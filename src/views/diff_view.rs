@@ -868,7 +868,10 @@ fn render_file_contents_panel(
                             }))
                             .into_any_element()
                     }
-                    _ if file_content_state.map(|state| state.loading).unwrap_or(false) => {
+                    _ if file_content_state
+                        .map(|state| state.loading)
+                        .unwrap_or(false) =>
+                    {
                         render_file_content_state_row("Loading file contents…").into_any_element()
                     }
                     _ if file_content_state

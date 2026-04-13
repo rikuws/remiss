@@ -27,12 +27,10 @@ fn main() {
     };
 
     if !bundled {
-        fs::copy(&bridge_source, &bundle_output)
-            .expect("Failed to copy bridge script as fallback");
+        write_unavailable_bridge(&bundle_output).expect("Failed to write bridge fallback");
         println!(
-            "cargo:warning=esbuild not available — using unbundled bridge script. \
-             The code tour feature will require node_modules at runtime. \
-             Run `npm install` to enable bundling."
+            "cargo:warning=code tour bridge bundling failed — using unavailable bridge fallback. \
+             Run `npm install` and rebuild to enable AI code tours."
         );
     }
 }
@@ -69,6 +67,7 @@ fn try_bundle(esbuild: &PathBuf, source: &Path, output: &Path) -> bool {
             "--bundle",
             "--platform=node",
             "--format=esm",
+            "--banner:js=import { createRequire as __ghUiCreateRequire } from 'node:module'; const require = __ghUiCreateRequire(import.meta.url);",
             &format!("--outfile={}", output.display()),
         ])
         .output();
@@ -85,4 +84,34 @@ fn try_bundle(esbuild: &PathBuf, source: &Path, output: &Path) -> bool {
             false
         }
     }
+}
+
+fn write_unavailable_bridge(output: &Path) -> std::io::Result<()> {
+    fs::write(
+        output,
+        r#"import { readFileSync } from "node:fs";
+
+const request = JSON.parse(readFileSync(0, "utf8"));
+const message =
+  "Code tour bridge dependencies could not be prepared during build. Run `npm install` and rebuild to enable AI code tours.";
+
+const providers = ["codex", "copilot"].map((provider) => ({
+  provider,
+  label: provider === "codex" ? "Codex" : "Copilot",
+  available: false,
+  authenticated: false,
+  message,
+  detail: message,
+  defaultModel: null
+}));
+
+if (request.action === "status") {
+  process.stdout.write(JSON.stringify({ providers }));
+  process.exit(0);
+}
+
+process.stderr.write(message);
+process.exit(1);
+"#,
+    )
 }

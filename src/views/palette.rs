@@ -141,7 +141,7 @@ fn palette_item(item: CommandItem, state: Entity<AppState>) -> impl IntoElement 
                 });
             }
             CommandAction::SyncWorkspace => {
-                super::sections::trigger_sync_workspace(&state, window, cx);
+                super::workspace_sync::trigger_sync_workspace(&state, window, cx);
                 state.update(cx, |s, cx| {
                     s.palette_open = false;
                     s.palette_query.clear();

@@ -6,6 +6,7 @@ mod gh;
 mod github;
 mod local_repo;
 mod markdown;
+mod notifications;
 mod platform_macos;
 mod state;
 mod syntax;

@@ -107,6 +107,10 @@ pub struct CodeTourState {
     pub document: Option<GeneratedCodeTour>,
     pub loading: bool,
     pub generating: bool,
+    pub progress_summary: Option<String>,
+    pub progress_detail: Option<String>,
+    pub progress_log: Vec<String>,
+    pub progress_log_file_path: Option<String>,
     pub error: Option<String>,
     pub message: Option<String>,
     pub success: bool,
@@ -119,6 +123,10 @@ impl Default for CodeTourState {
             document: None,
             loading: false,
             generating: false,
+            progress_summary: None,
+            progress_detail: None,
+            progress_log: Vec::new(),
+            progress_log_file_path: None,
             error: None,
             message: None,
             success: false,
@@ -231,7 +239,8 @@ pub struct AppState {
     pub code_tour_provider_statuses_loaded: bool,
     pub code_tour_provider_loading: bool,
     pub code_tour_provider_error: Option<String>,
-    pub selected_tour_provider: CodeTourProvider,
+    pub selected_tour_provider: Option<CodeTourProvider>,
+    pub tour_provider_manually_selected: bool,
     pub automatic_tour_request_keys: std::collections::HashSet<String>,
     pub active_tour_outline_id: String,
     pub collapsed_tour_panels: std::collections::HashSet<String>,
@@ -271,7 +280,8 @@ impl AppState {
             code_tour_provider_statuses_loaded: false,
             code_tour_provider_loading: false,
             code_tour_provider_error: None,
-            selected_tour_provider: CodeTourProvider::Codex,
+            selected_tour_provider: None,
+            tour_provider_manually_selected: false,
             automatic_tour_request_keys: std::collections::HashSet::new(),
             active_tour_outline_id: "overview".to_string(),
             collapsed_tour_panels: std::collections::HashSet::new(),
@@ -312,7 +322,7 @@ impl AppState {
 
     pub fn active_tour_state(&self) -> Option<&CodeTourState> {
         let detail_state = self.active_detail_state()?;
-        detail_state.tour_states.get(&self.selected_tour_provider)
+        detail_state.tour_states.get(&self.selected_tour_provider?)
     }
 
     pub fn active_local_repository_status(&self) -> Option<&LocalRepositoryStatus> {
@@ -320,14 +330,15 @@ impl AppState {
     }
 
     pub fn selected_tour_provider_status(&self) -> Option<&CodeTourProviderStatus> {
+        let selected_provider = self.selected_tour_provider?;
         self.code_tour_provider_statuses
             .iter()
-            .find(|status| status.provider == self.selected_tour_provider)
+            .find(|status| status.provider == selected_provider)
     }
 
     pub fn active_tour_request_key(&self) -> Option<String> {
         let detail = self.active_detail()?;
-        Some(build_tour_request_key(detail, self.selected_tour_provider))
+        Some(build_tour_request_key(detail, self.selected_tour_provider?))
     }
 
     pub fn section_count(&self, section: SectionId) -> i64 {

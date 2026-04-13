@@ -6,6 +6,7 @@ use crate::state::*;
 use crate::theme::*;
 
 use super::tour_view::refresh_active_tour_flow;
+use super::workspace_sync::trigger_sync_workspace;
 
 pub fn render_section_workspace(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let s = state.read(cx);
@@ -806,44 +807,6 @@ pub fn open_pull_request(
             if should_refresh_tour {
                 refresh_active_tour_flow(model.clone(), true, cx).await;
             }
-        })
-        .detach();
-}
-
-pub fn trigger_sync_workspace(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
-    let model = state.clone();
-
-    state.update(cx, |s, cx| {
-        s.workspace_syncing = true;
-        cx.notify();
-    });
-
-    window
-        .spawn(cx, async move |cx: &mut AsyncWindowContext| {
-            let cache = model.read_with(cx, |s, _| s.cache.clone()).ok();
-            let Some(cache) = cache else { return };
-
-            let result = cx
-                .background_executor()
-                .spawn(async move { github::sync_workspace_snapshot(&cache) })
-                .await;
-
-            model
-                .update(cx, |s, cx| {
-                    s.workspace_syncing = false;
-                    match result {
-                        Ok(ws) => {
-                            s.gh_available = ws.auth.is_authenticated;
-                            s.workspace = Some(ws);
-                            s.workspace_error = None;
-                        }
-                        Err(e) => {
-                            s.workspace_error = Some(e);
-                        }
-                    }
-                    cx.notify();
-                })
-                .ok();
         })
         .detach();
 }

@@ -1,12 +1,14 @@
+use std::{sync::mpsc, time::Duration};
+
 use gpui::prelude::*;
 use gpui::*;
 
 use crate::code_tour::{
-    build_code_tour_generation_input, build_tour_request_key, CodeTourProvider,
-    CodeTourProviderStatus, GeneratedCodeTour, TourSection, TourStep,
+    build_code_tour_generation_input, build_tour_request_key, CodeTourProgressUpdate,
+    CodeTourProvider, CodeTourProviderStatus, GeneratedCodeTour, TourSection, TourStep,
 };
 use crate::local_repo;
-use crate::state::{AppState, PullRequestSurface};
+use crate::state::{AppState, CodeTourState, PullRequestSurface};
 use crate::theme::*;
 use crate::{code_tour, github};
 
@@ -35,7 +37,9 @@ pub fn select_tour_provider(
     cx: &mut App,
 ) {
     state.update(cx, |s, cx| {
-        s.selected_tour_provider = provider;
+        s.selected_tour_provider = Some(provider);
+        s.tour_provider_manually_selected = true;
+        s.code_tour_provider_error = None;
         s.active_tour_outline_id = "overview".to_string();
         s.collapsed_tour_panels.clear();
         cx.notify();
@@ -72,6 +76,7 @@ pub async fn refresh_active_tour_flow(
                 detail_key,
                 detail,
                 state.selected_tour_provider,
+                state.tour_provider_manually_selected,
                 state.code_tour_provider_statuses_loaded,
                 state.code_tour_provider_statuses.clone(),
             ))
@@ -79,8 +84,15 @@ pub async fn refresh_active_tour_flow(
         .ok()
         .flatten();
 
-    let Some((cache, detail_key, detail, current_provider, statuses_loaded, existing_statuses)) =
-        initial
+    let Some((
+        cache,
+        detail_key,
+        detail,
+        current_provider,
+        provider_manually_selected,
+        statuses_loaded,
+        existing_statuses,
+    )) = initial
     else {
         return;
     };
@@ -104,8 +116,13 @@ pub async fn refresh_active_tour_flow(
     };
 
     let provider_statuses = provider_statuses_result.clone().unwrap_or_default();
-    let provider = resolve_preferred_provider(&provider_statuses, current_provider);
-    let request_key = build_tour_request_key(&detail, provider);
+    let provider = resolve_preferred_provider(
+        &provider_statuses,
+        current_provider,
+        provider_manually_selected,
+    );
+    let preserve_manual_selection =
+        provider_manually_selected && provider.is_some() && provider == current_provider;
 
     model
         .update(cx, |state, cx| {
@@ -115,26 +132,37 @@ pub async fn refresh_active_tour_flow(
                 state.code_tour_provider_statuses = statuses.clone();
                 state.code_tour_provider_error = None;
                 state.selected_tour_provider = provider;
+                state.tour_provider_manually_selected = preserve_manual_selection;
             } else if let Err(error) = &provider_statuses_result {
                 state.code_tour_provider_error = Some(error.clone());
             }
 
             if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
-                detail_state.local_repository_loading = true;
+                detail_state.local_repository_loading = provider.is_some();
                 detail_state.local_repository_error = None;
 
-                let tour_state = detail_state.tour_states.entry(provider).or_default();
-                tour_state.loading = true;
-                tour_state.generating = false;
-                tour_state.request_key = Some(request_key.clone());
-                tour_state.error = None;
-                tour_state.message = None;
-                tour_state.success = false;
+                if let Some(provider) = provider {
+                    let request_key = build_tour_request_key(&detail, provider);
+                    let tour_state = detail_state.tour_states.entry(provider).or_default();
+                    clear_tour_progress(tour_state);
+                    tour_state.loading = true;
+                    tour_state.generating = false;
+                    tour_state.request_key = Some(request_key);
+                    tour_state.error = None;
+                    tour_state.message = None;
+                    tour_state.success = false;
+                }
             }
 
             cx.notify();
         })
         .ok();
+
+    let Some(provider) = provider else {
+        return;
+    };
+
+    let request_key = build_tour_request_key(&detail, provider);
 
     let local_repo_result = cx
         .background_executor()
@@ -209,6 +237,7 @@ pub async fn refresh_active_tour_flow(
 
                 let tour_state = detail_state.tour_states.entry(provider).or_default();
                 tour_state.loading = false;
+                clear_tour_progress(tour_state);
                 match &cached_tour_result {
                     Ok(document) => {
                         tour_state.document = document.clone();
@@ -263,31 +292,74 @@ async fn generate_tour_flow(
     automatic: bool,
     cx: &mut AsyncWindowContext,
 ) {
+    enum GenerateTourInitial {
+        Ready(
+            (
+                std::sync::Arc<crate::cache::CacheStore>,
+                (String, github::PullRequestDetail, CodeTourProvider, String),
+            ),
+        ),
+        MissingProvider(String),
+    }
+
     let initial = if let Some(context) = context {
         let cache = model.read_with(cx, |state, _| state.cache.clone()).ok();
-        cache.map(|cache| (cache, context))
+        cache.map(|cache| GenerateTourInitial::Ready((cache, context)))
     } else {
         model
             .read_with(cx, |state, _| {
                 let detail = state.active_detail()?.clone();
                 let detail_key = state.active_pr_key.clone()?;
                 let provider = state.selected_tour_provider;
+                let provider_loading = state.code_tour_provider_loading;
+                let statuses = state.code_tour_provider_statuses.clone();
                 Some((
                     state.cache.clone(),
-                    (
-                        detail_key,
-                        detail.clone(),
-                        provider,
-                        build_tour_request_key(&detail, provider),
-                    ),
+                    detail_key,
+                    detail,
+                    provider,
+                    provider_loading,
+                    statuses,
                 ))
             })
             .ok()
             .flatten()
+            .map(
+                |(cache, detail_key, detail, provider, provider_loading, statuses)| match provider {
+                    Some(provider) => GenerateTourInitial::Ready((
+                        cache,
+                        (
+                            detail_key,
+                            detail.clone(),
+                            provider,
+                            build_tour_request_key(&detail, provider),
+                        ),
+                    )),
+                    None => GenerateTourInitial::MissingProvider(provider_selection_message(
+                        &statuses,
+                        provider_loading,
+                    )),
+                },
+            )
     };
 
-    let Some((cache, (detail_key, detail, provider, request_key))) = initial else {
+    let Some(initial) = initial else {
         return;
+    };
+
+    let (cache, (detail_key, detail, provider, request_key)) = match initial {
+        GenerateTourInitial::Ready(values) => values,
+        GenerateTourInitial::MissingProvider(message) => {
+            if !automatic {
+                model
+                    .update(cx, |state, cx| {
+                        state.code_tour_provider_error = Some(message);
+                        cx.notify();
+                    })
+                    .ok();
+            }
+            return;
+        }
     };
 
     let provider_status = model
@@ -354,12 +426,23 @@ async fn generate_tour_flow(
                 detail_state.local_repository_error = None;
 
                 let tour_state = detail_state.tour_states.entry(provider).or_default();
+                clear_tour_progress(tour_state);
                 tour_state.request_key = Some(request_key.clone());
                 tour_state.loading = false;
                 tour_state.generating = true;
                 tour_state.error = None;
                 tour_state.message = None;
                 tour_state.success = false;
+                apply_tour_progress_message(
+                    tour_state,
+                    "Preparing local checkout".to_string(),
+                    Some(format!(
+                        "Checking the linked or managed repository before starting {}.",
+                        provider.label()
+                    )),
+                    Some("Preparing the local checkout".to_string()),
+                    None,
+                );
             }
 
             cx.notify();
@@ -405,19 +488,86 @@ async fn generate_tour_flow(
                 detail_state.local_repository_loading = false;
                 detail_state.local_repository_status = Some(local_repo_status.clone());
                 detail_state.local_repository_error = None;
+                let tour_state = detail_state.tour_states.entry(provider).or_default();
+                apply_tour_progress_message(
+                    tour_state,
+                    format!("Starting {}", provider.label()),
+                    Some(format!(
+                        "Launching {} in the linked checkout and sending the pull request context.",
+                        provider.label()
+                    )),
+                    Some(format!("Starting {}", provider.label())),
+                    None,
+                );
                 cx.notify();
             }
         })
         .ok();
 
     let generation_input = build_code_tour_generation_input(&detail, provider, &working_directory);
-    let generation_result = cx
-        .background_executor()
-        .spawn({
-            let cache = cache.clone();
-            async move { code_tour::generate_code_tour(&cache, generation_input) }
-        })
-        .await;
+    let (progress_tx, progress_rx) = mpsc::channel::<CodeTourProgressUpdate>();
+    let (result_tx, result_rx) = mpsc::channel::<Result<GeneratedCodeTour, String>>();
+    std::thread::spawn({
+        let cache = cache.clone();
+        move || {
+            let result =
+                code_tour::generate_code_tour_with_progress(&cache, generation_input, |progress| {
+                    let _ = progress_tx.send(progress);
+                });
+            let _ = result_tx.send(result);
+        }
+    });
+    let generation_result = loop {
+        while let Ok(progress) = progress_rx.try_recv() {
+            model
+                .update(cx, |state, cx| {
+                    if !detail_request_matches(state, &detail_key, provider, &request_key) {
+                        return;
+                    }
+
+                    if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
+                        let tour_state = detail_state.tour_states.entry(provider).or_default();
+                        apply_tour_progress_update(tour_state, progress);
+                    }
+
+                    cx.notify();
+                })
+                .ok();
+        }
+
+        match result_rx.try_recv() {
+            Ok(result) => {
+                while let Ok(progress) = progress_rx.try_recv() {
+                    model
+                        .update(cx, |state, cx| {
+                            if !detail_request_matches(state, &detail_key, provider, &request_key) {
+                                return;
+                            }
+
+                            if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
+                                let tour_state =
+                                    detail_state.tour_states.entry(provider).or_default();
+                                apply_tour_progress_update(tour_state, progress);
+                            }
+
+                            cx.notify();
+                        })
+                        .ok();
+                }
+                break result;
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                break Err("The code tour generator stopped before returning a result.".to_string());
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+
+        cx.background_executor()
+            .spawn(async move {
+                std::thread::sleep(Duration::from_millis(120));
+            })
+            .await;
+    };
 
     model
         .update(cx, |state, cx| {
@@ -430,6 +580,7 @@ async fn generate_tour_flow(
                 tour_state.generating = false;
                 match generation_result {
                     Ok(ref document) => {
+                        clear_tour_progress(tour_state);
                         tour_state.document = Some(document.clone());
                         tour_state.error = None;
                         tour_state.message = Some(if automatic {
@@ -450,6 +601,68 @@ async fn generate_tour_flow(
             cx.notify();
         })
         .ok();
+}
+
+const MAX_TOUR_PROGRESS_LOG_ITEMS: usize = 10;
+
+fn clear_tour_progress(tour_state: &mut CodeTourState) {
+    tour_state.progress_summary = None;
+    tour_state.progress_detail = None;
+    tour_state.progress_log.clear();
+    tour_state.progress_log_file_path = None;
+}
+
+fn push_tour_progress_log(tour_state: &mut CodeTourState, entry: String) {
+    let normalized = entry.trim();
+    if normalized.is_empty() {
+        return;
+    }
+
+    if tour_state
+        .progress_log
+        .last()
+        .map(|existing| existing == normalized)
+        .unwrap_or(false)
+    {
+        return;
+    }
+
+    tour_state.progress_log.push(normalized.to_string());
+    if tour_state.progress_log.len() > MAX_TOUR_PROGRESS_LOG_ITEMS {
+        let overflow = tour_state.progress_log.len() - MAX_TOUR_PROGRESS_LOG_ITEMS;
+        tour_state.progress_log.drain(0..overflow);
+    }
+}
+
+fn apply_tour_progress_message(
+    tour_state: &mut CodeTourState,
+    summary: String,
+    detail: Option<String>,
+    log_entry: Option<String>,
+    log_file_path: Option<String>,
+) {
+    tour_state.progress_summary = Some(summary);
+    tour_state.progress_detail = detail.clone();
+    if let Some(path) = log_file_path {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            tour_state.progress_log_file_path = Some(trimmed.to_string());
+        }
+    }
+
+    if let Some(log_entry) = log_entry.or_else(|| detail.clone()) {
+        push_tour_progress_log(tour_state, log_entry);
+    }
+}
+
+fn apply_tour_progress_update(tour_state: &mut CodeTourState, progress: CodeTourProgressUpdate) {
+    apply_tour_progress_message(
+        tour_state,
+        progress.summary,
+        progress.detail,
+        progress.log,
+        progress.log_file_path,
+    );
 }
 
 fn set_tour_error(
@@ -526,21 +739,69 @@ fn detail_request_matches(
         .unwrap_or(false)
 }
 
-fn resolve_preferred_provider(
+pub(super) fn resolve_preferred_provider(
     statuses: &[CodeTourProviderStatus],
-    current_provider: CodeTourProvider,
-) -> CodeTourProvider {
-    if statuses.iter().any(|status| {
-        status.provider == current_provider && status.available && status.authenticated
-    }) {
+    current_provider: Option<CodeTourProvider>,
+    provider_manually_selected: bool,
+) -> Option<CodeTourProvider> {
+    if statuses.is_empty() {
         return current_provider;
     }
 
+    let available = available_providers(statuses);
+    let ready = ready_providers(statuses);
+
+    if provider_manually_selected {
+        if let Some(provider) = current_provider {
+            if available.contains(&provider) {
+                return Some(provider);
+            }
+        }
+    }
+
+    if ready.len() == 1 {
+        return ready.first().copied();
+    }
+
+    if available.len() == 1 {
+        return available.first().copied();
+    }
+
+    None
+}
+
+fn available_providers(statuses: &[CodeTourProviderStatus]) -> Vec<CodeTourProvider> {
     statuses
         .iter()
-        .find(|status| status.available && status.authenticated)
+        .filter(|status| status.available)
         .map(|status| status.provider)
-        .unwrap_or(current_provider)
+        .collect()
+}
+
+fn ready_providers(statuses: &[CodeTourProviderStatus]) -> Vec<CodeTourProvider> {
+    statuses
+        .iter()
+        .filter(|status| status.available && status.authenticated)
+        .map(|status| status.provider)
+        .collect()
+}
+
+fn provider_selection_message(
+    statuses: &[CodeTourProviderStatus],
+    provider_loading: bool,
+) -> String {
+    let available = available_providers(statuses);
+    let ready = ready_providers(statuses);
+
+    if provider_loading {
+        "Still checking AI provider status.".to_string()
+    } else if ready.len() > 1 || available.len() > 1 {
+        "Choose an AI provider before generating a code tour.".to_string()
+    } else if available.is_empty() {
+        "No supported AI provider is available in this workspace.".to_string()
+    } else {
+        "Still preparing the detected AI provider.".to_string()
+    }
 }
 
 pub fn render_tour_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
@@ -566,6 +827,10 @@ pub fn render_tour_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement 
         .map(|state| state.local_repository_loading)
         .unwrap_or(false);
     let local_repo_error = detail_state.and_then(|state| state.local_repository_error.clone());
+    let tour_progress_summary = tour_state.progress_summary.clone();
+    let tour_progress_detail = tour_state.progress_detail.clone();
+    let tour_progress_log = tour_state.progress_log.clone();
+    let tour_progress_log_file_path = tour_state.progress_log_file_path.clone();
 
     let generated_tour = tour_state.document.clone();
     let overview_step = generated_tour.as_ref().and_then(|tour| {
@@ -613,9 +878,13 @@ pub fn render_tour_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement 
     let state_for_provider = state.clone();
     let state_for_generate = state.clone();
     let pending_generate_label = if tour_state.generating {
-        format!("Generating with {}...", provider.label())
-    } else {
+        provider
+            .map(|provider| format!("Generating with {}...", provider.label()))
+            .unwrap_or_else(|| "Generating code tour...".to_string())
+    } else if let Some(provider) = provider {
         format!("Generate with {}", provider.label())
+    } else {
+        "Choose a provider".to_string()
     };
 
     if generated_tour.is_none() {
@@ -639,9 +908,14 @@ pub fn render_tour_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement 
                     .child(render_pending_panel(
                         provider,
                         provider_status.as_ref(),
+                        &provider_statuses,
                         provider_loading,
                         tour_state.loading,
                         tour_state.generating,
+                        tour_progress_summary.as_deref(),
+                        tour_progress_detail.as_deref(),
+                        &tour_progress_log,
+                        tour_progress_log_file_path.as_deref(),
                         local_repo_status.as_ref(),
                         local_repo_loading,
                     ))
@@ -706,13 +980,18 @@ pub fn render_tour_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement 
             .flex_wrap()
             .text_size(px(12.0))
             .text_color(fg_muted())
-            .child(badge(&format!("{} sections", generated_tour.sections.len())))
+            .child(badge(&format!(
+                "{} sections",
+                generated_tour.sections.len()
+            )))
             .child(badge(&format!(
                 "{} changed files covered",
                 generated_tour.steps.len().saturating_sub(1)
             )))
             .child(badge(&count_tour_callsites(&generated_tour)))
-            .when(local_repo_loading, |el| el.child(badge("Preparing checkout")))
+            .when(local_repo_loading, |el| {
+                el.child(badge("Preparing checkout"))
+            })
             .when_some(local_repo_status.clone(), |el, status| {
                 el.child(badge(match status.source.as_str() {
                     "linked" => "linked checkout",
@@ -724,17 +1003,14 @@ pub fn render_tour_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement 
 
     if tour_state.generating {
         content_children.push(
-            nested_panel()
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .text_color(fg_muted())
-                        .child(format!(
-                            "{} is building the code tour. Large pull requests can take a few minutes.",
-                            provider.label()
-                        )),
-                )
-                .into_any_element(),
+            render_tour_progress_panel(
+                provider,
+                tour_progress_summary.as_deref(),
+                tour_progress_detail.as_deref(),
+                &tour_progress_log,
+                tour_progress_log_file_path.as_deref(),
+            )
+            .into_any_element(),
         );
     }
     if let Some(error) = provider_error.clone() {
@@ -754,11 +1030,13 @@ pub fn render_tour_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement 
         });
     }
     if !generated_tour.open_questions.is_empty() {
-        content_children
-            .push(render_note_panel("Open Questions", &generated_tour.open_questions).into_any_element());
+        content_children.push(
+            render_note_panel("Open Questions", &generated_tour.open_questions).into_any_element(),
+        );
     }
     if !generated_tour.warnings.is_empty() {
-        content_children.push(render_note_panel("Warnings", &generated_tour.warnings).into_any_element());
+        content_children
+            .push(render_note_panel("Warnings", &generated_tour.warnings).into_any_element());
     }
 
     scroll_targets.push(("overview".to_string(), content_children.len()));
@@ -821,7 +1099,11 @@ pub fn render_tour_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement 
                     div()
                         .p(px(12.0))
                         .rounded(radius())
-                        .bg(if is_active { bg_selected() } else { bg_overlay() })
+                        .bg(if is_active {
+                            bg_selected()
+                        } else {
+                            bg_overlay()
+                        })
                         .cursor_pointer()
                         .hover(|style| style.bg(hover_bg()))
                         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
@@ -894,21 +1176,27 @@ pub fn render_tour_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement 
 
 fn render_provider_bar(
     state: &Entity<AppState>,
-    selected_provider: CodeTourProvider,
+    selected_provider: Option<CodeTourProvider>,
     statuses: &[CodeTourProviderStatus],
     provider_loading: bool,
     generating: bool,
     generated_tour: Option<&GeneratedCodeTour>,
 ) -> impl IntoElement {
     let generate_label = if generating {
-        format!("Generating with {}...", selected_provider.label())
-    } else if generated_tour
-        .map(|tour| tour.provider == selected_provider)
-        .unwrap_or(false)
-    {
-        format!("Regenerate with {}", selected_provider.label())
+        selected_provider
+            .map(|provider| format!("Generating with {}...", provider.label()))
+            .unwrap_or_else(|| "Generating code tour...".to_string())
+    } else if let Some(selected_provider) = selected_provider {
+        if generated_tour
+            .map(|tour| tour.provider == selected_provider)
+            .unwrap_or(false)
+        {
+            format!("Regenerate with {}", selected_provider.label())
+        } else {
+            format!("Generate with {}", selected_provider.label())
+        }
     } else {
-        format!("Generate with {}", selected_provider.label())
+        "Choose a provider".to_string()
     };
 
     div()
@@ -922,7 +1210,11 @@ fn render_provider_bar(
                 .flex()
                 .flex_col()
                 .gap(px(6.0))
-                .child(eyebrow(&format!("{} pair programmer", selected_provider.label())))
+                .child(eyebrow(
+                    &selected_provider
+                        .map(|provider| format!("{} pair programmer", provider.label()))
+                        .unwrap_or_else(|| "AI pair programmer".to_string()),
+                ))
                 .child(
                     div()
                         .text_size(px(20.0))
@@ -949,7 +1241,7 @@ fn render_provider_bar(
                                     copy
                                 })
                                 .unwrap_or_else(|| {
-                                    "Generate a narrated walkthrough with Codex or Copilot. The tour stays next to the changed code and still drops you into the raw diff when needed.".to_string()
+                                    "Generate a narrated walkthrough with the available AI tool. If both providers are ready, pick the one you want to use for this tour.".to_string()
                                 }),
                         ),
                 ),
@@ -971,9 +1263,13 @@ fn render_provider_bar(
                         let state = state.clone();
                         let provider = *candidate;
 
-                        surface_tab(&label, selected_provider == provider, move |_, window, cx| {
-                            select_tour_provider(&state, provider, window, cx);
-                        })
+                        surface_tab(
+                            &label,
+                            selected_provider == Some(provider),
+                            move |_, window, cx| {
+                                select_tour_provider(&state, provider, window, cx);
+                            },
+                        )
                     })),
                 )
                 .child(review_button(
@@ -988,18 +1284,25 @@ fn render_provider_bar(
 }
 
 fn render_pending_panel(
-    provider: CodeTourProvider,
+    provider: Option<CodeTourProvider>,
     provider_status: Option<&CodeTourProviderStatus>,
+    statuses: &[CodeTourProviderStatus],
     provider_loading: bool,
     tour_loading: bool,
     generating: bool,
+    progress_summary: Option<&str>,
+    progress_detail: Option<&str>,
+    progress_log: &[String],
+    progress_log_file_path: Option<&str>,
     local_repo_status: Option<&local_repo::LocalRepositoryStatus>,
     local_repo_loading: bool,
 ) -> impl IntoElement {
+    let available_count = available_providers(statuses).len();
+    let ready_count = ready_providers(statuses).len();
     let (title, body) = if provider_loading {
         (
             "Checking AI provider status".to_string(),
-            "Inspecting the local Codex and Copilot setup before the tour can run.".to_string(),
+            "Inspecting the detected AI tools before the tour can run.".to_string(),
         )
     } else if tour_loading {
         (
@@ -1009,11 +1312,25 @@ fn render_pending_panel(
         )
     } else if generating {
         (
-            format!("{} is building the code tour", provider.label()),
-            format!(
-                "{} is reading the local checkout, pull request context, and active review threads.",
-                provider.label()
-            ),
+            progress_summary
+                .map(str::to_string)
+                .or_else(|| {
+                    provider.map(|provider| format!("{} is building the code tour", provider.label()))
+                })
+                .unwrap_or_else(|| "Generating code tour".to_string()),
+            progress_detail
+                .map(str::to_string)
+                .or_else(|| {
+                    provider.map(|provider| {
+                        format!(
+                            "{} is reading the local checkout, pull request context, and active review threads.",
+                            provider.label()
+                        )
+                    })
+                })
+                .unwrap_or_else(|| {
+                    "The selected provider is reading the local checkout, pull request context, and active review threads.".to_string()
+                }),
         )
     } else if let Some(status) = provider_status {
         if !status.available {
@@ -1025,14 +1342,28 @@ fn render_pending_panel(
             )
         } else {
             (
-                format!("Preparing {} code tour", provider.label()),
+                provider
+                    .map(|provider| format!("Preparing {} code tour", provider.label()))
+                    .unwrap_or_else(|| "Preparing code tour".to_string()),
                 "No cached tour is available for this pull request head yet. The app can generate one in the background and store it in the local cache.".to_string(),
             )
         }
+    } else if ready_count > 1 || available_count > 1 {
+        (
+            "Choose AI provider".to_string(),
+            "Multiple AI providers are available. Pick the one you want to use for this code tour."
+                .to_string(),
+        )
+    } else if available_count == 0 {
+        (
+            "No AI provider detected".to_string(),
+            "Install or expose GitHub Copilot CLI or Codex CLI to enable AI-powered code tours."
+                .to_string(),
+        )
     } else {
         (
             "Preparing code tour".to_string(),
-            "Choose a provider and generate a walkthrough when the toolchain is ready.".to_string(),
+            "Waiting for the detected AI provider to finish loading.".to_string(),
         )
     };
 
@@ -1067,7 +1398,14 @@ fn render_pending_panel(
                 .gap(px(8.0))
                 .flex_wrap()
                 .mt(px(12.0))
-                .child(badge(provider.label()))
+                .when_some(provider, |el, provider| el.child(badge(provider.label())))
+                .when(
+                    provider.is_none() && (ready_count > 1 || available_count > 1),
+                    |el| el.child(badge("choose provider")),
+                )
+                .when(provider.is_none() && available_count == 0, |el| {
+                    el.child(badge("no provider detected"))
+                })
                 .when_some(provider_status, |el, status| {
                     el.child(badge(if status.authenticated {
                         "authenticated"
@@ -1101,6 +1439,123 @@ fn render_pending_panel(
                     .child(status.message.clone()),
             )
         })
+        .when_some(progress_log_file_path, |el, path| {
+            el.child(render_tour_log_location(path))
+        })
+        .when(!progress_log.is_empty(), |el| {
+            el.child(render_tour_progress_log(progress_log))
+        })
+}
+
+fn render_tour_progress_panel(
+    provider: Option<CodeTourProvider>,
+    progress_summary: Option<&str>,
+    progress_detail: Option<&str>,
+    progress_log: &[String],
+    progress_log_file_path: Option<&str>,
+) -> impl IntoElement {
+    let title = progress_summary
+        .map(str::to_string)
+        .or_else(|| {
+            provider.map(|provider| format!("{} is building the code tour", provider.label()))
+        })
+        .unwrap_or_else(|| "Generating code tour".to_string());
+    let detail = progress_detail.map(str::to_string).unwrap_or_else(|| {
+        provider
+            .map(|provider| {
+                format!(
+                    "{} is still working through the code tour request.",
+                    provider.label()
+                )
+            })
+            .unwrap_or_else(|| {
+                "The selected provider is still working through the code tour request.".to_string()
+            })
+    });
+
+    nested_panel()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(12.0))
+                .flex_wrap()
+                .child(eyebrow("Live activity"))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(8.0))
+                        .flex_wrap()
+                        .child(badge("live"))
+                        .when_some(provider, |el, provider| el.child(badge(provider.label()))),
+                ),
+        )
+        .child(
+            div()
+                .text_size(px(18.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_emphasis())
+                .child(title),
+        )
+        .child(
+            div()
+                .text_size(px(13.0))
+                .text_color(fg_muted())
+                .mt(px(10.0))
+                .child(detail),
+        )
+        .when_some(progress_log_file_path, |el, path| {
+            el.child(render_tour_log_location(path))
+        })
+        .when(!progress_log.is_empty(), |el| {
+            el.child(render_tour_progress_log(progress_log))
+        })
+}
+
+fn render_tour_log_location(log_file_path: &str) -> impl IntoElement {
+    div()
+        .mt(px(12.0))
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(
+            div()
+                .text_size(px(10.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_subtle())
+                .font_family("Fira Code")
+                .child("DEBUG LOG"),
+        )
+        .child(
+            div()
+                .text_size(px(12.0))
+                .text_color(fg_muted())
+                .font_family("Fira Code")
+                .child(log_file_path.to_string()),
+        )
+}
+
+fn render_tour_progress_log(progress_log: &[String]) -> impl IntoElement {
+    div()
+        .mt(px(14.0))
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .child(
+            div()
+                .text_size(px(11.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_subtle())
+                .font_family("Fira Code")
+                .child("RECENT PROVIDER ACTIVITY"),
+        )
+        .children(progress_log.iter().rev().map(|entry| {
+            div()
+                .text_size(px(12.0))
+                .text_color(fg_muted())
+                .child(format!("• {entry}"))
+        }))
 }
 
 fn render_note_panel(title: &str, items: &[String]) -> impl IntoElement {

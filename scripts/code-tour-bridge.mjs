@@ -1,16 +1,20 @@
-import { existsSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { accessSync, appendFileSync, constants, existsSync, mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, join, relative, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { fileURLToPath } from "node:url";
 
 import { CopilotClient } from "@github/copilot-sdk";
 import { Codex } from "@openai/codex-sdk";
+import { jsonrepair } from "jsonrepair";
 
 const execFileAsync = promisify(execFile);
 
-const GENERATION_TIMEOUT_MS = 600_000;
+const GENERATION_TIMEOUT_MS = 240_000;
+const GENERATION_INACTIVITY_TIMEOUT_MS = 60_000;
 const STATUS_TIMEOUT_MS = 20_000;
+const PROGRESS_PREFIX = "__GH_UI_PROGRESS__";
+const CODE_TOUR_LOG_DIR_ENV = "GH_UI_CODE_TOUR_LOG_DIR";
 const MAX_FILES = 80;
 const MAX_REVIEWS = 5;
 const MAX_THREADS = 12;
@@ -18,8 +22,8 @@ const MAX_COMMENTS_PER_THREAD = 3;
 const MAX_SECTIONS = 10;
 const MAX_REVIEW_POINTS = 4;
 const MAX_CALLSITES_PER_SECTION = 3;
-const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url));
-const PROJECT_ROOT = resolve(SCRIPT_DIRECTORY, "..");
+const PROJECT_ROOT = resolveProjectRoot();
+let currentRunLogger = null;
 
 const TOUR_OUTPUT_SCHEMA = {
   type: "object",
@@ -118,25 +122,43 @@ const TOUR_OUTPUT_SCHEMA = {
   additionalProperties: false
 };
 
-const request = JSON.parse(await readStdin());
+main().catch((error) => {
+  const message =
+    error instanceof Error ? error.message : "Unknown code tour bridge failure.";
+  writeRunLog("run.failed", {
+    message,
+    stack: error instanceof Error ? error.stack : null
+  });
+  process.stderr.write(formatErrorMessageWithLogPath(message));
+  process.exit(1);
+});
 
-try {
+async function main() {
+  const request = JSON.parse(await readStdin());
+  currentRunLogger = createRunLoggerForRequest(request);
+  writeRunLog("run.start", summarizeRequestForLog(request));
+
   if (request.action === "status") {
     process.stdout.write(JSON.stringify(await loadProviderStatuses()));
     process.exit(0);
   }
 
   if (request.action === "generate") {
-    process.stdout.write(JSON.stringify(await generateCodeTour(request.context)));
+    const response = await generateCodeTour(request.context);
+    writeRunLog("run.completed", {
+      provider: sanitizeString(request?.context?.provider),
+      repository: sanitizeString(request?.context?.repository),
+      number:
+        typeof request?.context?.number === "number" &&
+        Number.isFinite(request.context.number)
+          ? Math.floor(request.context.number)
+          : null
+    });
+    process.stdout.write(JSON.stringify(response));
     process.exit(0);
   }
 
   throw new Error(`Unsupported code tour bridge action: ${request.action}`);
-} catch (error) {
-  const message =
-    error instanceof Error ? error.message : "Unknown code tour bridge failure.";
-  process.stderr.write(message);
-  process.exit(1);
 }
 
 async function loadProviderStatuses() {
@@ -157,7 +179,7 @@ async function loadCodexStatus() {
     return unavailableProviderStatus(
       "codex",
       "Codex",
-      "Codex CLI is not installed in this app workspace."
+      "Codex CLI is not installed in this workspace or on PATH."
     );
   }
 
@@ -180,7 +202,7 @@ async function loadCodexStatus() {
       authenticated,
       message,
       detail: authenticated
-        ? "Uses the local Codex CLI session from your existing ChatGPT or API-backed setup."
+        ? "Uses the detected Codex CLI session."
         : "Sign in with `codex login` to use Codex for AI code tours.",
       defaultModel: null
     };
@@ -205,7 +227,7 @@ async function loadCopilotStatus() {
     return unavailableProviderStatus(
       "copilot",
       "Copilot",
-      "GitHub Copilot CLI is not installed in this app workspace."
+      "GitHub Copilot CLI is not installed in this workspace or on PATH."
     );
   }
 
@@ -242,7 +264,7 @@ async function loadCopilotStatus() {
       authenticated: auth.isAuthenticated,
       message,
       detail: auth.isAuthenticated
-        ? "Uses the local GitHub Copilot CLI auth from your existing subscription."
+        ? "Uses the detected GitHub Copilot CLI session."
         : "Sign in with `copilot login` or provide a Copilot-capable token to generate tours.",
       defaultModel
     };
@@ -263,6 +285,8 @@ async function loadCopilotStatus() {
 }
 
 async function generateCodeTour(input) {
+  emitDebugLogLocation();
+
   if (!input?.provider) {
     throw new Error("Code tour generation requires a provider.");
   }
@@ -276,6 +300,17 @@ async function generateCodeTour(input) {
   if (!Array.isArray(input.candidateSteps) || input.candidateSteps.length === 0) {
     throw new Error("No candidate steps were provided for code tour generation.");
   }
+
+  writeRunLog("generate.request", {
+    provider: input.provider,
+    repository: input.repository,
+    number: input.number,
+    workingDirectory: input.workingDirectory,
+    candidateStepCount: ensureArray(input.candidateSteps).length,
+    candidateGroupCount: ensureArray(input.candidateGroups).length,
+    fileCount: ensureArray(input.files).length,
+    reviewThreadCount: ensureArray(input.reviewThreads).length
+  });
 
   if (input.provider === "codex") {
     return generateWithCodex(input);
@@ -295,43 +330,111 @@ async function generateWithCodex(input) {
     throw new Error("Codex CLI is not available in this workspace.");
   }
 
+  emitProgress({
+    stage: "startup",
+    summary: "Starting Codex",
+    detail: "Launching the local Codex CLI in the linked checkout.",
+    log: "Starting Codex CLI"
+  });
+  writeRunLog("codex.start", {
+    cliPath,
+    workingDirectory: input.workingDirectory
+  });
   const codex = new Codex({
     codexPathOverride: cliPath
   });
   const thread = codex.startThread({
     workingDirectory: input.workingDirectory,
     sandboxMode: "read-only",
-    modelReasoningEffort: "medium",
+    modelReasoningEffort: "low",
     approvalPolicy: "never",
     networkAccessEnabled: false,
     webSearchMode: "disabled"
   });
   const controller = new AbortController();
-  let timedOut = false;
-  const timeout = setTimeout(() => {
-    timedOut = true;
+  const watchdog = createGenerationWatchdog((abortReason) => {
+    emitProgress({
+      stage: "timeout",
+      summary: generationAbortMessage("Codex", abortReason),
+      detail:
+        "Aborting the Codex run so the app can surface the failure without waiting for the old 10 minute timeout.",
+      log: generationAbortMessage("Codex", abortReason)
+    });
     controller.abort();
-  }, GENERATION_TIMEOUT_MS);
+  });
 
   try {
-    const result = await thread.run(buildTourPrompt(input), {
+    const prompt = buildTourPrompt(input);
+    writeRunLog("prompt.prepared", {
+      provider: "codex",
+      promptLength: prompt.length,
+      promptPreview: limitText(prompt, 4_000),
+      candidateStepCount: ensureArray(input.candidateSteps).length,
+      candidateGroupCount: ensureArray(input.candidateGroups).length
+    });
+    trackProgress(watchdog, {
+      stage: "planning",
+      summary: "Codex is reading the tour request",
+      detail:
+        "Inspecting the pull request context before it opens files from the linked checkout.",
+      log: "Reading the code tour request"
+    });
+    const { events } = await thread.runStreamed(prompt, {
       outputSchema: TOUR_OUTPUT_SCHEMA,
       signal: controller.signal
     });
+    let finalResponse = null;
+
+    for await (const event of events) {
+      const progress = progressForCodexEvent(event);
+      if (progress) {
+        trackProgress(watchdog, progress);
+      } else {
+        watchdog.touchBackground();
+      }
+
+      if (event.type === "item.completed" && event.item.type === "agent_message") {
+        finalResponse = event.item.text;
+      } else if (event.type === "turn.failed") {
+        throw new Error(event.error?.message ?? "Codex failed while generating the code tour.");
+      }
+    }
+
+    if (!sanitizeString(finalResponse)) {
+      throw new Error("Codex returned an empty code tour response.");
+    }
+
+    writeRunLog("codex.response.received", {
+      contentLength: finalResponse.length,
+      contentPreview: limitText(finalResponse, 4_000)
+    });
+
+    trackProgress(watchdog, {
+      stage: "finalizing",
+      summary: "Codex finished the draft",
+      detail: "Parsing the structured response and merging it into the final code tour.",
+      log: "Finalizing Codex output"
+    });
 
     return {
-      tour: mergeTour(parseStructuredResponse(result.finalResponse), input, null)
+      tour: mergeTour(parseStructuredResponse(finalResponse), input, null)
     };
   } catch (error) {
-    if (timedOut || controller.signal.aborted || isAbortError(error)) {
+    if (watchdog.abortReason() || controller.signal.aborted || isAbortError(error)) {
       throw new Error(
-        "Codex timed out while generating the code tour after 10 minutes."
+        generationAbortMessage(
+          "Codex",
+          watchdog.abortReason() ?? {
+            kind: "overall",
+            timeoutMs: GENERATION_TIMEOUT_MS
+          }
+        )
       );
     }
 
     throw error;
   } finally {
-    clearTimeout(timeout);
+    watchdog.clear();
   }
 }
 
@@ -342,6 +445,16 @@ async function generateWithCopilot(input) {
     throw new Error("GitHub Copilot CLI is not available in this workspace.");
   }
 
+  emitProgress({
+    stage: "startup",
+    summary: "Starting GitHub Copilot",
+    detail: "Launching the local Copilot CLI in the linked checkout.",
+    log: "Starting Copilot CLI"
+  });
+  writeRunLog("copilot.start", {
+    cliPath,
+    workingDirectory: input.workingDirectory
+  });
   const client = new CopilotClient({
     cliPath,
     cwd: input.workingDirectory,
@@ -355,6 +468,12 @@ async function generateWithCopilot(input) {
       "Timed out while starting GitHub Copilot."
     );
 
+    emitProgress({
+      stage: "auth",
+      summary: "Checking GitHub Copilot authentication",
+      detail: "Verifying the current Copilot session before generating the code tour.",
+      log: "Checking Copilot authentication"
+    });
     const auth = await withTimeout(
       client.getAuthStatus(),
       STATUS_TIMEOUT_MS,
@@ -368,17 +487,43 @@ async function generateWithCopilot(input) {
       );
     }
 
+    emitProgress({
+      stage: "model_lookup",
+      summary: "Loading GitHub Copilot models",
+      detail: "Choosing the fastest suitable model for the code tour run.",
+      log: "Loading Copilot models"
+    });
     const models = await loadCopilotModels(client);
     const model = selectCopilotModel(models);
+    writeRunLog("copilot.models", {
+      availableModels: ensureArray(models)
+        .map((candidate) => sanitizeString(candidate?.id))
+        .filter(Boolean),
+      selectedModel: model
+    });
+    emitProgress({
+      stage: "session",
+      summary: "Creating GitHub Copilot session",
+      detail: model
+        ? `Using ${model} for the code tour run.`
+        : "Using the default Copilot model for the code tour run.",
+      log: model ? `Selected model ${model}` : "Using the default Copilot model"
+    });
     const session = await withTimeout(
       client.createSession({
         model: model ?? undefined,
         workingDirectory: input.workingDirectory,
-        streaming: false,
+        streaming: true,
         systemMessage: {
           content: [
             "You are helping generate a code-review tour inside a desktop pull-request tool.",
             "Stay read-only. Never edit files or claim you made changes.",
+            "Work directly in the current session. Do not spawn sub-agents, background agents, or web searches.",
+            "Finish the task in a single turn. Do not wait for follow-up instructions.",
+            "Prefer the provided pull-request context and candidate snippets first.",
+            "Only inspect files from the checkout when they are needed to verify a concrete claim.",
+            "After you have enough evidence for a best-effort tour, stop using tools and return the JSON immediately.",
+            "If a search or file read is inconclusive, do not keep broadening the search; continue with the verified context you already have.",
             "Return strict JSON with no markdown fences."
           ].join(" ")
         },
@@ -395,22 +540,36 @@ async function generateWithCopilot(input) {
     );
 
     try {
-      const response = await withTimeout(
-        session.sendAndWait(
-          {
-            prompt: buildTourPrompt(input)
-          },
-          GENERATION_TIMEOUT_MS
-        ),
-        GENERATION_TIMEOUT_MS + 5_000,
-        "GitHub Copilot timed out while generating the code tour."
+      const prompt = buildTourPrompt(input);
+      writeRunLog("prompt.prepared", {
+        provider: "copilot",
+        promptLength: prompt.length,
+        promptPreview: limitText(prompt, 4_000),
+        candidateStepCount: ensureArray(input.candidateSteps).length,
+        candidateGroupCount: ensureArray(input.candidateGroups).length
+      });
+      const response = await waitForCopilotTurn(
+        session,
+        prompt,
+        input.workingDirectory
       );
       const content = response?.data?.content?.trim();
+      writeRunLog("copilot.response.received", {
+        hasResponse: Boolean(response),
+        contentLength: content?.length ?? 0,
+        contentPreview: content ? limitText(content, 4_000) : null
+      });
 
       if (!content) {
         throw new Error("GitHub Copilot returned an empty code tour response.");
       }
 
+      emitProgress({
+        stage: "finalizing",
+        summary: "GitHub Copilot finished the draft",
+        detail: "Parsing the structured response and merging it into the final code tour.",
+        log: "Finalizing Copilot output"
+      });
       return {
         tour: mergeTour(parseStructuredResponse(content), input, model)
       };
@@ -431,6 +590,15 @@ function buildTourPrompt(input) {
     "Assume the reviewer already knows the codebase well. Be direct, useful, and never condescending.",
     "Stay grounded in the provided pull-request data and the linked local repository.",
     "Do not edit files, propose patches, or imply that you changed the code.",
+    "Finish the whole task in this turn. Do not wait for more instructions.",
+    "Be fast and selective. Do not exhaustively explore the repository.",
+    "Start from the provided candidate groups and candidate steps before opening more files.",
+    "Inspect only the changed files plus direct supporting callsites.",
+    "Do not spawn sub-agents or background agents.",
+    "Inspect at most a few targeted supporting callsites beyond the changed files. Once the story is clear, stop using tools and return the final JSON immediately.",
+    "If a supporting callsite cannot be verified quickly, omit it instead of continuing to search.",
+    "If a search returns no direct hit, do not keep widening it. Continue with the verified pull-request context you already have.",
+    "A complete best-effort tour is better than an exhaustive investigation.",
     "Return JSON only with no markdown fences or extra commentary.",
     "Always use the provided candidate step ids. Never invent ids.",
     "Explain the whole pull request first, then organize the changed files into related sections.",
@@ -653,13 +821,930 @@ function selectCopilotModel(models) {
     return null;
   }
 
-  const preferredMatch =
-    models.find((model) => model.id === "gpt-5") ??
-    models.find((model) => model.id?.startsWith("gpt-5")) ??
-    models.find((model) => model.id?.startsWith("o")) ??
-    models[0];
+  const preferredMatch = models
+    .map((model, index) => ({
+      id: sanitizeString(model?.id),
+      index,
+      score: scoreCopilotModel(model?.id)
+    }))
+    .filter((entry) => entry.id)
+    .sort((left, right) => left.score - right.score || left.index - right.index)[0];
 
   return preferredMatch?.id ?? null;
+}
+
+function scoreCopilotModel(modelId) {
+  const normalized = sanitizeString(modelId)?.toLowerCase();
+  if (!normalized) {
+    return Number.MAX_SAFE_INTEGER;
+  }
+
+  if (normalized.startsWith("gpt-5") && normalized.includes("mini")) {
+    return 0;
+  }
+  if (normalized.includes("mini")) {
+    return 1;
+  }
+  if (normalized.includes("haiku")) {
+    return 2;
+  }
+  if (normalized === "gpt-5") {
+    return 3;
+  }
+  if (normalized.startsWith("gpt-5")) {
+    return 4;
+  }
+  if (normalized.startsWith("gpt-4.1")) {
+    return 5;
+  }
+  if (normalized.startsWith("claude")) {
+    return 6;
+  }
+  if (normalized.startsWith("o")) {
+    return 7;
+  }
+
+  return 100;
+}
+
+async function waitForCopilotTurn(session, prompt, workingDirectory) {
+  const activeTools = new Map();
+  const requestedTools = new Map();
+  let finalMessage = null;
+  let streamedResponseStarted = false;
+  let settled = false;
+  let reasoningDeltaCount = 0;
+  let usageCount = 0;
+  let lastReasoningHeartbeatAt = 0;
+  let resolveDone = null;
+  let rejectDone = null;
+  const done = new Promise((resolve, reject) => {
+    resolveDone = resolve;
+    rejectDone = reject;
+  });
+  const resolveOnce = (value) => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    writeRunLog("copilot.turn.resolved", {
+      hasFinalMessage: Boolean(value),
+      streamedResponseStarted,
+      reasoningDeltaCount,
+      usageCount
+    });
+    resolveDone(value);
+  };
+  const rejectOnce = (error) => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    writeRunLog("copilot.turn.rejected", {
+      message: error instanceof Error ? error.message : String(error),
+      streamedResponseStarted,
+      reasoningDeltaCount,
+      usageCount
+    });
+    rejectDone(error);
+  };
+  const watchdog = createGenerationWatchdog((abortReason) => {
+    writeRunLog("copilot.watchdog.abort", abortReason);
+    emitProgress({
+      stage: "timeout",
+      summary: generationAbortMessage("GitHub Copilot", abortReason),
+      detail:
+        "Aborting the Copilot run so the app can surface the failure without waiting for the old 10 minute timeout.",
+      log: generationAbortMessage("GitHub Copilot", abortReason)
+    });
+    session.abort().catch(() => {});
+    rejectOnce(new Error(generationAbortMessage("GitHub Copilot", abortReason)));
+  });
+  const subscriptions = [
+    session.on("assistant.message", (event) => {
+      finalMessage = event;
+      watchdog.touchVisible("assistant.message");
+      writeRunLog("copilot.assistant.message", {
+        hasContent: Boolean(sanitizeString(event?.data?.content)),
+        toolRequests: ensureArray(event?.data?.toolRequests).map((toolRequest) => ({
+          toolCallId: sanitizeString(toolRequest?.toolCallId),
+          name: sanitizeString(toolRequest?.name),
+          intentionSummary: sanitizeString(toolRequest?.intentionSummary)
+        })),
+        contentPreview: sanitizeOptionalString(event?.data?.content, 800)
+      });
+      for (const toolRequest of ensureArray(event?.data?.toolRequests)) {
+        requestedTools.set(toolRequest.toolCallId, toolRequest);
+      }
+    }),
+    session.on("assistant.message_delta", () => {
+      watchdog.touchVisible("assistant.message_delta");
+      if (streamedResponseStarted) {
+        return;
+      }
+      streamedResponseStarted = true;
+      writeRunLog("copilot.assistant.message_delta.started");
+      emitProgress({
+        stage: "drafting",
+        summary: "GitHub Copilot is drafting the code tour",
+        detail: "Streaming the final structured response back to the app.",
+        log: "Copilot started drafting the final response"
+      });
+    }),
+    session.on("assistant.reasoning_delta", (event) => {
+      watchdog.touchBackground();
+      reasoningDeltaCount += 1;
+      const now = Date.now();
+      if (reasoningDeltaCount <= 3 || now - lastReasoningHeartbeatAt >= 10_000) {
+        lastReasoningHeartbeatAt = now;
+        writeRunLog("copilot.assistant.reasoning", {
+          count: reasoningDeltaCount,
+          detail: snapshotForLog(event?.data, 1_200)
+        });
+      }
+    }),
+    session.on("tool.execution_start", (event) => {
+      const requestInfo = requestedTools.get(event.data.toolCallId) ?? null;
+      requestedTools.delete(event.data.toolCallId);
+      const toolContext = describeCopilotTool(
+        event.data,
+        requestInfo,
+        workingDirectory
+      );
+      watchdog.touchVisible(toolContext?.log ?? "tool.execution_start");
+      writeRunLog("copilot.tool.start", {
+        toolCallId: sanitizeString(event?.data?.toolCallId),
+        tool: toolContext?.log ?? null,
+        request: snapshotForLog(requestInfo, 2_000),
+        event: snapshotForLog(event?.data, 2_000)
+      });
+      activeTools.set(event.data.toolCallId, toolContext);
+      const progress = progressForCopilotToolStart(toolContext);
+      if (progress) {
+        emitProgress(progress);
+      }
+    }),
+    session.on("tool.execution_progress", (event) => {
+      const toolContext = activeTools.get(event.data.toolCallId);
+      watchdog.touchVisible(toolContext?.log ?? "tool.execution_progress");
+      const progress = progressForCopilotToolProgress(
+        event.data,
+        toolContext
+      );
+      if (progress?.detail) {
+        writeRunLog("copilot.tool.progress", {
+          toolCallId: sanitizeString(event?.data?.toolCallId),
+          tool: toolContext?.log ?? null,
+          progress: progress.detail
+        });
+      }
+      if (progress) {
+        emitProgress(progress);
+      }
+    }),
+    session.on("tool.execution_complete", (event) => {
+      const toolContext = activeTools.get(event.data.toolCallId);
+      watchdog.touchVisible(toolContext?.log ?? "tool.execution_complete");
+      writeRunLog("copilot.tool.complete", {
+        toolCallId: sanitizeString(event?.data?.toolCallId),
+        tool: toolContext?.log ?? null,
+        success: event?.data?.success,
+        event: snapshotForLog(event?.data, 2_000)
+      });
+      activeTools.delete(event.data.toolCallId);
+
+      if (!event.data.success) {
+        const progress = progressForCopilotToolFailure(event.data, toolContext);
+        if (progress) {
+          emitProgress(progress);
+        }
+      }
+    }),
+    session.on("subagent.started", (event) => {
+      watchdog.touchVisible("subagent.started");
+      writeRunLog("copilot.subagent.started", snapshotForLog(event?.data, 1_500));
+      emitProgress(progressForSubagentStart(event.data));
+    }),
+    session.on("subagent.completed", (event) => {
+      watchdog.touchVisible("subagent.completed");
+      writeRunLog("copilot.subagent.completed", snapshotForLog(event?.data, 1_500));
+      emitProgress(progressForSubagentComplete(event.data));
+    }),
+    session.on("subagent.failed", (event) => {
+      watchdog.touchVisible("subagent.failed");
+      writeRunLog("copilot.subagent.failed", snapshotForLog(event?.data, 1_500));
+      emitProgress(progressForSubagentFailure(event.data));
+    }),
+    session.on("assistant.usage", (event) => {
+      watchdog.touchBackground();
+      usageCount += 1;
+      if (usageCount <= 3 || usageCount % 10 === 0) {
+        writeRunLog("copilot.assistant.usage", {
+          count: usageCount,
+          detail: snapshotForLog(event?.data, 1_000)
+        });
+      }
+    }),
+    session.on("session.error", (event) => {
+      watchdog.touchVisible("session.error");
+      writeRunLog("copilot.session.error", snapshotForLog(event?.data, 2_000));
+      rejectOnce(new Error(event.data.message));
+    }),
+    session.on("session.idle", () => {
+      writeRunLog("copilot.session.idle", {
+        hasFinalMessage: Boolean(finalMessage),
+        activeToolCount: activeTools.size,
+        requestedToolCount: requestedTools.size
+      });
+      if (watchdog.abortReason()) {
+        rejectOnce(
+          new Error(generationAbortMessage("GitHub Copilot", watchdog.abortReason()))
+        );
+        return;
+      }
+
+      if (!finalMessage) {
+        rejectOnce(
+          new Error(
+            "GitHub Copilot finished the turn without returning the structured code tour."
+          )
+        );
+        return;
+      }
+
+      resolveOnce(finalMessage);
+    })
+  ];
+
+  try {
+    trackProgress(watchdog, {
+      stage: "running",
+      summary: "GitHub Copilot is inspecting the checkout",
+      detail:
+        "Waiting for live tool activity or streamed output from the current tour run.",
+      log: "Inspecting the linked checkout"
+    });
+    writeRunLog("copilot.session.send", {
+      promptLength: prompt.length
+    });
+    await withTimeout(
+      session.send({ prompt }),
+      STATUS_TIMEOUT_MS,
+      "Timed out while sending the code tour request to GitHub Copilot."
+    );
+    writeRunLog("copilot.session.send.accepted");
+    return await done;
+  } finally {
+    watchdog.clear();
+    for (const unsubscribe of subscriptions) {
+      unsubscribe();
+    }
+  }
+}
+
+function createGenerationWatchdog(onAbort) {
+  let abortReason = null;
+  let overallTimer = null;
+  let inactivityTimer = null;
+  let lastVisibleActivity = "starting request";
+  const abortWith = (kind, timeoutMs) => {
+    if (abortReason) {
+      return;
+    }
+
+    abortReason = { kind, timeoutMs, lastVisibleActivity };
+    onAbort?.(abortReason);
+  };
+  const resetInactivity = () => {
+    if (abortReason) {
+      return;
+    }
+
+    if (inactivityTimer !== null) {
+      clearTimeout(inactivityTimer);
+    }
+    inactivityTimer = setTimeout(() => {
+      abortWith("inactivity", GENERATION_INACTIVITY_TIMEOUT_MS);
+    }, GENERATION_INACTIVITY_TIMEOUT_MS);
+  };
+
+  overallTimer = setTimeout(() => {
+    abortWith("overall", GENERATION_TIMEOUT_MS);
+  }, GENERATION_TIMEOUT_MS);
+  resetInactivity();
+
+  return {
+    touch() {
+      this.touchVisible(null);
+    },
+    touchVisible(activity) {
+      const normalized = sanitizeString(activity);
+      if (normalized) {
+        lastVisibleActivity = limitText(normalized, 160);
+      }
+      resetInactivity();
+    },
+    touchBackground() {
+      resetInactivity();
+    },
+    clear() {
+      if (overallTimer !== null) {
+        clearTimeout(overallTimer);
+      }
+      if (inactivityTimer !== null) {
+        clearTimeout(inactivityTimer);
+      }
+    },
+    abortReason() {
+      return abortReason;
+    },
+    lastVisibleActivity() {
+      return lastVisibleActivity;
+    }
+  };
+}
+
+function trackProgress(watchdog, progress) {
+  watchdog.touchVisible(progress?.log ?? progress?.summary ?? null);
+  if (progress) {
+    emitProgress(progress);
+  }
+}
+
+function emitProgress({ stage, summary, detail = null, log = null }) {
+  const payload = {
+    stage,
+    summary: limitText(summary, 160),
+    detail: detail ? limitText(detail, 240) : null,
+    log: log ? limitText(log, 240) : null,
+    logFilePath: currentRunLogger?.filePath ?? null
+  };
+  writeRunLog("progress", payload);
+  process.stderr.write(
+    `${PROGRESS_PREFIX}${JSON.stringify(payload)}\n`
+  );
+}
+
+function generationAbortMessage(providerLabel, abortReason) {
+  if (!abortReason) {
+    return `${providerLabel} stopped while generating the code tour.`;
+  }
+
+  const lastVisibleActivity = sanitizeString(abortReason.lastVisibleActivity);
+  const lastVisibleSuffix = lastVisibleActivity
+    ? ` Last visible activity: ${lastVisibleActivity}.`
+    : "";
+
+  if (abortReason.kind === "inactivity") {
+    return `${providerLabel} stopped reporting progress for ${formatDuration(
+      abortReason.timeoutMs
+    )} while generating the code tour.${lastVisibleSuffix}`;
+  }
+
+  return `${providerLabel} timed out while generating the code tour after ${formatDuration(
+    abortReason.timeoutMs
+  )}.${lastVisibleSuffix}`;
+}
+
+function formatDuration(timeoutMs) {
+  const totalSeconds = Math.round(timeoutMs / 1000);
+  if (totalSeconds % 60 === 0) {
+    const minutes = totalSeconds / 60;
+    return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  }
+
+  return `${totalSeconds} second${totalSeconds === 1 ? "" : "s"}`;
+}
+
+function progressForCopilotToolStart(toolContext) {
+  if (!toolContext || toolContext.hidden) {
+    return null;
+  }
+
+  return {
+    stage: "tool",
+    summary: toolContext.summary,
+    detail: toolContext.detail,
+    log: toolContext.log
+  };
+}
+
+function progressForCopilotToolProgress(data, toolContext) {
+  if (!toolContext || toolContext.hidden) {
+    return null;
+  }
+
+  const progressMessage = sanitizeString(data.progressMessage);
+  if (!progressMessage) {
+    return null;
+  }
+
+  return {
+    stage: "tool_progress",
+    summary: toolContext.summary,
+    detail: progressMessage,
+    log: `${toolContext.log}: ${limitText(progressMessage, 120)}`
+  };
+}
+
+function progressForCopilotToolFailure(data, toolContext) {
+  if (toolContext?.suppressFailure) {
+    return null;
+  }
+
+  const toolLabel = toolContext?.log ?? describeToolName(data?.toolName, null);
+  const detail =
+    sanitizeString(data.error?.message) ??
+    `${toolLabel} failed before Copilot could finish the tour.`;
+
+  return {
+    stage: "tool_failed",
+    summary: `${toolLabel} failed`,
+    detail,
+    log: `${toolLabel} failed`
+  };
+}
+
+function progressForSubagentStart(data) {
+  return {
+    stage: "subagent",
+    summary: `GitHub Copilot spawned ${data.agentDisplayName}`,
+    detail:
+      sanitizeOptionalString(data.agentDescription, 240) ??
+      "Delegating a focused part of the review to a sub-agent.",
+    log: `Sub-agent started: ${data.agentDisplayName}`
+  };
+}
+
+function progressForSubagentComplete(data) {
+  const detailParts = [];
+  if (typeof data.totalToolCalls === "number") {
+    detailParts.push(`${data.totalToolCalls} tool call${data.totalToolCalls === 1 ? "" : "s"}`);
+  }
+  if (typeof data.durationMs === "number") {
+    detailParts.push(`finished in ${formatDuration(data.durationMs)}`);
+  }
+
+  return {
+    stage: "subagent_complete",
+    summary: `${data.agentDisplayName} finished`,
+    detail:
+      detailParts.length > 0
+        ? detailParts.join(" • ")
+        : "Returning the sub-agent result to the main Copilot run.",
+    log: `Sub-agent finished: ${data.agentDisplayName}`
+  };
+}
+
+function progressForSubagentFailure(data) {
+  return {
+    stage: "subagent_failed",
+    summary: `${data.agentDisplayName} failed`,
+    detail: sanitizeOptionalString(data.error, 240) ?? "The sub-agent failed.",
+    log: `Sub-agent failed: ${data.agentDisplayName}`
+  };
+}
+
+function progressForCodexEvent(event) {
+  switch (event.type) {
+    case "thread.started":
+      return {
+        stage: "thread",
+        summary: "Codex started a new thread",
+        detail: "The agent is ready to inspect the linked checkout.",
+        log: "Started Codex thread"
+      };
+    case "turn.started":
+      return {
+        stage: "turn",
+        summary: "Codex is inspecting the change",
+        detail: "Walking the changed files and related callsites from the checkout.",
+        log: "Inspecting the changed files"
+      };
+    case "item.started":
+      return progressForCodexItem(event.item, "started");
+    case "item.updated":
+      return event.item.type === "todo_list"
+        ? progressForCodexItem(event.item, "updated")
+        : null;
+    case "item.completed":
+      return progressForCodexItem(event.item, "completed");
+    case "turn.completed":
+      return {
+        stage: "finalizing",
+        summary: "Codex finished gathering context",
+        detail: "Formatting the structured code tour response.",
+        log: "Codex finished its turn"
+      };
+    default:
+      return null;
+  }
+}
+
+function progressForCodexItem(item, status) {
+  switch (item.type) {
+    case "command_execution":
+      if (status === "started") {
+        return {
+          stage: "command",
+          summary: "Codex is running a checkout command",
+          detail: sanitizeOptionalString(item.command, 240),
+          log: `Command: ${limitText(item.command, 160)}`
+        };
+      }
+
+      if (status === "completed" && item.status === "failed") {
+        return {
+          stage: "command_failed",
+          summary: "A Codex command failed",
+          detail: sanitizeOptionalString(item.command, 240),
+          log: `Command failed: ${limitText(item.command, 160)}`
+        };
+      }
+
+      return null;
+    case "mcp_tool_call": {
+      const toolRef = `${item.server}/${item.tool}`;
+      if (status === "started") {
+        return {
+          stage: "tool",
+          summary: "Codex is using a tool",
+          detail: toolRef,
+          log: `Tool: ${toolRef}`
+        };
+      }
+
+      if (status === "completed" && item.status === "failed") {
+        return {
+          stage: "tool_failed",
+          summary: "A Codex tool step failed",
+          detail:
+            sanitizeOptionalString(item.error?.message, 240) ?? `Tool failed: ${toolRef}`,
+          log: `Tool failed: ${toolRef}`
+        };
+      }
+
+      return null;
+    }
+    case "todo_list": {
+      const nextTodo = ensureArray(item.items).find((entry) => !entry.completed)?.text;
+      const detail =
+        sanitizeOptionalString(nextTodo, 240) ??
+        "Updating the current plan for the code tour run.";
+
+      return {
+        stage: "planning",
+        summary: "Codex is updating its review plan",
+        detail,
+        log: detail
+      };
+    }
+    case "reasoning":
+      return {
+        stage: "reasoning",
+        summary: "Codex is reasoning through the change",
+        detail:
+          sanitizeOptionalString(item.text, 240) ??
+          "Working through the current reasoning step.",
+        log:
+          sanitizeOptionalString(item.text, 180) ??
+          "Codex updated its reasoning"
+      };
+    case "web_search":
+      return {
+        stage: "search",
+        summary: "Codex is searching for context",
+        detail:
+          sanitizeOptionalString(item.query, 240) ?? "Issuing a search query.",
+        log:
+          sanitizeOptionalString(item.query, 180) ?? "Codex issued a search query"
+      };
+    case "agent_message":
+      if (status === "completed") {
+        return {
+          stage: "drafting",
+          summary: "Codex drafted the code tour response",
+          detail: "Finalizing the structured output for the app.",
+          log: "Codex drafted the final response"
+        };
+      }
+
+      return null;
+    default:
+      return null;
+  }
+}
+
+function describeToolName(primaryName, fallbackName) {
+  const candidate = sanitizeString(primaryName) ?? sanitizeString(fallbackName);
+  if (!candidate) {
+    return "tool";
+  }
+
+  const humanized = candidate.replace(/[._-]+/g, " ").replace(/\s+/g, " ").trim();
+  return humanized.length > 0 ? humanized : "tool";
+}
+
+function describeCopilotTool(data, requestInfo, workingDirectory) {
+  const toolName =
+    sanitizeString(requestInfo?.name) ??
+    sanitizeString(data?.toolName) ??
+    sanitizeString(data?.mcpToolName) ??
+    "tool";
+  const toolArgs = requestInfo?.arguments ?? data?.arguments ?? {};
+  const toolTitle = sanitizeString(requestInfo?.toolTitle);
+  const intentionSummary = sanitizeString(requestInfo?.intentionSummary);
+  const fallbackLabel =
+    intentionSummary ??
+    toolTitle ??
+    describeToolName(toolName, data?.mcpToolName);
+
+  switch (toolName) {
+    case "view":
+      return {
+        summary: "GitHub Copilot is reading code",
+        detail: describeViewActivity(toolArgs, workingDirectory) ?? fallbackLabel,
+        log: describeViewLog(toolArgs, workingDirectory) ?? "Read file",
+        suppressFailure: true,
+        hidden: false
+      };
+    case "rg":
+      return {
+        summary: "GitHub Copilot is searching the checkout",
+        detail: describeRipgrepActivity(toolArgs, workingDirectory) ?? fallbackLabel,
+        log: describeRipgrepLog(toolArgs, workingDirectory) ?? "Search checkout",
+        suppressFailure: true,
+        hidden: false
+      };
+    case "glob":
+      return {
+        summary: "GitHub Copilot is listing matching files",
+        detail: describeGlobActivity(toolArgs, workingDirectory) ?? fallbackLabel,
+        log: describeGlobLog(toolArgs, workingDirectory) ?? "List matching files",
+        suppressFailure: true,
+        hidden: false
+      };
+    case "bash":
+      return {
+        summary: "GitHub Copilot is running a shell command",
+        detail: describeBashActivity(toolArgs) ?? fallbackLabel,
+        log: describeBashLog(toolArgs) ?? "Run shell command",
+        suppressFailure: false,
+        hidden: false
+      };
+    case "report_intent":
+      return {
+        summary: "GitHub Copilot is planning the next step",
+        detail: sanitizeString(toolArgs.intent) ?? fallbackLabel,
+        log: sanitizeString(toolArgs.intent) ?? "Update plan",
+        suppressFailure: true,
+        hidden: false
+      };
+    default:
+      if (toolName.startsWith("github-mcp-server-")) {
+        return {
+          summary: "GitHub Copilot is querying GitHub",
+          detail:
+            describeGitHubToolActivity(toolName, toolArgs, workingDirectory) ??
+            fallbackLabel,
+          log:
+            describeGitHubToolLog(toolName, toolArgs, workingDirectory) ??
+            fallbackLabel,
+          suppressFailure: false,
+          hidden: false
+        };
+      }
+
+      return {
+        summary: "GitHub Copilot is running a tool",
+        detail: fallbackLabel,
+        log: fallbackLabel,
+        suppressFailure: false,
+        hidden: false
+      };
+  }
+}
+
+function describeViewActivity(toolArgs, workingDirectory) {
+  const path = formatToolPath(pickObjectValue(toolArgs, ["path"]), workingDirectory);
+  if (!path) {
+    return null;
+  }
+
+  const range = formatViewRange(
+    pickObjectValue(toolArgs, ["view_range", "viewRange"])
+  );
+  return range ? `Reading ${path}${range}.` : `Reading ${path}.`;
+}
+
+function describeViewLog(toolArgs, workingDirectory) {
+  const path = formatToolPath(pickObjectValue(toolArgs, ["path"]), workingDirectory);
+  if (!path) {
+    return null;
+  }
+
+  const range = formatViewRange(
+    pickObjectValue(toolArgs, ["view_range", "viewRange"])
+  );
+  return range ? `Read ${path}${range}` : `Read ${path}`;
+}
+
+function describeRipgrepActivity(toolArgs, workingDirectory) {
+  const pattern = formatInlineCode(pickObjectValue(toolArgs, ["pattern"]));
+  const path = formatToolPath(pickObjectValue(toolArgs, ["path"]), workingDirectory);
+  const globPattern = formatInlineCode(pickObjectValue(toolArgs, ["glob"]));
+
+  if (pattern && path && globPattern) {
+    return `Searching ${path} for ${pattern} in ${globPattern} files.`;
+  }
+  if (pattern && path) {
+    return `Searching ${path} for ${pattern}.`;
+  }
+  if (pattern) {
+    return `Searching the checkout for ${pattern}.`;
+  }
+
+  return path ? `Searching ${path}.` : null;
+}
+
+function describeRipgrepLog(toolArgs, workingDirectory) {
+  const pattern = formatInlineCode(pickObjectValue(toolArgs, ["pattern"]));
+  const path = formatToolPath(pickObjectValue(toolArgs, ["path"]), workingDirectory);
+
+  if (pattern && path) {
+    return `Search ${path} for ${pattern}`;
+  }
+  if (pattern) {
+    return `Search for ${pattern}`;
+  }
+
+  return path ? `Search ${path}` : null;
+}
+
+function describeGlobActivity(toolArgs, workingDirectory) {
+  const pattern = formatInlineCode(pickObjectValue(toolArgs, ["pattern"]));
+  const path = formatToolPath(pickObjectValue(toolArgs, ["path"]), workingDirectory);
+
+  if (pattern && path) {
+    return `Listing files in ${path} matching ${pattern}.`;
+  }
+  if (pattern) {
+    return `Listing files matching ${pattern}.`;
+  }
+
+  return path ? `Listing files in ${path}.` : null;
+}
+
+function describeGlobLog(toolArgs, workingDirectory) {
+  const pattern = formatInlineCode(pickObjectValue(toolArgs, ["pattern"]));
+  const path = formatToolPath(pickObjectValue(toolArgs, ["path"]), workingDirectory);
+
+  if (pattern && path) {
+    return `List ${pattern} in ${path}`;
+  }
+  if (pattern) {
+    return `List ${pattern}`;
+  }
+
+  return path ? `List files in ${path}` : null;
+}
+
+function describeBashActivity(toolArgs) {
+  return (
+    sanitizeString(pickObjectValue(toolArgs, ["description"])) ??
+    sanitizeOptionalString(pickObjectValue(toolArgs, ["command"]), 240)
+  );
+}
+
+function describeBashLog(toolArgs) {
+  return (
+    sanitizeOptionalString(pickObjectValue(toolArgs, ["description"]), 160) ??
+    sanitizeOptionalString(pickObjectValue(toolArgs, ["command"]), 160)
+  );
+}
+
+function describeGitHubToolActivity(toolName, toolArgs, workingDirectory) {
+  if (toolName === "github-mcp-server-get_file_contents") {
+    const path = formatToolPath(pickObjectValue(toolArgs, ["path"]), workingDirectory);
+    const repo = formatRepository(toolArgs);
+    if (path && repo) {
+      return `Reading ${path} from ${repo}.`;
+    }
+    if (path) {
+      return `Reading ${path} from GitHub.`;
+    }
+  }
+
+  const method = sanitizeString(pickObjectValue(toolArgs, ["method"]));
+  const repo = formatRepository(toolArgs);
+  const resourceId = sanitizeString(
+    pickObjectValue(toolArgs, ["resource_id", "resourceId"])
+  );
+
+  if (method && repo && resourceId) {
+    return `Running ${method} for ${repo} (${resourceId}).`;
+  }
+  if (method && repo) {
+    return `Running ${method} for ${repo}.`;
+  }
+  if (repo) {
+    return `Querying ${repo} on GitHub.`;
+  }
+
+  return null;
+}
+
+function describeGitHubToolLog(toolName, toolArgs, workingDirectory) {
+  if (toolName === "github-mcp-server-get_file_contents") {
+    const path = formatToolPath(pickObjectValue(toolArgs, ["path"]), workingDirectory);
+    const repo = formatRepository(toolArgs);
+    if (path && repo) {
+      return `Read ${path} from ${repo}`;
+    }
+    if (path) {
+      return `Read ${path} from GitHub`;
+    }
+  }
+
+  const method = sanitizeString(pickObjectValue(toolArgs, ["method"]));
+  const repo = formatRepository(toolArgs);
+  if (method && repo) {
+    return `GitHub ${method} on ${repo}`;
+  }
+  if (repo) {
+    return `Query GitHub for ${repo}`;
+  }
+
+  return null;
+}
+
+function formatToolPath(value, workingDirectory) {
+  const path = sanitizeString(value);
+  if (!path) {
+    return null;
+  }
+
+  if (workingDirectory) {
+    try {
+      const relativePath = relative(workingDirectory, path);
+      if (relativePath === "") {
+        return ".";
+      }
+      if (!relativePath.startsWith("..")) {
+        return relativePath;
+      }
+    } catch {}
+  }
+
+  return path;
+}
+
+function formatViewRange(value) {
+  if (!Array.isArray(value) || value.length === 0) {
+    return "";
+  }
+
+  const start = Number.isFinite(value[0]) ? Math.max(1, Math.floor(value[0])) : null;
+  const end = Number.isFinite(value[1]) ? Math.floor(value[1]) : null;
+  if (start === null) {
+    return "";
+  }
+  if (end === null || end === start) {
+    return `:${start}`;
+  }
+  if (end < 0) {
+    return `:${start}+`;
+  }
+  return `:${start}-${Math.max(start, end)}`;
+}
+
+function formatInlineCode(value) {
+  const text = sanitizeString(value);
+  return text ? `\`${limitText(text, 80)}\`` : null;
+}
+
+function pickObjectValue(value, keys) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  for (const key of keys) {
+    if (key in value) {
+      return value[key];
+    }
+  }
+
+  return null;
+}
+
+function formatRepository(toolArgs) {
+  const owner = sanitizeString(pickObjectValue(toolArgs, ["owner"]));
+  const repo = sanitizeString(pickObjectValue(toolArgs, ["repo"]));
+  if (!owner || !repo) {
+    return null;
+  }
+
+  return `${owner}/${repo}`;
 }
 
 function unavailableProviderStatus(provider, label, message) {
@@ -675,8 +1760,221 @@ function unavailableProviderStatus(provider, label, message) {
 }
 
 function resolveCliPath(name) {
-  const localCandidate = resolve(PROJECT_ROOT, "node_modules", ".bin", name);
-  return existsSync(localCandidate) ? localCandidate : name;
+  const overrideCandidate = resolveExplicitCliPath(name);
+  if (overrideCandidate) {
+    return overrideCandidate;
+  }
+
+  if (PROJECT_ROOT) {
+    const localCandidate = resolve(PROJECT_ROOT, "node_modules", ".bin", name);
+    if (hasExecutablePath(localCandidate)) {
+      return localCandidate;
+    }
+  }
+
+  return findBinaryOnPath(name);
+}
+
+function createRunLoggerForRequest(request) {
+  if (sanitizeString(request?.action) !== "generate") {
+    return null;
+  }
+
+  const directory = resolveCodeTourLogDirectory();
+
+  try {
+    mkdirSync(directory, { recursive: true });
+  } catch {
+    return null;
+  }
+
+  const filePath = join(directory, buildRunLogFileName(request?.context));
+
+  try {
+    appendFileSync(filePath, "");
+    return { filePath };
+  } catch {
+    return null;
+  }
+}
+
+function resolveCodeTourLogDirectory() {
+  const configured = sanitizeString(process.env[CODE_TOUR_LOG_DIR_ENV]);
+  if (configured) {
+    return configured;
+  }
+
+  return resolve(tmpdir(), "gh-ui-tool", "logs", "code-tours");
+}
+
+function buildRunLogFileName(input) {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const provider = sanitizeLogFileComponent(input?.provider ?? "provider");
+  const repository = sanitizeLogFileComponent(input?.repository ?? "repository");
+  const prNumber =
+    typeof input?.number === "number" && Number.isFinite(input.number)
+      ? `pr${Math.max(0, Math.floor(input.number))}`
+      : "pr";
+
+  return `${timestamp}-${provider}-${repository}-${prNumber}-${process.pid}.log`;
+}
+
+function sanitizeLogFileComponent(value) {
+  const normalized = sanitizeString(String(value)) ?? "unknown";
+  const sanitized = normalized
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+
+  return sanitized.length > 0 ? sanitized : "unknown";
+}
+
+function summarizeRequestForLog(request) {
+  if (sanitizeString(request?.action) !== "generate") {
+    return { action: sanitizeString(request?.action) ?? "unknown" };
+  }
+
+  const input = request?.context ?? {};
+  return {
+    action: "generate",
+    provider: sanitizeString(input.provider),
+    repository: sanitizeString(input.repository),
+    number:
+      typeof input.number === "number" && Number.isFinite(input.number)
+        ? Math.floor(input.number)
+        : null,
+    workingDirectory: sanitizeString(input.workingDirectory),
+    candidateStepCount: ensureArray(input.candidateSteps).length,
+    candidateGroupCount: ensureArray(input.candidateGroups).length,
+    fileCount: ensureArray(input.files).length,
+    reviewThreadCount: ensureArray(input.reviewThreads).length
+  };
+}
+
+function emitDebugLogLocation() {
+  if (!currentRunLogger?.filePath) {
+    return;
+  }
+
+  emitProgress({
+    stage: "logging",
+    summary: "Writing code tour debug log",
+    detail: `Saving detailed provider activity to ${currentRunLogger.filePath}.`,
+    log: `Writing debug log to ${currentRunLogger.filePath}`
+  });
+}
+
+function formatErrorMessageWithLogPath(message) {
+  if (!currentRunLogger?.filePath) {
+    return message;
+  }
+
+  return `${message} Debug log: ${currentRunLogger.filePath}`;
+}
+
+function writeRunLog(event, data = null) {
+  if (!currentRunLogger?.filePath) {
+    return;
+  }
+
+  const suffix = data === null || data === undefined ? "" : ` ${snapshotForLog(data, 8_000)}`;
+
+  try {
+    appendFileSync(
+      currentRunLogger.filePath,
+      `${new Date().toISOString()} ${event}${suffix}\n`
+    );
+  } catch {}
+}
+
+function snapshotForLog(value, maxLength = 4_000) {
+  if (value === null || value === undefined) {
+    return "null";
+  }
+
+  if (typeof value === "string") {
+    return JSON.stringify(limitText(value, maxLength));
+  }
+
+  try {
+    return limitText(JSON.stringify(value, logJsonReplacer), maxLength);
+  } catch {
+    return JSON.stringify(limitText(String(value), maxLength));
+  }
+}
+
+function logJsonReplacer(_key, value) {
+  if (typeof value === "bigint") {
+    return value.toString();
+  }
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: value.message,
+      stack: value.stack
+    };
+  }
+  if (typeof value === "string") {
+    return limitText(value, 2_000);
+  }
+
+  return value;
+}
+
+function resolveProjectRoot() {
+  const candidate = sanitizeString(process.env.GH_UI_CODE_TOUR_PROJECT_ROOT);
+  if (!candidate) {
+    return null;
+  }
+
+  return existsSync(candidate) ? candidate : null;
+}
+
+function resolveExplicitCliPath(name) {
+  const envName =
+    name === "codex" ? "GH_UI_TOOL_CODEX_BINARY" : "GH_UI_TOOL_COPILOT_BINARY";
+  const candidate = sanitizeString(process.env[envName]);
+
+  if (!candidate) {
+    return null;
+  }
+
+  return hasExecutablePath(candidate) ? candidate : null;
+}
+
+function findBinaryOnPath(name) {
+  const rawPath = sanitizeString(process.env.PATH);
+  if (!rawPath) {
+    return null;
+  }
+
+  for (const segment of rawPath.split(delimiter)) {
+    const trimmed = segment.trim();
+    if (!trimmed) {
+      continue;
+    }
+
+    const candidate = resolve(trimmed, name);
+    if (hasExecutablePath(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function hasExecutablePath(candidate) {
+  if (!candidate || !existsSync(candidate)) {
+    return false;
+  }
+
+  try {
+    accessSync(candidate, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function fallbackText(value, fallback) {
@@ -972,20 +2270,95 @@ function parseStructuredResponse(raw) {
     throw new Error("The LLM returned an empty response.");
   }
 
-  const extractedJson = extractFirstJsonObject(raw);
+  const candidates = buildStructuredResponseParseCandidates(raw);
 
-  if (!extractedJson) {
+  if (candidates.length === 0) {
     throw new Error("The LLM response did not contain a valid JSON object.");
   }
 
+  let parseError = null;
+
+  for (const candidate of candidates) {
+    const parsed = tryParseJson(candidate.value);
+
+    if (parsed.ok) {
+      return parsed.value;
+    }
+
+    parseError = parsed.error;
+  }
+
+  let repairError = null;
+
+  for (const candidate of candidates) {
+    const repaired = tryRepairJson(candidate.value);
+
+    if (repaired.ok) {
+      writeRunLog("llm.response.repaired", {
+        candidate: candidate.label,
+        originalLength: candidate.value.length,
+        repairedLength: repaired.repaired.length,
+        originalPreview: limitText(candidate.value, 1_000),
+        repairedPreview: limitText(repaired.repaired, 1_000)
+      });
+      return repaired.value;
+    }
+
+    repairError = repaired.error;
+  }
+
+  throw new Error(
+    `Failed to parse the LLM response as JSON: ${
+      parseError instanceof Error ? parseError.message : "unknown error"
+    }${
+      repairError instanceof Error
+        ? ` (repair attempt failed: ${repairError.message})`
+        : ""
+    }`
+  );
+}
+
+function buildStructuredResponseParseCandidates(raw) {
+  const trimmed = raw.trim();
+  const unwrapped = unwrapMarkdownCodeFence(trimmed);
+  const extractedJson = extractFirstJsonObject(unwrapped);
+  const candidates = [
+    { label: "raw", value: trimmed },
+    { label: "unwrapped", value: unwrapped },
+    extractedJson ? { label: "extracted_object", value: extractedJson } : null
+  ].filter(Boolean);
+
+  return candidates.filter(
+    (candidate, index) =>
+      candidate.value &&
+      candidates.findIndex((entry) => entry.value === candidate.value) === index
+  );
+}
+
+function unwrapMarkdownCodeFence(value) {
+  const trimmed = value.trim();
+  const match = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  return match ? match[1].trim() : trimmed;
+}
+
+function tryParseJson(value) {
   try {
-    return JSON.parse(extractedJson);
+    return { ok: true, value: JSON.parse(value) };
   } catch (error) {
-    throw new Error(
-      `Failed to parse the LLM response as JSON: ${
-        error instanceof Error ? error.message : "unknown error"
-      }`
-    );
+    return { ok: false, error };
+  }
+}
+
+function tryRepairJson(value) {
+  try {
+    const repaired = jsonrepair(value);
+    return {
+      ok: true,
+      repaired,
+      value: JSON.parse(repaired)
+    };
+  } catch (error) {
+    return { ok: false, error };
   }
 }
 

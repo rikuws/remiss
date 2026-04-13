@@ -9,6 +9,7 @@ use crate::theme::*;
 use super::palette::render_palette;
 use super::pr_detail::render_pr_workspace;
 use super::sections::render_section_workspace;
+use super::workspace_sync::{sync_workspace_flow, wait_for_workspace_poll_interval};
 
 pub struct RootView {
     state: Entity<AppState>,
@@ -66,7 +67,7 @@ impl RootView {
                 })
                 .ok();
 
-            // Now sync workspace in background
+            // Now sync workspace in background.
             model
                 .update(cx, |state, cx| {
                     state.workspace_syncing = true;
@@ -74,30 +75,34 @@ impl RootView {
                 })
                 .ok();
 
-            let sync_result = cx
-                .background_executor()
-                .spawn({
-                    let cache = cache.clone();
-                    async move { github::sync_workspace_snapshot(&cache) }
-                })
-                .await;
+            sync_workspace_flow(model.clone(), cx).await;
 
-            model
-                .update(cx, |state, cx| {
-                    state.workspace_syncing = false;
-                    match sync_result {
-                        Ok(ws) => {
-                            state.gh_available = ws.auth.is_authenticated;
-                            state.workspace = Some(ws);
-                            state.workspace_error = None;
+            loop {
+                wait_for_workspace_poll_interval(cx).await;
+
+                let should_sync = model
+                    .read_with(cx, |state, _| {
+                        state.is_authenticated() && !state.workspace_syncing
+                    })
+                    .ok()
+                    .unwrap_or(false);
+                if !should_sync {
+                    continue;
+                }
+
+                model
+                    .update(cx, |state, cx| {
+                        if state.workspace_syncing {
+                            return;
                         }
-                        Err(e) => {
-                            state.workspace_error = Some(e);
-                        }
-                    }
-                    cx.notify();
-                })
-                .ok();
+
+                        state.workspace_syncing = true;
+                        cx.notify();
+                    })
+                    .ok();
+
+                sync_workspace_flow(model.clone(), cx).await;
+            }
         })
         .detach();
 

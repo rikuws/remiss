@@ -686,7 +686,7 @@ fn fetch_pull_request_detail(repository: &str, number: i64) -> Result<PullReques
                   diffSide startDiffSide isCollapsed isOutdated isResolved
                   subjectType viewerCanReply viewerCanResolve viewerCanUnresolve
                   resolvedBy { login }
-                  comments(first: 20) {
+                  comments(first: 100) {
                     nodes {
                       id body path line originalLine startLine originalStartLine
                       state createdAt updatedAt publishedAt url
