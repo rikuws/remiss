@@ -170,3 +170,20 @@ pub fn radius() -> Pixels {
 pub fn radius_sm() -> Pixels {
     px(4.0)
 }
+
+pub fn lane_accent_color(repo: &str) -> Rgba {
+    let hash: u32 = repo
+        .bytes()
+        .fold(5381u32, |acc, b| acc.wrapping_mul(33).wrapping_add(b as u32));
+    let palette = [
+        hex(0x3fb950), // green
+        hex(0xf0883e), // orange
+        hex(0xa371f7), // purple
+        hex(0x58a6ff), // blue
+        hex(0xf778ba), // pink
+        hex(0xd2a8ff), // lavender
+        hex(0x56d4dd), // teal
+        hex(0xffd33d), // yellow
+    ];
+    palette[(hash as usize) % palette.len()]
+}

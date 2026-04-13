@@ -7,6 +7,7 @@ use crate::theme::*;
 
 use super::tour_view::refresh_active_tour_flow;
 use super::workspace_sync::trigger_sync_workspace;
+use std::collections::BTreeMap;
 
 pub fn render_section_workspace(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let s = state.read(cx);
@@ -182,7 +183,42 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
         .unwrap_or(false);
 
     let sync_state = state.clone();
-    let state_for_items = state.clone();
+    let state_for_lanes = state.clone();
+
+    // Viewer login for mine/others split
+    let viewer_login = s
+        .workspace
+        .as_ref()
+        .and_then(|w| w.viewer.as_ref())
+        .map(|v| v.login.clone())
+        .unwrap_or_default();
+    let muted_repos = s.muted_repos.clone();
+    let is_authored_queue = current_queue
+        .as_ref()
+        .map(|q| q.id == "authored")
+        .unwrap_or(false);
+
+    // Group items into kanban lanes by repository
+    let mut my_items: Vec<github::PullRequestSummary> = Vec::new();
+    let mut repo_groups: BTreeMap<String, Vec<github::PullRequestSummary>> = BTreeMap::new();
+    for item in &queue_items {
+        if muted_repos.contains(&item.repository) {
+            continue;
+        }
+        if !is_authored_queue && !viewer_login.is_empty() && item.author_login == viewer_login {
+            my_items.push(item.clone());
+        } else {
+            repo_groups
+                .entry(item.repository.clone())
+                .or_default()
+                .push(item.clone());
+        }
+    }
+
+    let has_my_items = !my_items.is_empty();
+    let has_any_lanes = has_my_items || !repo_groups.is_empty();
+    let muted_list: Vec<String> = muted_repos.iter().cloned().collect::<Vec<_>>();
+    let has_muted = !muted_list.is_empty();
 
     div()
         .flex()
@@ -219,9 +255,9 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                         .mt(px(6.0))
                         .max_w(px(200.0))
                         .child(if is_reviews {
-                            "Focused queue over pull requests that need your review."
+                            "Review requests grouped by repository."
                         } else {
-                            "Queue filters backed by gh search plus a local cache."
+                            "Pull requests grouped into repo lanes."
                         }),
                 )
                 .child(div().flex().flex_col().gap(px(4.0)).mt(px(20.0)).children(
@@ -244,33 +280,56 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                             },
                         )
                     }),
-                )),
+                ))
+                .when(has_muted, |el| {
+                    el.child(
+                        div()
+                            .mt(px(24.0))
+                            .flex()
+                            .flex_col()
+                            .child(eyebrow("Muted Repos"))
+                            .child(
+                                div().flex().flex_col().gap(px(4.0)).children(
+                                    muted_list.into_iter().map(|repo| {
+                                        let state = state.clone();
+                                        let repo_for_unmute = repo.clone();
+                                        muted_repo_pill(&repo, move |_, _, cx| {
+                                            let r = repo_for_unmute.clone();
+                                            state.update(cx, |s, cx| {
+                                                s.muted_repos.remove(&r);
+                                                cx.notify();
+                                            });
+                                        })
+                                    }),
+                                ),
+                            ),
+                    )
+                }),
         )
-        // Main content
+        // Kanban board
         .child(
             div()
                 .flex_grow()
                 .min_h_0()
-                .p(px(24.0))
-                .px(px(28.0))
                 .flex()
                 .flex_col()
-                .id("pull-list-scroll")
-                .overflow_y_scroll()
+                // Board header
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .justify_between()
-                        .mb(px(16.0))
+                        .px(px(28.0))
+                        .pt(px(24.0))
+                        .pb(px(16.0))
                         .child(
                             div()
                                 .flex()
                                 .flex_col()
                                 .child(eyebrow(if loaded_from_cache {
-                                    "Showing cached queue data"
+                                    "Cached data"
                                 } else {
-                                    "Showing live queue data"
+                                    "Live data"
                                 }))
                                 .child(
                                     div()
@@ -278,7 +337,7 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(fg_emphasis())
                                         .child(if is_reviews {
-                                            "Review Queue".to_string()
+                                            "Review Board".to_string()
                                         } else {
                                             queue_label
                                         }),
@@ -297,27 +356,77 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                         )),
                 )
                 .when(workspace_loading, |el| {
-                    el.child(panel_state_text("Loading queue..."))
+                    el.child(
+                        div()
+                            .px(px(28.0))
+                            .child(panel_state_text("Loading queue...")),
+                    )
                 })
-                .when_some(workspace_error, |el, err| el.child(error_text(&err)))
-                .when(!workspace_loading && queue_items.is_empty(), |el| {
-                    el.child(panel_state_text(if is_auth {
-                        "No pull requests matched this queue."
-                    } else {
-                        "Authenticate with gh to load live pull request queues."
-                    }))
+                .when_some(workspace_error, |el, err| {
+                    el.child(div().px(px(28.0)).child(error_text(&err)))
                 })
+                .when(!workspace_loading && !has_any_lanes, |el| {
+                    el.child(div().px(px(28.0)).child(panel_state_text(
+                        if has_muted {
+                            "All repositories in this queue are muted."
+                        } else if is_auth {
+                            "No pull requests matched this queue."
+                        } else {
+                            "Authenticate with gh to load live pull request queues."
+                        },
+                    )))
+                })
+                // Swim lanes
                 .child(
                     div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(8.0))
-                        .children(queue_items.into_iter().map(|item| {
-                            let state = state_for_items.clone();
-                            pr_list_row(item, move |summary, window, cx| {
-                                open_pull_request(&state, summary, window, cx);
-                            })
-                        })),
+                        .flex_grow()
+                        .min_h_0()
+                        .id("kanban-board-hscroll")
+                        .overflow_x_scroll()
+                        .overflow_y_hidden()
+                        .px(px(20.0))
+                        .pb(px(20.0))
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(12.0))
+                                .h_full()
+                                .when(has_my_items, |el| {
+                                    let state = state_for_lanes.clone();
+                                    el.child(kanban_lane(
+                                        "__mine__",
+                                        "My Pull Requests",
+                                        &format!("{} open", my_items.len()),
+                                        my_items,
+                                        accent(),
+                                        true,
+                                        state,
+                                    ))
+                                })
+                                .children(
+                                    repo_groups.into_iter().map(|(repo, items)| {
+                                        let short_name = repo
+                                            .split('/')
+                                            .last()
+                                            .unwrap_or(&repo)
+                                            .to_string();
+                                        let count = items.len();
+                                        let accent_color = lane_accent_color(&repo);
+                                        let state = state_for_lanes.clone();
+                                        kanban_lane(
+                                            &repo,
+                                            &short_name,
+                                            &format!(
+                                                "{repo} \u{00b7} {count}"
+                                            ),
+                                            items,
+                                            accent_color,
+                                            false,
+                                            state,
+                                        )
+                                    }),
+                                ),
+                        ),
                 ),
         )
 }
@@ -663,6 +772,288 @@ fn pr_list_row(
                 .text_size(px(13.0))
                 .flex_shrink_0()
                 .child(comments.to_string()),
+        )
+}
+
+fn kanban_lane(
+    lane_id: &str,
+    label: &str,
+    subtitle: &str,
+    items: Vec<github::PullRequestSummary>,
+    accent: Rgba,
+    is_mine: bool,
+    state: Entity<AppState>,
+) -> impl IntoElement {
+    let label = label.to_string();
+    let subtitle = subtitle.to_string();
+    let count = items.len();
+    let mute_state = state.clone();
+    let mute_repo = lane_id.to_string();
+
+    div()
+        .w(px(300.0))
+        .flex_shrink_0()
+        .flex()
+        .flex_col()
+        .min_h_0()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .min_h_0()
+                .flex_grow()
+                .rounded(radius())
+                .bg(bg_surface())
+                .overflow_hidden()
+                // Accent bar
+                .child(div().h(px(3.0)).bg(accent).w_full())
+                // Lane header
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .p(px(16.0))
+                        .pb(px(4.0))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(10.0))
+                                .child(
+                                    div()
+                                        .text_size(px(14.0))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(fg_emphasis())
+                                        .child(label),
+                                )
+                                .child(
+                                    div()
+                                        .px(px(8.0))
+                                        .py(px(2.0))
+                                        .rounded(px(10.0))
+                                        .bg(bg_emphasis())
+                                        .text_size(px(11.0))
+                                        .font_family("Fira Code")
+                                        .text_color(fg_muted())
+                                        .child(count.to_string()),
+                                ),
+                        )
+                        .when(!is_mine, |el| {
+                            el.child(
+                                div()
+                                    .px(px(8.0))
+                                    .py(px(4.0))
+                                    .rounded(radius_sm())
+                                    .text_size(px(11.0))
+                                    .text_color(fg_subtle())
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(hover_bg()).text_color(danger()))
+                                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                        mute_state.update(cx, |s, cx| {
+                                            s.muted_repos.insert(mute_repo.clone());
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child("Mute"),
+                            )
+                        }),
+                )
+                // Subtitle
+                .child(
+                    div()
+                        .px(px(16.0))
+                        .pb(px(12.0))
+                        .text_size(px(11.0))
+                        .text_color(fg_subtle())
+                        .font_family("Fira Code")
+                        .child(subtitle),
+                )
+                // Cards
+                .child(
+                    div()
+                        .flex_grow()
+                        .min_h_0()
+                        .id(SharedString::from(format!("lane-scroll-{lane_id}")))
+                        .overflow_y_scroll()
+                        .px(px(8.0))
+                        .pb(px(8.0))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(6.0))
+                                .children(items.into_iter().map(|item| {
+                                    let state = state.clone();
+                                    kanban_card(item, move |summary, window, cx| {
+                                        open_pull_request(&state, summary, window, cx);
+                                    })
+                                })),
+                        ),
+                ),
+        )
+}
+
+fn kanban_card(
+    item: github::PullRequestSummary,
+    on_click: impl Fn(github::PullRequestSummary, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let dot_color = match item.state.as_str() {
+        "MERGED" => purple(),
+        "CLOSED" => danger(),
+        _ => success(),
+    };
+    let title = item.title.clone();
+    let meta = format!(
+        "#{} \u{00b7} {} \u{00b7} {}",
+        item.number,
+        item.author_login,
+        format_relative_time(&item.updated_at)
+    );
+    let additions = item.additions;
+    let deletions = item.deletions;
+    let comments = item.comments_count;
+    let review_badge: Option<(Rgba, &str)> = match item.review_decision.as_deref() {
+        Some("APPROVED") => Some((success(), "Approved")),
+        Some("CHANGES_REQUESTED") => Some((danger(), "Changes")),
+        Some("REVIEW_REQUIRED") => Some((fg_subtle(), "Needs review")),
+        _ => None,
+    };
+    let summary = item;
+
+    div()
+        .p(px(12.0))
+        .rounded(radius_sm())
+        .bg(bg_overlay())
+        .cursor_pointer()
+        .hover(|s| s.bg(hover_bg()))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            on_click(summary.clone(), window, cx)
+        })
+        .child(
+            div()
+                .flex()
+                .gap(px(8.0))
+                .items_start()
+                // Status dot
+                .child(
+                    div()
+                        .mt(px(5.0))
+                        .w(px(7.0))
+                        .h(px(7.0))
+                        .rounded(px(4.0))
+                        .bg(dot_color)
+                        .flex_shrink_0(),
+                )
+                // Content
+                .child(
+                    div()
+                        .flex_grow()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.0))
+                        // Title
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(fg_emphasis())
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .overflow_x_hidden()
+                                .child(title),
+                        )
+                        // Meta line
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(fg_muted())
+                                .child(meta),
+                        )
+                        // Stats row
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(8.0))
+                                .items_center()
+                                .mt(px(1.0))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .gap(px(4.0))
+                                        .text_size(px(11.0))
+                                        .font_family("Fira Code")
+                                        .child(
+                                            div()
+                                                .text_color(success())
+                                                .child(format!("+{additions}")),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_color(fg_subtle())
+                                                .child(format!("-{deletions}")),
+                                        ),
+                                )
+                                .when(comments > 0, |el| {
+                                    el.child(
+                                        div()
+                                            .text_size(px(11.0))
+                                            .text_color(fg_subtle())
+                                            .font_family("Fira Code")
+                                            .child(comments.to_string()),
+                                    )
+                                })
+                                .when_some(review_badge, |el, (color, label)| {
+                                    el.child(
+                                        div()
+                                            .px(px(6.0))
+                                            .py(px(1.0))
+                                            .rounded(px(8.0))
+                                            .bg(bg_emphasis())
+                                            .text_size(px(10.0))
+                                            .text_color(color)
+                                            .child(label.to_string()),
+                                    )
+                                }),
+                        ),
+                ),
+        )
+}
+
+fn muted_repo_pill(
+    repo: &str,
+    on_unmute: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let short_name = repo.split('/').last().unwrap_or(repo).to_string();
+
+    div()
+        .flex()
+        .justify_between()
+        .items_center()
+        .px(px(14.0))
+        .py(px(6.0))
+        .rounded(radius_sm())
+        .text_size(px(12.0))
+        .text_color(fg_subtle())
+        .child(
+            div()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .overflow_x_hidden()
+                .child(short_name),
+        )
+        .child(
+            div()
+                .px(px(6.0))
+                .py(px(2.0))
+                .rounded(radius_sm())
+                .text_size(px(11.0))
+                .text_color(fg_subtle())
+                .cursor_pointer()
+                .hover(|s| s.bg(hover_bg()).text_color(success()))
+                .on_mouse_down(MouseButton::Left, on_unmute)
+                .child("Unmute"),
         )
 }
 

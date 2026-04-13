@@ -203,6 +203,7 @@ pub struct AppState {
     pub active_queue_id: String,
     pub active_pr_key: Option<String>,
     pub open_tabs: Vec<PullRequestSummary>,
+    pub muted_repos: std::collections::HashSet<String>,
 
     // Workspace data
     pub workspace: Option<WorkspaceSnapshot>,
@@ -257,6 +258,7 @@ impl AppState {
             active_queue_id: "reviewRequested".to_string(),
             active_pr_key: None,
             open_tabs: Vec::new(),
+            muted_repos: std::collections::HashSet::new(),
             workspace: None,
             workspace_loading: true,
             workspace_syncing: false,
