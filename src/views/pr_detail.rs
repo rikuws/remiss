@@ -6,7 +6,7 @@ use crate::markdown::render_markdown;
 use crate::state::*;
 use crate::theme::*;
 
-use super::diff_view::render_files_view;
+use super::diff_view::{enter_files_surface, render_files_view};
 use super::sections::{
     badge, badge_success, error_text, eyebrow, ghost_button, meta_row, nested_panel,
     panel_state_text, review_button, success_text,
@@ -143,6 +143,8 @@ pub fn render_pr_workspace(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                         surface_tab(s.label(), is_active, move |_, window, cx| {
                             if surf == PullRequestSurface::Tour {
                                 enter_tour_surface(&state, window, cx);
+                            } else if surf == PullRequestSurface::Files {
+                                enter_files_surface(&state, window, cx);
                             } else {
                                 state.update(cx, |st, cx| {
                                     st.active_surface = surf;

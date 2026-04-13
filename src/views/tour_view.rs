@@ -10,7 +10,7 @@ use crate::state::{AppState, PullRequestSurface};
 use crate::theme::*;
 use crate::{code_tour, github};
 
-use super::diff_view::render_tour_diff_file;
+use super::diff_view::{enter_files_surface, render_tour_diff_file};
 use super::pr_detail::surface_tab;
 use super::sections::{
     badge, error_text, eyebrow, ghost_button, nested_panel, panel_state_text, review_button,
@@ -680,13 +680,102 @@ pub fn render_tour_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement 
     }
 
     let generated_tour = generated_tour.unwrap();
-    let selected_section = generated_tour
-        .sections
-        .iter()
-        .find(|section| section.id == active_outline_id)
-        .cloned();
-
     let state_for_outline = state.clone();
+    let scroll_handle = s.tour_content_scroll_handle.clone();
+    let tour_request_key = s
+        .active_tour_request_key()
+        .unwrap_or_else(|| format!("detached:{}", generated_tour.generated_at));
+    let mut content_children = Vec::<AnyElement>::new();
+    let mut scroll_targets = Vec::<(String, usize)>::new();
+
+    content_children.push(
+        render_provider_bar(
+            &state_for_provider,
+            provider,
+            &provider_statuses,
+            provider_loading,
+            tour_state.generating,
+            Some(&generated_tour),
+        )
+        .into_any_element(),
+    );
+    content_children.push(
+        div()
+            .flex()
+            .gap(px(8.0))
+            .flex_wrap()
+            .text_size(px(12.0))
+            .text_color(fg_muted())
+            .child(badge(&format!("{} sections", generated_tour.sections.len())))
+            .child(badge(&format!(
+                "{} changed files covered",
+                generated_tour.steps.len().saturating_sub(1)
+            )))
+            .child(badge(&count_tour_callsites(&generated_tour)))
+            .when(local_repo_loading, |el| el.child(badge("Preparing checkout")))
+            .when_some(local_repo_status.clone(), |el, status| {
+                el.child(badge(match status.source.as_str() {
+                    "linked" => "linked checkout",
+                    _ => "managed checkout",
+                }))
+            })
+            .into_any_element(),
+    );
+
+    if tour_state.generating {
+        content_children.push(
+            nested_panel()
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(fg_muted())
+                        .child(format!(
+                            "{} is building the code tour. Large pull requests can take a few minutes.",
+                            provider.label()
+                        )),
+                )
+                .into_any_element(),
+        );
+    }
+    if let Some(error) = provider_error.clone() {
+        content_children.push(error_text(&error).into_any_element());
+    }
+    if let Some(error) = local_repo_error.clone() {
+        content_children.push(error_text(&error).into_any_element());
+    }
+    if let Some(error) = tour_state.error.clone() {
+        content_children.push(error_text(&error).into_any_element());
+    }
+    if let Some(message) = tour_state.message.clone() {
+        content_children.push(if tour_state.success {
+            success_text(&message).into_any_element()
+        } else {
+            error_text(&message).into_any_element()
+        });
+    }
+    if !generated_tour.open_questions.is_empty() {
+        content_children
+            .push(render_note_panel("Open Questions", &generated_tour.open_questions).into_any_element());
+    }
+    if !generated_tour.warnings.is_empty() {
+        content_children.push(render_note_panel("Warnings", &generated_tour.warnings).into_any_element());
+    }
+
+    scroll_targets.push(("overview".to_string(), content_children.len()));
+    content_children.push(render_overview_card(detail, overview_step.as_ref()).into_any_element());
+
+    for section in &generated_tour.sections {
+        scroll_targets.push((section.id.clone(), content_children.len()));
+        content_children.push(
+            render_section_card(state, detail, &generated_tour, section, cx).into_any_element(),
+        );
+    }
+
+    content_children.push(div().h(px(28.0)).w_full().into_any_element());
+    let section_targets_for_scroll = scroll_targets.clone();
+    let section_targets_for_sidebar = scroll_targets.clone();
+    let scroll_handle_for_wheel = scroll_handle.clone();
+    let state_for_scroll = state.clone();
 
     div()
         .flex()
@@ -696,6 +785,7 @@ pub fn render_tour_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement 
             div()
                 .w(px(260.0))
                 .flex_shrink_0()
+                .min_h_0()
                 .bg(bg_surface())
                 .p(px(24.0))
                 .flex()
@@ -721,6 +811,12 @@ pub fn render_tour_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement 
                 .children(outline_items.into_iter().map(|(id, title, meta)| {
                     let is_active = id == active_outline_id;
                     let state = state_for_outline.clone();
+                    let scroll_handle = scroll_handle.clone();
+                    let target_index = section_targets_for_sidebar
+                        .iter()
+                        .find(|(target_id, _)| target_id == &id)
+                        .map(|(_, index)| *index)
+                        .unwrap_or(0);
 
                     div()
                         .p(px(12.0))
@@ -733,6 +829,7 @@ pub fn render_tour_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement 
                                 state.active_tour_outline_id = id.clone();
                                 cx.notify();
                             });
+                            scroll_handle.scroll_to_top_of_item(target_index);
                         })
                         .child(
                             div()
@@ -753,83 +850,44 @@ pub fn render_tour_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement 
         .child(
             div()
                 .flex_grow()
+                .min_h_0()
                 .min_w_0()
                 .px(px(32.0))
-                .pb(px(24.0))
+                .pb(px(28.0))
                 .id("tour-content-scroll")
                 .overflow_y_scroll()
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(16.0))
-                        .child(render_provider_bar(
-                            &state_for_provider,
-                            provider,
-                            &provider_statuses,
-                            provider_loading,
-                            tour_state.generating,
-                            Some(&generated_tour),
-                        ))
-                        .child(
-                            div()
-                                .flex()
-                                .gap(px(8.0))
-                                .flex_wrap()
-                                .text_size(px(12.0))
-                                .text_color(fg_muted())
-                                .child(badge(&format!("{} sections", generated_tour.sections.len())))
-                                .child(badge(&format!(
-                                    "{} changed files covered",
-                                    generated_tour.steps.len().saturating_sub(1)
-                                )))
-                                .child(badge(&count_tour_callsites(&generated_tour)))
-                                .when(local_repo_loading, |el| el.child(badge("Preparing checkout")))
-                                .when_some(local_repo_status.clone(), |el, status| {
-                                    el.child(badge(match status.source.as_str() {
-                                        "linked" => "linked checkout",
-                                        _ => "managed checkout",
-                                    }))
-                                }),
-                        )
-                        .when(tour_state.generating, |el| {
-                            el.child(
-                                nested_panel().child(
-                                    div()
-                                        .text_size(px(13.0))
-                                        .text_color(fg_muted())
-                                        .child(format!(
-                                            "{} is building the code tour. Large pull requests can take a few minutes.",
-                                            provider.label()
-                                        )),
-                                ),
-                            )
-                        })
-                        .when_some(provider_error, |el, error| el.child(error_text(&error)))
-                        .when_some(local_repo_error, |el, error| el.child(error_text(&error)))
-                        .when_some(tour_state.error.clone(), |el, error| el.child(error_text(&error)))
-                        .when_some(tour_state.message.clone(), |el, message| {
-                            if tour_state.success {
-                                el.child(success_text(&message))
-                            } else {
-                                el.child(error_text(&message))
+                .track_scroll(&scroll_handle_for_wheel)
+                .on_scroll_wheel(move |_, window, _cx| {
+                    let scroll_handle = scroll_handle_for_wheel.clone();
+                    let state = state_for_scroll.clone();
+                    let request_key = tour_request_key.clone();
+                    let targets = section_targets_for_scroll.clone();
+
+                    window.on_next_frame(move |_, cx| {
+                        let top_item = scroll_handle.top_item();
+                        let active_id = targets
+                            .iter()
+                            .take_while(|(_, index)| *index <= top_item)
+                            .last()
+                            .map(|(id, _)| id.clone())
+                            .unwrap_or_else(|| "overview".to_string());
+
+                        state.update(cx, |state, cx| {
+                            if state.active_tour_request_key().as_deref() != Some(&request_key) {
+                                return;
                             }
-                        })
-                        .when(!generated_tour.open_questions.is_empty(), |el| {
-                            el.child(render_note_panel("Open Questions", &generated_tour.open_questions))
-                        })
-                        .when(!generated_tour.warnings.is_empty(), |el| {
-                            el.child(render_note_panel("Warnings", &generated_tour.warnings))
-                        })
-                        .child(if active_outline_id == "overview" {
-                            render_overview_card(detail, overview_step.as_ref()).into_any_element()
-                        } else if let Some(section) = selected_section {
-                            render_section_card(state, detail, &generated_tour, &section, cx)
-                                .into_any_element()
-                        } else {
-                            panel_state_text("No tour section is selected.").into_any_element()
-                        }),
-                ),
+
+                            if state.active_tour_outline_id != active_id {
+                                state.active_tour_outline_id = active_id.clone();
+                                cx.notify();
+                            }
+                        });
+                    });
+                })
+                .flex()
+                .flex_col()
+                .gap(px(16.0))
+                .children(content_children),
         )
         .into_any_element()
 }
@@ -1243,8 +1301,8 @@ fn render_section_card(
                         .flex_wrap()
                         .mb(px(12.0))
                         .child(ghost_button("Open in Files", {
-                            move |_, _, cx| {
-                                open_step_in_files(&open_state, &open_step, cx);
+                            move |_, window, cx| {
+                                open_step_in_files(&open_state, &open_step, window, cx);
                             }
                         }))
                         .child(ghost_button(
@@ -1404,7 +1462,12 @@ fn toggle_tour_panel(state: &Entity<AppState>, panel_key: &str, cx: &mut App) {
     });
 }
 
-fn open_step_in_files(state: &Entity<AppState>, step: &TourStep, cx: &mut App) {
+fn open_step_in_files(
+    state: &Entity<AppState>,
+    step: &TourStep,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let selected_path = step
         .file_path
         .clone()
@@ -1412,11 +1475,12 @@ fn open_step_in_files(state: &Entity<AppState>, step: &TourStep, cx: &mut App) {
     let selected_anchor = step.anchor.clone();
 
     state.update(cx, |state, cx| {
-        state.active_surface = PullRequestSurface::Files;
         state.selected_file_path = selected_path;
         state.selected_diff_anchor = selected_anchor;
         cx.notify();
     });
+
+    enter_files_surface(state, window, cx);
 }
 
 fn build_tour_panel_key(id: &str, panel: &str) -> String {

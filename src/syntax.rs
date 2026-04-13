@@ -5,7 +5,7 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::{SyntaxReference, SyntaxSet};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SyntaxSpan {
     pub text: String,
     pub color: Hsla,
@@ -24,19 +24,40 @@ fn theme_set() -> &'static ThemeSet {
 fn find_syntax<'a>(ss: &'a SyntaxSet, file_path: &str) -> Option<&'a SyntaxReference> {
     let filename = file_path.rsplit('/').next().unwrap_or(file_path);
 
-    // Try extension (e.g., "rs" from "src/main.rs")
-    let ext = filename.rsplit('.').next().unwrap_or("");
-    if !ext.is_empty() && ext != filename {
-        if let Some(s) = ss.find_syntax_by_extension(ext) {
-            if s.name != "Plain Text" {
-                return Some(s);
+    ss.find_syntax_by_token(filename)
+        .or_else(|| {
+            let ext = filename.rsplit('.').next().unwrap_or("");
+            if !ext.is_empty() && ext != filename {
+                ss.find_syntax_by_extension(ext)
+            } else {
+                None
             }
-        }
-    }
-
-    // Try full filename (handles Makefile, Dockerfile, etc.)
-    ss.find_syntax_by_extension(filename)
+        })
         .filter(|s| s.name != "Plain Text")
+}
+
+pub fn highlight_lines<'a, I>(file_path: &str, lines: I) -> Vec<Vec<SyntaxSpan>>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let ss = syntax_set();
+    let syntax = match find_syntax(ss, file_path) {
+        Some(syntax) => syntax,
+        None => {
+            return lines
+                .into_iter()
+                .map(|_| Vec::new())
+                .collect::<Vec<Vec<SyntaxSpan>>>()
+        }
+    };
+
+    let theme = &theme_set().themes["base16-ocean.dark"];
+    let mut highlighter = HighlightLines::new(syntax, theme);
+
+    lines
+        .into_iter()
+        .map(|line| highlight_with_state(&mut highlighter, ss, line))
+        .collect()
 }
 
 /// Highlight a single line of code, returning colored spans.
@@ -44,40 +65,45 @@ fn find_syntax<'a>(ss: &'a SyntaxSet, file_path: &str) -> Option<&'a SyntaxRefer
 /// Returns an empty vec for unknown file types or empty content,
 /// which signals the caller to use its fallback text color.
 pub fn highlight_line(file_path: &str, content: &str) -> Vec<SyntaxSpan> {
+    highlight_lines(file_path, [content])
+        .into_iter()
+        .next()
+        .unwrap_or_default()
+}
+
+fn highlight_with_state(
+    highlighter: &mut HighlightLines<'_>,
+    syntax_set: &SyntaxSet,
+    content: &str,
+) -> Vec<SyntaxSpan> {
     if content.is_empty() {
         return Vec::new();
     }
 
-    let ss = syntax_set();
-    let syntax = match find_syntax(ss, file_path) {
-        Some(s) => s,
-        None => return Vec::new(),
-    };
-
-    let theme = &theme_set().themes["base16-ocean.dark"];
-    let mut h = HighlightLines::new(syntax, theme);
     let line = format!("{content}\n");
 
-    match h.highlight_line(&line, ss) {
-        Ok(spans) => spans
-            .into_iter()
-            .map(|(style, text)| {
-                let text = text.trim_end_matches('\n').to_string();
-                let rgba = Rgba {
-                    r: style.foreground.r as f32 / 255.0,
-                    g: style.foreground.g as f32 / 255.0,
-                    b: style.foreground.b as f32 / 255.0,
-                    a: style.foreground.a as f32 / 255.0,
-                };
-                SyntaxSpan {
-                    text,
-                    color: rgba.into(),
-                }
-            })
-            .filter(|span| !span.text.is_empty())
-            .collect(),
-        Err(_) => Vec::new(),
-    }
+    highlighter
+        .highlight_line(&line, syntax_set)
+        .map(|spans| {
+            spans
+                .into_iter()
+                .map(|(style, text)| {
+                    let text = text.trim_end_matches('\n').to_string();
+                    let rgba = Rgba {
+                        r: style.foreground.r as f32 / 255.0,
+                        g: style.foreground.g as f32 / 255.0,
+                        b: style.foreground.b as f32 / 255.0,
+                        a: style.foreground.a as f32 / 255.0,
+                    };
+                    SyntaxSpan {
+                        text,
+                        color: rgba.into(),
+                    }
+                })
+                .filter(|span| !span.text.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -114,5 +140,17 @@ mod tests {
     fn test_empty_content() {
         let spans = highlight_line("test.rs", "");
         assert!(spans.is_empty(), "Empty content should return empty");
+    }
+
+    #[test]
+    fn test_stateful_multiline_highlighting() {
+        let lines = vec!["const message = `hello", "${name}`;"];
+        let highlighted = highlight_lines("app.js", lines.iter().copied());
+
+        assert_eq!(highlighted.len(), 2);
+        assert!(
+            highlighted.iter().any(|line| !line.is_empty()),
+            "Expected syntax spans across multiline input"
+        );
     }
 }

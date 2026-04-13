@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::prelude::*;
@@ -8,15 +9,39 @@ use crate::diff::{
     build_diff_render_rows, find_parsed_diff_file, find_parsed_diff_file_with_index, DiffLineKind,
     DiffRenderRow, ParsedDiffFile, ParsedDiffHunk, ParsedDiffLine,
 };
+use crate::github;
 use crate::github::{
     PullRequestDetail, PullRequestFile, PullRequestReviewComment, PullRequestReviewThread,
+    RepositoryFileContent,
 };
 use crate::markdown::render_markdown;
 use crate::state::*;
-use crate::syntax;
+use crate::syntax::{self, SyntaxSpan};
 use crate::theme::*;
 
 use super::sections::{badge, badge_success, nested_panel, panel_state_text};
+
+const MAX_FILE_HIGHLIGHT_BYTES: usize = 512 * 1024;
+
+pub fn enter_files_surface(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
+    state.update(cx, |s, cx| {
+        s.active_surface = PullRequestSurface::Files;
+
+        if s.selected_file_path.is_none() {
+            s.selected_file_path = s.active_detail().and_then(|detail| {
+                detail
+                    .files
+                    .first()
+                    .map(|file| file.path.clone())
+                    .or_else(|| detail.parsed_diff.first().map(|file| file.path.clone()))
+            });
+        }
+
+        cx.notify();
+    });
+
+    ensure_selected_file_content_loaded(state, window, cx);
+}
 
 pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let s = state.read(cx);
@@ -67,6 +92,7 @@ pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement
             detail,
             selected_path,
             selected_anchor.as_ref(),
+            cx,
         ))
         .into_any_element()
 }
@@ -153,12 +179,14 @@ fn render_file_tree(
                 .when(is_active, |el| el.text_color(fg_emphasis()))
                 .when(!is_active, |el| el.text_color(fg_default()))
                 .hover(|style| style.bg(hover_bg()))
-                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                     state.update(cx, |s, cx| {
                         s.selected_file_path = Some(path.clone());
                         s.selected_diff_anchor = None;
                         cx.notify();
                     });
+
+                    ensure_selected_file_content_loaded(&state, window, cx);
                 })
                 .child(
                     div()
@@ -212,12 +240,211 @@ fn render_file_tree(
         }))
 }
 
+pub fn ensure_selected_file_content_loaded(
+    state: &Entity<AppState>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let model = state.clone();
+    window
+        .spawn(cx, async move |cx: &mut AsyncWindowContext| {
+            load_selected_file_content_flow(model, cx).await;
+        })
+        .detach();
+}
+
+async fn load_selected_file_content_flow(model: Entity<AppState>, cx: &mut AsyncWindowContext) {
+    let request = model
+        .read_with(cx, |state, _| {
+            let detail = state.active_detail()?.clone();
+            let detail_key = state.active_pr_key.clone()?;
+            let selected_path = state
+                .selected_file_path
+                .clone()
+                .or_else(|| detail.files.first().map(|file| file.path.clone()))?;
+            let selected_file = detail
+                .files
+                .iter()
+                .find(|file| file.path == selected_path)
+                .cloned()?;
+            let parsed = find_parsed_diff_file(&detail.parsed_diff, &selected_file.path).cloned();
+            let request = build_file_content_request(&detail, &selected_file, parsed.as_ref())?;
+
+            let already_loaded = state
+                .detail_states
+                .get(&detail_key)
+                .and_then(|detail_state| detail_state.file_content_states.get(&request.path))
+                .map(|file_state| {
+                    file_state.request_key.as_deref() == Some(&request.request_key)
+                        && (file_state.loading || file_state.document.is_some())
+                })
+                .unwrap_or(false);
+
+            Some((detail_key, detail, selected_file, request, already_loaded))
+        })
+        .ok()
+        .flatten();
+
+    let Some((detail_key, detail, selected_file, request, already_loaded)) = request else {
+        return;
+    };
+
+    if already_loaded {
+        return;
+    }
+
+    model
+        .update(cx, |state, cx| {
+            if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
+                let file_state = detail_state
+                    .file_content_states
+                    .entry(request.path.clone())
+                    .or_default();
+                file_state.request_key = Some(request.request_key.clone());
+                file_state.document = None;
+                file_state.prepared = None;
+                file_state.loading = true;
+                file_state.error = None;
+            }
+
+            cx.notify();
+        })
+        .ok();
+
+    let load_result = cx
+        .background_executor()
+        .spawn({
+            let repository = detail.repository.clone();
+            let path = request.path.clone();
+            let reference = request.reference.clone();
+            async move { github::load_pull_request_file_content(&repository, &reference, &path) }
+        })
+        .await;
+
+    let prepared_result = load_result.map(|document| {
+        let prepared = prepare_file_content(&selected_file.path, &request.reference, &document);
+        (document, prepared)
+    });
+
+    model
+        .update(cx, |state, cx| {
+            let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
+                return;
+            };
+            let Some(file_state) = detail_state.file_content_states.get_mut(&request.path) else {
+                return;
+            };
+            if file_state.request_key.as_deref() != Some(&request.request_key) {
+                return;
+            }
+
+            file_state.loading = false;
+            match prepared_result {
+                Ok((document, prepared)) => {
+                    file_state.document = Some(document);
+                    file_state.prepared = Some(prepared);
+                    file_state.error = None;
+                }
+                Err(error) => {
+                    file_state.document = None;
+                    file_state.prepared = None;
+                    file_state.error = Some(error);
+                }
+            }
+
+            cx.notify();
+        })
+        .ok();
+}
+
+#[derive(Clone)]
+struct FileContentRequest {
+    path: String,
+    reference: String,
+    request_key: String,
+}
+
+fn build_file_content_request(
+    detail: &PullRequestDetail,
+    file: &PullRequestFile,
+    parsed: Option<&ParsedDiffFile>,
+) -> Option<FileContentRequest> {
+    let (path, reference) = if file.change_type == "DELETED" {
+        (
+            parsed
+                .and_then(|parsed| parsed.previous_path.clone())
+                .unwrap_or_else(|| file.path.clone()),
+            detail
+                .base_ref_oid
+                .clone()
+                .unwrap_or_else(|| detail.base_ref_name.clone()),
+        )
+    } else {
+        (
+            file.path.clone(),
+            detail
+                .head_ref_oid
+                .clone()
+                .unwrap_or_else(|| detail.head_ref_name.clone()),
+        )
+    };
+
+    if path.is_empty() || reference.is_empty() {
+        return None;
+    }
+
+    Some(FileContentRequest {
+        request_key: format!(
+            "{}:{reference}:{path}:{}",
+            detail.updated_at, detail.repository
+        ),
+        path,
+        reference,
+    })
+}
+
+fn prepare_file_content(
+    file_path: &str,
+    reference: &str,
+    document: &RepositoryFileContent,
+) -> PreparedFileContent {
+    let lines = document.content.as_deref().unwrap_or_default();
+    let text_lines = if lines.is_empty() {
+        Vec::new()
+    } else {
+        lines.lines().map(str::to_string).collect::<Vec<_>>()
+    };
+    let spans = if document.is_binary || document.size_bytes > MAX_FILE_HIGHLIGHT_BYTES {
+        text_lines
+            .iter()
+            .map(|_| Vec::new())
+            .collect::<Vec<Vec<SyntaxSpan>>>()
+    } else {
+        syntax::highlight_lines(file_path, text_lines.iter().map(|line| line.as_str()))
+    };
+
+    let prepared_lines = text_lines
+        .into_iter()
+        .zip(spans)
+        .map(|(text, spans)| PreparedFileLine { text, spans })
+        .collect::<Vec<_>>();
+
+    PreparedFileContent {
+        path: file_path.to_string(),
+        reference: reference.to_string(),
+        is_binary: document.is_binary,
+        size_bytes: document.size_bytes,
+        lines: Arc::new(prepared_lines),
+    }
+}
+
 fn render_diff_panel(
     state: &Entity<AppState>,
     app_state: &AppState,
     detail: &PullRequestDetail,
     selected_path: Option<&str>,
     selected_anchor: Option<&DiffAnchor>,
+    cx: &App,
 ) -> impl IntoElement {
     let files = &detail.files;
     let selected_file = selected_path
@@ -237,26 +464,50 @@ fn render_diff_panel(
         .unwrap_or(0);
     let diff_view_state =
         selected_file.map(|file| prepare_diff_view_state(app_state, detail, &file.path));
+    let file_content_state = selected_file.and_then(|file| {
+        app_state
+            .active_detail_state()
+            .and_then(|detail_state| detail_state.file_content_states.get(&file.path))
+            .cloned()
+    });
 
     div()
         .flex_grow()
         .min_w_0()
         .flex()
         .flex_col()
-        // Toolbar
+        // Toolbar (fixed, stays above scroll)
         .child(render_diff_toolbar(
             files.len(),
             selected_file,
             selected_parsed,
             file_thread_count,
         ))
+        // Single scroll container for file contents + diff
         .child(
             div()
                 .flex_grow()
                 .min_h_0()
+                .id("files-scroll-container")
+                .overflow_y_scroll()
                 .bg(bg_canvas())
                 .p(px(16.0))
                 .pt(px(14.0))
+                .flex()
+                .flex_col()
+                .gap(px(16.0))
+                .child(if let Some(file) = selected_file {
+                    render_file_contents_panel(
+                        detail,
+                        file,
+                        selected_parsed,
+                        file_content_state.as_ref(),
+                        selected_anchor,
+                    )
+                    .into_any_element()
+                } else {
+                    div().into_any_element()
+                })
                 .child(
                     if let (Some(file), Some(diff_view_state)) = (selected_file, diff_view_state) {
                         render_file_diff(
@@ -266,6 +517,7 @@ fn render_diff_panel(
                             selected_parsed,
                             selected_anchor,
                             diff_view_state,
+                            cx,
                         )
                         .into_any_element()
                     } else {
@@ -364,6 +616,7 @@ fn render_file_diff(
     parsed: Option<&ParsedDiffFile>,
     selected_anchor: Option<&DiffAnchor>,
     diff_view_state: DiffFileViewState,
+    cx: &App,
 ) -> impl IntoElement {
     let rename_from = parsed
         .and_then(|parsed| parsed.previous_path.as_deref())
@@ -376,16 +629,28 @@ fn render_file_diff(
         .count();
     let row_count = diff_view_state.rows.len();
     let row_model = diff_view_state.rows.clone();
-    let list_state = diff_view_state.list_state.clone();
     let parsed_file_index = diff_view_state.parsed_file_index;
-    let state_for_rows = state.clone();
+    let highlighted_hunks = diff_view_state.highlighted_hunks.clone();
     let selected_anchor = selected_anchor.cloned();
+
+    let rendered_rows: Vec<AnyElement> = row_model
+        .iter()
+        .map(|row| {
+            render_virtualized_diff_row(
+                state,
+                parsed_file_index,
+                highlighted_hunks.as_deref(),
+                row,
+                selected_anchor.as_ref(),
+                cx,
+            )
+            .into_any_element()
+        })
+        .collect();
 
     div()
         .flex()
         .flex_col()
-        .flex_grow()
-        .min_h_0()
         .rounded(radius())
         .border_1()
         .border_color(border_default())
@@ -470,25 +735,158 @@ fn render_file_diff(
                 ),
         )
         .child(
-            div().flex_grow().min_h_0().bg(bg_inset()).child(
-                list(list_state, move |ix, _, cx| {
-                    row_model
-                        .get(ix)
-                        .map(|row| {
-                            render_virtualized_diff_row(
-                                &state_for_rows,
-                                parsed_file_index,
-                                row,
-                                selected_anchor.as_ref(),
-                                cx,
-                            )
-                            .into_any_element()
-                        })
-                        .unwrap_or_else(|| div().into_any_element())
-                })
+            div()
+                .bg(bg_inset())
+                .flex()
+                .flex_col()
+                .children(rendered_rows),
+        )
+}
+
+fn render_file_contents_panel(
+    _detail: &PullRequestDetail,
+    file: &PullRequestFile,
+    parsed: Option<&ParsedDiffFile>,
+    file_content_state: Option<&FileContentState>,
+    selected_anchor: Option<&DiffAnchor>,
+) -> impl IntoElement {
+    let rename_from = parsed
+        .and_then(|parsed| parsed.previous_path.as_deref())
+        .filter(|previous| *previous != file.path.as_str());
+    let prepared = file_content_state.and_then(|state| state.prepared.as_ref());
+    let changed_lines = prepared.map(|prepared| build_changed_line_kinds(file, parsed, prepared));
+    let display_side = if file.change_type == "DELETED" {
+        Some("LEFT")
+    } else {
+        Some("RIGHT")
+    };
+
+    div()
+        .rounded(radius())
+        .border_1()
+        .border_color(border_default())
+        .bg(bg_surface())
+        .overflow_hidden()
+        .shadow_sm()
+        .child(
+            div()
                 .w_full()
-                .h_full(),
-            ),
+                .flex()
+                .flex_col()
+                .bg(bg_inset())
+                .child(
+                    div()
+                        .px(px(16.0))
+                        .py(px(12.0))
+                        .border_b(px(1.0))
+                        .border_color(border_default())
+                        .bg(bg_overlay())
+                        .flex()
+                        .items_start()
+                        .justify_between()
+                        .gap(px(12.0))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(4.0))
+                                .min_w_0()
+                                .child(eyebrow_label("File contents"))
+                                .child(
+                                    div()
+                                        .text_size(px(13.0))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(fg_emphasis())
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .overflow_x_hidden()
+                                        .child(file.path.clone()),
+                                )
+                                .when_some(rename_from, |el, previous| {
+                                    el.child(
+                                        div()
+                                            .text_size(px(11.0))
+                                            .font_family("Fira Code")
+                                            .text_color(fg_muted())
+                                            .child(format!("renamed from {previous}")),
+                                    )
+                                })
+                                .when_some(prepared, |el, prepared| {
+                                    el.child(
+                                        div()
+                                            .text_size(px(11.0))
+                                            .font_family("Fira Code")
+                                            .text_color(fg_muted())
+                                            .child(format!(
+                                                "{} lines \u{2022} ref {}",
+                                                prepared.lines.len(),
+                                                prepared.reference
+                                            )),
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .flex_wrap()
+                                .child(render_change_type_chip(&file.change_type))
+                                .when_some(prepared, |el, prepared| {
+                                    if prepared.is_binary {
+                                        el.child(badge("binary"))
+                                    } else {
+                                        el
+                                    }
+                                }),
+                        ),
+                )
+                .child(match prepared {
+                    Some(prepared) if prepared.is_binary => {
+                        render_file_content_state_row("Binary file content is not displayed.")
+                            .into_any_element()
+                    }
+                    Some(prepared) if prepared.lines.is_empty() => {
+                        render_file_content_state_row("The file is empty.").into_any_element()
+                    }
+                    Some(prepared) => {
+                        let lines = prepared.lines.clone();
+                        let changed_lines = changed_lines.unwrap_or_default();
+                        let anchor = selected_anchor.cloned();
+                        div()
+                            .flex()
+                            .flex_col()
+                            .children(lines.iter().enumerate().map(move |(ix, line)| {
+                                render_file_content_line(
+                                    ix,
+                                    line,
+                                    changed_lines.get(&(ix + 1)).cloned(),
+                                    display_side,
+                                    anchor.as_ref(),
+                                )
+                                .into_any_element()
+                            }))
+                            .into_any_element()
+                    }
+                    _ if file_content_state.map(|state| state.loading).unwrap_or(false) => {
+                        render_file_content_state_row("Loading file contents…").into_any_element()
+                    }
+                    _ if file_content_state
+                        .and_then(|state| state.error.as_ref())
+                        .is_some() =>
+                    {
+                        render_file_content_state_row(
+                            file_content_state
+                                .and_then(|state| state.error.as_deref())
+                                .unwrap_or("Failed to load file contents."),
+                        )
+                        .into_any_element()
+                    }
+                    _ => render_file_content_state_row(
+                        "Select a file or refresh the pull request to load contents.",
+                    )
+                    .into_any_element(),
+                }),
         )
 }
 
@@ -502,8 +900,10 @@ fn prepare_diff_view_state(
         app_state.active_pr_key.as_deref().unwrap_or("detached")
     );
     let revision = detail.updated_at.clone();
-    let parsed_file_index =
-        find_parsed_diff_file_with_index(&detail.parsed_diff, file_path).map(|(ix, _)| ix);
+    let (parsed_file_index, highlighted_hunks) =
+        find_parsed_diff_file_with_index(&detail.parsed_diff, file_path)
+            .map(|(ix, file)| (Some(ix), Some(build_diff_highlights(file))))
+            .unwrap_or((None, None));
 
     let mut diff_view_states = app_state.diff_view_states.borrow_mut();
     let entry = diff_view_states.entry(state_key).or_insert_with(|| {
@@ -511,17 +911,16 @@ fn prepare_diff_view_state(
             Arc::new(build_diff_render_rows(detail, file_path)),
             revision.clone(),
             parsed_file_index,
+            highlighted_hunks.clone(),
         )
     });
 
     if entry.revision != revision {
         let rows = Arc::new(build_diff_render_rows(detail, file_path));
-        if entry.rows.len() != rows.len() {
-            entry.list_state.reset(rows.len());
-        }
         entry.rows = rows;
         entry.revision = revision.clone();
         entry.parsed_file_index = parsed_file_index;
+        entry.highlighted_hunks = highlighted_hunks;
     }
 
     entry.clone()
@@ -530,6 +929,7 @@ fn prepare_diff_view_state(
 fn render_virtualized_diff_row(
     state: &Entity<AppState>,
     parsed_file_index: Option<usize>,
+    highlighted_hunks: Option<&Vec<Vec<Vec<SyntaxSpan>>>>,
     row: &DiffRenderRow,
     selected_anchor: Option<&DiffAnchor>,
     cx: &App,
@@ -599,7 +999,13 @@ fn render_virtualized_diff_row(
                     .hunks
                     .get(*hunk_index)
                     .and_then(|hunk| hunk.lines.get(*line_index))
-                    .map(|line| render_diff_line(path, line, selected_anchor).into_any_element())
+                    .map(|line| {
+                        let spans = highlighted_hunks
+                            .and_then(|hunks| hunks.get(*hunk_index))
+                            .and_then(|lines| lines.get(*line_index))
+                            .map(|spans| spans.as_slice());
+                        render_diff_line(path, line, spans, selected_anchor).into_any_element()
+                    })
             })
             .unwrap_or_else(|| div().into_any_element()),
         DiffRenderRow::NoTextHunks => render_diff_state_row(
@@ -770,7 +1176,7 @@ fn render_diff_line_with_threads(
     div()
         .flex()
         .flex_col()
-        .child(render_diff_line(file_path, line, selected_anchor))
+        .child(render_diff_line(file_path, line, None, selected_anchor))
         .when(!threads.is_empty(), |el| {
             el.child(
                 div()
@@ -795,6 +1201,7 @@ fn render_diff_line_with_threads(
 fn render_diff_line(
     file_path: &str,
     line: &ParsedDiffLine,
+    syntax_spans: Option<&[SyntaxSpan]>,
     selected_anchor: Option<&DiffAnchor>,
 ) -> impl IntoElement {
     let is_selected = line_matches_diff_anchor(line, selected_anchor);
@@ -914,11 +1321,17 @@ fn render_diff_line(
         .child(render_syntax_content(
             file_path,
             &line.content,
+            syntax_spans,
             fallback_text_color,
         ))
 }
 
-fn render_syntax_content(file_path: &str, content: &str, fallback_color: Rgba) -> Div {
+fn render_syntax_content(
+    file_path: &str,
+    content: &str,
+    syntax_spans: Option<&[SyntaxSpan]>,
+    fallback_color: Rgba,
+) -> Div {
     let content_div = div()
         .flex_grow()
         .min_w_0()
@@ -935,7 +1348,13 @@ fn render_syntax_content(file_path: &str, content: &str, fallback_color: Rgba) -
             .child("\u{00a0}".to_string());
     }
 
-    let spans = syntax::highlight_line(file_path, content);
+    let owned_spans;
+    let spans = if let Some(spans) = syntax_spans {
+        spans
+    } else {
+        owned_spans = syntax::highlight_line(file_path, content);
+        owned_spans.as_slice()
+    };
 
     if spans.is_empty() {
         return content_div
@@ -946,7 +1365,7 @@ fn render_syntax_content(file_path: &str, content: &str, fallback_color: Rgba) -
     let mut text = String::new();
     let mut runs = Vec::with_capacity(spans.len());
 
-    for span in &spans {
+    for span in spans {
         text.push_str(&span.text);
         runs.push(TextRun {
             len: span.text.len(),
@@ -961,6 +1380,158 @@ fn render_syntax_content(file_path: &str, content: &str, fallback_color: Rgba) -
     content_div
         .text_color(fallback_color)
         .child(StyledText::new(text).with_runs(runs))
+}
+
+fn build_diff_highlights(parsed_file: &ParsedDiffFile) -> Arc<Vec<Vec<Vec<SyntaxSpan>>>> {
+    Arc::new(
+        parsed_file
+            .hunks
+            .iter()
+            .map(|hunk| {
+                syntax::highlight_lines(
+                    parsed_file.path.as_str(),
+                    hunk.lines.iter().map(|line| line.content.as_str()),
+                )
+            })
+            .collect(),
+    )
+}
+
+fn build_changed_line_kinds(
+    file: &PullRequestFile,
+    parsed: Option<&ParsedDiffFile>,
+    prepared: &PreparedFileContent,
+) -> HashMap<usize, DiffLineKind> {
+    let mut changed_lines = HashMap::new();
+    let Some(parsed) = parsed else {
+        return changed_lines;
+    };
+
+    for hunk in &parsed.hunks {
+        for line in &hunk.lines {
+            match file.change_type.as_str() {
+                "DELETED" => {
+                    if line.kind == DiffLineKind::Deletion {
+                        if let Some(line_number) = line.left_line_number {
+                            if line_number > 0 && line_number as usize <= prepared.lines.len() {
+                                changed_lines.insert(line_number as usize, DiffLineKind::Deletion);
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    if line.kind == DiffLineKind::Addition {
+                        if let Some(line_number) = line.right_line_number {
+                            if line_number > 0 && line_number as usize <= prepared.lines.len() {
+                                changed_lines.insert(line_number as usize, DiffLineKind::Addition);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    changed_lines
+}
+
+fn render_file_content_state_row(message: &str) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .h_full()
+        .px(px(24.0))
+        .text_size(px(13.0))
+        .text_color(fg_muted())
+        .child(message.to_string())
+}
+
+fn render_file_content_line(
+    ix: usize,
+    line: &PreparedFileLine,
+    change_kind: Option<DiffLineKind>,
+    display_side: Option<&str>,
+    selected_anchor: Option<&DiffAnchor>,
+) -> impl IntoElement {
+    let line_number = ix + 1;
+    let is_selected = selected_anchor
+        .filter(|anchor| {
+            anchor
+                .side
+                .as_deref()
+                .map(|side| Some(side) == display_side)
+                .unwrap_or(true)
+        })
+        .and_then(|anchor| anchor.line)
+        .map(|anchor_line| anchor_line as usize == line_number)
+        .unwrap_or(false);
+
+    let (row_bg, border_color, number_color) = if is_selected {
+        (accent_muted(), accent(), fg_default())
+    } else {
+        match change_kind {
+            Some(DiffLineKind::Addition) => (diff_add_bg(), diff_add_border(), fg_subtle()),
+            Some(DiffLineKind::Deletion) => (diff_remove_bg(), diff_remove_border(), fg_subtle()),
+            _ => (diff_context_bg(), border_muted(), fg_subtle()),
+        }
+    };
+
+    div()
+        .flex()
+        .items_start()
+        .w_full()
+        .min_h(px(22.0))
+        .bg(row_bg)
+        .border_b(px(1.0))
+        .border_color(border_color)
+        .font_family("Fira Code")
+        .text_size(px(12.0))
+        .when(is_selected, |el| {
+            el.border_l(px(2.0)).border_color(accent())
+        })
+        .child(
+            div()
+                .w(px(72.0))
+                .flex_shrink_0()
+                .px(px(10.0))
+                .py(px(1.0))
+                .text_size(px(11.0))
+                .text_color(number_color)
+                .text_align(TextAlign::Right)
+                .child(line_number.to_string()),
+        )
+        .child(
+            div()
+                .w(px(10.0))
+                .flex_shrink_0()
+                .py(px(1.0))
+                .text_color(match change_kind {
+                    Some(DiffLineKind::Addition) => success(),
+                    Some(DiffLineKind::Deletion) => danger(),
+                    _ => fg_subtle(),
+                })
+                .child(match change_kind {
+                    Some(DiffLineKind::Addition) => "+",
+                    Some(DiffLineKind::Deletion) => "-",
+                    _ => " ",
+                }),
+        )
+        .child(render_syntax_content(
+            "",
+            &line.text,
+            Some(line.spans.as_slice()),
+            fg_default(),
+        ))
+}
+
+fn eyebrow_label(label: &str) -> impl IntoElement {
+    div()
+        .text_size(px(10.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(fg_subtle())
+        .font_family("Fira Code")
+        .child(label.to_string())
 }
 
 fn render_review_thread(
@@ -1213,16 +1784,12 @@ fn render_tour_diff_preview(
     const MAX_PREVIEW_LINES: usize = 40;
 
     let total_lines: usize = parsed_file.hunks.iter().map(|h| h.lines.len()).sum();
+    let highlighted_hunks = build_diff_highlights(parsed_file);
 
     // If anchor specifies a hunk, start there; otherwise start from the beginning
     let start_hunk = anchor
         .and_then(|a| a.hunk_header.as_ref())
-        .and_then(|header| {
-            parsed_file
-                .hunks
-                .iter()
-                .position(|h| h.header == *header)
-        })
+        .and_then(|header| parsed_file.hunks.iter().position(|h| h.header == *header))
         .unwrap_or(0);
 
     let mut rendered_lines = 0usize;
@@ -1240,8 +1807,12 @@ fn render_tour_diff_preview(
         let lines_remaining = MAX_PREVIEW_LINES.saturating_sub(rendered_lines);
         let lines_to_show = lines_remaining.min(hunk.lines.len());
 
-        for line in &hunk.lines[..lines_to_show] {
-            elements.push(render_diff_line(file_path, line, anchor).into_any_element());
+        for (line_idx, line) in hunk.lines[..lines_to_show].iter().enumerate() {
+            let spans = highlighted_hunks
+                .get(hunk_idx)
+                .and_then(|lines| lines.get(line_idx))
+                .map(|spans| spans.as_slice());
+            elements.push(render_diff_line(file_path, line, spans, anchor).into_any_element());
         }
         rendered_lines += lines_to_show;
     }

@@ -9,10 +9,11 @@ use crate::code_tour::{
 use crate::diff::DiffRenderRow;
 use crate::github::{
     PullRequestDetail, PullRequestDetailSnapshot, PullRequestQueue, PullRequestSummary,
-    ReviewAction, WorkspaceSnapshot,
+    RepositoryFileContent, ReviewAction, WorkspaceSnapshot,
 };
 use crate::local_repo::LocalRepositoryStatus;
-use gpui::{px, ListAlignment, ListState};
+use crate::syntax::SyntaxSpan;
+use gpui::ScrollHandle;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SectionId {
@@ -81,6 +82,7 @@ pub struct DetailState {
     pub local_repository_loading: bool,
     pub local_repository_error: Option<String>,
     pub tour_states: std::collections::HashMap<CodeTourProvider, CodeTourState>,
+    pub file_content_states: std::collections::HashMap<String, FileContentState>,
 }
 
 impl Default for DetailState {
@@ -94,6 +96,7 @@ impl Default for DetailState {
             local_repository_loading: false,
             local_repository_error: None,
             tour_states: std::collections::HashMap::new(),
+            file_content_states: std::collections::HashMap::new(),
         }
     }
 }
@@ -123,12 +126,48 @@ impl Default for CodeTourState {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct FileContentState {
+    pub request_key: Option<String>,
+    pub document: Option<RepositoryFileContent>,
+    pub prepared: Option<PreparedFileContent>,
+    pub loading: bool,
+    pub error: Option<String>,
+}
+
+impl Default for FileContentState {
+    fn default() -> Self {
+        Self {
+            request_key: None,
+            document: None,
+            prepared: None,
+            loading: false,
+            error: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PreparedFileContent {
+    pub path: String,
+    pub reference: String,
+    pub is_binary: bool,
+    pub size_bytes: usize,
+    pub lines: Arc<Vec<PreparedFileLine>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PreparedFileLine {
+    pub text: String,
+    pub spans: Vec<SyntaxSpan>,
+}
+
 #[derive(Clone)]
 pub struct DiffFileViewState {
-    pub list_state: ListState,
     pub rows: Arc<Vec<DiffRenderRow>>,
     pub revision: String,
     pub parsed_file_index: Option<usize>,
+    pub highlighted_hunks: Option<Arc<Vec<Vec<Vec<SyntaxSpan>>>>>,
 }
 
 impl DiffFileViewState {
@@ -136,12 +175,13 @@ impl DiffFileViewState {
         rows: Arc<Vec<DiffRenderRow>>,
         revision: String,
         parsed_file_index: Option<usize>,
+        highlighted_hunks: Option<Arc<Vec<Vec<Vec<SyntaxSpan>>>>>,
     ) -> Self {
         Self {
-            list_state: ListState::new(rows.len(), ListAlignment::Top, px(360.0)),
             rows,
             revision,
             parsed_file_index,
+            highlighted_hunks,
         }
     }
 }
@@ -175,7 +215,6 @@ pub struct AppState {
     pub selected_file_path: Option<String>,
     pub selected_diff_anchor: Option<DiffAnchor>,
     pub diff_view_states: RefCell<std::collections::HashMap<String, DiffFileViewState>>,
-
     // Review form
     pub review_action: ReviewAction,
     pub review_body: String,
@@ -196,6 +235,7 @@ pub struct AppState {
     pub automatic_tour_request_keys: std::collections::HashSet<String>,
     pub active_tour_outline_id: String,
     pub collapsed_tour_panels: std::collections::HashSet<String>,
+    pub tour_content_scroll_handle: ScrollHandle,
 }
 
 impl AppState {
@@ -235,6 +275,7 @@ impl AppState {
             automatic_tour_request_keys: std::collections::HashSet::new(),
             active_tour_outline_id: "overview".to_string(),
             collapsed_tour_panels: std::collections::HashSet::new(),
+            tour_content_scroll_handle: ScrollHandle::new(),
         }
     }
 

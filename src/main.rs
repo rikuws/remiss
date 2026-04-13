@@ -7,8 +7,8 @@ mod github;
 mod local_repo;
 mod markdown;
 mod platform_macos;
-mod syntax;
 mod state;
+mod syntax;
 mod theme;
 mod views;
 
