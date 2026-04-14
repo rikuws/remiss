@@ -738,26 +738,61 @@ fn language_server_spec_for_path(file_path: &str) -> Option<LanguageServerSpec> 
 }
 
 fn resolve_server_command(candidates: &[&str]) -> Option<String> {
-    candidates
-        .iter()
-        .find(|candidate| is_executable_in_path(candidate))
-        .map(|candidate| (*candidate).to_string())
+    candidates.iter().find_map(|candidate| {
+        let resolved = resolve_binary_path(candidate)?;
+        if command_candidate_is_usable(candidate, &resolved) {
+            Some((*candidate).to_string())
+        } else {
+            None
+        }
+    })
 }
 
-fn is_executable_in_path(binary: &str) -> bool {
+fn resolve_binary_path(binary: &str) -> Option<PathBuf> {
     let binary_path = Path::new(binary);
     if binary_path.components().count() > 1 {
-        return binary_path.is_file();
+        return binary_path.is_file().then(|| binary_path.to_path_buf());
     }
 
     env::var_os("PATH")
         .map(|paths| {
-            env::split_paths(&paths).any(|directory| {
+            env::split_paths(&paths).find_map(|directory| {
                 let candidate = directory.join(binary);
-                candidate.is_file()
+                candidate.is_file().then_some(candidate)
             })
         })
+        .unwrap_or(None)
+}
+
+fn command_candidate_is_usable(binary: &str, resolved_path: &Path) -> bool {
+    if !resolved_path.is_file() {
+        return false;
+    }
+
+    if !is_rust_analyzer_candidate(binary, resolved_path) {
+        return true;
+    }
+
+    Command::new(binary)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
         .unwrap_or(false)
+}
+
+fn is_rust_analyzer_candidate(binary: &str, resolved_path: &Path) -> bool {
+    binary.eq_ignore_ascii_case("rust-analyzer")
+        || resolved_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| {
+                name.eq_ignore_ascii_case("rust-analyzer")
+                    || name.eq_ignore_ascii_case("rust-analyzer.exe")
+            })
+            .unwrap_or(false)
 }
 
 fn parse_server_capabilities(result: &Value) -> LspServerCapabilities {
@@ -1211,9 +1246,39 @@ fn slice_utf16_range(text: &str, start: usize, end: usize) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::{
+        fs,
+        io::Cursor,
+        path::Path,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     use super::*;
+
+    #[cfg(unix)]
+    fn unique_test_directory(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("gh-ui-lsp-{prefix}-{nanos}-{}", std::process::id()));
+        fs::create_dir_all(&path).expect("failed to create temp directory");
+        path
+    }
+
+    #[cfg(unix)]
+    fn write_executable_script(path: &Path, body: &str) {
+        fs::write(path, body).expect("failed to write script");
+        let mut permissions = fs::metadata(path)
+            .expect("failed to stat script")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("failed to chmod script");
+    }
 
     #[test]
     fn resolves_rust_server_spec() {
@@ -1408,5 +1473,39 @@ mod tests {
             .expect("expected frame");
 
         assert_eq!(decoded, value);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ignores_broken_rust_analyzer_candidates() {
+        let dir = unique_test_directory("broken-rust-analyzer");
+        let candidate = dir.join("rust-analyzer");
+        write_executable_script(&candidate, "#!/bin/sh\nexit 1\n");
+
+        assert!(!command_candidate_is_usable(
+            candidate.to_str().expect("utf-8 path"),
+            &candidate
+        ));
+        assert_eq!(
+            resolve_server_command(&[candidate.to_str().expect("utf-8 path")]),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn accepts_working_rust_analyzer_candidates() {
+        let dir = unique_test_directory("working-rust-analyzer");
+        let candidate = dir.join("rust-analyzer");
+        write_executable_script(&candidate, "#!/bin/sh\nexit 0\n");
+
+        assert!(command_candidate_is_usable(
+            candidate.to_str().expect("utf-8 path"),
+            &candidate
+        ));
+        assert_eq!(
+            resolve_server_command(&[candidate.to_str().expect("utf-8 path")]),
+            Some(candidate.to_str().expect("utf-8 path").to_string())
+        );
     }
 }
