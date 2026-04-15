@@ -913,8 +913,7 @@ fn inspect_jdtls_record() -> ManagedServerInstallStatus {
             if !install_dir.is_dir() {
                 return broken_status(
                     &record,
-                    "Managed install metadata exists, but the JDTLS files are missing."
-                        .to_string(),
+                    "Managed install metadata exists, but the JDTLS files are missing.".to_string(),
                 );
             }
 

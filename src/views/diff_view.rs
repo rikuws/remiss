@@ -4,9 +4,8 @@ use gpui::prelude::*;
 use gpui::*;
 
 use crate::code_display::{
-    build_interactive_code_tokens, build_lsp_hover_tooltip_view,
-    render_highlighted_code_block, render_highlighted_code_content, styled_code_text,
-    InteractiveCodeToken,
+    build_interactive_code_tokens, build_lsp_hover_tooltip_view, render_highlighted_code_block,
+    render_highlighted_code_content, styled_code_text, InteractiveCodeToken,
 };
 use crate::code_tour::{line_matches_diff_anchor, thread_matches_diff_anchor, DiffAnchor};
 use crate::diff::{
@@ -29,6 +28,9 @@ use crate::theme::*;
 use super::sections::{badge, badge_success, nested_panel, panel_state_text};
 
 const MAX_FILE_HIGHLIGHT_BYTES: usize = 512 * 1024;
+const TOUR_DIFF_PREVIEW_MIN_ROWS: usize = 4;
+const TOUR_DIFF_PREVIEW_MAX_ROWS: usize = 18;
+const TOUR_DIFF_PREVIEW_ROW_HEIGHT_PX: f32 = 24.0;
 
 pub fn enter_files_surface(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
     state.update(cx, |s, cx| {
@@ -1276,23 +1278,47 @@ fn render_file_diff(
                 .min_h_0()
                 .bg(bg_inset())
                 .child(
-                    list(list_state, move |ix, _window, cx| match items[ix] {
-                        DiffViewItem::Gap(gap) => render_diff_gap_row(gap).into_any_element(),
-                        DiffViewItem::Row(row_ix) => render_virtualized_diff_row(
-                            &state,
-                            parsed_file_index,
-                            highlighted_hunks.as_deref(),
-                            file_lsp_context.as_ref(),
-                            &rows[row_ix],
-                            selected_anchor.as_ref(),
-                            cx,
-                        )
-                        .into_any_element(),
-                    })
+                    render_virtualized_diff_rows(
+                        &state,
+                        rows,
+                        parsed_file_index,
+                        highlighted_hunks,
+                        file_lsp_context,
+                        selected_anchor,
+                        list_state,
+                        items,
+                    )
                     .flex_grow()
                     .min_h_0(),
                 ),
         )
+}
+
+fn render_virtualized_diff_rows(
+    state: &Entity<AppState>,
+    rows: Arc<Vec<DiffRenderRow>>,
+    parsed_file_index: Option<usize>,
+    highlighted_hunks: Option<Arc<Vec<Vec<Vec<SyntaxSpan>>>>>,
+    file_lsp_context: Option<DiffFileLspContext>,
+    selected_anchor: Option<DiffAnchor>,
+    list_state: ListState,
+    items: Arc<Vec<DiffViewItem>>,
+) -> List {
+    let state = state.clone();
+
+    list(list_state, move |ix, _window, cx| match items[ix] {
+        DiffViewItem::Gap(gap) => render_diff_gap_row(gap).into_any_element(),
+        DiffViewItem::Row(row_ix) => render_virtualized_diff_row(
+            &state,
+            parsed_file_index,
+            highlighted_hunks.as_deref(),
+            file_lsp_context.as_ref(),
+            &rows[row_ix],
+            selected_anchor.as_ref(),
+            cx,
+        )
+        .into_any_element(),
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -1821,12 +1847,42 @@ fn prepare_diff_view_state(
     detail: &PullRequestDetail,
     file_path: &str,
 ) -> DiffFileViewState {
-    let state_key = format!(
-        "{}:{file_path}",
-        app_state.active_pr_key.as_deref().unwrap_or("detached")
-    );
-    let revision = detail.updated_at.clone();
+    prepare_diff_view_state_with_key(
+        app_state,
+        detail,
+        build_diff_view_state_key(app_state.active_pr_key.as_deref(), "files", file_path),
+        file_path,
+    )
+}
 
+fn prepare_tour_diff_view_state(
+    app_state: &AppState,
+    detail: &PullRequestDetail,
+    preview_key: &str,
+    file_path: &str,
+) -> DiffFileViewState {
+    prepare_diff_view_state_with_key(
+        app_state,
+        detail,
+        build_diff_view_state_key(app_state.active_pr_key.as_deref(), "tour", preview_key),
+        file_path,
+    )
+}
+
+fn build_diff_view_state_key(active_pr_key: Option<&str>, surface: &str, item_key: &str) -> String {
+    format!(
+        "{surface}:{}:{item_key}",
+        active_pr_key.unwrap_or("detached")
+    )
+}
+
+fn prepare_diff_view_state_with_key(
+    app_state: &AppState,
+    detail: &PullRequestDetail,
+    state_key: String,
+    file_path: &str,
+) -> DiffFileViewState {
+    let revision = detail.updated_at.clone();
     let mut diff_view_states = app_state.diff_view_states.borrow_mut();
     let entry = diff_view_states.entry(state_key).or_insert_with(|| {
         let (parsed_file_index, highlighted_hunks) =
@@ -2522,6 +2578,7 @@ fn render_hunk_header(
 pub fn render_tour_diff_file(
     state: &Entity<AppState>,
     detail: &PullRequestDetail,
+    preview_key: &str,
     file_path: Option<&str>,
     snippet: Option<&str>,
     anchor: Option<&DiffAnchor>,
@@ -2544,6 +2601,12 @@ pub fn render_tour_diff_file(
             .and_then(|detail_state| detail_state.file_content_states.get(file_path))
             .and_then(|file_state| file_state.prepared.as_ref())
             .cloned();
+        let diff_view_state = {
+            let app_state = state.read(cx);
+            file.map(|file| {
+                prepare_tour_diff_view_state(&app_state, detail, preview_key, &file.path)
+            })
+        };
         let file_lsp_context = build_diff_file_lsp_context(
             state,
             parsed_file.path.as_str(),
@@ -2607,8 +2670,19 @@ pub fn render_tour_diff_file(
             )
             .child(if parsed_file.hunks.is_empty() {
                 panel_state_text("No textual hunks available for this file.").into_any_element()
+            } else if let (Some(file), Some(diff_view_state)) = (file, diff_view_state) {
+                render_virtualized_tour_diff_preview(
+                    state,
+                    file,
+                    parsed_file,
+                    prepared_file.as_ref(),
+                    anchor,
+                    diff_view_state,
+                    file_lsp_context,
+                )
+                .into_any_element()
             } else {
-                render_tour_diff_preview(parsed_file, anchor, file_lsp_context.as_ref())
+                render_full_tour_diff_preview(parsed_file, anchor, file_lsp_context.as_ref())
                     .into_any_element()
             })
             .into_any_element();
@@ -2632,7 +2706,73 @@ pub fn render_tour_diff_file(
     panel_state_text("No parsed diff is available for this file.").into_any_element()
 }
 
-fn render_tour_diff_preview(
+fn render_virtualized_tour_diff_preview(
+    state: &Entity<AppState>,
+    file: &PullRequestFile,
+    parsed_file: &ParsedDiffFile,
+    prepared_file: Option<&PreparedFileContent>,
+    selected_anchor: Option<&DiffAnchor>,
+    diff_view_state: DiffFileViewState,
+    file_lsp_context: Option<DiffFileLspContext>,
+) -> impl IntoElement {
+    let rows = diff_view_state.rows.clone();
+    let parsed_file_index = diff_view_state.parsed_file_index;
+    let highlighted_hunks = diff_view_state.highlighted_hunks.clone();
+    let list_state = diff_view_state.list_state.clone();
+    let items = Arc::new(build_diff_view_items(
+        file,
+        Some(parsed_file),
+        prepared_file,
+        &rows,
+    ));
+
+    if list_state.item_count() != items.len() {
+        list_state.reset(items.len());
+    }
+
+    div()
+        .h(tour_diff_preview_height(items.len()))
+        .min_h_0()
+        .flex()
+        .flex_col()
+        .rounded(radius())
+        .border_1()
+        .border_color(border_default())
+        .bg(bg_surface())
+        .overflow_hidden()
+        .shadow_sm()
+        .child(
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .flex_grow()
+                .min_h_0()
+                .bg(bg_inset())
+                .child(
+                    render_virtualized_diff_rows(
+                        state,
+                        rows,
+                        parsed_file_index,
+                        highlighted_hunks,
+                        file_lsp_context,
+                        selected_anchor.cloned(),
+                        list_state,
+                        items,
+                    )
+                    .flex_grow()
+                    .min_h_0(),
+                ),
+        )
+}
+
+fn tour_diff_preview_height(item_count: usize) -> Pixels {
+    let visible_rows =
+        item_count.clamp(TOUR_DIFF_PREVIEW_MIN_ROWS, TOUR_DIFF_PREVIEW_MAX_ROWS) as f32;
+    px((visible_rows * TOUR_DIFF_PREVIEW_ROW_HEIGHT_PX) + 2.0)
+}
+
+fn render_full_tour_diff_preview(
     parsed_file: &ParsedDiffFile,
     anchor: Option<&DiffAnchor>,
     file_lsp_context: Option<&DiffFileLspContext>,

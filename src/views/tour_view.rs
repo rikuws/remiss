@@ -1953,6 +1953,7 @@ fn render_section_card(
                     .child(render_tour_diff_file(
                         state,
                         detail,
+                        &step.id,
                         step.file_path.as_deref(),
                         step.snippet.as_deref(),
                         step.anchor.as_ref(),

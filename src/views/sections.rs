@@ -704,82 +704,181 @@ fn filter_pill(
         )
 }
 
+fn pill_badge(label: &str, fg: Rgba, bg: Rgba, border: Rgba) -> impl IntoElement {
+    div()
+        .px(px(8.0))
+        .py(px(2.0))
+        .rounded(px(999.0))
+        .border_1()
+        .border_color(border)
+        .bg(bg)
+        .text_size(px(10.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(fg)
+        .child(label.to_string())
+}
+
+fn subtle_pill(label: &str) -> impl IntoElement {
+    pill_badge(label, fg_muted(), bg_emphasis(), border_muted())
+}
+
+fn pull_request_state_badge(item: &github::PullRequestSummary) -> AnyElement {
+    if item.is_draft {
+        return pill_badge("Draft", fg_muted(), bg_emphasis(), border_muted()).into_any_element();
+    }
+
+    match item.state.as_str() {
+        "MERGED" => pill_badge("Merged", purple(), bg_emphasis(), purple()).into_any_element(),
+        "CLOSED" => {
+            pill_badge("Closed", danger(), danger_muted(), diff_remove_border()).into_any_element()
+        }
+        _ => pill_badge("Open", success(), success_muted(), diff_add_border()).into_any_element(),
+    }
+}
+
+fn review_decision_badge(decision: &str) -> AnyElement {
+    match decision {
+        "APPROVED" => {
+            pill_badge("Approved", success(), success_muted(), diff_add_border()).into_any_element()
+        }
+        "CHANGES_REQUESTED" => {
+            pill_badge("Changes", danger(), danger_muted(), diff_remove_border()).into_any_element()
+        }
+        "REVIEW_REQUIRED" => {
+            pill_badge("Needs review", fg_muted(), bg_emphasis(), border_muted()).into_any_element()
+        }
+        "COMMENTED" => {
+            pill_badge("Commented", accent(), accent_muted(), accent()).into_any_element()
+        }
+        _ => subtle_pill(decision).into_any_element(),
+    }
+}
+
+fn render_diff_summary(additions: i64, deletions: i64) -> impl IntoElement {
+    let additions = additions.max(0);
+    let deletions = deletions.max(0);
+    let total = additions + deletions;
+    let segments = 8usize;
+    let add_segments = if total > 0 {
+        ((additions as f32 / total as f32) * segments as f32)
+            .round()
+            .clamp(0.0, segments as f32) as usize
+    } else {
+        0
+    };
+    let delete_segments = if total > 0 {
+        segments.saturating_sub(add_segments)
+    } else {
+        0
+    };
+
+    div()
+        .flex()
+        .flex_col()
+        .items_end()
+        .gap(px(6.0))
+        .child(
+            div()
+                .flex()
+                .gap(px(4.0))
+                .text_size(px(11.0))
+                .font_family("Fira Code")
+                .child(div().text_color(success()).child(format!("+{additions}")))
+                .child(div().text_color(danger()).child(format!("-{deletions}"))),
+        )
+        .child(
+            div()
+                .flex()
+                .gap(px(2.0))
+                .children((0..segments).map(move |ix| {
+                    let bg = if ix < add_segments {
+                        success()
+                    } else if ix < add_segments + delete_segments {
+                        danger()
+                    } else {
+                        border_muted()
+                    };
+
+                    div().w(px(8.0)).h(px(4.0)).rounded(px(2.0)).bg(bg)
+                })),
+        )
+}
+
 fn pr_list_row(
     item: github::PullRequestSummary,
     on_click: impl Fn(github::PullRequestSummary, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let dot_color = match item.state.as_str() {
-        "MERGED" => purple(),
-        "CLOSED" => danger(),
-        _ => success(),
-    };
     let title = item.title.clone();
+    let repo_ref = format!("{} #{}", item.repository, item.number);
     let meta = format!(
-        "{} #{} \u{00b7} {} \u{00b7} {}",
-        item.repository,
-        item.number,
+        "{} \u{2022} updated {}",
         item.author_login,
         format_relative_time(&item.updated_at)
     );
     let comments = item.comments_count;
+    let changed_files = item.changed_files;
+    let additions = item.additions;
+    let deletions = item.deletions;
+    let review_decision = item.review_decision.clone();
     let summary = item.clone();
 
     div()
-        .flex()
-        .gap(px(12.0))
-        .items_center()
-        .justify_between()
-        .px(px(20.0))
-        .py(px(14.0))
+        .p(px(16.0))
         .rounded(radius())
         .bg(bg_surface())
+        .border_1()
+        .border_color(border_muted())
         .cursor_pointer()
         .hover(|style| style.bg(hover_bg()).text_color(fg_emphasis()))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             on_click(summary.clone(), window, cx)
         })
-        // Status dot
-        .child(
-            div()
-                .w(px(8.0))
-                .h(px(8.0))
-                .rounded(px(4.0))
-                .bg(dot_color)
-                .flex_shrink_0(),
-        )
-        // Body
         .child(
             div()
                 .flex_grow()
-                .min_w_0()
-                .child(
-                    div()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(fg_emphasis())
-                        .text_size(px(14.0))
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .overflow_x_hidden()
-                        .child(title),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(fg_muted())
-                        .mt(px(4.0))
-                        .child(meta),
-                ),
-        )
-        // Trailing
-        .child(
-            div()
                 .flex()
-                .gap(px(5.0))
-                .items_center()
-                .text_color(fg_muted())
-                .text_size(px(13.0))
-                .flex_shrink_0()
-                .child(comments.to_string()),
+                .items_start()
+                .justify_between()
+                .gap(px(16.0))
+                .child(
+                    div()
+                        .flex_grow()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .font_family("Fira Code")
+                                .text_color(fg_subtle())
+                                .child(repo_ref),
+                        )
+                        .child(
+                            div()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(fg_emphasis())
+                                .text_size(px(15.0))
+                                .line_clamp(2)
+                                .child(title),
+                        )
+                        .child(div().text_size(px(12.0)).text_color(fg_muted()).child(meta))
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(6.0))
+                                .flex_wrap()
+                                .child(pull_request_state_badge(&item))
+                                .when_some(review_decision, |el, decision| {
+                                    el.child(review_decision_badge(&decision))
+                                })
+                                .when(comments > 0, |el| {
+                                    el.child(subtle_pill(&format!("{comments} comments")))
+                                })
+                                .child(subtle_pill(&format!("{changed_files} files"))),
+                        ),
+                )
+                .child(render_diff_summary(additions, deletions)),
         )
 }
 
@@ -902,14 +1001,16 @@ fn kanban_card(
     item: github::PullRequestSummary,
     on_click: impl Fn(github::PullRequestSummary, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let dot_color = match item.state.as_str() {
-        "MERGED" => purple(),
-        "CLOSED" => danger(),
-        _ => success(),
-    };
     let title = item.title.clone();
+    let repo_label = item
+        .repository
+        .split('/')
+        .last()
+        .unwrap_or(&item.repository)
+        .to_string();
     let meta = format!(
-        "#{} \u{00b7} {} \u{00b7} {}",
+        "{} #{} \u{00b7} {} \u{00b7} {}",
+        repo_label,
         item.number,
         item.author_login,
         format_relative_time(&item.updated_at)
@@ -917,18 +1018,16 @@ fn kanban_card(
     let additions = item.additions;
     let deletions = item.deletions;
     let comments = item.comments_count;
-    let review_badge: Option<(Rgba, &str)> = match item.review_decision.as_deref() {
-        Some("APPROVED") => Some((success(), "Approved")),
-        Some("CHANGES_REQUESTED") => Some((danger(), "Changes")),
-        Some("REVIEW_REQUIRED") => Some((fg_subtle(), "Needs review")),
-        _ => None,
-    };
-    let summary = item;
+    let changed_files = item.changed_files;
+    let review_decision = item.review_decision.clone();
+    let summary = item.clone();
 
     div()
-        .p(px(12.0))
-        .rounded(radius_sm())
+        .p(px(14.0))
+        .rounded(radius())
         .bg(bg_overlay())
+        .border_1()
+        .border_color(border_muted())
         .cursor_pointer()
         .hover(|s| s.bg(hover_bg()))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
@@ -937,85 +1036,52 @@ fn kanban_card(
         .child(
             div()
                 .flex()
-                .gap(px(8.0))
-                .items_start()
-                // Status dot
+                .flex_col()
+                .gap(px(10.0))
                 .child(
                     div()
-                        .mt(px(5.0))
-                        .w(px(7.0))
-                        .h(px(7.0))
-                        .rounded(px(4.0))
-                        .bg(dot_color)
-                        .flex_shrink_0(),
-                )
-                // Content
-                .child(
-                    div()
-                        .flex_grow()
-                        .min_w_0()
                         .flex()
-                        .flex_col()
-                        .gap(px(3.0))
-                        // Title
+                        .items_start()
+                        .justify_between()
+                        .gap(px(12.0))
                         .child(
                             div()
-                                .text_size(px(13.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(fg_emphasis())
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .overflow_x_hidden()
-                                .child(title),
-                        )
-                        // Meta line
-                        .child(div().text_size(px(11.0)).text_color(fg_muted()).child(meta))
-                        // Stats row
-                        .child(
-                            div()
+                                .flex_grow()
+                                .min_w_0()
                                 .flex()
-                                .gap(px(8.0))
-                                .items_center()
-                                .mt(px(1.0))
+                                .flex_col()
+                                .gap(px(4.0))
                                 .child(
                                     div()
-                                        .flex()
-                                        .gap(px(4.0))
+                                        .text_size(px(13.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(fg_emphasis())
+                                        .line_clamp(2)
+                                        .child(title),
+                                )
+                                .child(
+                                    div()
                                         .text_size(px(11.0))
                                         .font_family("Fira Code")
-                                        .child(
-                                            div()
-                                                .text_color(success())
-                                                .child(format!("+{additions}")),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_color(fg_subtle())
-                                                .child(format!("-{deletions}")),
-                                        ),
-                                )
-                                .when(comments > 0, |el| {
-                                    el.child(
-                                        div()
-                                            .text_size(px(11.0))
-                                            .text_color(fg_subtle())
-                                            .font_family("Fira Code")
-                                            .child(comments.to_string()),
-                                    )
-                                })
-                                .when_some(review_badge, |el, (color, label)| {
-                                    el.child(
-                                        div()
-                                            .px(px(6.0))
-                                            .py(px(1.0))
-                                            .rounded(px(8.0))
-                                            .bg(bg_emphasis())
-                                            .text_size(px(10.0))
-                                            .text_color(color)
-                                            .child(label.to_string()),
-                                    )
-                                }),
-                        ),
+                                        .text_color(fg_muted())
+                                        .child(meta),
+                                ),
+                        )
+                        .child(render_diff_summary(additions, deletions)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(6.0))
+                        .flex_wrap()
+                        .child(pull_request_state_badge(&item))
+                        .when_some(review_decision, |el, decision| {
+                            el.child(review_decision_badge(&decision))
+                        })
+                        .when(comments > 0, |el| {
+                            el.child(subtle_pill(&format!("{comments} comments")))
+                        })
+                        .child(subtle_pill(&format!("{changed_files} files"))),
                 ),
         )
 }
@@ -1272,7 +1338,7 @@ fn current_time_ms() -> i64 {
         .unwrap_or(0)
 }
 
-fn format_relative_time(value: &str) -> String {
+pub(crate) fn format_relative_time(value: &str) -> String {
     if value.is_empty() {
         return value.to_string();
     }

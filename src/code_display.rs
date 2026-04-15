@@ -833,7 +833,12 @@ fn render_lsp_symbol_details(details: &lsp::LspSymbolDetails) -> AnyElement {
                     .flex_col()
                     .gap(px(8.0))
                     .child(render_lsp_section_label("HOVER"))
-                    .child(div().w_full().min_w_0().child(render_markdown(&hover.markdown))),
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .child(render_markdown(&hover.markdown)),
+                    ),
             )
         })
         .when_some(details.signature_help.as_ref(), |el, signature| {
@@ -874,7 +879,12 @@ fn render_lsp_symbol_details(details: &lsp::LspSymbolDetails) -> AnyElement {
                             .child(signature.label.clone()),
                     )
                     .when_some(signature.documentation.as_deref(), |el, documentation| {
-                        el.child(div().w_full().min_w_0().child(render_markdown(documentation)))
+                        el.child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .child(render_markdown(documentation)),
+                        )
                     }),
             )
         })

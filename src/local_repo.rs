@@ -227,8 +227,12 @@ fn inspect_repository_candidate(
                 "The app-managed checkout has local changes. Remove it from app storage and let the app recreate it for local code features.".to_string()
             }
         } else {
-            default_message
-                .unwrap_or_else(|| format!("Using your checkout at pull request head {}.", expected_head))
+            default_message.unwrap_or_else(|| {
+                format!(
+                    "Using your checkout at pull request head {}.",
+                    expected_head
+                )
+            })
         }
     } else if !is_worktree_clean {
         if source == "linked" {
@@ -488,7 +492,10 @@ fn repository_matches_git_remote(repository: &str, path: &Path) -> Result<bool, 
 }
 
 fn managed_repository_path(repository: &str) -> Result<PathBuf, String> {
-    Ok(app_storage::managed_repositories_root().join(managed_repository_directory_name(repository)))
+    Ok(
+        app_storage::managed_repositories_root()
+            .join(managed_repository_directory_name(repository)),
+    )
 }
 
 fn managed_repository_directory_name(repository: &str) -> String {

@@ -31,6 +31,8 @@ pub struct PullRequestSummary {
     pub number: i64,
     pub title: String,
     pub author_login: String,
+    #[serde(default)]
+    pub is_draft: bool,
     pub comments_count: i64,
     pub additions: i64,
     pub deletions: i64,
@@ -100,6 +102,16 @@ pub struct PullRequestReviewComment {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PullRequestComment {
+    pub id: String,
+    pub author_login: String,
+    pub body: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PullRequestReviewThread {
     pub id: String,
     pub path: String,
@@ -145,6 +157,8 @@ pub struct PullRequestDetail {
     pub updated_at: String,
     pub labels: Vec<String>,
     pub reviewers: Vec<String>,
+    #[serde(default)]
+    pub comments: Vec<PullRequestComment>,
     pub latest_reviews: Vec<PullRequestReview>,
     pub review_threads: Vec<PullRequestReviewThread>,
     pub files: Vec<PullRequestFile>,
@@ -630,6 +644,7 @@ fn fetch_queue(id: &str, label: &str, search_query: &str) -> Result<PullRequestQ
                 title
                 url
                 state
+                isDraft
                 updatedAt
                 additions
                 deletions
@@ -684,7 +699,17 @@ fn fetch_pull_request_detail(repository: &str, number: i64) -> Result<PullReques
               baseRefName headRefName baseRefOid headRefOid
               additions deletions changedFiles createdAt updatedAt
               author { login }
-              comments { totalCount }
+              comments(first: 30) {
+                totalCount
+                nodes {
+                  id
+                  body
+                  createdAt
+                  updatedAt
+                  url
+                  author { login }
+                }
+              }
               commits { totalCount }
               labels(first: 20) { nodes { name } }
               reviewRequests(first: 20) {
@@ -801,6 +826,31 @@ fn fetch_pull_request_detail(repository: &str, number: i64) -> Result<PullReques
                     .iter()
                     .filter_map(|n| n.get("name").and_then(Value::as_str))
                     .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        comments: pr
+            .get("comments")
+            .and_then(|v| v.get("nodes"))
+            .and_then(Value::as_array)
+            .map(|nodes| {
+                nodes
+                    .iter()
+                    .filter_map(|node| {
+                        Some(PullRequestComment {
+                            id: node.get("id")?.as_str()?.to_string(),
+                            author_login: node
+                                .get("author")
+                                .and_then(|v| v.get("login"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("unknown")
+                                .to_string(),
+                            body: str_field(node, "body"),
+                            created_at: str_field(node, "createdAt"),
+                            updated_at: str_field(node, "updatedAt"),
+                            url: node.get("url")?.as_str()?.to_string(),
+                        })
+                    })
                     .collect()
             })
             .unwrap_or_default(),
@@ -1011,6 +1061,10 @@ fn map_pull_request_summary(node: &Value) -> Option<PullRequestSummary> {
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_string(),
+        is_draft: node
+            .get("isDraft")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         comments_count: node
             .get("comments")
             .and_then(|v| v.get("totalCount"))

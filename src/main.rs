@@ -1,5 +1,5 @@
-mod app_storage;
 mod app_assets;
+mod app_storage;
 mod cache;
 mod code_display;
 mod code_tour;
