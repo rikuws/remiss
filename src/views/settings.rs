@@ -358,7 +358,7 @@ fn managed_server_state_badge(state: ManagedServerInstallState) -> impl IntoElem
     div()
         .px(px(10.0))
         .py(px(3.0))
-        .rounded(px(16.0))
+        .rounded(px(999.0))
         .bg(background)
         .text_size(px(12.0))
         .font_weight(FontWeight::MEDIUM)

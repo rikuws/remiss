@@ -340,130 +340,180 @@ fn render_pr_header(
     let title = pr_title.to_string();
     let author = author.to_string();
     let repository = repository.to_string();
+    let breadcrumb = format!("Pull Requests / {} / #{}", repository, number).to_uppercase();
 
-    div()
-        .flex_shrink_0()
+    let header_copy = div()
+        .flex()
+        .flex_col()
+        .min_w_0()
+        .gap(if compact { px(0.0) } else { px(6.0) })
         .child(
             div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .mb(if compact { px(12.0) } else { px(20.0) })
-                .pb(if compact { px(12.0) } else { px(20.0) })
-                .gap(px(16.0))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .min_w_0()
-                        .child(
-                            div()
-                                .text_color(if compact { fg_muted() } else { fg_subtle() })
-                                .child(eyebrow(&format!(
-                                    "Pull Requests / {} / #{}",
-                                    repository, number
-                                ))),
-                        )
-                        .child(
-                            div()
-                                .text_size(if compact { px(20.0) } else { px(24.0) })
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(fg_emphasis())
-                                .child(title)
-                                .with_animation(
-                                    "pr-header-title",
-                                    Animation::new(Duration::from_millis(180))
-                                        .with_easing(ease_in_out),
-                                    move |el, delta| {
-                                        let progress = header_animation_progress(compact, delta);
-                                        el.text_size(lerp_px(24.0, 20.0, progress))
-                                    },
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .gap(px(8.0))
-                                .flex_wrap()
-                                .mt(if compact { px(6.0) } else { px(10.0) })
-                                .items_center()
-                                .text_size(if compact { px(12.0) } else { px(13.0) })
-                                .text_color(fg_muted())
-                                .child(pull_request_state_badge(pr_state, is_draft))
-                                .child(author)
-                                .when(syncing, |el| el.child(badge("Refreshing live")))
-                                .when_some(refs, |el, (base, head)| {
-                                    if compact {
-                                        el.child(badge(&base)).child(badge(&head))
-                                    } else {
-                                        el.child("wants to merge into")
-                                            .child(badge(&base))
-                                            .child("from")
-                                            .child(badge(&head))
-                                    }
-                                })
-                                .with_animation(
-                                    "pr-header-meta",
-                                    Animation::new(Duration::from_millis(180))
-                                        .with_easing(ease_in_out),
-                                    move |el, delta| {
-                                        let progress = header_animation_progress(compact, delta);
-                                        el.mt(lerp_px(10.0, 6.0, progress))
-                                            .text_size(lerp_px(13.0, 12.0, progress))
-                                    },
-                                ),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(6.0))
-                        .flex_wrap()
-                        .child(ghost_button("Open in browser", {
-                            let repository = repository.clone();
-                            move |_, window, cx| {
-                                open_pull_request_in_browser(&repository, number, window, cx)
-                            }
-                        }))
-                        .child(review_button("Refresh PR", {
-                            let state = state_for_refresh.clone();
-                            let repository = repository.clone();
-                            move |_, window, cx| {
-                                trigger_sync_pr(&state, &repository, number, window, cx)
-                            }
-                        })),
+                .h(if compact { px(0.0) } else { px(18.0) })
+                .overflow_hidden()
+                .text_size(px(10.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .font_family("Fira Code")
+                .text_color(if compact { transparent() } else { fg_subtle() })
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .overflow_x_hidden()
+                .child(breadcrumb)
+                .with_animation(
+                    ("pr-header-eyebrow", usize::from(compact)),
+                    Animation::new(Duration::from_millis(240)).with_easing(ease_in_out),
+                    move |el, delta| {
+                        let progress = header_animation_progress(compact, delta);
+                        el.h(lerp_px(18.0, 0.0, progress)).text_color(lerp_rgba(
+                            fg_subtle(),
+                            transparent(),
+                            progress,
+                        ))
+                    },
                 ),
         )
         .child(
             div()
+                .text_size(if compact { px(18.0) } else { px(24.0) })
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_emphasis())
+                .line_height(if compact { px(22.0) } else { px(30.0) })
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .overflow_x_hidden()
+                .child(title)
+                .with_animation(
+                    ("pr-header-title", usize::from(compact)),
+                    Animation::new(Duration::from_millis(240)).with_easing(ease_in_out),
+                    move |el, delta| {
+                        let progress = header_animation_progress(compact, delta);
+                        el.text_size(lerp_px(24.0, 18.0, progress))
+                            .line_height(lerp_px(30.0, 22.0, progress))
+                            .text_color(fg_emphasis())
+                    },
+                ),
+        )
+        .child(
+            div()
+                .h(if compact { px(0.0) } else { px(28.0) })
+                .overflow_hidden()
+                .text_size(px(13.0))
+                .text_color(if compact { transparent() } else { fg_muted() })
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(8.0))
+                        .flex_wrap()
+                        .items_center()
+                        .child(pull_request_state_badge(pr_state, is_draft))
+                        .child(author)
+                        .when(syncing, |el| el.child(badge("Refreshing live")))
+                        .when_some(refs, |el, (base, head)| {
+                            el.child("wants to merge into")
+                                .child(badge(&base))
+                                .child("from")
+                                .child(badge(&head))
+                        }),
+                )
+                .with_animation(
+                    ("pr-header-meta", usize::from(compact)),
+                    Animation::new(Duration::from_millis(240)).with_easing(ease_in_out),
+                    move |el, delta| {
+                        let progress = header_animation_progress(compact, delta);
+                        el.h(lerp_px(28.0, 0.0, progress)).text_color(lerp_rgba(
+                            fg_muted(),
+                            transparent(),
+                            progress,
+                        ))
+                    },
+                ),
+        )
+        .with_animation(
+            ("pr-header-copy", usize::from(compact)),
+            Animation::new(Duration::from_millis(240)).with_easing(ease_in_out),
+            move |el, delta| {
+                let progress = header_animation_progress(compact, delta);
+                el.gap(lerp_px(6.0, 0.0, progress))
+            },
+        );
+
+    let top_row = div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .mb(if compact { px(8.0) } else { px(20.0) })
+        .pb(if compact { px(8.0) } else { px(20.0) })
+        .gap(if compact { px(12.0) } else { px(16.0) })
+        .child(header_copy)
+        .child(
+            div()
                 .flex()
-                .gap(px(2.0))
-                .pb(if compact { px(8.0) } else { px(12.0) })
-                .children(PullRequestSurface::all().iter().map(|surface_id| {
-                    let is_active = surface == *surface_id;
-                    let target_surface = *surface_id;
-                    let state = state_for_surface.clone();
-                    surface_tab(surface_id.label(), is_active, move |_, window, cx| {
-                        if target_surface == PullRequestSurface::Tour {
-                            enter_tour_surface(&state, window, cx);
-                        } else if target_surface == PullRequestSurface::Files {
-                            enter_files_surface(&state, window, cx);
-                        } else {
-                            state.update(cx, |st, cx| {
-                                st.active_surface = target_surface;
-                                st.pr_header_compact = false;
-                                cx.notify();
-                            });
-                        }
-                    })
+                .gap(px(6.0))
+                .flex_wrap()
+                .child(ghost_button("Open in browser", {
+                    let repository = repository.clone();
+                    move |_, window, cx| {
+                        open_pull_request_in_browser(&repository, number, window, cx)
+                    }
+                }))
+                .child(review_button("Refresh PR", {
+                    let state = state_for_refresh.clone();
+                    let repository = repository.clone();
+                    move |_, window, cx| trigger_sync_pr(&state, &repository, number, window, cx)
                 })),
         )
         .with_animation(
-            "pr-header-shell",
-            Animation::new(Duration::from_millis(180)).with_easing(ease_in_out),
+            ("pr-header-top-row", usize::from(compact)),
+            Animation::new(Duration::from_millis(240)).with_easing(ease_in_out),
             move |el, delta| {
                 let progress = header_animation_progress(compact, delta);
-                el.pt(lerp_px(28.0, 16.0, progress))
+                el.mb(lerp_px(20.0, 8.0, progress))
+                    .pb(lerp_px(20.0, 8.0, progress))
+                    .gap(lerp_px(16.0, 12.0, progress))
+            },
+        );
+
+    let tabs = div()
+        .flex()
+        .gap(px(2.0))
+        .pb(if compact { px(8.0) } else { px(12.0) })
+        .children(PullRequestSurface::all().iter().map(|surface_id| {
+            let is_active = surface == *surface_id;
+            let target_surface = *surface_id;
+            let state = state_for_surface.clone();
+            surface_tab(surface_id.label(), is_active, move |_, window, cx| {
+                if target_surface == PullRequestSurface::Tour {
+                    enter_tour_surface(&state, window, cx);
+                } else if target_surface == PullRequestSurface::Files {
+                    enter_files_surface(&state, window, cx);
+                } else {
+                    state.update(cx, |st, cx| {
+                        st.active_surface = target_surface;
+                        st.pr_header_compact = false;
+                        cx.notify();
+                    });
+                }
+            })
+        }))
+        .with_animation(
+            ("pr-header-tabs", usize::from(compact)),
+            Animation::new(Duration::from_millis(240)).with_easing(ease_in_out),
+            move |el, delta| {
+                let progress = header_animation_progress(compact, delta);
+                el.pb(lerp_px(12.0, 8.0, progress))
+            },
+        );
+
+    div()
+        .flex_shrink_0()
+        .child(top_row)
+        .child(tabs)
+        .with_animation(
+            ("pr-header-shell", usize::from(compact)),
+            Animation::new(Duration::from_millis(240)).with_easing(ease_in_out),
+            move |el, delta| {
+                let progress = header_animation_progress(compact, delta);
+                el.pt(lerp_px(28.0, 14.0, progress))
                     .px(px(32.0))
                     .pb(px(0.0))
             },
@@ -480,6 +530,15 @@ fn header_animation_progress(compact: bool, delta: f32) -> f32 {
 
 fn lerp_px(expanded: f32, compact: f32, progress: f32) -> Pixels {
     px(expanded + (compact - expanded) * progress)
+}
+
+fn lerp_rgba(expanded: Rgba, compact: Rgba, progress: f32) -> Rgba {
+    Rgba {
+        r: expanded.r + (compact.r - expanded.r) * progress,
+        g: expanded.g + (compact.g - expanded.g) * progress,
+        b: expanded.b + (compact.b - expanded.b) * progress,
+        a: expanded.a + (compact.a - expanded.a) * progress,
+    }
 }
 
 fn render_overview_surface(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
@@ -525,6 +584,8 @@ fn render_overview_surface(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
     let state_for_files = state.clone();
 
     div()
+        .w_full()
+        .min_w_0()
         .flex()
         .items_start()
         .flex_wrap()
@@ -562,6 +623,7 @@ fn render_overview_surface(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                     el.child(render_submit_review_panel(
                         review_action,
                         review_body,
+                        s.review_editor_active,
                         review_loading,
                         review_message,
                         review_success,
@@ -574,6 +636,7 @@ fn render_overview_surface(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                 .flex_1()
                 .min_w(px(240.0))
                 .max_w(detail_side_width())
+                .flex_shrink_0()
                 .flex()
                 .flex_col()
                 .gap(px(16.0))
@@ -1043,6 +1106,7 @@ fn render_own_feedback_card(
     let updated_at = format_relative_time(&item.updated_at);
 
     div()
+        .min_w_0()
         .p(px(14.0))
         .rounded(radius_sm())
         .bg(bg_overlay())
@@ -1061,22 +1125,21 @@ fn render_own_feedback_card(
         .child(
             div()
                 .flex()
-                .items_center()
+                .items_start()
                 .justify_between()
                 .gap(px(10.0))
-                .flex_wrap()
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .font_family("Fira Code")
-                        .text_color(fg_emphasis())
-                        .child(item.location_label.clone()),
-                )
+                .min_w_0()
+                .child(div().flex_grow().min_w_0().child(overflow_safe_code_label(
+                    &item.location_label,
+                    fg_emphasis(),
+                )))
                 .child(
                     div()
                         .flex()
                         .gap(px(6.0))
                         .flex_wrap()
+                        .justify_end()
+                        .flex_shrink_0()
                         .child(subtle_badge(&item.subject_type.to_lowercase()))
                         .when(item.is_resolved, |el| {
                             el.child(tone_badge(
@@ -1118,6 +1181,7 @@ fn render_thread_digest_card(
     let resolved_by = item.resolved_by_login.clone();
 
     div()
+        .min_w_0()
         .p(px(14.0))
         .rounded(radius_sm())
         .bg(bg_overlay())
@@ -1136,22 +1200,21 @@ fn render_thread_digest_card(
         .child(
             div()
                 .flex()
-                .items_center()
+                .items_start()
                 .justify_between()
                 .gap(px(10.0))
-                .flex_wrap()
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .font_family("Fira Code")
-                        .text_color(fg_emphasis())
-                        .child(item.location_label.clone()),
-                )
+                .min_w_0()
+                .child(div().flex_grow().min_w_0().child(overflow_safe_code_label(
+                    &item.location_label,
+                    fg_emphasis(),
+                )))
                 .child(
                     div()
                         .flex()
                         .gap(px(6.0))
                         .flex_wrap()
+                        .justify_end()
+                        .flex_shrink_0()
                         .child(subtle_badge(&item.subject_type.to_lowercase()))
                         .when(item.is_resolved, |el| {
                             el.child(tone_badge(
@@ -1269,6 +1332,7 @@ fn render_activity_card(item: &ActivityItem, state: &Entity<AppState>) -> impl I
     let timestamp = format_relative_time(&item.timestamp);
 
     div()
+        .min_w_0()
         .p(px(16.0))
         .rounded(radius())
         .bg(bg_subtle())
@@ -1289,29 +1353,35 @@ fn render_activity_card(item: &ActivityItem, state: &Entity<AppState>) -> impl I
         .child(
             div()
                 .flex()
-                .items_center()
+                .items_start()
                 .justify_between()
                 .gap(px(10.0))
-                .flex_wrap()
+                .min_w_0()
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .gap(px(8.0))
-                        .flex_wrap()
+                        .flex_grow()
+                        .min_w_0()
                         .when(item.kind != ActivityItemKind::Thread, |el| {
                             el.child(activity_kind_badge(&item.kind))
                         })
                         .child(
                             div()
+                                .min_w_0()
                                 .text_size(px(13.0))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(fg_emphasis())
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .overflow_x_hidden()
                                 .child(item.title.clone()),
                         ),
                 )
                 .child(
                     div()
+                        .flex_shrink_0()
                         .text_size(px(12.0))
                         .text_color(fg_muted())
                         .child(timestamp),
@@ -1321,11 +1391,17 @@ fn render_activity_card(item: &ActivityItem, state: &Entity<AppState>) -> impl I
             div()
                 .mt(px(8.0))
                 .flex()
-                .items_center()
+                .items_start()
                 .gap(px(6.0))
                 .flex_wrap()
+                .min_w_0()
                 .when_some(item.location_label.clone(), |el, location| {
-                    el.child(activity_location_text(&location))
+                    el.child(
+                        div()
+                            .min_w_0()
+                            .max_w(px(720.0))
+                            .child(activity_location_text(&location)),
+                    )
                 })
                 .when_some(item.status_label.clone(), |el, status| {
                     el.child(activity_status_badge(item, &status))
@@ -1337,11 +1413,7 @@ fn render_activity_card(item: &ActivityItem, state: &Entity<AppState>) -> impl I
                     .mt(px(8.0))
                     .pl(px(10.0))
                     .border_l(px(2.0))
-                    .border_color(if item.kind == ActivityItemKind::Review {
-                        accent()
-                    } else {
-                        border_muted()
-                    })
+                    .border_color(transparent())
                     .text_size(px(14.0))
                     .line_height(px(21.0))
                     .font_weight(FontWeight::MEDIUM)
@@ -1351,14 +1423,160 @@ fn render_activity_card(item: &ActivityItem, state: &Entity<AppState>) -> impl I
         })
 }
 
+pub fn start_review_editor(state: &Entity<AppState>, cx: &mut App) {
+    state.update(cx, |s, cx| {
+        if s.review_loading {
+            return;
+        }
+        s.review_editor_active = true;
+        s.review_message = None;
+        s.review_success = false;
+        cx.notify();
+    });
+}
+
+pub fn blur_review_editor(state: &Entity<AppState>, cx: &mut App) {
+    state.update(cx, |s, cx| {
+        if !s.review_editor_active {
+            return;
+        }
+        s.review_editor_active = false;
+        cx.notify();
+    });
+}
+
+pub fn append_review_body(state: &Entity<AppState>, text: &str, cx: &mut App) {
+    if text.is_empty() {
+        return;
+    }
+
+    state.update(cx, |s, cx| {
+        if !s.review_editor_active || s.review_loading {
+            return;
+        }
+        s.review_body.push_str(text);
+        s.review_message = None;
+        s.review_success = false;
+        cx.notify();
+    });
+}
+
+pub fn backspace_review_body(state: &Entity<AppState>, cx: &mut App) {
+    state.update(cx, |s, cx| {
+        if !s.review_editor_active || s.review_loading {
+            return;
+        }
+        s.review_body.pop();
+        s.review_message = None;
+        s.review_success = false;
+        cx.notify();
+    });
+}
+
+pub fn trigger_submit_review(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
+    let Some((repository, number)) = state
+        .read(cx)
+        .active_pr()
+        .map(|pr| (pr.repository.clone(), pr.number))
+    else {
+        return;
+    };
+
+    let (action, body, loading) = {
+        let s = state.read(cx);
+        (s.review_action, s.review_body.clone(), s.review_loading)
+    };
+
+    if loading {
+        return;
+    }
+
+    if action == ReviewAction::Comment && body.trim().is_empty() {
+        state.update(cx, |s, cx| {
+            s.review_message = Some("Enter a review note before submitting a comment.".to_string());
+            s.review_success = false;
+            cx.notify();
+        });
+        return;
+    }
+
+    state.update(cx, |s, cx| {
+        s.review_loading = true;
+        s.review_message = None;
+        s.review_success = false;
+        cx.notify();
+    });
+
+    let model = state.clone();
+    let repo = repository.clone();
+    window
+        .spawn(cx, async move |cx: &mut AsyncWindowContext| {
+            let submit_result = cx
+                .background_executor()
+                .spawn(async move {
+                    github::submit_pull_request_review(&repository, number, action, &body)
+                })
+                .await;
+
+            let (success, message) = match submit_result {
+                Ok(result) => (result.success, result.message),
+                Err(error) => (false, error),
+            };
+
+            model
+                .update(cx, |s, cx| {
+                    s.review_loading = false;
+                    s.review_message = Some(message.clone());
+                    s.review_success = success;
+                    if success {
+                        s.review_body.clear();
+                        s.review_editor_active = false;
+                    }
+                    cx.notify();
+                })
+                .ok();
+
+            if !success {
+                return;
+            }
+
+            let cache = model.read_with(cx, |s, _| s.cache.clone()).ok();
+            let Some(cache) = cache else { return };
+            let detail_key = pr_key(&repo, number);
+            let repo_for_sync = repo.clone();
+            let sync_result = cx
+                .background_executor()
+                .spawn(
+                    async move { github::sync_pull_request_detail(&cache, &repo_for_sync, number) },
+                )
+                .await;
+
+            model
+                .update(cx, |s, cx| {
+                    let ds = s.detail_states.entry(detail_key.clone()).or_default();
+                    ds.loading = false;
+                    ds.syncing = false;
+                    if let Ok(snapshot) = sync_result {
+                        ds.snapshot = Some(snapshot);
+                        ds.error = None;
+                    }
+                    cx.notify();
+                })
+                .ok();
+        })
+        .detach();
+}
+
 fn render_submit_review_panel(
     review_action: ReviewAction,
     review_body: String,
+    review_editor_active: bool,
     review_loading: bool,
     review_message: Option<String>,
     review_success: bool,
     state: &Entity<AppState>,
 ) -> impl IntoElement {
+    let editor_state = state.clone();
     nested_panel()
         .child(
             div()
@@ -1368,10 +1586,25 @@ fn render_submit_review_panel(
                 .mb(px(16.0))
                 .child(
                     div()
-                        .text_size(px(15.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(fg_emphasis())
-                        .child("Submit Review"),
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.0))
+                        .child(eyebrow("Review action"))
+                        .child(
+                            div()
+                                .text_size(px(15.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(fg_emphasis())
+                                .child("Submit review"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(fg_muted())
+                                .child(
+                                    "Write a review note here, then submit through gh without leaving the pull request.",
+                                ),
+                        ),
                 )
                 .child(badge(match review_action {
                     ReviewAction::Approve => "approve",
@@ -1406,7 +1639,17 @@ fn render_submit_review_panel(
                 .p(px(12.0))
                 .px(px(14.0))
                 .rounded(radius_sm())
-                .bg(bg_subtle())
+                .border_1()
+                .border_color(transparent())
+                .bg(if review_editor_active {
+                    bg_overlay()
+                } else {
+                    bg_subtle()
+                })
+                .cursor(CursorStyle::IBeam)
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    start_review_editor(&editor_state, cx);
+                })
                 .text_color(if review_body.is_empty() {
                     fg_subtle()
                 } else {
@@ -1414,10 +1657,54 @@ fn render_submit_review_panel(
                 })
                 .text_size(px(14.0))
                 .min_h(px(120.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(12.0))
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .font_family("Fira Code")
+                                .text_color(if review_editor_active {
+                                    accent()
+                                } else {
+                                    fg_subtle()
+                                })
+                                .child(if review_editor_active {
+                                    "EDITING"
+                                } else {
+                                    "CLICK TO EDIT"
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .font_family("Fira Code")
+                                .text_color(fg_subtle())
+                                .child("cmd-enter submit • esc blur"),
+                        ),
+                )
                 .child(if review_body.is_empty() {
-                    "Leave a review note... (text input coming soon)".to_string()
+                    div()
+                        .mt(px(10.0))
+                        .child("Leave a review note...")
+                        .into_any_element()
                 } else {
-                    review_body
+                    div()
+                        .mt(px(10.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.0))
+                        .children(review_body.lines().map(|line| {
+                            div().child(if line.is_empty() {
+                                " ".to_string()
+                            } else {
+                                line.to_string()
+                            })
+                        }))
+                        .into_any_element()
                 }),
         )
         .child(
@@ -1434,8 +1721,11 @@ fn render_submit_review_panel(
                     } else {
                         "Submit review"
                     },
-                    |_, _, _cx| {
-                        // TODO: submit review
+                    {
+                        let state = state.clone();
+                        move |_, window, cx| {
+                            trigger_submit_review(&state, window, cx);
+                        }
                     },
                 ))
                 .when_some(review_message, |el, msg| {
@@ -1537,13 +1827,11 @@ fn detail_value_text(value: &str) -> AnyElement {
         .into_any_element()
 }
 
-fn detail_badge(label: &str, fg: Rgba, bg: Rgba, border: Rgba) -> AnyElement {
+fn detail_badge(label: &str, fg: Rgba, bg: Rgba, _border: Rgba) -> AnyElement {
     div()
         .px(px(8.0))
         .py(px(2.0))
         .rounded(px(999.0))
-        .border_1()
-        .border_color(border)
         .bg(bg)
         .text_size(px(11.0))
         .font_family("Fira Code")
@@ -1599,21 +1887,32 @@ fn render_reviewers_panel(
                         .items_center()
                         .justify_between()
                         .gap(px(10.0))
+                        .min_w_0()
                         .child(
                             div()
                                 .flex()
                                 .items_center()
                                 .gap(px(10.0))
+                                .flex_grow()
+                                .min_w_0()
                                 .child(participant_avatar(reviewer, false))
                                 .child(
                                     div()
+                                        .min_w_0()
                                         .text_size(px(13.0))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(fg_emphasis())
-                                        .child(reviewer.clone()),
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .overflow_x_hidden()
+                                        .child(participant_display_name(reviewer)),
                                 ),
                         )
-                        .child(reviewer_status_badge(reviewer, review_status))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .child(reviewer_status_badge(reviewer, review_status)),
+                        )
                 })),
         )
 }
@@ -1765,7 +2064,7 @@ fn participant_avatar(login: &str, emphasized: bool) -> impl IntoElement {
         .h(px(28.0))
         .rounded(px(14.0))
         .border_1()
-        .border_color(if emphasized { accent() } else { border_muted() })
+        .border_color(transparent())
         .bg(if emphasized {
             accent_muted()
         } else {
@@ -1824,13 +2123,23 @@ fn participant_display_name(login: &str) -> String {
     shortened
 }
 
-fn tone_badge(label: &str, fg: Rgba, bg: Rgba, border: Rgba) -> impl IntoElement {
+fn overflow_safe_code_label(label: &str, color: Rgba) -> impl IntoElement {
+    div()
+        .min_w_0()
+        .font_family("Fira Code")
+        .text_size(px(12.0))
+        .text_color(color)
+        .text_ellipsis()
+        .whitespace_nowrap()
+        .overflow_x_hidden()
+        .child(label.to_string())
+}
+
+fn tone_badge(label: &str, fg: Rgba, bg: Rgba, _border: Rgba) -> impl IntoElement {
     div()
         .px(px(8.0))
         .py(px(2.0))
         .rounded(px(999.0))
-        .border_1()
-        .border_color(border)
         .bg(bg)
         .text_size(px(11.0))
         .font_weight(FontWeight::MEDIUM)
@@ -1857,12 +2166,7 @@ fn activity_kind_badge(kind: &ActivityItemKind) -> AnyElement {
 }
 
 fn activity_location_text(location: &str) -> AnyElement {
-    div()
-        .font_family("Fira Code")
-        .text_size(px(12.0))
-        .text_color(fg_subtle())
-        .child(location.to_string())
-        .into_any_element()
+    overflow_safe_code_label(location, fg_subtle()).into_any_element()
 }
 
 fn activity_status_badge(item: &ActivityItem, status: &str) -> AnyElement {

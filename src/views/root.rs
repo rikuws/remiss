@@ -8,9 +8,11 @@ use crate::theme::*;
 
 use super::palette::render_palette;
 use super::pr_detail::render_pr_workspace;
-use super::sections::render_section_workspace;
+use super::sections::{badge, ghost_button, render_section_workspace};
 use super::settings::ensure_managed_lsp_statuses_loaded;
-use super::workspace_sync::{sync_workspace_flow, wait_for_workspace_poll_interval};
+use super::workspace_sync::{
+    sync_workspace_flow, trigger_sync_workspace, wait_for_workspace_poll_interval,
+};
 
 pub struct RootView {
     state: Entity<AppState>,
@@ -135,90 +137,180 @@ fn render_topbar(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let active_section = s.active_section;
     let active_pr_key = s.active_pr_key.clone();
     let tabs: Vec<_> = s.open_tabs.clone();
+    let is_authenticated = s.is_authenticated();
+    let workspace_syncing = s.workspace_syncing;
+    let workspace_error = s.workspace_error.clone();
+    let gh_version = s.gh_version.clone();
 
     let state_for_nav = state.clone();
     let state_for_tabs = state.clone();
+    let state_for_sync = state.clone();
 
     div()
-        .flex()
-        .items_center()
-        .gap(px(4.0))
-        .px(px(20.0))
-        .h(topbar_height())
         .bg(bg_surface())
+        .border_b(px(1.0))
+        .border_color(border_default())
         .flex_shrink_0()
-        // Brand mark
         .child(
             div()
                 .flex()
                 .items_center()
-                .gap(px(10.0))
-                .mr(px(16.0))
-                .flex_shrink_0()
-                .child(img(APP_LOGO_ASSET).size(px(28.0)))
+                .justify_between()
+                .gap(px(16.0))
+                .px(px(20.0))
+                .h(topbar_height())
                 .child(
                     div()
-                        .text_size(px(13.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(fg_emphasis())
-                        .child("gh-ui"),
+                        .flex()
+                        .items_center()
+                        .gap(px(18.0))
+                        .min_w_0()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(10.0))
+                                .flex_shrink_0()
+                                .child(img(APP_LOGO_ASSET).size(px(24.0)))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(2.0))
+                                        .child(
+                                            div()
+                                                .text_size(px(13.0))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(fg_emphasis())
+                                                .child("ReviewBuddy"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(11.0))
+                                                .font_family("Fira Code")
+                                                .text_color(fg_subtle())
+                                                .child("desktop review workspace"),
+                                        ),
+                                ),
+                        )
+                        .child(
+                            div().flex().gap(px(4.0)).items_center().min_w_0().children(
+                                SectionId::all()
+                                    .iter()
+                                    .filter(|section| **section != SectionId::Issues)
+                                    .map(|section| {
+                                        let section = *section;
+                                        let is_active =
+                                            active_section == section && active_pr_key.is_none();
+                                        let count = s.section_count(section);
+                                        let state = state_for_nav.clone();
+                                        nav_pill(
+                                            section.label(),
+                                            count,
+                                            is_active,
+                                            move |_, window, cx| {
+                                                if section == SectionId::Settings {
+                                                    ensure_managed_lsp_statuses_loaded(
+                                                        &state, window, cx,
+                                                    );
+                                                }
+                                                state.update(cx, |s, cx| {
+                                                    s.active_section = section;
+                                                    s.active_pr_key = None;
+                                                    s.palette_open = false;
+                                                    s.palette_selected_index = 0;
+                                                    cx.notify();
+                                                });
+                                            },
+                                        )
+                                    }),
+                            ),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .flex_wrap()
+                        .justify_end()
+                        .child(if workspace_syncing {
+                            badge("syncing workspace").into_any_element()
+                        } else if workspace_error.is_some() {
+                            badge("sync issue").into_any_element()
+                        } else if is_authenticated {
+                            badge("github connected").into_any_element()
+                        } else {
+                            badge("gh needs auth").into_any_element()
+                        })
+                        .when_some(gh_version, |el, version| {
+                            el.child(badge(version.split_whitespace().next().unwrap_or(&version)))
+                        })
+                        .child(ghost_button(
+                            if workspace_syncing {
+                                "Syncing..."
+                            } else {
+                                "Sync"
+                            },
+                            move |_, window, cx| {
+                                trigger_sync_workspace(&state_for_sync, window, cx)
+                            },
+                        )),
                 ),
         )
-        // Section nav
-        .child(
-            div()
-                .flex()
-                .gap(px(1.0))
-                .items_center()
-                .mr(px(8.0))
-                .children(SectionId::all().iter().map(|section| {
-                    let section = *section;
-                    let is_active = active_section == section && active_pr_key.is_none();
-                    let count = s.section_count(section);
-                    let state = state_for_nav.clone();
-                    nav_pill(section.label(), count, is_active, move |_, window, cx| {
-                        if section == SectionId::Settings {
-                            ensure_managed_lsp_statuses_loaded(&state, window, cx);
-                        }
-                        state.update(cx, |s, cx| {
-                            s.active_section = section;
-                            s.active_pr_key = None;
-                            s.palette_open = false;
-                            cx.notify();
-                        });
-                    })
-                })),
-        )
-        // PR tabs
-        .child(
-            div()
-                .flex()
-                .gap(px(1.0))
-                .items_center()
-                .overflow_x_hidden()
-                .pl(px(16.0))
-                .ml(px(8.0))
-                .children(tabs.into_iter().map(|tab| {
-                    let key = pr_key(&tab.repository, tab.number);
-                    let is_active = active_pr_key.as_deref() == Some(&key);
-                    let state = state_for_tabs.clone();
-                    pr_tab(
-                        &tab.title,
-                        tab.additions,
-                        tab.deletions,
-                        &tab.state,
-                        is_active,
-                        move |_, _, cx| {
-                            state.update(cx, |s, cx| {
-                                s.active_pr_key = Some(key.clone());
-                                s.active_section = SectionId::Pulls;
-                                s.palette_open = false;
-                                cx.notify();
-                            });
-                        },
+        .when(!tabs.is_empty(), |el| {
+            el.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.0))
+                    .px(px(20.0))
+                    .py(px(8.0))
+                    .border_t(px(1.0))
+                    .border_color(border_muted())
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_family("Fira Code")
+                            .text_color(fg_subtle())
+                            .flex_shrink_0()
+                            .child(format!("{} OPEN", tabs.len())),
                     )
-                })),
-        )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(6.0))
+                            .items_center()
+                            .id("topbar-tabs-scroll")
+                            .overflow_x_scroll()
+                            .min_w_0()
+                            .children(tabs.into_iter().map(|tab| {
+                                let key = pr_key(&tab.repository, tab.number);
+                                let is_active = active_pr_key.as_deref() == Some(&key);
+                                let state = state_for_tabs.clone();
+                                pr_tab(
+                                    &tab.repository,
+                                    tab.number,
+                                    &tab.title,
+                                    tab.additions,
+                                    tab.deletions,
+                                    &tab.state,
+                                    tab.is_draft,
+                                    is_active,
+                                    move |_, _, cx| {
+                                        state.update(cx, |s, cx| {
+                                            s.active_pr_key = Some(key.clone());
+                                            s.active_section = SectionId::Pulls;
+                                            s.palette_open = false;
+                                            s.palette_selected_index = 0;
+                                            cx.notify();
+                                        });
+                                    },
+                                )
+                            })),
+                    ),
+            )
+        })
 }
 
 fn render_workspace_area(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
@@ -247,8 +339,8 @@ fn nav_pill(
         .flex()
         .gap(px(6.0))
         .items_center()
-        .px(px(14.0))
-        .py(px(6.0))
+        .px(px(12.0))
+        .py(px(5.0))
         .rounded(radius_sm())
         .text_size(px(12.0))
         .font_weight(FontWeight::MEDIUM)
@@ -270,60 +362,142 @@ fn nav_pill(
 }
 
 fn pr_tab(
+    repository: &str,
+    number: i64,
     title: &str,
     additions: i64,
     deletions: i64,
     pr_state: &str,
+    is_draft: bool,
     active: bool,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let dot_color = match pr_state {
-        "MERGED" => purple(),
-        "CLOSED" => danger(),
-        _ => success(),
-    };
+    let dot_color = pr_tab_state_dot(pr_state, is_draft);
+    let state_badge = pr_tab_state_badge(pr_state, is_draft);
+    let repo_short = repository
+        .split('/')
+        .last()
+        .unwrap_or(repository)
+        .to_string();
+    let tab_label = format!("#{number} {title}");
 
     div()
         .flex()
-        .gap(px(6.0))
         .items_center()
-        .px(px(14.0))
+        .gap(px(8.0))
+        .px(px(10.0))
         .py(px(6.0))
         .rounded(radius_sm())
+        .border_1()
+        .border_color(if active {
+            border_default()
+        } else {
+            border_muted()
+        })
+        .bg(if active { bg_canvas() } else { bg_surface() })
         .text_size(px(12.0))
-        .max_w(px(220.0))
+        .max_w(px(320.0))
+        .min_w_0()
         .cursor_pointer()
-        .when(active, |el| el.bg(bg_selected()).text_color(fg_emphasis()))
-        .when(!active, |el| el.text_color(fg_muted()))
-        .hover(|style| style.bg(hover_bg()).text_color(fg_emphasis()))
+        .hover(move |style| {
+            style
+                .bg(if active { bg_canvas() } else { hover_bg() })
+                .border_color(border_default())
+                .text_color(fg_emphasis())
+        })
         .on_mouse_down(MouseButton::Left, on_click)
-        // Status dot
-        .child(
-            div()
-                .w(px(7.0))
-                .h(px(7.0))
-                .rounded(px(4.0))
-                .bg(dot_color)
-                .flex_shrink_0(),
-        )
-        // Title
-        .child(
-            div()
-                .overflow_x_hidden()
-                .text_ellipsis()
-                .whitespace_nowrap()
-                .child(title.to_string()),
-        )
-        // Delta
         .child(
             div()
                 .flex()
-                .gap(px(3.0))
-                .text_size(px(11.0))
+                .items_center()
+                .gap(px(8.0))
+                .min_w_0()
+                .flex_grow()
+                .child(
+                    div()
+                        .w(px(5.0))
+                        .h(px(5.0))
+                        .rounded(px(999.0))
+                        .bg(dot_color)
+                        .flex_shrink_0(),
+                )
+                .child(
+                    div()
+                        .px(px(6.0))
+                        .py(px(1.0))
+                        .rounded(px(999.0))
+                        .bg(if active { bg_surface() } else { bg_emphasis() })
+                        .text_size(px(10.0))
+                        .font_family("Fira Code")
+                        .text_color(if active { fg_default() } else { fg_subtle() })
+                        .flex_shrink_0()
+                        .child(repo_short),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_x_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(if active { fg_emphasis() } else { fg_default() })
+                        .child(tab_label),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .gap(px(6.0))
+                .items_center()
+                .text_size(px(10.0))
                 .font_family("Fira Code")
                 .whitespace_nowrap()
                 .flex_shrink_0()
+                .when_some(state_badge, |el, badge| el.child(badge))
                 .child(div().text_color(success()).child(format!("+{additions}")))
-                .child(div().text_color(fg_subtle()).child(format!("-{deletions}"))),
+                .child(div().text_color(danger()).child(format!("-{deletions}"))),
         )
+}
+
+fn pr_tab_state_dot(pr_state: &str, is_draft: bool) -> Rgba {
+    if is_draft {
+        return fg_muted();
+    }
+
+    match pr_state {
+        "MERGED" => purple(),
+        "CLOSED" => danger(),
+        _ => success(),
+    }
+}
+
+fn pr_tab_state_badge(pr_state: &str, is_draft: bool) -> Option<AnyElement> {
+    if is_draft {
+        return Some(
+            pr_tab_badge("Draft", fg_muted(), bg_emphasis(), border_muted()).into_any_element(),
+        );
+    }
+
+    match pr_state {
+        "MERGED" => {
+            Some(pr_tab_badge("Merged", purple(), bg_emphasis(), purple()).into_any_element())
+        }
+        "CLOSED" => Some(
+            pr_tab_badge("Closed", danger(), danger_muted(), diff_remove_border())
+                .into_any_element(),
+        ),
+        _ => None,
+    }
+}
+
+fn pr_tab_badge(label: &str, fg: Rgba, bg: Rgba, _border: Rgba) -> impl IntoElement {
+    div()
+        .px(px(8.0))
+        .py(px(2.0))
+        .rounded(px(999.0))
+        .bg(bg)
+        .text_size(px(10.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(fg)
+        .child(label.to_string())
 }
