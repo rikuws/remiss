@@ -28,9 +28,6 @@ use crate::theme::*;
 use super::sections::{badge, badge_success, nested_panel, panel_state_text};
 
 const MAX_FILE_HIGHLIGHT_BYTES: usize = 512 * 1024;
-const TOUR_DIFF_PREVIEW_MIN_ROWS: usize = 4;
-const TOUR_DIFF_PREVIEW_MAX_ROWS: usize = 18;
-const TOUR_DIFF_PREVIEW_ROW_HEIGHT_PX: f32 = 24.0;
 
 pub fn enter_files_surface(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
     state.update(cx, |s, cx| {
@@ -2672,7 +2669,7 @@ pub fn render_tour_diff_file(
             .child(if parsed_file.hunks.is_empty() {
                 panel_state_text("No textual hunks available for this file.").into_any_element()
             } else if let (Some(file), Some(diff_view_state)) = (file, diff_view_state) {
-                render_virtualized_tour_diff_preview(
+                render_tour_diff_preview(
                     state,
                     file,
                     parsed_file,
@@ -2680,6 +2677,7 @@ pub fn render_tour_diff_file(
                     anchor,
                     diff_view_state,
                     file_lsp_context,
+                    cx,
                 )
                 .into_any_element()
             } else {
@@ -2707,7 +2705,7 @@ pub fn render_tour_diff_file(
     panel_state_text("No parsed diff is available for this file.").into_any_element()
 }
 
-fn render_virtualized_tour_diff_preview(
+fn render_tour_diff_preview(
     state: &Entity<AppState>,
     file: &PullRequestFile,
     parsed_file: &ParsedDiffFile,
@@ -2715,25 +2713,31 @@ fn render_virtualized_tour_diff_preview(
     selected_anchor: Option<&DiffAnchor>,
     diff_view_state: DiffFileViewState,
     file_lsp_context: Option<DiffFileLspContext>,
+    cx: &App,
 ) -> impl IntoElement {
-    let rows = diff_view_state.rows.clone();
+    let rows = diff_view_state.rows;
     let parsed_file_index = diff_view_state.parsed_file_index;
-    let highlighted_hunks = diff_view_state.highlighted_hunks.clone();
-    let list_state = diff_view_state.list_state.clone();
-    let items = Arc::new(build_diff_view_items(
-        file,
-        Some(parsed_file),
-        prepared_file,
-        &rows,
-    ));
+    let highlighted_hunks = diff_view_state.highlighted_hunks;
+    let items = build_diff_view_items(file, Some(parsed_file), prepared_file, &rows);
 
-    if list_state.item_count() != items.len() {
-        list_state.reset(items.len());
-    }
+    let elements: Vec<AnyElement> = items
+        .iter()
+        .map(|item| match item {
+            DiffViewItem::Gap(gap) => render_diff_gap_row(*gap).into_any_element(),
+            DiffViewItem::Row(row_ix) => render_virtualized_diff_row(
+                state,
+                parsed_file_index,
+                highlighted_hunks.as_deref(),
+                file_lsp_context.as_ref(),
+                &rows[*row_ix],
+                selected_anchor,
+                cx,
+            )
+            .into_any_element(),
+        })
+        .collect();
 
     div()
-        .h(tour_diff_preview_height(items.len()))
-        .min_h_0()
         .flex()
         .flex_col()
         .rounded(radius())
@@ -2743,33 +2747,11 @@ fn render_virtualized_tour_diff_preview(
         .overflow_hidden()
         .child(
             div()
-                .size_full()
                 .flex()
                 .flex_col()
-                .flex_grow()
-                .min_h_0()
                 .bg(bg_inset())
-                .child(
-                    render_virtualized_diff_rows(
-                        state,
-                        rows,
-                        parsed_file_index,
-                        highlighted_hunks,
-                        file_lsp_context,
-                        selected_anchor.cloned(),
-                        list_state,
-                        items,
-                    )
-                    .flex_grow()
-                    .min_h_0(),
-                ),
+                .children(elements),
         )
-}
-
-fn tour_diff_preview_height(item_count: usize) -> Pixels {
-    let visible_rows =
-        item_count.clamp(TOUR_DIFF_PREVIEW_MIN_ROWS, TOUR_DIFF_PREVIEW_MAX_ROWS) as f32;
-    px((visible_rows * TOUR_DIFF_PREVIEW_ROW_HEIGHT_PX) + 2.0)
 }
 
 fn render_full_tour_diff_preview(
