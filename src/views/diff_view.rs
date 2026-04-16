@@ -28,9 +28,6 @@ use crate::theme::*;
 use super::sections::{badge, badge_success, nested_panel, panel_state_text};
 
 const MAX_FILE_HIGHLIGHT_BYTES: usize = 512 * 1024;
-const TOUR_DIFF_PREVIEW_MIN_ROWS: usize = 4;
-const TOUR_DIFF_PREVIEW_MAX_ROWS: usize = 18;
-const TOUR_DIFF_PREVIEW_ROW_HEIGHT_PX: f32 = 24.0;
 
 pub fn enter_files_surface(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
     state.update(cx, |s, cx| {
@@ -128,12 +125,19 @@ fn render_file_tree(
         .child(
             div()
                 .px(px(16.0))
-                .py(px(14.0))
+                .py(px(12.0))
                 .border_b(px(1.0))
                 .border_color(border_default())
                 .flex()
                 .flex_col()
-                .gap(px(6.0))
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_family("Fira Code")
+                        .text_color(fg_subtle())
+                        .child("FILES"),
+                )
                 .child(
                     div()
                         .text_size(px(13.0))
@@ -162,6 +166,7 @@ fn render_file_tree(
         .px(px(8.0))
         .py(px(8.0))
         .children(files.iter().map(|file| {
+            let (file_name, parent_path) = split_file_path(&file.path);
             let path = file.path.clone();
             let is_active = selected_path == Some(file.path.as_str());
             let file_additions = file.additions;
@@ -170,14 +175,18 @@ fn render_file_tree(
 
             div()
                 .w_full()
-                .mb(px(6.0))
-                .px(px(12.0))
-                .py(px(10.0))
-                .rounded(radius())
+                .mb(px(4.0))
+                .px(px(10.0))
+                .py(px(8.0))
+                .rounded(radius_sm())
                 .border_1()
-                .border_color(if is_active { accent() } else { border_muted() })
+                .border_color(if is_active {
+                    border_default()
+                } else {
+                    border_muted()
+                })
                 .bg(if is_active {
-                    accent_muted()
+                    bg_selected()
                 } else {
                     bg_surface()
                 })
@@ -203,16 +212,29 @@ fn render_file_tree(
                     div()
                         .flex()
                         .flex_col()
-                        .gap(px(2.0))
+                        .gap(px(3.0))
                         .overflow_x_hidden()
                         .min_w_0()
                         .child(
                             div()
+                                .font_weight(FontWeight::MEDIUM)
                                 .text_ellipsis()
                                 .whitespace_nowrap()
                                 .overflow_x_hidden()
-                                .child(file.path.clone()),
+                                .child(file_name),
                         )
+                        .when(!parent_path.is_empty(), |el| {
+                            el.child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .font_family("Fira Code")
+                                    .text_color(fg_subtle())
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .overflow_x_hidden()
+                                    .child(parent_path),
+                            )
+                        })
                         .child(
                             div()
                                 .flex()
@@ -249,6 +271,13 @@ fn render_file_tree(
                         .child(render_file_stat_bar(file_additions, file_deletions)),
                 )
         }))
+}
+
+fn split_file_path(path: &str) -> (String, String) {
+    match path.rsplit_once('/') {
+        Some((parent, file_name)) => (file_name.to_string(), parent.to_string()),
+        None => (path.to_string(), String::new()),
+    }
 }
 
 pub fn ensure_selected_file_content_loaded(
@@ -1050,6 +1079,20 @@ fn render_diff_toolbar(
     lsp_status: Option<&lsp::LspServerStatus>,
     lsp_loading: bool,
 ) -> impl IntoElement {
+    let local_status_badge = local_repo_status.map(|status| {
+        if status.ready_for_local_features {
+            "checkout ready"
+        } else if !status.is_valid_repository {
+            "needs repair"
+        } else if !status.matches_expected_head {
+            "needs sync"
+        } else if !status.is_worktree_clean {
+            "dirty checkout"
+        } else {
+            "checkout pending"
+        }
+    });
+
     div()
         .flex()
         .items_start()
@@ -1068,10 +1111,10 @@ fn render_diff_toolbar(
                 .min_w_0()
                 .child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size(px(10.0))
                         .font_family("Fira Code")
                         .text_color(fg_subtle())
-                        .child(format!("{total_files} changed files")),
+                        .child(format!("FILES • {total_files} changed")),
                 )
                 .when_some(selected_file, |el, f| {
                     el.child(
@@ -1103,23 +1146,19 @@ fn render_diff_toolbar(
                         el
                     }
                 })
-                .when(
+                .when_some(local_repo_error.filter(|_| {
                     file_document
                         .map(|document| document.source != REPOSITORY_FILE_SOURCE_LOCAL_CHECKOUT)
                         .unwrap_or(false)
-                        && local_repo_error.is_some(),
-                    |el| {
-                        el.child(
-                            div()
-                                .text_size(px(11.0))
-                                .font_family("Fira Code")
-                                .text_color(fg_muted())
-                                .child(
-                                    "Showing a GitHub snapshot because the local checkout is not ready.",
-                                ),
-                        )
-                    },
-                )
+                }), |el, _| {
+                    el.child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_family("Fira Code")
+                            .text_color(fg_muted())
+                            .child("Showing a GitHub snapshot because the local checkout is not ready."),
+                    )
+                })
                 .when_some(lsp_status.filter(|status| !status.is_ready()), |el, status| {
                     el.child(
                         div()
@@ -1137,30 +1176,9 @@ fn render_diff_toolbar(
                 .gap(px(6.0))
                 .flex_wrap()
                 .flex_shrink_0()
-                .child(badge("Unified"))
                 .when(local_repo_loading, |el| el.child(badge("Preparing checkout")))
-                .when_some(local_repo_status, |el, status| {
-                    let status_badge = if !status.is_valid_repository {
-                        if status.exists {
-                            "needs repair"
-                        } else {
-                            "checkout pending"
-                        }
-                    } else if status.ready_for_local_features {
-                        "PR head ready"
-                    } else if !status.matches_expected_head {
-                        "needs sync"
-                    } else if !status.is_worktree_clean {
-                        "dirty checkout"
-                    } else {
-                        "checkout pending"
-                    };
-
-                    el.child(badge(match status.source.as_str() {
-                        "linked" => "linked checkout",
-                        _ => "managed checkout",
-                    }))
-                    .child(badge(status_badge))
+                .when_some(local_status_badge, |el, status_badge| {
+                    el.child(badge(status_badge))
                 })
                 .when_some(file_document, |el, document| {
                     el.child(badge(match document.source.as_str() {
@@ -1170,22 +1188,7 @@ fn render_diff_toolbar(
                 })
                 .when(lsp_loading, |el| el.child(badge("Starting LSP")))
                 .when_some(lsp_status, |el, status| {
-                    let el = el.child(badge(status.badge_label()));
-                    let el = if status.is_ready() && status.capabilities.hover_supported {
-                        el.child(badge("hover"))
-                    } else {
-                        el
-                    };
-                    let el = if status.is_ready() && status.capabilities.definition_supported {
-                        el.child(badge("definition"))
-                    } else {
-                        el
-                    };
-                    if status.is_ready() && status.capabilities.signature_help_supported {
-                        el.child(badge("signature"))
-                    } else {
-                        el
-                    }
+                    el.child(badge(status.badge_label()))
                 })
                 .when(file_thread_count > 0, |el| {
                     el.child(badge(&format!("{file_thread_count} threads")))
@@ -1240,18 +1243,25 @@ fn render_file_diff(
 
     if let Some(active_pr_key) = state.read(cx).active_pr_key.clone() {
         let state_for_scroll = state.clone();
-        list_state.set_scroll_handler(move |event, _, cx| {
-            let compact = event.is_scrolled;
-            state_for_scroll.update(cx, |state, cx| {
-                if state.active_surface != PullRequestSurface::Files
-                    || state.active_pr_key.as_deref() != Some(active_pr_key.as_str())
-                    || state.pr_header_compact == compact
-                {
-                    return;
-                }
+        let list_state_for_scroll = list_state.clone();
+        list_state.set_scroll_handler(move |_, window, _| {
+            let state = state_for_scroll.clone();
+            let list_state = list_state_for_scroll.clone();
+            let active_pr_key = active_pr_key.clone();
+            window.on_next_frame(move |_, cx| {
+                let scroll_top = list_state.logical_scroll_top();
+                let compact = scroll_top.item_ix > 0 || scroll_top.offset_in_item > px(0.0);
+                state.update(cx, |state, cx| {
+                    if state.active_surface != PullRequestSurface::Files
+                        || state.active_pr_key.as_deref() != Some(active_pr_key.as_str())
+                        || state.pr_header_compact == compact
+                    {
+                        return;
+                    }
 
-                state.pr_header_compact = compact;
-                cx.notify();
+                    state.pr_header_compact = compact;
+                    cx.notify();
+                });
             });
         });
     }
@@ -1269,7 +1279,6 @@ fn render_file_diff(
         .border_color(border_default())
         .bg(bg_surface())
         .overflow_hidden()
-        .shadow_sm()
         .child(
             div()
                 .flex()
@@ -2082,7 +2091,7 @@ fn render_raw_diff_fallback(raw_diff: &str) -> impl IntoElement {
 }
 
 fn render_change_type_chip(change_type: &str) -> impl IntoElement {
-    let (bg, fg, border) = match change_type {
+    let (bg, fg, _border) = match change_type {
         "ADDED" => (success_muted(), success(), diff_add_border()),
         "DELETED" => (danger_muted(), danger(), diff_remove_border()),
         "RENAMED" | "COPIED" => (accent_muted(), accent(), accent()),
@@ -2093,8 +2102,6 @@ fn render_change_type_chip(change_type: &str) -> impl IntoElement {
         .px(px(7.0))
         .py(px(2.0))
         .rounded(px(999.0))
-        .border_1()
-        .border_color(border)
         .bg(bg)
         .text_size(px(10.0))
         .font_family("Fira Code")
@@ -2280,7 +2287,7 @@ fn render_diff_line(
         .font_family("Fira Code")
         .text_size(px(12.0))
         .when(is_selected, |el| {
-            el.border_l(px(2.0)).border_color(accent())
+            el.border_l(px(2.0)).border_color(transparent())
         })
         .child(
             div()
@@ -2440,15 +2447,7 @@ fn render_review_thread(
     selected_anchor: Option<&DiffAnchor>,
 ) -> impl IntoElement {
     let is_selected = thread_matches_diff_anchor(thread, selected_anchor);
-    let thread_border = if is_selected {
-        accent()
-    } else if thread.is_resolved {
-        success()
-    } else if thread.is_outdated {
-        border_muted()
-    } else {
-        border_default()
-    };
+    let thread_border = transparent();
     let header_bg = if is_selected {
         accent_muted()
     } else if thread.is_resolved {
@@ -2463,7 +2462,6 @@ fn render_review_thread(
         .border_color(thread_border)
         .bg(bg_overlay())
         .overflow_hidden()
-        .shadow_sm()
         .flex()
         .flex_col()
         .child(
@@ -2671,7 +2669,7 @@ pub fn render_tour_diff_file(
             .child(if parsed_file.hunks.is_empty() {
                 panel_state_text("No textual hunks available for this file.").into_any_element()
             } else if let (Some(file), Some(diff_view_state)) = (file, diff_view_state) {
-                render_virtualized_tour_diff_preview(
+                render_tour_diff_preview(
                     state,
                     file,
                     parsed_file,
@@ -2679,6 +2677,7 @@ pub fn render_tour_diff_file(
                     anchor,
                     diff_view_state,
                     file_lsp_context,
+                    cx,
                 )
                 .into_any_element()
             } else {
@@ -2706,7 +2705,7 @@ pub fn render_tour_diff_file(
     panel_state_text("No parsed diff is available for this file.").into_any_element()
 }
 
-fn render_virtualized_tour_diff_preview(
+fn render_tour_diff_preview(
     state: &Entity<AppState>,
     file: &PullRequestFile,
     parsed_file: &ParsedDiffFile,
@@ -2714,25 +2713,31 @@ fn render_virtualized_tour_diff_preview(
     selected_anchor: Option<&DiffAnchor>,
     diff_view_state: DiffFileViewState,
     file_lsp_context: Option<DiffFileLspContext>,
+    cx: &App,
 ) -> impl IntoElement {
-    let rows = diff_view_state.rows.clone();
+    let rows = diff_view_state.rows;
     let parsed_file_index = diff_view_state.parsed_file_index;
-    let highlighted_hunks = diff_view_state.highlighted_hunks.clone();
-    let list_state = diff_view_state.list_state.clone();
-    let items = Arc::new(build_diff_view_items(
-        file,
-        Some(parsed_file),
-        prepared_file,
-        &rows,
-    ));
+    let highlighted_hunks = diff_view_state.highlighted_hunks;
+    let items = build_diff_view_items(file, Some(parsed_file), prepared_file, &rows);
 
-    if list_state.item_count() != items.len() {
-        list_state.reset(items.len());
-    }
+    let elements: Vec<AnyElement> = items
+        .iter()
+        .map(|item| match item {
+            DiffViewItem::Gap(gap) => render_diff_gap_row(*gap).into_any_element(),
+            DiffViewItem::Row(row_ix) => render_virtualized_diff_row(
+                state,
+                parsed_file_index,
+                highlighted_hunks.as_deref(),
+                file_lsp_context.as_ref(),
+                &rows[*row_ix],
+                selected_anchor,
+                cx,
+            )
+            .into_any_element(),
+        })
+        .collect();
 
     div()
-        .h(tour_diff_preview_height(items.len()))
-        .min_h_0()
         .flex()
         .flex_col()
         .rounded(radius())
@@ -2740,36 +2745,13 @@ fn render_virtualized_tour_diff_preview(
         .border_color(border_default())
         .bg(bg_surface())
         .overflow_hidden()
-        .shadow_sm()
         .child(
             div()
-                .size_full()
                 .flex()
                 .flex_col()
-                .flex_grow()
-                .min_h_0()
                 .bg(bg_inset())
-                .child(
-                    render_virtualized_diff_rows(
-                        state,
-                        rows,
-                        parsed_file_index,
-                        highlighted_hunks,
-                        file_lsp_context,
-                        selected_anchor.cloned(),
-                        list_state,
-                        items,
-                    )
-                    .flex_grow()
-                    .min_h_0(),
-                ),
+                .children(elements),
         )
-}
-
-fn tour_diff_preview_height(item_count: usize) -> Pixels {
-    let visible_rows =
-        item_count.clamp(TOUR_DIFF_PREVIEW_MIN_ROWS, TOUR_DIFF_PREVIEW_MAX_ROWS) as f32;
-    px((visible_rows * TOUR_DIFF_PREVIEW_ROW_HEIGHT_PX) + 2.0)
 }
 
 fn render_full_tour_diff_preview(

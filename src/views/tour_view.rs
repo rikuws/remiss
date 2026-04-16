@@ -412,7 +412,7 @@ async fn generate_tour_flow(
                 &detail_key,
                 provider,
                 &request_key,
-                "Still checking AI provider status.".to_string(),
+                "Still checking provider status.".to_string(),
                 cx,
             );
         }
@@ -625,9 +625,9 @@ async fn generate_tour_flow(
                         tour_state.document = Some(document.clone());
                         tour_state.error = None;
                         tour_state.message = Some(if automatic {
-                            format!("Cached a {} code tour in the background.", provider.label())
+                            format!("Cached a {} guide in the background.", provider.label())
                         } else {
-                            format!("Generated a {} code tour.", provider.label())
+                            format!("Generated a {} guide.", provider.label())
                         });
                         tour_state.success = true;
                     }
@@ -885,13 +885,13 @@ fn provider_selection_message(
     let ready = ready_providers(statuses);
 
     if provider_loading {
-        "Still checking AI provider status.".to_string()
+        "Still checking provider status.".to_string()
     } else if ready.len() > 1 || available.len() > 1 {
-        "Choose an AI provider before generating a code tour.".to_string()
+        "Choose a provider before generating a guide.".to_string()
     } else if available.is_empty() {
-        "No supported AI provider is available in this workspace.".to_string()
+        "No supported guide provider is available in this workspace.".to_string()
     } else {
-        "Still preparing the detected AI provider.".to_string()
+        "Still preparing the detected provider.".to_string()
     }
 }
 
@@ -971,14 +971,17 @@ pub fn render_tour_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement 
     let pending_generate_label = if tour_state.generating {
         provider
             .map(|provider| format!("Generating with {}...", provider.label()))
-            .unwrap_or_else(|| "Generating code tour...".to_string())
+            .unwrap_or_else(|| "Generating guide...".to_string())
     } else if let Some(provider) = provider {
         format!("Generate with {}", provider.label())
     } else {
         "Choose a provider".to_string()
     };
+    let scroll_handle = s.tour_content_scroll_handle.clone();
 
     if generated_tour.is_none() {
+        let scroll_handle_for_pending = scroll_handle.clone();
+        let state_for_pending_scroll = state.clone();
         return div()
             .px(px(32.0))
             .pb(px(24.0))
@@ -986,6 +989,25 @@ pub fn render_tour_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement 
             .min_h_0()
             .id("tour-pending-scroll")
             .overflow_y_scroll()
+            .track_scroll(&scroll_handle_for_pending)
+            .on_scroll_wheel(move |_, window, _cx| {
+                let scroll_handle = scroll_handle_for_pending.clone();
+                let state = state_for_pending_scroll.clone();
+
+                window.on_next_frame(move |_, cx| {
+                    let compact = scroll_handle.offset().y < px(0.0);
+                    state.update(cx, |state, cx| {
+                        if state.active_surface != PullRequestSurface::Tour
+                            || state.pr_header_compact == compact
+                        {
+                            return;
+                        }
+
+                        state.pr_header_compact = compact;
+                        cx.notify();
+                    });
+                });
+            })
             .child(
                 nested_panel()
                     .child(render_provider_bar(
@@ -1046,7 +1068,6 @@ pub fn render_tour_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement 
 
     let generated_tour = generated_tour.unwrap();
     let state_for_outline = state.clone();
-    let scroll_handle = s.tour_content_scroll_handle.clone();
     let tour_request_key = s
         .active_tour_request_key()
         .unwrap_or_else(|| format!("detached:{}", generated_tour.generated_at));
@@ -1137,18 +1158,16 @@ pub fn render_tour_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement 
             error_text(&message).into_any_element()
         });
     }
-    if !generated_tour.open_questions.is_empty() {
-        content_children.push(
-            render_note_panel("Open Questions", &generated_tour.open_questions).into_any_element(),
-        );
-    }
-    if !generated_tour.warnings.is_empty() {
-        content_children
-            .push(render_note_panel("Warnings", &generated_tour.warnings).into_any_element());
-    }
-
     scroll_targets.push(("overview".to_string(), content_children.len()));
-    content_children.push(render_overview_card(detail, overview_step.as_ref()).into_any_element());
+    content_children.push(
+        render_overview_card(
+            detail,
+            overview_step.as_ref(),
+            &generated_tour.open_questions,
+            &generated_tour.warnings,
+        )
+        .into_any_element(),
+    );
 
     for section in &generated_tour.sections {
         scroll_targets.push((section.id.clone(), content_children.len()));
@@ -1190,7 +1209,7 @@ pub fn render_tour_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement 
                                 .text_size(px(14.0))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(fg_emphasis())
-                                .child("Tour"),
+                                .child("Guide"),
                         )
                         .child(badge(generated_tour.provider.label())),
                 )
@@ -1205,12 +1224,18 @@ pub fn render_tour_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement 
                         .unwrap_or(0);
 
                     div()
-                        .p(px(12.0))
-                        .rounded(radius())
+                        .p(px(10.0))
+                        .rounded(radius_sm())
+                        .border_1()
+                        .border_color(if is_active {
+                            border_default()
+                        } else {
+                            border_muted()
+                        })
                         .bg(if is_active {
                             bg_selected()
                         } else {
-                            bg_overlay()
+                            bg_surface()
                         })
                         .cursor_pointer()
                         .hover(|style| style.bg(hover_bg()))
@@ -1268,7 +1293,7 @@ pub fn render_tour_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement 
                                 return;
                             }
 
-                            let compact = top_item > 0;
+                            let compact = scroll_handle.offset().y < px(0.0);
                             if state.active_tour_outline_id != active_id
                                 || state.pr_header_compact != compact
                             {
@@ -1298,7 +1323,7 @@ fn render_provider_bar(
     let generate_label = if generating {
         selected_provider
             .map(|provider| format!("Generating with {}...", provider.label()))
-            .unwrap_or_else(|| "Generating code tour...".to_string())
+            .unwrap_or_else(|| "Generating guide...".to_string())
     } else if let Some(selected_provider) = selected_provider {
         if generated_tour
             .map(|tour| tour.provider == selected_provider)
@@ -1325,8 +1350,8 @@ fn render_provider_bar(
                 .gap(px(6.0))
                 .child(eyebrow(
                     &selected_provider
-                        .map(|provider| format!("{} pair programmer", provider.label()))
-                        .unwrap_or_else(|| "AI pair programmer".to_string()),
+                        .map(|provider| format!("{} guide", provider.label()))
+                        .unwrap_or_else(|| "Guided review".to_string()),
                 ))
                 .child(
                     div()
@@ -1334,9 +1359,9 @@ fn render_provider_bar(
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(fg_emphasis())
                         .child(if generated_tour.is_some() {
-                            "AI Code Tour".to_string()
+                            "Guided review".to_string()
                         } else {
-                            "Code Tour".to_string()
+                            "Generate guide".to_string()
                         }),
                 )
                 .child(
@@ -1346,15 +1371,9 @@ fn render_provider_bar(
                         .max_w(px(720.0))
                         .child(
                             generated_tour
-                                .map(|tour| {
-                                    let mut copy = tour.summary.clone();
-                                    if let Some(model) = tour.model.as_deref() {
-                                        copy.push_str(&format!(" • model {model}"));
-                                    }
-                                    copy
-                                })
+                                .map(|tour| tour.summary.clone())
                                 .unwrap_or_else(|| {
-                                    "Generate a narrated walkthrough with the available AI tool. If both providers are ready, pick the one you want to use for this tour.".to_string()
+                                    "Generate a guided walkthrough of the pull request. If more than one provider is ready, pick the one you want to use for this guide.".to_string()
                                 }),
                         ),
                 ),
@@ -1414,23 +1433,21 @@ fn render_pending_panel(
     let ready_count = ready_providers(statuses).len();
     let (title, body) = if provider_loading {
         (
-            "Checking AI provider status".to_string(),
-            "Inspecting the detected AI tools before the tour can run.".to_string(),
+            "Checking guide provider status".to_string(),
+            "Inspecting the detected providers before the guide can run.".to_string(),
         )
     } else if tour_loading {
         (
-            "Looking for a cached tour".to_string(),
-            "Checking whether this pull request head already has a stored AI walkthrough."
+            "Looking for a cached guide".to_string(),
+            "Checking whether this pull request head already has a stored guided walkthrough."
                 .to_string(),
         )
     } else if generating {
         (
             progress_summary
                 .map(str::to_string)
-                .or_else(|| {
-                    provider.map(|provider| format!("{} is building the code tour", provider.label()))
-                })
-                .unwrap_or_else(|| "Generating code tour".to_string()),
+                .or_else(|| provider.map(|provider| format!("{} is building the guide", provider.label())))
+                .unwrap_or_else(|| "Generating guide".to_string()),
             progress_detail
                 .map(str::to_string)
                 .or_else(|| {
@@ -1456,27 +1473,27 @@ fn render_pending_panel(
         } else {
             (
                 provider
-                    .map(|provider| format!("Preparing {} code tour", provider.label()))
-                    .unwrap_or_else(|| "Preparing code tour".to_string()),
-                "No cached tour is available for this pull request head yet. The app can generate one in the background and store it in the local cache.".to_string(),
+                    .map(|provider| format!("Preparing {} guide", provider.label()))
+                    .unwrap_or_else(|| "Preparing guide".to_string()),
+                "No cached guide is available for this pull request head yet. The app can generate one in the background and store it in the local cache.".to_string(),
             )
         }
     } else if ready_count > 1 || available_count > 1 {
         (
-            "Choose AI provider".to_string(),
-            "Multiple AI providers are available. Pick the one you want to use for this code tour."
+            "Choose guide provider".to_string(),
+            "Multiple providers are available. Pick the one you want to use for this guided review."
                 .to_string(),
         )
     } else if available_count == 0 {
         (
-            "No AI provider detected".to_string(),
-            "Install or expose GitHub Copilot CLI or Codex CLI to enable AI-powered code tours."
+            "No guide provider detected".to_string(),
+            "Install or expose GitHub Copilot CLI or Codex CLI to enable guided review generation."
                 .to_string(),
         )
     } else {
         (
-            "Preparing code tour".to_string(),
-            "Waiting for the detected AI provider to finish loading.".to_string(),
+            "Preparing guide".to_string(),
+            "Waiting for the detected provider to finish loading.".to_string(),
         )
     };
 
@@ -1489,7 +1506,7 @@ fn render_pending_panel(
                 .text_color(fg_subtle())
                 .font_family("Fira Code")
                 .mb(px(8.0))
-                .child("AI PAIR PROGRAMMER"),
+                .child("GUIDED REVIEW"),
         )
         .child(
             div()
@@ -1586,20 +1603,18 @@ fn render_tour_progress_panel(
 ) -> impl IntoElement {
     let title = progress_summary
         .map(str::to_string)
-        .or_else(|| {
-            provider.map(|provider| format!("{} is building the code tour", provider.label()))
-        })
-        .unwrap_or_else(|| "Generating code tour".to_string());
+        .or_else(|| provider.map(|provider| format!("{} is building the guide", provider.label())))
+        .unwrap_or_else(|| "Generating guide".to_string());
     let detail = progress_detail.map(str::to_string).unwrap_or_else(|| {
         provider
             .map(|provider| {
                 format!(
-                    "{} is still working through the code tour request.",
+                    "{} is still working through the guide request.",
                     provider.label()
                 )
             })
             .unwrap_or_else(|| {
-                "The selected provider is still working through the code tour request.".to_string()
+                "The selected provider is still working through the guide request.".to_string()
             })
     });
 
@@ -1687,14 +1702,19 @@ fn render_tour_progress_log(progress_log: &[String]) -> impl IntoElement {
         }))
 }
 
-fn render_note_panel(title: &str, items: &[String]) -> impl IntoElement {
-    nested_panel()
+fn render_note_section(title: &str, items: &[String]) -> impl IntoElement {
+    div()
+        .mt(px(16.0))
+        .pt(px(16.0))
+        .border_t(px(1.0))
+        .border_color(border_muted())
         .child(
             div()
                 .flex()
                 .items_center()
                 .justify_between()
-                .mb(px(12.0))
+                .gap(px(12.0))
+                .flex_wrap()
                 .child(
                     div()
                         .text_size(px(14.0))
@@ -1706,14 +1726,31 @@ fn render_note_panel(title: &str, items: &[String]) -> impl IntoElement {
         )
         .child(
             div()
+                .mt(px(12.0))
                 .flex()
                 .flex_col()
-                .gap(px(8.0))
+                .gap(px(10.0))
                 .children(items.iter().map(|item| {
                     div()
-                        .text_size(px(13.0))
-                        .text_color(fg_default())
-                        .child(item.clone())
+                        .flex()
+                        .items_start()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .mt(px(6.0))
+                                .w(px(4.0))
+                                .h(px(4.0))
+                                .rounded(px(999.0))
+                                .bg(fg_subtle()),
+                        )
+                        .child(
+                            div()
+                                .flex_grow()
+                                .min_w_0()
+                                .text_size(px(13.0))
+                                .text_color(fg_default())
+                                .child(item.clone()),
+                        )
                 })),
         )
 }
@@ -1721,61 +1758,88 @@ fn render_note_panel(title: &str, items: &[String]) -> impl IntoElement {
 fn render_overview_card(
     detail: &github::PullRequestDetail,
     overview_step: Option<&TourStep>,
+    open_questions: &[String],
+    warnings: &[String],
 ) -> impl IntoElement {
-    let Some(overview_step) = overview_step else {
-        return panel_state_text("No overview step is available yet.").into_any_element();
-    };
+    let mut panel = nested_panel();
 
-    nested_panel()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .mb(px(14.0))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .child(eyebrow("Whole changeset"))
-                        .child(
-                            div()
-                                .text_size(px(20.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(fg_emphasis())
-                                .child(overview_step.title.clone()),
-                        ),
-                )
-                .child(badge(&overview_step.badge)),
-        )
-        .child(
-            div()
-                .text_size(px(13.0))
-                .text_color(fg_default())
-                .child(overview_step.summary.clone()),
-        )
-        .child(
-            div()
-                .text_size(px(12.0))
-                .text_color(fg_muted())
-                .mt(px(10.0))
-                .child(overview_step.detail.clone()),
-        )
-        .child(
-            div()
-                .flex()
-                .gap(px(8.0))
-                .flex_wrap()
-                .mt(px(14.0))
-                .child(badge(&detail.author_login))
-                .child(badge(&detail.base_ref_name))
-                .child(badge(&detail.head_ref_name))
-                .child(badge(&format!(
-                    "+{} / -{}",
-                    overview_step.additions, overview_step.deletions
-                ))),
-        )
-        .into_any_element()
+    if let Some(overview_step) = overview_step {
+        panel = panel
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .mb(px(14.0))
+                    .gap(px(12.0))
+                    .flex_wrap()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(eyebrow("Whole changeset"))
+                            .child(
+                                div()
+                                    .text_size(px(20.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(fg_emphasis())
+                                    .child(overview_step.title.clone()),
+                            ),
+                    )
+                    .child(badge(&overview_step.badge)),
+            )
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(fg_default())
+                    .child(overview_step.summary.clone()),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(fg_muted())
+                    .mt(px(10.0))
+                    .child(overview_step.detail.clone()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(8.0))
+                    .flex_wrap()
+                    .mt(px(14.0))
+                    .child(badge(&detail.author_login))
+                    .child(badge(&detail.base_ref_name))
+                    .child(badge(&detail.head_ref_name))
+                    .child(badge(&format!(
+                        "+{} / -{}",
+                        overview_step.additions, overview_step.deletions
+                    ))),
+            );
+    } else {
+        panel = panel
+            .child(eyebrow("Whole changeset"))
+            .child(
+                div()
+                    .text_size(px(20.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(fg_emphasis())
+                    .child("Overview unavailable"),
+            )
+            .child(
+                div()
+                    .mt(px(10.0))
+                    .child(panel_state_text("No overview step is available yet.")),
+            );
+    }
+
+    if !open_questions.is_empty() {
+        panel = panel.child(render_note_section("Open Questions", open_questions));
+    }
+    if !warnings.is_empty() {
+        panel = panel.child(render_note_section("Warnings", warnings));
+    }
+
+    panel.into_any_element()
 }
 
 fn render_section_card(
@@ -1800,237 +1864,320 @@ fn render_section_card(
     let state_for_open = state.clone();
     let state_for_toggle = state.clone();
 
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(16.0))
+    nested_panel()
         .child(
-            nested_panel()
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .mb(px(14.0))
+                .gap(px(12.0))
+                .flex_wrap()
                 .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .mb(px(14.0))
-                        .child(
-                            div().flex().flex_col().child(eyebrow("Section")).child(
-                                div()
-                                    .text_size(px(20.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(fg_emphasis())
-                                    .child(section.title.clone()),
-                            ),
-                        )
-                        .child(badge(&section.badge)),
+                    div().flex().flex_col().child(eyebrow("Section")).child(
+                        div()
+                            .text_size(px(20.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(fg_emphasis())
+                            .child(section.title.clone()),
+                    ),
                 )
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .text_color(fg_default())
-                        .child(section.summary.clone()),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(fg_muted())
-                        .mt(px(10.0))
-                        .child(section.detail.clone()),
-                ),
+                .child(badge(&section.badge)),
+        )
+        .child(
+            div()
+                .text_size(px(13.0))
+                .text_color(fg_default())
+                .child(section.summary.clone()),
+        )
+        .child(
+            div()
+                .text_size(px(12.0))
+                .text_color(fg_muted())
+                .mt(px(10.0))
+                .child(section.detail.clone()),
         )
         .when(!section.review_points.is_empty(), |el| {
-            el.child(render_note_panel("Review Focus", &section.review_points))
+            el.child(render_note_section("Review Focus", &section.review_points))
         })
-        .children(section_steps.into_iter().map(move |step| {
-            let explanation_key = build_tour_panel_key(&step.id, "explanation");
-            let changeset_key = build_tour_panel_key(&step.id, "changeset");
-            let explanation_collapsed = state
-                .read(cx)
-                .collapsed_tour_panels
-                .contains(&explanation_key);
-            let changeset_collapsed = state
-                .read(cx)
-                .collapsed_tour_panels
-                .contains(&changeset_key);
+        .when(!section_steps.is_empty(), |el| {
+            let file_label = if section_steps.len() == 1 {
+                "Changed file"
+            } else {
+                "Changed files"
+            };
 
-            let open_state = state_for_open.clone();
-            let toggle_state = state_for_toggle.clone();
-            let open_step = step.clone();
-
-            nested_panel()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .mb(px(12.0))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .child(eyebrow("Changed file"))
-                                .child(
-                                    div()
-                                        .text_size(px(16.0))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(fg_emphasis())
-                                        .child(step.title.clone()),
-                                ),
-                        )
-                        .child(badge(&step.badge)),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(8.0))
-                        .flex_wrap()
-                        .mb(px(12.0))
-                        .child(ghost_button("Open in Files", {
-                            move |_, window, cx| {
-                                open_step_in_files(&open_state, &open_step, window, cx);
-                            }
-                        }))
-                        .child(ghost_button(
-                            if explanation_collapsed {
-                                "Show explanation"
-                            } else {
-                                "Hide explanation"
-                            },
-                            {
-                                let panel_key = explanation_key.clone();
-                                let state = toggle_state.clone();
-                                move |_, _, cx| toggle_tour_panel(&state, &panel_key, cx)
-                            },
-                        ))
-                        .child(ghost_button(
-                            if changeset_collapsed {
-                                "Show changeset"
-                            } else {
-                                "Hide changeset"
-                            },
-                            {
-                                let panel_key = changeset_key.clone();
-                                let state = toggle_state.clone();
-                                move |_, _, cx| toggle_tour_panel(&state, &panel_key, cx)
-                            },
-                        )),
-                )
-                .when(!explanation_collapsed, |el| {
-                    el.child(
-                        div()
-                            .text_size(px(13.0))
-                            .text_color(fg_default())
-                            .child(step.summary.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(fg_muted())
-                            .mt(px(8.0))
-                            .child(step.detail.clone()),
-                    )
-                })
-                .when(!changeset_collapsed, |el| {
-                    el.child(
-                        div()
-                            .flex()
-                            .gap(px(8.0))
-                            .flex_wrap()
-                            .mt(px(12.0))
-                            .mb(px(12.0))
-                            .child(badge(step.file_path.as_deref().unwrap_or("file")))
-                            .child(badge(&format!("+{}", step.additions)))
-                            .child(badge(&format!("-{}", step.deletions)))
-                            .child(badge(&format!(
-                                "{} unresolved thread{}",
-                                step.unresolved_thread_count,
-                                if step.unresolved_thread_count == 1 {
-                                    ""
-                                } else {
-                                    "s"
-                                }
-                            ))),
-                    )
-                    .child(render_tour_diff_file(
-                        state,
-                        detail,
-                        &step.id,
-                        step.file_path.as_deref(),
-                        step.snippet.as_deref(),
-                        step.anchor.as_ref(),
-                        cx,
-                    ))
-                })
-        }))
-        .when(!section.callsites.is_empty(), |el| {
             el.child(
-                nested_panel()
+                div()
+                    .mt(px(16.0))
+                    .pt(px(16.0))
+                    .border_t(px(1.0))
+                    .border_color(border_muted())
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .justify_between()
-                            .mb(px(12.0))
+                            .gap(px(12.0))
+                            .flex_wrap()
                             .child(
                                 div()
                                     .text_size(px(14.0))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(fg_emphasis())
-                                    .child("Callsites"),
+                                    .child(file_label),
                             )
-                            .child(badge(&section.callsites.len().to_string())),
+                            .child(badge(&section_steps.len().to_string())),
                     )
-                    .child(div().flex().flex_col().gap(px(12.0)).children(
-                        section.callsites.iter().map(|callsite| {
-                            div()
-                                .p(px(14.0))
-                                .rounded(radius())
-                                .bg(bg_surface())
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .gap(px(8.0))
-                                        .child(
-                                            div()
-                                                .text_size(px(13.0))
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(fg_emphasis())
-                                                .child(callsite.title.clone()),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_size(px(11.0))
-                                                .font_family("Fira Code")
-                                                .text_color(fg_muted())
-                                                .child(format!(
-                                                    "{}{}",
-                                                    callsite.path,
-                                                    callsite
-                                                        .line
-                                                        .map(|line| format!(":{line}"))
-                                                        .unwrap_or_default()
-                                                )),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(12.0))
-                                        .text_color(fg_muted())
-                                        .mt(px(8.0))
-                                        .child(callsite.summary.clone()),
-                                )
-                                .when(
-                                    callsite.snippet.is_some() || callsite.line.is_some(),
-                                    |el| {
-                                        el.child(render_tour_callsite_snippet(state, callsite, cx))
-                                    },
-                                )
-                        }),
-                    )),
+                    .child(
+                        div().mt(px(14.0)).flex().flex_col().children(
+                            section_steps
+                                .into_iter()
+                                .enumerate()
+                                .map(move |(index, step)| {
+                                    render_tour_step_row(
+                                        &state_for_open,
+                                        &state_for_toggle,
+                                        detail,
+                                        step,
+                                        index > 0,
+                                        cx,
+                                    )
+                                }),
+                        ),
+                    ),
             )
         })
+        .when(!section.callsites.is_empty(), |el| {
+            el.child(render_callsites_section(state, &section.callsites, cx))
+        })
         .into_any_element()
+}
+
+fn render_tour_step_row(
+    open_state: &Entity<AppState>,
+    toggle_state: &Entity<AppState>,
+    detail: &github::PullRequestDetail,
+    step: TourStep,
+    show_divider: bool,
+    cx: &App,
+) -> impl IntoElement {
+    let explanation_key = build_tour_panel_key(&step.id, "explanation");
+    let changeset_key = build_tour_panel_key(&step.id, "changeset");
+    let explanation_collapsed = open_state
+        .read(cx)
+        .collapsed_tour_panels
+        .contains(&explanation_key);
+    let changeset_collapsed = open_state
+        .read(cx)
+        .collapsed_tour_panels
+        .contains(&changeset_key);
+    let has_body = !explanation_collapsed || !changeset_collapsed;
+
+    let open_state = open_state.clone();
+    let toggle_state = toggle_state.clone();
+    let open_step = step.clone();
+
+    div()
+        .when(show_divider, |el| {
+            el.mt(px(16.0))
+                .pt(px(16.0))
+                .border_t(px(1.0))
+                .border_color(border_muted())
+        })
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .justify_between()
+                .gap(px(12.0))
+                .flex_wrap()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.0))
+                        .child(eyebrow("Changed file"))
+                        .child(
+                            div()
+                                .text_size(px(16.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(fg_emphasis())
+                                .child(step.title.clone()),
+                        ),
+                )
+                .child(badge(&step.badge)),
+        )
+        .child(
+            div()
+                .flex()
+                .gap(px(8.0))
+                .flex_wrap()
+                .mt(px(10.0))
+                .when(has_body, |el| el.mb(px(12.0)))
+                .child(ghost_button("Open in Files", {
+                    move |_, window, cx| {
+                        open_step_in_files(&open_state, &open_step, window, cx);
+                    }
+                }))
+                .child(ghost_button(
+                    if explanation_collapsed {
+                        "Show explanation"
+                    } else {
+                        "Hide explanation"
+                    },
+                    {
+                        let panel_key = explanation_key.clone();
+                        let state = toggle_state.clone();
+                        move |_, _, cx| toggle_tour_panel(&state, &panel_key, cx)
+                    },
+                ))
+                .child(ghost_button(
+                    if changeset_collapsed {
+                        "Show changeset"
+                    } else {
+                        "Hide changeset"
+                    },
+                    {
+                        let panel_key = changeset_key.clone();
+                        let state = toggle_state.clone();
+                        move |_, _, cx| toggle_tour_panel(&state, &panel_key, cx)
+                    },
+                )),
+        )
+        .when(!explanation_collapsed, |el| {
+            el.child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(fg_default())
+                    .child(step.summary.clone()),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(fg_muted())
+                    .mt(px(8.0))
+                    .child(step.detail.clone()),
+            )
+        })
+        .when(!changeset_collapsed, |el| {
+            el.child(
+                div()
+                    .flex()
+                    .gap(px(8.0))
+                    .flex_wrap()
+                    .mt(px(12.0))
+                    .mb(px(12.0))
+                    .child(badge(step.file_path.as_deref().unwrap_or("file")))
+                    .child(badge(&format!("+{}", step.additions)))
+                    .child(badge(&format!("-{}", step.deletions)))
+                    .child(badge(&format!(
+                        "{} unresolved thread{}",
+                        step.unresolved_thread_count,
+                        if step.unresolved_thread_count == 1 {
+                            ""
+                        } else {
+                            "s"
+                        }
+                    ))),
+            )
+            .child(render_tour_diff_file(
+                &toggle_state,
+                detail,
+                &step.id,
+                step.file_path.as_deref(),
+                step.snippet.as_deref(),
+                step.anchor.as_ref(),
+                cx,
+            ))
+        })
+}
+
+fn render_callsites_section(
+    state: &Entity<AppState>,
+    callsites: &[TourCallsite],
+    cx: &App,
+) -> impl IntoElement {
+    div()
+        .mt(px(16.0))
+        .pt(px(16.0))
+        .border_t(px(1.0))
+        .border_color(border_muted())
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(12.0))
+                .flex_wrap()
+                .child(
+                    div()
+                        .text_size(px(14.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg_emphasis())
+                        .child("Callsites"),
+                )
+                .child(badge(&callsites.len().to_string())),
+        )
+        .child(
+            div().mt(px(14.0)).flex().flex_col().children(
+                callsites.iter().enumerate().map(|(index, callsite)| {
+                    render_tour_callsite_row(state, callsite, index > 0, cx)
+                }),
+            ),
+        )
+}
+
+fn render_tour_callsite_row(
+    state: &Entity<AppState>,
+    callsite: &TourCallsite,
+    show_divider: bool,
+    cx: &App,
+) -> impl IntoElement {
+    div()
+        .when(show_divider, |el| {
+            el.mt(px(12.0))
+                .pt(px(12.0))
+                .border_t(px(1.0))
+                .border_color(border_muted())
+        })
+        .child(
+            div()
+                .text_size(px(13.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_emphasis())
+                .child(callsite.title.clone()),
+        )
+        .child(
+            div()
+                .mt(px(4.0))
+                .text_size(px(11.0))
+                .font_family("Fira Code")
+                .text_color(fg_muted())
+                .child(callsite_location_label(callsite)),
+        )
+        .child(
+            div()
+                .text_size(px(12.0))
+                .text_color(fg_muted())
+                .mt(px(8.0))
+                .child(callsite.summary.clone()),
+        )
+        .when(
+            callsite.snippet.is_some() || callsite.line.is_some(),
+            |el| el.child(render_tour_callsite_snippet(state, callsite, cx)),
+        )
+}
+
+fn callsite_location_label(callsite: &TourCallsite) -> String {
+    format!(
+        "{}{}",
+        callsite.path,
+        callsite
+            .line
+            .map(|line| format!(":{line}"))
+            .unwrap_or_default()
+    )
 }
 
 const DEFAULT_CALLSITE_EXCERPT_LINE_COUNT: usize = 6;

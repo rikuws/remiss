@@ -5,6 +5,9 @@ use std::path::PathBuf;
 use gpui::{AssetSource, Result, SharedString};
 
 pub const APP_LOGO_ASSET: &str = "brand/logo.png";
+pub const OVERVIEW_OPEN_PULL_REQUESTS_ASSET: &str = "icons/overview-open-pull-requests.svg";
+pub const OVERVIEW_MY_PULL_REQUESTS_ASSET: &str = "icons/overview-my-pull-requests.svg";
+pub const OVERVIEW_REVIEW_REQUESTS_ASSET: &str = "icons/overview-review-requests.svg";
 
 pub struct AppAssets {
     base: PathBuf,

@@ -1,6 +1,10 @@
 use gpui::prelude::*;
 use gpui::*;
 
+use crate::app_assets::{
+    OVERVIEW_MY_PULL_REQUESTS_ASSET, OVERVIEW_OPEN_PULL_REQUESTS_ASSET,
+    OVERVIEW_REVIEW_REQUESTS_ASSET,
+};
 use crate::github;
 use crate::state::*;
 use crate::theme::*;
@@ -27,6 +31,7 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let is_auth = s.is_authenticated();
     let review_count = s.review_queue().map(|q| q.total_count).unwrap_or(0);
     let authored_count = s.authored_queue().map(|q| q.total_count).unwrap_or(0);
+    let open_tab_count = s.open_tabs.len() as i64;
     let review_items: Vec<_> = s
         .review_queue()
         .map(|q| q.items.clone())
@@ -34,104 +39,210 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let workspace_loading = s.workspace_loading;
     let workspace_syncing = s.workspace_syncing;
     let workspace_error = s.workspace_error.clone();
+    let first_open_tab = s.open_tabs.first().cloned();
+
+    let summary_title = if is_auth {
+        format!("Welcome back, {viewer_name}")
+    } else {
+        "Connect GitHub".to_string()
+    };
+    let queue_copy = if workspace_loading {
+        "Loading the latest review requests from the workspace snapshot.".to_string()
+    } else if workspace_error.is_some() {
+        "Workspace sync needs attention before the queue can refresh.".to_string()
+    } else if is_auth {
+        "Pull requests currently waiting on your attention.".to_string()
+    } else {
+        "Authenticate with gh to populate the review queue.".to_string()
+    };
 
     let sync_state = state.clone();
+    let state_for_open_pull_requests = state.clone();
+    let state_for_authored = state.clone();
+    let state_for_review_requests = state.clone();
     let state_for_items = state.clone();
+    let state_for_review_board = state.clone();
 
     div()
-        .p(px(40.0))
-        .px(px(48.0))
+        .p(px(28.0))
+        .px(px(40.0))
         .flex()
         .flex_col()
         .flex_grow()
         .min_h_0()
         .id("overview-scroll")
         .overflow_y_scroll()
-        .gap(px(24.0))
-        .max_w(px(960.0))
-        // Hero panel
         .child(
-            panel().child(
+            div().w_full().flex().justify_center().child(
                 div()
-                    .p(px(28.0))
-                    .px(px(32.0))
+                    .w_full()
+                    .min_w_0()
+                    .max_w(px(1040.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(24.0))
                     .child(
-                        div()
-                            .text_size(px(24.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(fg_emphasis())
-                            .child(if is_auth {
-                                format!("Welcome back, {viewer_name}")
-                            } else {
-                                "Connect GitHub through gh".to_string()
-                            }),
-                    )
-                    // Stat cards
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(16.0))
-                            .mt(px(24.0))
-                            .child(stat_card(authored_count, "Open Pull Requests"))
-                            .child(stat_card(review_count, "Review Requests")),
-                    ),
-            ),
-        )
-        // Recent PRs panel
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .mb(px(16.0))
-                        .px(px(4.0))
-                        .child(
+                        div().w_full().min_w_0().child(
                             div()
-                                .text_size(px(15.0))
+                                .text_size(px(40.0))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(fg_emphasis())
-                                .child("Recent Pull Requests"),
-                        )
-                        .child(ghost_button(
-                            if workspace_syncing {
-                                "Syncing..."
-                            } else {
-                                "Sync workspace"
-                            },
-                            {
-                                let state = sync_state.clone();
-                                move |_, window, cx| trigger_sync_workspace(&state, window, cx)
-                            },
-                        )),
-                )
-                .when(workspace_loading, |el| {
-                    el.child(panel_state_text("Loading workspace..."))
-                })
-                .when_some(workspace_error.clone(), |el, err| {
-                    el.child(error_text(&err))
-                })
-                .when(
-                    !workspace_loading && workspace_error.is_none() && review_items.is_empty(),
-                    |el| {
-                        el.child(panel_state_text(if is_auth {
-                            "No PRs are currently requesting your review."
-                        } else {
-                            "No live review queue yet because gh is not authenticated."
-                        }))
-                    },
-                )
-                .child(div().flex().flex_col().gap(px(8.0)).children(
-                    review_items.into_iter().map(|item| {
-                        let state = state_for_items.clone();
-                        pr_list_row(item, move |summary, window, cx| {
-                            open_pull_request(&state, summary, window, cx);
-                        })
-                    }),
-                )),
+                                .child(summary_title),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_wrap()
+                            .gap(px(12.0))
+                            .child(stat_card(
+                                OVERVIEW_OPEN_PULL_REQUESTS_ASSET,
+                                "Open Pull Requests",
+                                open_tab_count,
+                                first_open_tab.is_some(),
+                                {
+                                    let state = state_for_open_pull_requests.clone();
+                                    let summary = first_open_tab.clone();
+                                    move |_, window, cx| {
+                                        if let Some(summary) = summary.clone() {
+                                            open_pull_request(&state, summary, window, cx);
+                                        }
+                                    }
+                                },
+                            ))
+                            .child(stat_card(
+                                OVERVIEW_MY_PULL_REQUESTS_ASSET,
+                                "My Pull Requests",
+                                authored_count,
+                                is_auth,
+                                {
+                                    let state = state_for_authored.clone();
+                                    move |_, _, cx| {
+                                        activate_queue(&state, SectionId::Pulls, "authored", cx);
+                                    }
+                                },
+                            ))
+                            .child(stat_card(
+                                OVERVIEW_REVIEW_REQUESTS_ASSET,
+                                "Review Requests",
+                                review_count,
+                                is_auth,
+                                {
+                                    let state = state_for_review_requests.clone();
+                                    move |_, _, cx| {
+                                        activate_queue(
+                                            &state,
+                                            SectionId::Reviews,
+                                            "reviewRequested",
+                                            cx,
+                                        );
+                                    }
+                                },
+                            )),
+                    )
+                    .child(
+                        panel().child(
+                            div()
+                                .p(px(20.0))
+                                .px(px(24.0))
+                                .flex()
+                                .flex_col()
+                                .gap(px(16.0))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .items_start()
+                                        .justify_between()
+                                        .gap(px(16.0))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .gap(px(4.0))
+                                                .min_w_0()
+                                                .child(eyebrow("Needs your attention"))
+                                                .child(
+                                                    div()
+                                                        .text_size(px(16.0))
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .text_color(fg_emphasis())
+                                                        .child("Recent Pull Requests"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_size(px(12.0))
+                                                        .text_color(fg_muted())
+                                                        .max_w(px(720.0))
+                                                        .child(queue_copy),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(8.0))
+                                                .flex_wrap()
+                                                .when(is_auth, |el| {
+                                                    el.child(review_button("Open review board", {
+                                                        let state = state_for_review_board.clone();
+                                                        move |_, _, cx| {
+                                                            activate_queue(
+                                                                &state,
+                                                                SectionId::Reviews,
+                                                                "reviewRequested",
+                                                                cx,
+                                                            );
+                                                        }
+                                                    }))
+                                                })
+                                                .child(ghost_button(
+                                                    if workspace_syncing {
+                                                        "Syncing..."
+                                                    } else {
+                                                        "Sync workspace"
+                                                    },
+                                                    {
+                                                        let state = sync_state.clone();
+                                                        move |_, window, cx| {
+                                                            trigger_sync_workspace(
+                                                                &state, window, cx,
+                                                            )
+                                                        }
+                                                    },
+                                                )),
+                                        ),
+                                )
+                                .when(workspace_loading, |el| {
+                                    el.child(panel_state_text("Loading review requests..."))
+                                })
+                                .when_some(workspace_error.clone(), |el, err| {
+                                    el.child(error_text(&err))
+                                })
+                                .when(
+                                    !workspace_loading
+                                        && workspace_error.is_none()
+                                        && review_items.is_empty(),
+                                    |el| {
+                                        el.child(panel_state_text(if is_auth {
+                                            "No pull requests are currently requesting your review."
+                                        } else {
+                                            "Authenticate with gh to populate the review queue."
+                                        }))
+                                    },
+                                )
+                                .child(div().flex().flex_col().gap(px(10.0)).children(
+                                    review_items.into_iter().map(|item| {
+                                        let state = state_for_items.clone();
+                                        pr_list_row(item, move |summary, window, cx| {
+                                            open_pull_request(&state, summary, window, cx);
+                                        })
+                                    }),
+                                )),
+                        ),
+                    ),
+            ),
         )
 }
 
@@ -489,11 +600,21 @@ fn render_issues(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
 // --- Shared components ---
 
 pub fn panel() -> Div {
-    div().rounded(radius()).bg(bg_surface()).overflow_hidden()
+    div()
+        .rounded(radius())
+        .bg(bg_surface())
+        .border_1()
+        .border_color(border_muted())
+        .overflow_hidden()
 }
 
 pub fn nested_panel() -> Div {
-    div().p(px(20.0)).rounded(radius()).bg(bg_overlay())
+    div()
+        .p(px(18.0))
+        .rounded(radius())
+        .bg(bg_overlay())
+        .border_1()
+        .border_color(border_muted())
 }
 
 pub fn eyebrow(text: &str) -> impl IntoElement {
@@ -546,7 +667,7 @@ pub fn badge(text: &str) -> impl IntoElement {
     div()
         .px(px(10.0))
         .py(px(3.0))
-        .rounded(px(16.0))
+        .rounded(px(999.0))
         .bg(bg_subtle())
         .text_size(px(12.0))
         .font_weight(FontWeight::MEDIUM)
@@ -558,7 +679,7 @@ pub fn badge_success(text: &str) -> impl IntoElement {
     div()
         .px(px(10.0))
         .py(px(3.0))
-        .rounded(px(16.0))
+        .rounded(px(999.0))
         .bg(success_muted())
         .text_size(px(12.0))
         .font_weight(FontWeight::MEDIUM)
@@ -620,55 +741,62 @@ pub fn meta_row(label: &str, value: &str) -> impl IntoElement {
         )
 }
 
-fn stat_card(count: i64, label: &str) -> impl IntoElement {
-    let abbrev: String = label
-        .split_whitespace()
-        .filter_map(|w| w.chars().next())
-        .take(2)
-        .collect::<String>()
-        .to_uppercase();
-
+fn stat_card(
+    icon_asset: &str,
+    label: &str,
+    count: i64,
+    interactive: bool,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
     div()
         .flex()
-        .items_center()
-        .gap(px(16.0))
-        .p(px(20.0))
-        .px(px(24.0))
-        .rounded(radius())
-        .bg(bg_overlay())
         .flex_1()
+        .min_w(px(240.0))
+        .items_center()
+        .gap(px(14.0))
+        .p(px(16.0))
+        .px(px(18.0))
+        .min_h(px(84.0))
+        .rounded(px(18.0))
+        .bg(bg_overlay())
+        .when(interactive, |el| {
+            el.cursor_pointer()
+                .hover(|style| style.bg(hover_bg()))
+                .on_mouse_down(MouseButton::Left, on_click)
+        })
         .child(
             div()
-                .w(px(40.0))
-                .h(px(40.0))
-                .rounded(radius())
-                .bg(bg_emphasis())
-                .flex_shrink_0()
+                .w(px(24.0))
+                .h(px(24.0))
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_color(fg_default())
-                .text_size(px(14.0))
-                .font_weight(FontWeight::BOLD)
-                .font_family("Fira Code")
-                .child(abbrev),
+                .flex_shrink_0()
+                .child(
+                    svg()
+                        .path(icon_asset.to_string())
+                        .size(px(22.0))
+                        .text_color(fg_muted()),
+                ),
         )
         .child(
             div()
                 .flex()
                 .flex_col()
+                .gap(px(2.0))
+                .min_w_0()
                 .child(
                     div()
-                        .text_size(px(24.0))
+                        .text_size(px(20.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(fg_emphasis())
-                        .font_family("Fira Code")
                         .child(count.to_string()),
                 )
                 .child(
                     div()
-                        .text_size(px(12.0))
-                        .text_color(fg_muted())
+                        .text_size(px(14.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(fg_default())
                         .child(label.to_string()),
                 ),
         )
@@ -704,13 +832,11 @@ fn filter_pill(
         )
 }
 
-fn pill_badge(label: &str, fg: Rgba, bg: Rgba, border: Rgba) -> impl IntoElement {
+fn pill_badge(label: &str, fg: Rgba, bg: Rgba, _border: Rgba) -> impl IntoElement {
     div()
         .px(px(8.0))
         .py(px(2.0))
         .rounded(px(999.0))
-        .border_1()
-        .border_color(border)
         .bg(bg)
         .text_size(px(10.0))
         .font_weight(FontWeight::MEDIUM)
@@ -823,9 +949,10 @@ fn pr_list_row(
     let summary = item.clone();
 
     div()
-        .p(px(16.0))
-        .rounded(radius())
-        .bg(bg_surface())
+        .w_full()
+        .p(px(14.0))
+        .rounded(radius_sm())
+        .bg(bg_overlay())
         .border_1()
         .border_color(border_muted())
         .cursor_pointer()
@@ -849,7 +976,7 @@ fn pr_list_row(
                         .gap(px(8.0))
                         .child(
                             div()
-                                .text_size(px(11.0))
+                                .text_size(px(10.0))
                                 .font_family("Fira Code")
                                 .text_color(fg_subtle())
                                 .child(repo_ref),
@@ -858,7 +985,7 @@ fn pr_list_row(
                             div()
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(fg_emphasis())
-                                .text_size(px(15.0))
+                                .text_size(px(14.0))
                                 .line_clamp(2)
                                 .child(title),
                         )
@@ -898,7 +1025,7 @@ fn kanban_lane(
     let mute_repo = lane_id.to_string();
 
     div()
-        .w(px(300.0))
+        .w(px(286.0))
         .flex_shrink_0()
         .flex()
         .flex_col()
@@ -911,22 +1038,22 @@ fn kanban_lane(
                 .flex_grow()
                 .rounded(radius())
                 .bg(bg_surface())
+                .border_1()
+                .border_color(border_muted())
                 .overflow_hidden()
-                // Accent bar
-                .child(div().h(px(3.0)).bg(accent).w_full())
-                // Lane header
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .justify_between()
-                        .p(px(16.0))
-                        .pb(px(4.0))
+                        .p(px(14.0))
+                        .pb(px(8.0))
                         .child(
                             div()
                                 .flex()
                                 .items_center()
                                 .gap(px(10.0))
+                                .child(div().w(px(6.0)).h(px(24.0)).rounded(radius_sm()).bg(accent))
                                 .child(
                                     div()
                                         .text_size(px(14.0))
@@ -966,17 +1093,15 @@ fn kanban_lane(
                             )
                         }),
                 )
-                // Subtitle
                 .child(
                     div()
-                        .px(px(16.0))
-                        .pb(px(12.0))
+                        .px(px(14.0))
+                        .pb(px(10.0))
                         .text_size(px(11.0))
                         .text_color(fg_subtle())
                         .font_family("Fira Code")
                         .child(subtitle),
                 )
-                // Cards
                 .child(
                     div()
                         .flex_grow()
@@ -985,7 +1110,7 @@ fn kanban_lane(
                         .overflow_y_scroll()
                         .px(px(8.0))
                         .pb(px(8.0))
-                        .child(div().flex().flex_col().gap(px(6.0)).children(
+                        .child(div().flex().flex_col().gap(px(4.0)).children(
                             items.into_iter().map(|item| {
                                 let state = state.clone();
                                 kanban_card(item, move |summary, window, cx| {
@@ -1023,8 +1148,8 @@ fn kanban_card(
     let summary = item.clone();
 
     div()
-        .p(px(14.0))
-        .rounded(radius())
+        .p(px(12.0))
+        .rounded(radius_sm())
         .bg(bg_overlay())
         .border_1()
         .border_color(border_muted())
@@ -1043,7 +1168,7 @@ fn kanban_card(
                         .flex()
                         .items_start()
                         .justify_between()
-                        .gap(px(12.0))
+                        .gap(px(10.0))
                         .child(
                             div()
                                 .flex_grow()
@@ -1053,7 +1178,7 @@ fn kanban_card(
                                 .gap(px(4.0))
                                 .child(
                                     div()
-                                        .text_size(px(13.0))
+                                        .text_size(px(14.0))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(fg_emphasis())
                                         .line_clamp(2)
@@ -1061,7 +1186,7 @@ fn kanban_card(
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(11.0))
+                                        .text_size(px(10.0))
                                         .font_family("Fira Code")
                                         .text_color(fg_muted())
                                         .child(meta),
@@ -1122,6 +1247,19 @@ fn muted_repo_pill(
         )
 }
 
+fn activate_queue(state: &Entity<AppState>, section: SectionId, queue_id: &str, cx: &mut App) {
+    state.update(cx, |s, cx| {
+        s.active_section = section;
+        s.active_surface = PullRequestSurface::Overview;
+        s.active_queue_id = queue_id.to_string();
+        s.active_pr_key = None;
+        s.palette_open = false;
+        s.palette_selected_index = 0;
+        s.pr_header_compact = false;
+        cx.notify();
+    });
+}
+
 pub fn open_pull_request(
     state: &Entity<AppState>,
     summary: github::PullRequestSummary,
@@ -1148,8 +1286,10 @@ pub fn open_pull_request(
         s.active_surface = PullRequestSurface::Overview;
         s.active_pr_key = Some(key.clone());
         s.palette_open = false;
+        s.palette_selected_index = 0;
         s.selected_diff_anchor = None;
         s.review_body.clear();
+        s.review_editor_active = false;
         s.review_message = None;
         s.review_success = false;
         s.pr_header_compact = false;

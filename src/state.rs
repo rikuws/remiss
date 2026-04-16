@@ -259,6 +259,7 @@ pub struct AppState {
     // Review form
     pub review_action: ReviewAction,
     pub review_body: String,
+    pub review_editor_active: bool,
     pub review_loading: bool,
     pub review_message: Option<String>,
     pub review_success: bool,
@@ -267,6 +268,7 @@ pub struct AppState {
     // Command palette
     pub palette_open: bool,
     pub palette_query: String,
+    pub palette_selected_index: usize,
 
     // Code tours
     pub code_tour_provider_statuses: Vec<CodeTourProviderStatus>,
@@ -308,12 +310,14 @@ impl AppState {
             diff_view_states: RefCell::new(std::collections::HashMap::new()),
             review_action: ReviewAction::Comment,
             review_body: String::new(),
+            review_editor_active: false,
             review_loading: false,
             review_message: None,
             review_success: false,
             pr_header_compact: false,
             palette_open: false,
             palette_query: String::new(),
+            palette_selected_index: 0,
             code_tour_provider_statuses: Vec::new(),
             code_tour_provider_statuses_loaded: false,
             code_tour_provider_loading: false,
