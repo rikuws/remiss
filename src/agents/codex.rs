@@ -180,7 +180,9 @@ fn finalize_turn(
     on_progress(make_progress(
         "finalizing",
         "Codex finished the draft",
-        Some("Parsing the structured response and merging it into the final code tour.".to_string()),
+        Some(
+            "Parsing the structured response and merging it into the final code tour.".to_string(),
+        ),
         Some("Finalizing Codex output".to_string()),
     ));
 
@@ -351,7 +353,10 @@ fn handle_notification(
             let _ = progress_tx.send(make_progress(
                 "turn",
                 "Codex is inspecting the change",
-                Some("Walking the changed files and related callsites from the checkout.".to_string()),
+                Some(
+                    "Walking the changed files and related callsites from the checkout."
+                        .to_string(),
+                ),
                 Some("Inspecting the changed files".to_string()),
             ));
             outcome.last_visible_activity = Some("Inspecting the changed files".to_string());
@@ -588,9 +593,7 @@ async fn handle_request(
             let _ = progress_tx.send(make_progress(
                 "tool_failed",
                 "Codex requested a file change that is not allowed",
-                Some(
-                    "Tours never edit files; the change was declined automatically.".to_string(),
-                ),
+                Some("Tours never edit files; the change was declined automatically.".to_string()),
                 Some("Declined a Codex file change approval".to_string()),
             ));
             let response = FileChangeApprovalResponse {

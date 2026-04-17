@@ -198,11 +198,16 @@ pub fn merge_tour(
         }
     }
 
-    for section in
-        build_fallback_sections(&input.candidate_groups, &merged_steps_by_id, &mut used_step_ids)
-    {
+    for section in build_fallback_sections(
+        &input.candidate_groups,
+        &merged_steps_by_id,
+        &mut used_step_ids,
+    ) {
         let next_id = format!("section:{}", merged_sections.len() + 1);
-        merged_sections.push(TourSection { id: next_id, ..section });
+        merged_sections.push(TourSection {
+            id: next_id,
+            ..section
+        });
     }
 
     let mut merged_steps: Vec<TourStep> = Vec::new();
@@ -583,9 +588,7 @@ fn format_iso_timestamp(millis: i64) -> String {
     let total_seconds = millis / 1000;
     let millis_part = millis.rem_euclid(1000);
     let (year, month, day, hour, minute, second) = seconds_to_calendar(total_seconds);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis_part:03}Z"
-    )
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis_part:03}Z")
 }
 
 fn seconds_to_calendar(mut epoch_seconds: i64) -> (i32, u32, u32, u32, u32, u32) {
@@ -611,7 +614,20 @@ fn seconds_to_calendar(mut epoch_seconds: i64) -> (i32, u32, u32, u32, u32, u32)
         }
     }
 
-    let month_lengths = [31u32, if is_leap(year) { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let month_lengths = [
+        31u32,
+        if is_leap(year) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut month: u32 = 1;
     let mut day_of_year = days as u32;
     for (index, length) in month_lengths.iter().enumerate() {

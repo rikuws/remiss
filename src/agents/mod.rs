@@ -37,8 +37,9 @@ pub fn load_all_statuses() -> Vec<CodeTourProviderStatus> {
         .iter()
         .map(|provider| {
             let backend = backend_for(*provider);
-            backend.status().unwrap_or_else(|error| {
-                CodeTourProviderStatus {
+            backend
+                .status()
+                .unwrap_or_else(|error| CodeTourProviderStatus {
                     provider: *provider,
                     label: provider.label().to_string(),
                     available: false,
@@ -46,8 +47,7 @@ pub fn load_all_statuses() -> Vec<CodeTourProviderStatus> {
                     message: error.clone(),
                     detail: error,
                     default_model: None,
-                }
-            })
+                })
         })
         .collect()
 }

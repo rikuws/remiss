@@ -3,7 +3,8 @@ use serde_json::{json, Value};
 
 use crate::code_tour::{
     CodeTourCandidateGroup, CodeTourFileContext, CodeTourReviewCommentContext,
-    CodeTourReviewContext, CodeTourReviewThreadContext, DiffAnchor, GenerateCodeTourInput, TourStep,
+    CodeTourReviewContext, CodeTourReviewThreadContext, DiffAnchor, GenerateCodeTourInput,
+    TourStep,
 };
 
 use super::schema::TOUR_OUTPUT_SCHEMA_JSON;
@@ -52,8 +53,7 @@ pub fn build_tour_prompt(input: &GenerateCodeTourInput) -> String {
         &serde_json::from_str::<Value>(TOUR_OUTPUT_SCHEMA_JSON).expect("schema must parse"),
     )
     .expect("schema must serialize");
-    let context_pretty =
-        serde_json::to_string_pretty(&context).expect("context must serialize");
+    let context_pretty = serde_json::to_string_pretty(&context).expect("context must serialize");
 
     let mut lines: Vec<String> = BASE_INSTRUCTIONS.iter().map(|s| (*s).to_string()).collect();
     lines.push(String::new());

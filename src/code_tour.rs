@@ -890,4 +890,3 @@ fn now_ms() -> i64 {
         .map(|duration| duration.as_millis() as i64)
         .unwrap_or_default()
 }
-

@@ -86,7 +86,9 @@ fn unwrap_markdown_fence(value: &str) -> &str {
     }
 
     let after_opener = trimmed.trim_start_matches('`');
-    let after_opener = after_opener.trim_start_matches("json").trim_start_matches('\n');
+    let after_opener = after_opener
+        .trim_start_matches("json")
+        .trim_start_matches('\n');
     if let Some(end) = after_opener.rfind("```") {
         after_opener[..end].trim()
     } else {
