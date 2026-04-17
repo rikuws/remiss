@@ -204,20 +204,41 @@ fn feedback_location_label(
 }
 
 fn summarize_feedback_preview(comment: &PullRequestReviewComment) -> String {
-    let collapsed = comment
-        .body
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    if collapsed.is_empty() {
+    truncate_markdown_preview(&comment.body, 320)
+}
+
+fn truncate_markdown_preview(body: &str, limit: usize) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
         return "No comment body.".to_string();
     }
 
-    let mut preview = collapsed.chars().take(160).collect::<String>();
-    if collapsed.chars().count() > 160 {
-        preview.push('…');
+    let mut collapsed = String::with_capacity(trimmed.len());
+    let mut blank_run = 0usize;
+    for line in trimmed.lines() {
+        if line.trim().is_empty() {
+            blank_run += 1;
+            if blank_run <= 1 {
+                collapsed.push('\n');
+            }
+        } else {
+            blank_run = 0;
+            if !collapsed.is_empty() && !collapsed.ends_with('\n') {
+                collapsed.push('\n');
+            }
+            collapsed.push_str(line);
+            collapsed.push('\n');
+        }
     }
-    preview
+    let collapsed = collapsed.trim_end().to_string();
+
+    if collapsed.chars().count() <= limit {
+        collapsed
+    } else {
+        let mut out: String = collapsed.chars().take(limit).collect();
+        out.push('…');
+        out
+    }
 }
 
 fn viewer_login(state: &AppState) -> Option<String> {
@@ -906,21 +927,12 @@ fn render_review_snapshot_panel(
                     danger(),
                 )),
         )
-        .child(
-            div()
-                .mt(px(18.0))
-                .flex()
-                .gap(px(16.0))
-                .flex_wrap()
-                .items_start()
-                .child(render_review_pulse_panel(review_status))
-                .child(render_thread_focus_panel(
-                    own_pr_feedback,
-                    thread_digest,
-                    is_own_pull_request,
-                    state,
-                )),
-        )
+        .child(div().mt(px(18.0)).child(render_thread_focus_panel(
+            own_pr_feedback,
+            thread_digest,
+            is_own_pull_request,
+            state,
+        )))
 }
 
 fn render_snapshot_stat(value: String, label: &str, hint: &str, color: Rgba) -> impl IntoElement {
@@ -958,53 +970,6 @@ fn render_snapshot_stat(value: String, label: &str, hint: &str, color: Rgba) -> 
         )
 }
 
-fn render_review_pulse_panel(review_status: &ReviewStatusSummary) -> impl IntoElement {
-    div()
-        .flex_1()
-        .min_w(px(240.0))
-        .p(px(16.0))
-        .rounded(radius())
-        .bg(bg_subtle())
-        .border_1()
-        .border_color(border_muted())
-        .child(eyebrow("Review pulse"))
-        .when(
-            review_status.approved.is_empty()
-                && review_status.changes_requested.is_empty()
-                && review_status.commented.is_empty()
-                && review_status.waiting.is_empty(),
-            |el| el.child(panel_state_text("No review activity yet.")),
-        )
-        .when(!review_status.approved.is_empty(), |el| {
-            el.child(render_review_status_group(
-                "Approved",
-                &review_status.approved,
-                success(),
-            ))
-        })
-        .when(!review_status.changes_requested.is_empty(), |el| {
-            el.child(render_review_status_group(
-                "Changes requested",
-                &review_status.changes_requested,
-                danger(),
-            ))
-        })
-        .when(!review_status.waiting.is_empty(), |el| {
-            el.child(render_review_status_group(
-                "Waiting",
-                &review_status.waiting,
-                fg_muted(),
-            ))
-        })
-        .when(!review_status.commented.is_empty(), |el| {
-            el.child(render_review_status_group(
-                "Commented",
-                &review_status.commented,
-                accent(),
-            ))
-        })
-}
-
 fn render_thread_focus_panel(
     own_pr_feedback: &[OwnPrFeedbackItem],
     thread_digest: &[ThreadDigestItem],
@@ -1015,8 +980,8 @@ fn render_thread_focus_panel(
         let has_more = own_pr_feedback.len() > 4;
 
         div()
-            .flex_1()
-            .min_w(px(280.0))
+            .w_full()
+            .min_w_0()
             .p(px(16.0))
             .rounded(radius())
             .bg(bg_subtle())
@@ -1056,8 +1021,8 @@ fn render_thread_focus_panel(
         let has_more = thread_digest.len() > 4;
 
         div()
-            .flex_1()
-            .min_w(px(280.0))
+            .w_full()
+            .min_w_0()
             .p(px(16.0))
             .rounded(radius())
             .bg(bg_subtle())
@@ -1159,7 +1124,7 @@ fn render_own_feedback_card(
                 .text_size(px(13.0))
                 .line_height(px(19.0))
                 .text_color(fg_default())
-                .child(item.preview.clone()),
+                .child(render_markdown(&item.preview)),
         )
         .child(
             div()
@@ -1241,7 +1206,7 @@ fn render_thread_digest_card(
                 .text_size(px(13.0))
                 .line_height(px(19.0))
                 .text_color(fg_default())
-                .child(item.preview.clone()),
+                .child(render_markdown(&item.preview)),
         )
         .child(
             div()
@@ -2554,49 +2519,6 @@ fn count_copy(count: usize, singular: &str, plural: &str) -> String {
     }
 }
 
-fn render_review_status_group(label: &str, names: &[String], color: Rgba) -> impl IntoElement {
-    div()
-        .mb(px(12.0))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(8.0))
-                .mb(px(6.0))
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(fg_emphasis())
-                        .child(label.to_string()),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .font_family("Fira Code")
-                        .text_color(color)
-                        .child(names.len().to_string()),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .gap(px(4.0))
-                .flex_wrap()
-                .children(names.iter().map(|name| {
-                    div()
-                        .px(px(8.0))
-                        .py(px(3.0))
-                        .rounded(px(999.0))
-                        .bg(bg_emphasis())
-                        .text_size(px(11.0))
-                        .text_color(color)
-                        .child(name.clone())
-                })),
-        )
-}
-
 pub fn surface_tab(
     label: &str,
     active: bool,
@@ -2812,7 +2734,7 @@ mod tests {
         assert_eq!(items[0].anchor.side.as_deref(), Some("RIGHT"));
         assert_eq!(
             items[0].preview,
-            "Please add a null check before this branch. It currently panics."
+            "Please add a null check before this branch.\n\nIt currently panics."
         );
         assert!(!items[0].is_resolved);
         assert!(!items[0].is_outdated);
