@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use gpui::prelude::*;
 use gpui::*;
@@ -21,12 +21,23 @@ use crate::local_documents;
 use crate::local_repo;
 use crate::lsp;
 use crate::markdown::render_markdown;
-use crate::selectable_text::SelectableText;
+use crate::review_context::{build_review_context, ReviewContextData};
+use crate::review_queue::{build_review_queue, ReviewQueue, ReviewQueueBucket};
+use crate::review_routes::{
+    build_callsite_route, build_changed_touch_route, build_section_symbol_focus,
+    collect_section_focus_terms, ReviewSymbolFocus,
+};
+use crate::review_session::{ReviewCenterMode, ReviewLocation, ReviewSourceTarget};
+use crate::selectable_text::{AppTextFieldKind, AppTextInput, SelectableText};
+use crate::semantic_diff::{build_semantic_diff_file, SemanticDiffFile, SemanticDiffSection};
+use crate::source_browser::render_source_browser;
 use crate::state::*;
 use crate::syntax::{self, SyntaxSpan};
 use crate::theme::*;
 
-use super::sections::{badge, badge_success, nested_panel, panel_state_text};
+use super::sections::{
+    badge, badge_success, error_text, ghost_button, nested_panel, panel_state_text, review_button,
+};
 
 const MAX_FILE_HIGHLIGHT_BYTES: usize = 512 * 1024;
 
@@ -37,10 +48,7 @@ pub fn enter_files_surface(state: &Entity<AppState>, window: &mut Window, cx: &m
 
         if s.selected_file_path.is_none() {
             s.selected_file_path = s.active_detail().and_then(|detail| {
-                detail
-                    .files
-                    .first()
-                    .map(|file| file.path.clone())
+                crate::review_queue::default_review_file(detail)
                     .or_else(|| detail.parsed_diff.first().map(|file| file.path.clone()))
             });
         }
@@ -48,7 +56,565 @@ pub fn enter_files_surface(state: &Entity<AppState>, window: &mut Window, cx: &m
         cx.notify();
     });
 
-    ensure_selected_file_content_loaded(state, window, cx);
+    ensure_active_review_focus_loaded(state, window, cx);
+}
+
+pub fn open_review_diff_location(
+    state: &Entity<AppState>,
+    file_path: String,
+    anchor: Option<DiffAnchor>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    state.update(cx, |state, cx| {
+        state.active_surface = PullRequestSurface::Files;
+        state.navigate_to_review_location(
+            ReviewLocation::from_diff(file_path.clone(), anchor),
+            true,
+        );
+        state.persist_active_review_session();
+        cx.notify();
+    });
+
+    ensure_active_review_focus_loaded(state, window, cx);
+}
+
+pub fn open_review_source_location(
+    state: &Entity<AppState>,
+    path: String,
+    line: Option<usize>,
+    reason: Option<String>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    state.update(cx, |state, cx| {
+        state.active_surface = PullRequestSurface::Files;
+        state.navigate_to_review_location(
+            ReviewLocation::from_source(path.clone(), line, reason.clone()),
+            true,
+        );
+        state.persist_active_review_session();
+        cx.notify();
+    });
+
+    ensure_active_review_focus_loaded(state, window, cx);
+}
+
+pub fn ensure_active_review_focus_loaded(
+    state: &Entity<AppState>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let source_target = state.read(cx).active_review_session().and_then(|session| {
+        (session.center_mode == ReviewCenterMode::SourceBrowser)
+            .then(|| session.source_target.clone())
+            .flatten()
+    });
+
+    if let Some(source_target) = source_target {
+        let model = state.clone();
+        window
+            .spawn(cx, async move |cx: &mut AsyncWindowContext| {
+                load_local_source_file_content_flow(model, source_target.path, cx).await;
+            })
+            .detach();
+    } else {
+        ensure_selected_file_content_loaded(state, window, cx);
+    }
+}
+
+pub fn close_review_line_action(state: &Entity<AppState>, cx: &mut App) {
+    state.update(cx, |state, cx| {
+        if state.inline_comment_loading {
+            return;
+        }
+        state.active_review_line_action = None;
+        state.active_review_line_action_position = None;
+        state.review_line_action_mode = ReviewLineActionMode::Menu;
+        state.inline_comment_draft.clear();
+        state.inline_comment_error = None;
+        cx.notify();
+    });
+}
+
+pub fn open_waypoint_spotlight(state: &Entity<AppState>, cx: &mut App) {
+    state.update(cx, |state, cx| {
+        if state.active_surface != PullRequestSurface::Files || state.active_pr_key.is_none() {
+            return;
+        }
+        state.waypoint_spotlight_open = true;
+        state.waypoint_spotlight_query.clear();
+        state.waypoint_spotlight_selected_index = 0;
+        state.active_review_line_action = None;
+        state.active_review_line_action_position = None;
+        state.review_line_action_mode = ReviewLineActionMode::Menu;
+        state.inline_comment_error = None;
+        cx.notify();
+    });
+}
+
+pub fn toggle_waypoint_spotlight(state: &Entity<AppState>, cx: &mut App) {
+    let is_open = state.read(cx).waypoint_spotlight_open;
+    if is_open {
+        close_waypoint_spotlight(state, cx);
+    } else {
+        open_waypoint_spotlight(state, cx);
+    }
+}
+
+pub fn close_waypoint_spotlight(state: &Entity<AppState>, cx: &mut App) {
+    state.update(cx, |state, cx| {
+        state.waypoint_spotlight_open = false;
+        state.waypoint_spotlight_query.clear();
+        state.waypoint_spotlight_selected_index = 0;
+        cx.notify();
+    });
+}
+
+pub fn move_waypoint_spotlight_selection(state: &Entity<AppState>, delta: isize, cx: &mut App) {
+    state.update(cx, |state, cx| {
+        if !state.waypoint_spotlight_open {
+            return;
+        }
+
+        let item_count = filtered_waypoint_spotlight_items(state).len();
+        if item_count == 0 {
+            state.waypoint_spotlight_selected_index = 0;
+            cx.notify();
+            return;
+        }
+
+        let max_index = item_count.saturating_sub(1) as isize;
+        let next =
+            (state.waypoint_spotlight_selected_index as isize + delta).clamp(0, max_index) as usize;
+        if next != state.waypoint_spotlight_selected_index {
+            state.waypoint_spotlight_selected_index = next;
+            cx.notify();
+        }
+    });
+}
+
+pub fn execute_waypoint_spotlight_selection(
+    state: &Entity<AppState>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let item = {
+        let app_state = state.read(cx);
+        let items = filtered_waypoint_spotlight_items(&app_state);
+        let selected_index = app_state
+            .waypoint_spotlight_selected_index
+            .min(items.len().saturating_sub(1));
+        items.get(selected_index).cloned()
+    };
+
+    let Some(waymark) = item else {
+        return;
+    };
+
+    close_waypoint_spotlight(state, cx);
+    open_review_location_card(state, &waymark.location, window, cx);
+}
+
+pub fn trigger_add_waypoint_shortcut(state: &Entity<AppState>, cx: &mut App) {
+    let waypoint_name = {
+        let app_state = state.read(cx);
+        if app_state.active_surface != PullRequestSurface::Files
+            || app_state.selected_diff_line_target().is_none()
+        {
+            return;
+        }
+
+        default_waymark_name(
+            app_state.selected_file_path.as_deref(),
+            None,
+            app_state.selected_diff_anchor.as_ref(),
+        )
+    };
+
+    state.update(cx, |state, cx| {
+        if state.selected_diff_line_target().is_none() {
+            return;
+        }
+        state.add_waymark_for_current_review_location(waypoint_name.clone());
+        state.persist_active_review_session();
+        cx.notify();
+    });
+}
+
+pub fn trigger_submit_inline_comment(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
+    let Some((detail_id, repository, number, target, body, loading)) = ({
+        let app_state = state.read(cx);
+        app_state.active_detail().and_then(|detail| {
+            app_state.active_review_line_action.clone().map(|target| {
+                (
+                    detail.id.clone(),
+                    detail.repository.clone(),
+                    detail.number,
+                    target,
+                    app_state.inline_comment_draft.clone(),
+                    app_state.inline_comment_loading,
+                )
+            })
+        })
+    }) else {
+        return;
+    };
+
+    if loading {
+        return;
+    }
+
+    if body.trim().is_empty() {
+        state.update(cx, |state, cx| {
+            state.inline_comment_error =
+                Some("Enter a line comment before submitting it.".to_string());
+            cx.notify();
+        });
+        return;
+    }
+
+    let Some(line) = target.anchor.line else {
+        return;
+    };
+    let Some(side) = target.anchor.side.clone() else {
+        return;
+    };
+
+    state.update(cx, |state, cx| {
+        state.inline_comment_loading = true;
+        state.inline_comment_error = None;
+        cx.notify();
+    });
+
+    let model = state.clone();
+    let target_for_refresh = target.clone();
+    window
+        .spawn(cx, async move |cx: &mut AsyncWindowContext| {
+            let submit_result = cx
+                .background_executor()
+                .spawn(async move {
+                    github::add_pull_request_review_thread(
+                        &detail_id,
+                        &target.anchor.file_path,
+                        &body,
+                        Some(line),
+                        Some(side.as_str()),
+                        Some("LINE"),
+                    )
+                })
+                .await;
+
+            let (success, message) = match submit_result {
+                Ok(result) => (result.success, result.message),
+                Err(error) => (false, error),
+            };
+
+            if !success {
+                model
+                    .update(cx, |state, cx| {
+                        state.inline_comment_loading = false;
+                        state.inline_comment_error = Some(message);
+                        cx.notify();
+                    })
+                    .ok();
+                return;
+            }
+
+            let cache = model.read_with(cx, |state, _| state.cache.clone()).ok();
+            let Some(cache) = cache else { return };
+            let repository_for_sync = repository.clone();
+
+            let sync_result = cx
+                .background_executor()
+                .spawn(async move {
+                    github::sync_pull_request_detail(&cache, &repository_for_sync, number)
+                })
+                .await;
+
+            model
+                .update(cx, |state, cx| {
+                    state.inline_comment_loading = false;
+                    state.inline_comment_draft.clear();
+                    state.inline_comment_error = None;
+
+                    if state
+                        .active_review_line_action
+                        .as_ref()
+                        .map(|active| active.stable_key() == target_for_refresh.stable_key())
+                        .unwrap_or(false)
+                    {
+                        state.active_review_line_action = None;
+                        state.active_review_line_action_position = None;
+                        state.review_line_action_mode = ReviewLineActionMode::Menu;
+                    }
+
+                    let detail_key = pr_key(&repository, number);
+                    let detail_state = state.detail_states.entry(detail_key).or_default();
+                    match sync_result {
+                        Ok(snapshot) => {
+                            detail_state.snapshot = Some(snapshot);
+                            detail_state.error = None;
+                        }
+                        Err(error) => {
+                            detail_state.error = Some(error);
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+        })
+        .detach();
+}
+
+fn open_review_line_action(
+    state: &Entity<AppState>,
+    target: ReviewLineActionTarget,
+    position: Point<Pixels>,
+    cx: &mut App,
+) {
+    state.update(cx, |state, cx| {
+        state.active_surface = PullRequestSurface::Files;
+        state.navigate_to_review_location(target.review_location(), true);
+        state.active_review_line_action = Some(target);
+        state.active_review_line_action_position = Some(position);
+        state.review_line_action_mode = ReviewLineActionMode::Menu;
+        state.inline_comment_draft.clear();
+        state.inline_comment_error = None;
+        state.waypoint_spotlight_open = false;
+        state.persist_active_review_session();
+        cx.notify();
+    });
+}
+
+fn filtered_waypoint_spotlight_items(
+    state: &AppState,
+) -> Vec<crate::review_session::ReviewWaymark> {
+    let mut items = state
+        .active_review_session()
+        .map(|session| session.waymarks.clone())
+        .unwrap_or_default();
+    items.reverse();
+
+    let query = state.waypoint_spotlight_query.trim().to_lowercase();
+    if query.is_empty() {
+        return items;
+    }
+
+    items
+        .into_iter()
+        .filter(|waymark| {
+            let haystack = format!(
+                "{} {} {}",
+                waymark.name, waymark.location.label, waymark.location.file_path
+            )
+            .to_lowercase();
+            haystack.contains(&query)
+        })
+        .collect()
+}
+
+fn render_waypoint_spotlight(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
+    let app_state = state.read(cx);
+    let query = app_state.waypoint_spotlight_query.clone();
+    let filtered = filtered_waypoint_spotlight_items(&app_state);
+    let selected_index = app_state
+        .waypoint_spotlight_selected_index
+        .min(filtered.len().saturating_sub(1));
+    let state_for_backdrop = state.clone();
+
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .justify_center()
+        .pt(px(88.0))
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .bg(palette_backdrop())
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    close_waypoint_spotlight(&state_for_backdrop, cx);
+                }),
+        )
+        .child(
+            div()
+                .relative()
+                .w(px(560.0))
+                .max_h(px(560.0))
+                .rounded(radius())
+                .border_1()
+                .border_color(border_default())
+                .bg(bg_surface())
+                .shadow_sm()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .px(px(20.0))
+                        .py(px(16.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(12.0))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap(px(12.0))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(10.0))
+                                        .child(render_waypoint_pill("Waypoint Spotlight", true))
+                                        .child(
+                                            div()
+                                                .text_size(px(13.0))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(fg_emphasis())
+                                                .child("Jump between saved review stops"),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .gap(px(6.0))
+                                        .items_center()
+                                        .child(badge("cmd-j"))
+                                        .child(badge("cmd-shift-j")),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .px(px(14.0))
+                                .py(px(12.0))
+                                .rounded(radius_sm())
+                                .border_1()
+                                .border_color(border_default())
+                                .bg(bg_overlay())
+                                .text_size(px(13.0))
+                                .text_color(if query.is_empty() {
+                                    fg_subtle()
+                                } else {
+                                    fg_emphasis()
+                                })
+                                .child(
+                                    AppTextInput::new(
+                                        "waypoint-spotlight-query",
+                                        state.clone(),
+                                        AppTextFieldKind::WaypointSpotlightQuery,
+                                        "Search waypoints by name, file, or line",
+                                    )
+                                    .autofocus(true),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap(px(12.0))
+                                .child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .font_family("Fira Code")
+                                        .text_color(fg_subtle())
+                                        .child(format!("{} waypoints", filtered.len())),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .gap(px(6.0))
+                                        .items_center()
+                                        .text_size(px(11.0))
+                                        .font_family("Fira Code")
+                                        .text_color(fg_subtle())
+                                        .child("↑↓ move")
+                                        .child("•")
+                                        .child("enter open"),
+                                ),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .id("waypoint-spotlight-scroll")
+                        .overflow_y_scroll()
+                        .max_h(px(380.0))
+                        .when(filtered.is_empty(), |el| {
+                            el.child(
+                                div()
+                                    .px(px(20.0))
+                                    .pb(px(18.0))
+                                    .child(panel_state_text(
+                                        "No waypoints yet. Click a diff line, choose Add waypoint, or press cmd-shift-j on a selected line.",
+                                    )),
+                            )
+                        })
+                        .children(filtered.into_iter().enumerate().map(|(ix, waymark)| {
+                            render_waypoint_spotlight_row(
+                                state,
+                                &waymark,
+                                ix == selected_index,
+                            )
+                        })),
+                )
+                .with_animation(
+                    "waypoint-spotlight",
+                    Animation::new(Duration::from_millis(160)).with_easing(ease_in_out),
+                    move |el, delta| {
+                        el.mt(lerp_px(10.0, 0.0, delta))
+                            .bg(lerp_rgba(bg_canvas(), bg_surface(), delta))
+                    },
+                ),
+        )
+}
+
+fn render_waypoint_spotlight_row(
+    state: &Entity<AppState>,
+    waymark: &crate::review_session::ReviewWaymark,
+    selected: bool,
+) -> impl IntoElement {
+    let location = waymark.location.clone();
+    let state = state.clone();
+
+    div()
+        .px(px(20.0))
+        .py(px(12.0))
+        .border_t(px(1.0))
+        .border_color(if selected {
+            waypoint_border()
+        } else {
+            border_muted()
+        })
+        .bg(if selected {
+            waypoint_bg()
+        } else {
+            bg_surface()
+        })
+        .cursor_pointer()
+        .hover(|style| style.bg(hover_bg()))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            close_waypoint_spotlight(&state, cx);
+            open_review_location_card(&state, &location, window, cx);
+        })
+        .child(render_waypoint_pill(&waymark.name, selected))
+        .child(
+            div()
+                .mt(px(8.0))
+                .text_size(px(12.0))
+                .text_color(fg_emphasis())
+                .child(waymark.location.label.clone()),
+        )
+        .child(
+            div()
+                .mt(px(4.0))
+                .text_size(px(11.0))
+                .text_color(fg_muted())
+                .child(waymark.location.mode.label()),
+        )
 }
 
 pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
@@ -62,10 +628,13 @@ pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement
     };
 
     let files = &detail.files;
-    let parsed_diff = &detail.parsed_diff;
-    let additions = detail.additions;
-    let deletions = detail.deletions;
+    let review_queue = build_review_queue(detail);
     let selected_anchor = s.selected_diff_anchor.clone();
+    let review_session = s.active_review_session().cloned().unwrap_or_default();
+    let waypoint_spotlight_open = s.waypoint_spotlight_open;
+    let line_action_target = s.active_review_line_action.clone();
+    let line_action_position = s.active_review_line_action_position;
+    let line_action_mode = s.review_line_action_mode.clone();
 
     let selected_path = s
         .selected_file_path
@@ -73,36 +642,799 @@ pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement
         .and_then(|path| files.iter().find(|file| file.path == path))
         .map(|file| file.path.as_str())
         .or_else(|| {
-            files
-                .first()
-                .map(|f| f.path.as_str())
-                .or_else(|| parsed_diff.first().map(|f| f.path.as_str()))
+            review_queue
+                .default_item()
+                .map(|item| item.file_path.as_str())
+                .or_else(|| detail.parsed_diff.first().map(|file| file.path.as_str()))
         });
 
-    let state_for_tree = state.clone();
+    let selected_file = selected_path.and_then(|path| files.iter().find(|file| file.path == path));
+    let selected_parsed =
+        selected_file.and_then(|file| find_parsed_diff_file(&detail.parsed_diff, &file.path));
+    let semantic_file = selected_file
+        .map(|file| build_semantic_diff_file(file, selected_parsed, &detail.review_threads));
+    let prepared_file = selected_file.and_then(|file| {
+        s.active_detail_state()
+            .and_then(|detail_state| detail_state.file_content_states.get(&file.path))
+            .and_then(|file_state| file_state.prepared.as_ref())
+    });
+    let review_context = selected_file
+        .zip(semantic_file.as_ref())
+        .map(|(file, semantic)| {
+            build_review_context(
+                detail,
+                semantic,
+                file.path.as_str(),
+                selected_anchor.as_ref(),
+            )
+        });
 
     div()
+        .relative()
         .flex()
         .flex_grow()
         .min_h_0()
-        // File tree sidebar
-        .child(render_file_tree(
-            &files,
-            additions,
-            deletions,
-            selected_path,
-            state_for_tree,
-        ))
-        // Diff panel
-        .child(render_diff_panel(
+        .child(render_review_navigation_pane(
             state,
-            &s,
             detail,
+            &review_queue,
             selected_path,
-            selected_anchor.as_ref(),
+            semantic_file.as_ref(),
+            &review_session,
             cx,
         ))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_grow()
+                .min_w_0()
+                .min_h_0()
+                .child(render_diff_panel(
+                    state,
+                    &s,
+                    detail,
+                    selected_path,
+                    selected_anchor.as_ref(),
+                    semantic_file.as_ref(),
+                    cx,
+                )),
+        )
+        .child(render_review_context_pane(
+            state,
+            detail,
+            selected_file,
+            selected_parsed,
+            semantic_file.as_ref(),
+            prepared_file,
+            review_context.as_ref(),
+            cx,
+        ))
+        .when(waypoint_spotlight_open, |el| {
+            el.child(render_waypoint_spotlight(state, cx))
+        })
+        .when_some(
+            line_action_target
+                .as_ref()
+                .zip(line_action_position)
+                .map(|(target, position)| (target.clone(), position)),
+            |el, (target, position)| {
+                el.child(render_review_line_action_overlay(
+                    state,
+                    &target,
+                    position,
+                    line_action_mode.clone(),
+                    cx,
+                ))
+            },
+        )
         .into_any_element()
+}
+
+fn render_review_navigation_pane(
+    state: &Entity<AppState>,
+    detail: &PullRequestDetail,
+    review_queue: &ReviewQueue,
+    selected_path: Option<&str>,
+    semantic_file: Option<&SemanticDiffFile>,
+    review_session: &crate::review_session::ReviewSessionState,
+    cx: &App,
+) -> impl IntoElement {
+    let list_state = {
+        let app_state = state.read(cx);
+        prepare_review_nav_list_state(&app_state)
+    };
+    let selected_path = selected_path.map(str::to_string);
+    let outline_path = selected_path.clone().unwrap_or_default();
+    let nav_items = Arc::new(build_review_nav_items(
+        detail,
+        review_queue,
+        semantic_file,
+        review_session,
+    ));
+    if list_state.item_count() != nav_items.len() {
+        list_state.reset(nav_items.len());
+    }
+
+    div()
+        .w(px(300.0))
+        .flex_shrink_0()
+        .min_h_0()
+        .flex()
+        .flex_col()
+        .bg(bg_surface())
+        .border_r(px(1.0))
+        .border_color(border_default())
+        .id("review-nav-scroll")
+        .child(
+            list(list_state, {
+                let state = state.clone();
+                let nav_items = nav_items.clone();
+                let selected_path = selected_path.clone();
+                let outline_path = outline_path.clone();
+                move |ix, _window, cx| {
+                    render_review_nav_list_item(
+                        &state,
+                        &nav_items[ix],
+                        selected_path.as_deref(),
+                        outline_path.as_str(),
+                        cx,
+                    )
+                }
+            })
+            .with_sizing_behavior(ListSizingBehavior::Auto)
+            .flex_grow()
+            .min_h_0(),
+        )
+}
+
+#[derive(Clone, Debug)]
+enum ReviewNavListItem {
+    QueueHeader {
+        changed_files: i64,
+    },
+    QueueBucketHeader {
+        bucket: ReviewQueueBucket,
+        count: usize,
+    },
+    QueueRow(crate::review_queue::ReviewQueueItem),
+    SemanticHeader {
+        count: usize,
+    },
+    SemanticSection(SemanticDiffSection),
+    TaskRouteHeader {
+        title: String,
+        count: usize,
+    },
+    TaskRouteStop {
+        index: usize,
+        location: ReviewLocation,
+    },
+    WaymarksHeader {
+        title: String,
+        count: usize,
+    },
+    Waymark(crate::review_session::ReviewWaymark),
+    RecentLocation(ReviewLocation),
+    Spacer,
+}
+
+fn prepare_review_nav_list_state(app_state: &AppState) -> ListState {
+    let state_key = format!(
+        "{}:review-nav",
+        app_state.active_pr_key.as_deref().unwrap_or("detached")
+    );
+    let mut list_states = app_state.review_nav_list_states.borrow_mut();
+    list_states
+        .entry(state_key)
+        .or_insert_with(|| ListState::new(0, ListAlignment::Top, px(96.0)))
+        .clone()
+}
+
+fn build_review_nav_items(
+    detail: &PullRequestDetail,
+    review_queue: &ReviewQueue,
+    semantic_file: Option<&SemanticDiffFile>,
+    review_session: &crate::review_session::ReviewSessionState,
+) -> Vec<ReviewNavListItem> {
+    let mut items = Vec::new();
+
+    items.push(ReviewNavListItem::QueueHeader {
+        changed_files: detail.changed_files,
+    });
+    append_review_nav_bucket(
+        &mut items,
+        ReviewQueueBucket::StartHere,
+        &review_queue.start_here,
+    );
+    append_review_nav_bucket(
+        &mut items,
+        ReviewQueueBucket::NeedsScrutiny,
+        &review_queue.needs_scrutiny,
+    );
+    append_review_nav_bucket(
+        &mut items,
+        ReviewQueueBucket::QuickPass,
+        &review_queue.quick_pass,
+    );
+
+    if let Some(semantic_file) = semantic_file {
+        items.push(ReviewNavListItem::Spacer);
+        items.push(ReviewNavListItem::SemanticHeader {
+            count: semantic_file.sections.len(),
+        });
+        items.extend(
+            semantic_file
+                .sections
+                .iter()
+                .cloned()
+                .map(ReviewNavListItem::SemanticSection),
+        );
+    }
+
+    if let Some(task_route) = review_session.task_route.as_ref() {
+        items.push(ReviewNavListItem::Spacer);
+        items.push(ReviewNavListItem::TaskRouteHeader {
+            title: task_route.title.clone(),
+            count: task_route.stops.len(),
+        });
+        items.extend(
+            task_route
+                .stops
+                .iter()
+                .enumerate()
+                .map(|(index, location)| ReviewNavListItem::TaskRouteStop {
+                    index,
+                    location: location.clone(),
+                }),
+        );
+    }
+
+    if !review_session.waymarks.is_empty() {
+        items.push(ReviewNavListItem::Spacer);
+        items.push(ReviewNavListItem::WaymarksHeader {
+            title: "Waypoints".to_string(),
+            count: review_session.waymarks.len(),
+        });
+        items.extend(
+            review_session
+                .waymarks
+                .iter()
+                .cloned()
+                .map(ReviewNavListItem::Waymark),
+        );
+    }
+
+    if !review_session.route.is_empty() {
+        items.push(ReviewNavListItem::Spacer);
+        items.push(ReviewNavListItem::WaymarksHeader {
+            title: "Recent Route".to_string(),
+            count: review_session.route.len(),
+        });
+        items.extend(
+            review_session
+                .route
+                .iter()
+                .cloned()
+                .map(ReviewNavListItem::RecentLocation),
+        );
+    }
+
+    items.push(ReviewNavListItem::Spacer);
+    items
+}
+
+fn append_review_nav_bucket(
+    items: &mut Vec<ReviewNavListItem>,
+    bucket: ReviewQueueBucket,
+    bucket_items: &[crate::review_queue::ReviewQueueItem],
+) {
+    if bucket_items.is_empty() {
+        return;
+    }
+
+    items.push(ReviewNavListItem::QueueBucketHeader {
+        bucket,
+        count: bucket_items.len(),
+    });
+    items.extend(
+        bucket_items
+            .iter()
+            .cloned()
+            .map(ReviewNavListItem::QueueRow),
+    );
+}
+
+fn render_review_nav_list_item(
+    state: &Entity<AppState>,
+    item: &ReviewNavListItem,
+    selected_path: Option<&str>,
+    outline_path: &str,
+    cx: &App,
+) -> AnyElement {
+    match item {
+        ReviewNavListItem::QueueHeader { changed_files } => div()
+            .px(px(14.0))
+            .pt(px(14.0))
+            .child(render_review_nav_panel_header(
+                "REVIEW QUEUE",
+                "Prioritized pass",
+                changed_files.to_string(),
+            ))
+            .into_any_element(),
+        ReviewNavListItem::QueueBucketHeader { bucket, count } => div()
+            .px(px(14.0))
+            .pt(px(10.0))
+            .child(render_review_nav_bucket_header(*bucket, *count))
+            .into_any_element(),
+        ReviewNavListItem::QueueRow(queue_item) => div()
+            .px(px(14.0))
+            .pt(px(8.0))
+            .child(render_review_queue_row(
+                state,
+                queue_item,
+                selected_path == Some(queue_item.file_path.as_str()),
+            ))
+            .into_any_element(),
+        ReviewNavListItem::SemanticHeader { count } => div()
+            .px(px(14.0))
+            .pt(px(14.0))
+            .child(render_review_nav_panel_header(
+                "SYMBOL OUTLINE",
+                "Semantic sections",
+                count.to_string(),
+            ))
+            .into_any_element(),
+        ReviewNavListItem::SemanticSection(section) => div()
+            .px(px(14.0))
+            .pt(px(8.0))
+            .child(render_semantic_outline_row(
+                state,
+                outline_path,
+                section,
+                cx,
+            ))
+            .into_any_element(),
+        ReviewNavListItem::TaskRouteHeader { title, count } => div()
+            .px(px(14.0))
+            .pt(px(14.0))
+            .child(render_review_nav_panel_header(
+                "TASK ROUTE",
+                title,
+                count.to_string(),
+            ))
+            .into_any_element(),
+        ReviewNavListItem::TaskRouteStop { index, location } => div()
+            .px(px(14.0))
+            .pt(px(8.0))
+            .child(render_task_route_stop_row(state, *index, location))
+            .into_any_element(),
+        ReviewNavListItem::WaymarksHeader { title, count } => div()
+            .px(px(14.0))
+            .pt(px(14.0))
+            .child(render_review_nav_panel_header(
+                &title.to_ascii_uppercase(),
+                title,
+                count.to_string(),
+            ))
+            .into_any_element(),
+        ReviewNavListItem::Waymark(waymark) => div()
+            .px(px(14.0))
+            .pt(px(8.0))
+            .child(render_waymark_row(state, waymark))
+            .into_any_element(),
+        ReviewNavListItem::RecentLocation(location) => div()
+            .px(px(14.0))
+            .pt(px(8.0))
+            .child(render_recent_location_row(state, location))
+            .into_any_element(),
+        ReviewNavListItem::Spacer => div().h(px(6.0)).into_any_element(),
+    }
+}
+
+fn render_review_nav_panel_header(
+    eyebrow_label: &str,
+    title: &str,
+    count: String,
+) -> impl IntoElement {
+    nested_panel().child(
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(12.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .font_family("Fira Code")
+                            .text_color(fg_subtle())
+                            .child(eyebrow_label.to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(15.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(fg_emphasis())
+                            .child(title.to_string()),
+                    ),
+            )
+            .child(badge(&count)),
+    )
+}
+
+fn render_review_nav_bucket_header(bucket: ReviewQueueBucket, count: usize) -> impl IntoElement {
+    div()
+        .pt(px(10.0))
+        .border_t(px(1.0))
+        .border_color(border_muted())
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_family("Fira Code")
+                        .text_color(fg_subtle())
+                        .child(bucket.label().to_ascii_uppercase()),
+                )
+                .child(badge(&count.to_string())),
+        )
+}
+
+fn render_review_queue_row(
+    state: &Entity<AppState>,
+    item: &crate::review_queue::ReviewQueueItem,
+    is_selected: bool,
+) -> impl IntoElement {
+    let path = item.file_path.clone();
+    let anchor = item.anchor.clone();
+    let state = state.clone();
+
+    div()
+        .px(px(10.0))
+        .py(px(9.0))
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(if is_selected {
+            border_default()
+        } else {
+            border_muted()
+        })
+        .bg(if is_selected {
+            bg_selected()
+        } else {
+            bg_surface()
+        })
+        .cursor_pointer()
+        .hover(|style| style.bg(hover_bg()))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            open_review_diff_location(&state, path.clone(), anchor.clone(), window, cx);
+        })
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .justify_between()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.0))
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(fg_emphasis())
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .overflow_x_hidden()
+                                .child(item.file_path.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(fg_muted())
+                                .child(item.reasons.join(" • ")),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .font_family("Fira Code")
+                        .text_color(accent())
+                        .child(item.risk_label.clone()),
+                ),
+        )
+        .child(
+            div()
+                .mt(px(8.0))
+                .flex()
+                .gap(px(6.0))
+                .flex_wrap()
+                .child(render_change_type_chip(&item.change_type))
+                .child(queue_metric(format!("+{}", item.additions), success()))
+                .child(queue_metric(format!("-{}", item.deletions), danger()))
+                .when(item.thread_count > 0, |el| {
+                    el.child(queue_metric(
+                        format!(
+                            "{} thread{}",
+                            item.thread_count,
+                            if item.thread_count == 1 { "" } else { "s" }
+                        ),
+                        accent(),
+                    ))
+                }),
+        )
+}
+
+fn render_semantic_outline_row(
+    state: &Entity<AppState>,
+    selected_path: &str,
+    section: &SemanticDiffSection,
+    cx: &App,
+) -> impl IntoElement {
+    let state_for_open = state.clone();
+    let state_for_toggle = state.clone();
+    let path = selected_path.to_string();
+    let anchor = section.anchor.clone();
+    let section_id = section.id.clone();
+    let collapsed = state.read(cx).is_review_section_collapsed(&section.id);
+
+    div()
+        .px(px(10.0))
+        .py(px(8.0))
+        .rounded(radius_sm())
+        .bg(bg_surface())
+        .border_1()
+        .border_color(border_muted())
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .justify_between()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.0))
+                        .min_w_0()
+                        .cursor_pointer()
+                        .hover(|style| style.text_color(fg_emphasis()))
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                            open_review_diff_location(
+                                &state_for_open,
+                                path.clone(),
+                                anchor.clone(),
+                                window,
+                                cx,
+                            );
+                        })
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(fg_emphasis())
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .overflow_x_hidden()
+                                .child(section.title.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(fg_muted())
+                                .child(section.summary.clone()),
+                        ),
+                )
+                .child(ghost_button(
+                    if collapsed { "Expand" } else { "Fold" },
+                    move |_, _, cx| {
+                        state_for_toggle.update(cx, |state, cx| {
+                            state.toggle_review_section_collapse(&section_id);
+                            state.persist_active_review_session();
+                            cx.notify();
+                        });
+                    },
+                )),
+        )
+}
+
+fn render_task_route_stop_row(
+    state: &Entity<AppState>,
+    index: usize,
+    location: &ReviewLocation,
+) -> impl IntoElement {
+    let state = state.clone();
+    let location = location.clone();
+    let location_for_open = location.clone();
+
+    div()
+        .px(px(10.0))
+        .py(px(8.0))
+        .rounded(radius_sm())
+        .bg(bg_surface())
+        .border_1()
+        .border_color(border_muted())
+        .cursor_pointer()
+        .hover(|style| style.bg(hover_bg()))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            open_review_location_card(&state, &location_for_open, window, cx);
+        })
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .gap(px(8.0))
+                .child(queue_metric(format!("{:02}", index + 1), accent()))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.0))
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(fg_emphasis())
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .overflow_x_hidden()
+                                .child(location.label.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(fg_muted())
+                                .child(location.mode.label()),
+                        ),
+                ),
+        )
+}
+
+fn render_recent_location_row(
+    state: &Entity<AppState>,
+    location: &ReviewLocation,
+) -> impl IntoElement {
+    let state = state.clone();
+    let location = location.clone();
+    let location_for_open = location.clone();
+
+    div()
+        .px(px(10.0))
+        .py(px(8.0))
+        .rounded(radius_sm())
+        .bg(bg_surface())
+        .border_1()
+        .border_color(border_muted())
+        .cursor_pointer()
+        .hover(|style| style.bg(hover_bg()))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            open_review_location_card(&state, &location_for_open, window, cx);
+        })
+        .child(
+            div()
+                .text_size(px(12.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(fg_emphasis())
+                .child(location.label.clone()),
+        )
+        .child(
+            div()
+                .mt(px(4.0))
+                .text_size(px(11.0))
+                .text_color(fg_muted())
+                .child(location.mode.label()),
+        )
+}
+
+fn render_waymark_row(
+    state: &Entity<AppState>,
+    waymark: &crate::review_session::ReviewWaymark,
+) -> impl IntoElement {
+    let state = state.clone();
+    let location = waymark.location.clone();
+    let location_for_open = location.clone();
+    let waymark_name = waymark.name.clone();
+
+    div()
+        .px(px(10.0))
+        .py(px(8.0))
+        .rounded(radius_sm())
+        .bg(bg_surface())
+        .border_1()
+        .border_color(border_muted())
+        .cursor_pointer()
+        .hover(|style| style.bg(hover_bg()))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            open_review_location_card(&state, &location_for_open, window, cx);
+        })
+        .child(
+            div()
+                .text_size(px(12.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(fg_emphasis())
+                .child(waymark_name),
+        )
+        .child(
+            div()
+                .mt(px(4.0))
+                .text_size(px(11.0))
+                .text_color(fg_muted())
+                .child(location.label.clone()),
+        )
+}
+
+fn open_review_location_card(
+    state: &Entity<AppState>,
+    location: &ReviewLocation,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    match location.mode {
+        ReviewCenterMode::SemanticDiff => open_review_diff_location(
+            state,
+            location.file_path.clone(),
+            location.anchor.clone(),
+            window,
+            cx,
+        ),
+        ReviewCenterMode::SourceBrowser => open_review_source_location(
+            state,
+            location.file_path.clone(),
+            location.source_line,
+            location.source_reason.clone(),
+            window,
+            cx,
+        ),
+    }
+}
+
+fn default_waymark_name(
+    selected_file_path: Option<&str>,
+    selected_section: Option<&SemanticDiffSection>,
+    selected_anchor: Option<&DiffAnchor>,
+) -> String {
+    if let Some(section) = selected_section {
+        return format!("Check {}", section.title);
+    }
+
+    if let Some(line) = selected_anchor
+        .and_then(|anchor| anchor.line)
+        .and_then(|line| usize::try_from(line).ok())
+        .filter(|line| *line > 0)
+    {
+        if let Some(path) = selected_file_path {
+            return format!("{path}:{line}");
+        }
+    }
+
+    selected_file_path
+        .map(|path| format!("Review {path}"))
+        .unwrap_or_else(|| "Waypoint".to_string())
+}
+
+fn queue_metric(label: String, color: gpui::Rgba) -> impl IntoElement {
+    div()
+        .px(px(6.0))
+        .py(px(2.0))
+        .rounded(px(999.0))
+        .bg(bg_emphasis())
+        .text_size(px(10.0))
+        .font_family("Fira Code")
+        .text_color(color)
+        .child(label)
 }
 
 fn render_file_tree(
@@ -965,6 +2297,7 @@ fn render_diff_panel(
     detail: &PullRequestDetail,
     selected_path: Option<&str>,
     selected_anchor: Option<&DiffAnchor>,
+    semantic_file: Option<&SemanticDiffFile>,
     cx: &App,
 ) -> impl IntoElement {
     let files = &detail.files;
@@ -1017,6 +2350,25 @@ fn render_diff_panel(
                 .unwrap_or(false)
         })
         .unwrap_or(false);
+    let review_session = app_state
+        .active_review_session()
+        .cloned()
+        .unwrap_or_default();
+    let center_mode = review_session.center_mode;
+    let source_target = review_session.source_target.clone().or_else(|| {
+        selected_file.map(|file| ReviewSourceTarget {
+            path: file.path.clone(),
+            line: selected_anchor
+                .and_then(|anchor| anchor.line)
+                .and_then(|line| usize::try_from(line).ok())
+                .filter(|line| *line > 0),
+            reason: Some("Current review focus".to_string()),
+        })
+    });
+    let has_waymark = app_state.current_waymark().is_some();
+    let can_go_back = !review_session.history_back.is_empty();
+    let can_go_forward = !review_session.history_forward.is_empty();
+    let has_task_route = review_session.task_route.is_some();
 
     div()
         .flex_grow()
@@ -1024,11 +2376,12 @@ fn render_diff_panel(
         .min_w_0()
         .flex()
         .flex_col()
-        // Toolbar (fixed, stays above scroll)
         .child(render_diff_toolbar(
+            state,
             files.len(),
             selected_file,
             selected_parsed,
+            semantic_file,
             file_thread_count,
             file_document,
             local_repo_status,
@@ -1036,6 +2389,12 @@ fn render_diff_panel(
             local_repo_error,
             lsp_status,
             lsp_loading,
+            center_mode,
+            can_go_back,
+            can_go_forward,
+            has_waymark,
+            has_task_route,
+            selected_anchor,
         ))
         .child(
             div()
@@ -1046,32 +2405,43 @@ fn render_diff_panel(
                 .pt(px(14.0))
                 .flex()
                 .flex_col()
-                .child(
-                    if let (Some(file), Some(diff_view_state)) = (selected_file, diff_view_state) {
-                        render_file_diff(
-                            state,
-                            file,
-                            selected_parsed,
-                            file_content_state
-                                .as_ref()
-                                .and_then(|state| state.prepared.as_ref()),
-                            selected_anchor,
-                            diff_view_state,
-                            cx,
-                        )
-                        .into_any_element()
-                    } else {
-                        panel_state_text("No files returned for this pull request.")
+                .child(if center_mode == ReviewCenterMode::SourceBrowser {
+                    source_target
+                        .as_ref()
+                        .map(|target| render_source_browser(state, target, cx))
+                        .unwrap_or_else(|| {
+                            panel_state_text(
+                                "Select a file or definition to open the source browser.",
+                            )
                             .into_any_element()
-                    },
-                ),
+                        })
+                } else if let (Some(file), Some(diff_view_state)) = (selected_file, diff_view_state)
+                {
+                    render_file_diff(
+                        state,
+                        file,
+                        selected_parsed,
+                        semantic_file,
+                        file_content_state
+                            .as_ref()
+                            .and_then(|state| state.prepared.as_ref()),
+                        selected_anchor,
+                        diff_view_state,
+                        cx,
+                    )
+                    .into_any_element()
+                } else {
+                    panel_state_text("No files returned for this pull request.").into_any_element()
+                }),
         )
 }
 
 fn render_diff_toolbar(
+    state: &Entity<AppState>,
     total_files: usize,
     selected_file: Option<&PullRequestFile>,
     selected_parsed: Option<&ParsedDiffFile>,
+    semantic_file: Option<&SemanticDiffFile>,
     file_thread_count: usize,
     file_document: Option<&RepositoryFileContent>,
     local_repo_status: Option<&local_repo::LocalRepositoryStatus>,
@@ -1079,6 +2449,12 @@ fn render_diff_toolbar(
     local_repo_error: Option<&str>,
     lsp_status: Option<&lsp::LspServerStatus>,
     lsp_loading: bool,
+    center_mode: ReviewCenterMode,
+    _can_go_back: bool,
+    _can_go_forward: bool,
+    has_waymark: bool,
+    has_task_route: bool,
+    selected_anchor: Option<&DiffAnchor>,
 ) -> impl IntoElement {
     let local_status_badge = local_repo_status.map(|status| {
         if status.ready_for_local_features {
@@ -1093,11 +2469,29 @@ fn render_diff_toolbar(
             "checkout pending"
         }
     });
+    let state_for_back = state.clone();
+    let state_for_forward = state.clone();
+    let state_for_waymark = state.clone();
+    let state_for_clear_route = state.clone();
+    let state_for_semantic = state.clone();
+    let state_for_source = state.clone();
+    let waymark_name = default_waymark_name(
+        selected_file.map(|file| file.path.as_str()),
+        semantic_file.and_then(|semantic| semantic.section_for_anchor(selected_anchor)),
+        selected_anchor,
+    );
+    let rename_from = selected_parsed
+        .and_then(|parsed| parsed.previous_path.as_deref())
+        .filter(|previous| {
+            selected_parsed
+                .map(|parsed| *previous != parsed.path.as_str())
+                .unwrap_or(false)
+        });
 
     div()
         .flex()
         .items_start()
-        .justify_between()
+        .flex_wrap()
         .gap(px(16.0))
         .px(px(20.0))
         .py(px(12.0))
@@ -1108,14 +2502,18 @@ fn render_diff_toolbar(
             div()
                 .flex()
                 .flex_col()
-                .gap(px(4.0))
+                .flex_grow()
                 .min_w_0()
+                .gap(px(6.0))
                 .child(
                     div()
                         .text_size(px(10.0))
                         .font_family("Fira Code")
                         .text_color(fg_subtle())
-                        .child(format!("FILES • {total_files} changed")),
+                        .whitespace_nowrap()
+                        .overflow_x_hidden()
+                        .text_ellipsis()
+                        .child(format!("REVIEW • {total_files} changed")),
                 )
                 .when_some(selected_file, |el, f| {
                     el.child(
@@ -1129,92 +2527,1038 @@ fn render_diff_toolbar(
                             .child(f.path.clone()),
                     )
                 })
-                .when_some(selected_parsed, |el, parsed| {
-                    let rename_from = parsed
-                        .previous_path
-                        .as_deref()
-                        .filter(|previous| *previous != parsed.path.as_str());
-
-                    if let Some(rename_from) = rename_from {
-                        el.child(
-                            div()
-                                .text_size(px(11.0))
-                                .font_family("Fira Code")
-                                .text_color(fg_muted())
-                                .child(format!("renamed from {rename_from}")),
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .flex_wrap()
+                        .text_size(px(11.0))
+                        .font_family("Fira Code")
+                        .text_color(fg_muted())
+                        .when_some(rename_from, |el, previous| {
+                            el.child(
+                                div()
+                                    .max_w(px(340.0))
+                                    .whitespace_nowrap()
+                                    .overflow_x_hidden()
+                                    .text_ellipsis()
+                                    .child(format!("renamed from {previous}")),
+                            )
+                        })
+                        .when_some(semantic_file, |el, semantic_file| {
+                            el.child(format!(
+                                "{} semantic section{}",
+                                semantic_file.sections.len(),
+                                if semantic_file.sections.len() == 1 { "" } else { "s" }
+                            ))
+                        })
+                        .when_some(
+                            local_repo_error.filter(|_| {
+                                file_document
+                                    .map(|document| {
+                                        document.source != REPOSITORY_FILE_SOURCE_LOCAL_CHECKOUT
+                                    })
+                                    .unwrap_or(false)
+                            }),
+                            |el, _| {
+                                el.child(
+                                    div()
+                                        .max_w(px(460.0))
+                                        .whitespace_nowrap()
+                                        .overflow_x_hidden()
+                                        .text_ellipsis()
+                                        .child(
+                                            "Showing a GitHub snapshot because the local checkout is not ready.",
+                                        ),
+                                )
+                            },
                         )
-                    } else {
-                        el
-                    }
-                })
-                .when_some(local_repo_error.filter(|_| {
-                    file_document
-                        .map(|document| document.source != REPOSITORY_FILE_SOURCE_LOCAL_CHECKOUT)
-                        .unwrap_or(false)
-                }), |el, _| {
-                    el.child(
-                        div()
-                            .text_size(px(11.0))
-                            .font_family("Fira Code")
-                            .text_color(fg_muted())
-                            .child("Showing a GitHub snapshot because the local checkout is not ready."),
-                    )
-                })
-                .when_some(lsp_status.filter(|status| !status.is_ready()), |el, status| {
-                    el.child(
-                        div()
-                            .text_size(px(11.0))
-                            .font_family("Fira Code")
-                            .text_color(fg_muted())
-                            .child(status.message.clone()),
-                    )
-                }),
+                        .when_some(lsp_status.filter(|status| !status.is_ready()), |el, status| {
+                            el.child(
+                                div()
+                                    .max_w(px(460.0))
+                                    .whitespace_nowrap()
+                                    .overflow_x_hidden()
+                                    .text_ellipsis()
+                                    .child(status.message.clone()),
+                            )
+                        }),
+                ),
         )
         .child(
             div()
                 .flex()
-                .items_center()
+                .flex_col()
+                .items_end()
+                .gap(px(8.0))
+                .flex_shrink_0()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .gap(px(6.0))
+                        .flex_wrap()
+                        .child(workspace_mode_button("Semantic", center_mode == ReviewCenterMode::SemanticDiff, {
+                            let state = state_for_semantic.clone();
+                            move |_, _, cx| {
+                                state.update(cx, |state, cx| {
+                                    state.set_review_center_mode(ReviewCenterMode::SemanticDiff);
+                                    state.persist_active_review_session();
+                                    cx.notify();
+                                });
+                            }
+                        }))
+                        .child(workspace_mode_button("Source", center_mode == ReviewCenterMode::SourceBrowser, {
+                            let state = state_for_source.clone();
+                            move |_, window, cx| {
+                                state.update(cx, |state, cx| {
+                                    state.set_review_center_mode(ReviewCenterMode::SourceBrowser);
+                                    state.persist_active_review_session();
+                                    cx.notify();
+                                });
+                                ensure_active_review_focus_loaded(&state, window, cx);
+                            }
+                        }))
+                        .child(ghost_button("Back", {
+                            let state = state_for_back.clone();
+                            move |_, window, cx| {
+                                state.update(cx, |state, cx| {
+                                    if state.navigate_review_back() {
+                                        state.persist_active_review_session();
+                                        cx.notify();
+                                    }
+                                });
+                                ensure_active_review_focus_loaded(&state, window, cx);
+                            }
+                        }))
+                        .child(ghost_button("Forward", {
+                            let state = state_for_forward.clone();
+                            move |_, window, cx| {
+                                state.update(cx, |state, cx| {
+                                    if state.navigate_review_forward() {
+                                        state.persist_active_review_session();
+                                        cx.notify();
+                                    }
+                                });
+                                ensure_active_review_focus_loaded(&state, window, cx);
+                            }
+                        }))
+                        .child(ghost_button(if has_waymark { "Waypointed" } else { "Add waypoint" }, {
+                            let state = state_for_waymark.clone();
+                            let waymark_name = waymark_name.clone();
+                            move |_, _, cx| {
+                                state.update(cx, |state, cx| {
+                                    state.add_waymark_for_current_review_location(waymark_name.clone());
+                                    state.persist_active_review_session();
+                                    cx.notify();
+                                });
+                            }
+                        }))
+                        .when(has_task_route, |el| {
+                            el.child(ghost_button("Clear route", {
+                                let state = state_for_clear_route.clone();
+                                move |_, _, cx| {
+                                    state.update(cx, |state, cx| {
+                                        state.set_active_review_task_route(None);
+                                        state.persist_active_review_session();
+                                        cx.notify();
+                                    });
+                                }
+                            }))
+                        }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .gap(px(6.0))
+                        .flex_wrap()
+                        .when(local_repo_loading, |el| el.child(badge("Preparing checkout")))
+                        .when_some(local_status_badge, |el, status_badge| {
+                            el.child(badge(status_badge))
+                        })
+                        .when_some(file_document, |el, document| {
+                            el.child(badge(match document.source.as_str() {
+                                REPOSITORY_FILE_SOURCE_LOCAL_CHECKOUT => "local checkout",
+                                _ => "GitHub snapshot",
+                            }))
+                        })
+                        .when(lsp_loading, |el| el.child(badge("Starting LSP")))
+                        .when_some(lsp_status, |el, status| {
+                            el.child(badge(status.badge_label()))
+                        })
+                        .when(file_thread_count > 0, |el| {
+                            el.child(badge(&format!("{file_thread_count} threads")))
+                        })
+                        .when_some(selected_file, |el, f| {
+                            el.child(render_change_type_chip(&f.change_type))
+                                .child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .font_family("Fira Code")
+                                        .text_color(success())
+                                        .child(format!("+{}", f.additions)),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .font_family("Fira Code")
+                                        .text_color(danger())
+                                        .child(format!("-{}", f.deletions)),
+                                )
+                        })
+                        .when(
+                            selected_parsed.map(|p| p.is_binary).unwrap_or(false),
+                            |el| el.child(badge("binary")),
+                        ),
+                ),
+        )
+}
+
+fn workspace_mode_button(
+    label: &str,
+    active: bool,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .px(px(8.0))
+        .py(px(4.0))
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(if active {
+            border_default()
+        } else {
+            border_muted()
+        })
+        .bg(if active { bg_selected() } else { bg_surface() })
+        .text_size(px(11.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(if active { fg_emphasis() } else { fg_muted() })
+        .cursor_pointer()
+        .hover(|style| style.bg(hover_bg()).text_color(fg_emphasis()))
+        .on_mouse_down(MouseButton::Left, on_click)
+        .child(label.to_string())
+}
+
+fn render_review_context_pane(
+    state: &Entity<AppState>,
+    detail: &PullRequestDetail,
+    selected_file: Option<&PullRequestFile>,
+    selected_parsed: Option<&ParsedDiffFile>,
+    semantic_file: Option<&SemanticDiffFile>,
+    prepared_file: Option<&PreparedFileContent>,
+    review_context: Option<&ReviewContextData>,
+    cx: &App,
+) -> impl IntoElement {
+    let (
+        current_location,
+        current_location_label,
+        active_task_route,
+        waymarks,
+        route_loading,
+        route_message,
+        route_error,
+    ) = {
+        let app_state = state.read(cx);
+        let current_location = app_state.current_review_location();
+        let current_location_label = current_location
+            .as_ref()
+            .map(|location| location.label.clone())
+            .unwrap_or_else(|| "No active focus".to_string());
+        let active_task_route = app_state.active_review_task_route().cloned();
+        let waymarks = app_state
+            .active_review_session()
+            .map(|session| session.waymarks.clone())
+            .unwrap_or_default();
+        let route_loading = app_state
+            .active_detail_state()
+            .map(|detail_state| detail_state.review_route_loading)
+            .unwrap_or(false);
+        let route_message = app_state
+            .active_detail_state()
+            .and_then(|detail_state| detail_state.review_route_message.clone());
+        let route_error = app_state
+            .active_detail_state()
+            .and_then(|detail_state| detail_state.review_route_error.clone());
+
+        (
+            current_location,
+            current_location_label,
+            active_task_route,
+            waymarks,
+            route_loading,
+            route_message,
+            route_error,
+        )
+    };
+
+    div()
+        .w(px(320.0))
+        .flex_shrink_0()
+        .min_h_0()
+        .bg(bg_surface())
+        .border_l(px(1.0))
+        .border_color(border_default())
+        .id("review-context-scroll")
+        .overflow_y_scroll()
+        .child(
+            div()
+                .p(px(14.0))
+                .flex()
+                .flex_col()
+                .gap(px(14.0))
+                .child(
+                    nested_panel()
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .font_family("Fira Code")
+                                .text_color(fg_subtle())
+                                .child("REVIEW STATUS"),
+                        )
+                        .child(
+                            div()
+                                .mt(px(8.0))
+                                .text_size(px(13.0))
+                                .text_color(fg_default())
+                                .child(format!(
+                                    "{} files, {} comments, {} commits",
+                                    detail.changed_files,
+                                    detail.comments_count,
+                                    detail.commits_count
+                                )),
+                        )
+                        .child(
+                            div()
+                                .mt(px(8.0))
+                                .text_size(px(12.0))
+                                .text_color(fg_muted())
+                                .child(current_location_label),
+                        ),
+                )
+                .when_some(review_context, |el, review_context| {
+                    el.child(render_context_summary_panel(review_context))
+                        .child(render_context_waymarks_panel(
+                            state,
+                            current_location.as_ref(),
+                            review_context.selected_section.as_ref(),
+                            &waymarks,
+                            cx,
+                        ))
+                        .child(render_context_task_routes_panel(
+                            state,
+                            detail,
+                            selected_file,
+                            selected_parsed,
+                            semantic_file,
+                            prepared_file,
+                            review_context,
+                            active_task_route.as_ref(),
+                            route_loading,
+                            route_message.clone(),
+                            route_error.clone(),
+                            cx,
+                        ))
+                        .child(render_context_threads_panel(review_context))
+                        .child(render_context_related_panel(state, review_context))
+                })
+                .when_some(selected_file, |el, selected_file| {
+                    el.child(
+                        nested_panel()
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .font_family("Fira Code")
+                                    .text_color(fg_subtle())
+                                    .child("FILE"),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(8.0))
+                                    .text_size(px(13.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(fg_emphasis())
+                                    .child(selected_file.path.clone()),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(8.0))
+                                    .flex()
+                                    .gap(px(6.0))
+                                    .flex_wrap()
+                                    .child(render_change_type_chip(&selected_file.change_type))
+                                    .child(queue_metric(
+                                        format!("+{}", selected_file.additions),
+                                        success(),
+                                    ))
+                                    .child(queue_metric(
+                                        format!("-{}", selected_file.deletions),
+                                        danger(),
+                                    )),
+                            ),
+                    )
+                }),
+        )
+}
+
+fn render_context_summary_panel(review_context: &ReviewContextData) -> impl IntoElement {
+    nested_panel()
+        .child(
+            div()
+                .text_size(px(10.0))
+                .font_family("Fira Code")
+                .text_color(fg_subtle())
+                .child("IMPACT"),
+        )
+        .when_some(review_context.queue_item.as_ref(), |el, item| {
+            el.child(
+                div()
+                    .mt(px(8.0))
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(fg_emphasis())
+                    .child(item.risk_label.clone()),
+            )
+            .child(
+                div()
+                    .mt(px(8.0))
+                    .text_size(px(12.0))
+                    .text_color(fg_muted())
+                    .child(item.reasons.join(" • ")),
+            )
+        })
+        .when_some(review_context.selected_section.as_ref(), |el, section| {
+            el.child(
+                div()
+                    .mt(px(12.0))
+                    .text_size(px(12.0))
+                    .text_color(fg_default())
+                    .child(format!(
+                        "{} section with +{} / -{}",
+                        section.kind.label(),
+                        section.additions,
+                        section.deletions
+                    )),
+            )
+            .child(
+                div()
+                    .mt(px(6.0))
+                    .text_size(px(11.0))
+                    .text_color(fg_muted())
+                    .child(section.title.clone()),
+            )
+        })
+        .child(
+            div()
+                .mt(px(12.0))
+                .flex()
                 .gap(px(6.0))
                 .flex_wrap()
-                .flex_shrink_0()
-                .when(local_repo_loading, |el| el.child(badge("Preparing checkout")))
-                .when_some(local_status_badge, |el, status_badge| {
-                    el.child(badge(status_badge))
-                })
-                .when_some(file_document, |el, document| {
-                    el.child(badge(match document.source.as_str() {
-                        REPOSITORY_FILE_SOURCE_LOCAL_CHECKOUT => "local checkout",
-                        _ => "GitHub snapshot",
+                .child(queue_metric(
+                    format!("{} approved", review_context.review_status.approved),
+                    success(),
+                ))
+                .child(queue_metric(
+                    format!("{} changes", review_context.review_status.changes_requested),
+                    danger(),
+                ))
+                .child(queue_metric(
+                    format!("{} waiting", review_context.review_status.waiting),
+                    accent(),
+                ))
+                .child(queue_metric(
+                    format!("{} commented", review_context.review_status.commented),
+                    fg_muted(),
+                )),
+        )
+        .child(
+            div()
+                .mt(px(10.0))
+                .text_size(px(12.0))
+                .text_color(fg_muted())
+                .child(review_context.ownership_label.clone()),
+        )
+}
+
+fn render_context_waymarks_panel(
+    state: &Entity<AppState>,
+    current_location: Option<&ReviewLocation>,
+    selected_section: Option<&SemanticDiffSection>,
+    waymarks: &[crate::review_session::ReviewWaymark],
+    cx: &App,
+) -> impl IntoElement {
+    let draft = state.read(cx).waymark_draft.clone();
+    let default_name = default_waymark_name(
+        current_location.map(|location| location.file_path.as_str()),
+        selected_section,
+        current_location.and_then(|location| location.anchor.as_ref()),
+    );
+
+    nested_panel()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .font_family("Fira Code")
+                        .text_color(fg_subtle())
+                        .child("WAYPOINTS"),
+                )
+                .child(badge(&waymarks.len().to_string())),
+        )
+        .when_some(current_location, |el, _| {
+            el.child(
+                div()
+                    .mt(px(10.0))
+                    .px(px(10.0))
+                    .py(px(9.0))
+                    .rounded(radius_sm())
+                    .border_1()
+                    .border_color(border_default())
+                    .bg(bg_overlay())
+                    .text_size(px(12.0))
+                    .text_color(if draft.is_empty() {
+                        fg_subtle()
+                    } else {
+                        fg_emphasis()
+                    })
+                    .child(AppTextInput::new(
+                        "review-waymark-draft",
+                        state.clone(),
+                        AppTextFieldKind::WaymarkDraft,
+                        default_name.clone(),
+                    )),
+            )
+            .child(
+                div()
+                    .mt(px(10.0))
+                    .flex()
+                    .gap(px(8.0))
+                    .flex_wrap()
+                    .child(review_button("Add waypoint", {
+                        let state = state.clone();
+                        let default_name = default_name.clone();
+                        move |_, _, cx| {
+                            state.update(cx, |state, cx| {
+                                let name = if state.waymark_draft.trim().is_empty() {
+                                    default_name.clone()
+                                } else {
+                                    state.waymark_draft.clone()
+                                };
+                                state.add_waymark_for_current_review_location(name);
+                                state.waymark_draft.clear();
+                                state.persist_active_review_session();
+                                cx.notify();
+                            });
+                        }
                     }))
-                })
-                .when(lsp_loading, |el| el.child(badge("Starting LSP")))
-                .when_some(lsp_status, |el, status| {
-                    el.child(badge(status.badge_label()))
-                })
-                .when(file_thread_count > 0, |el| {
-                    el.child(badge(&format!("{file_thread_count} threads")))
-                })
-                .when_some(selected_file, |el, f| {
-                    el.child(render_change_type_chip(&f.change_type))
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .font_family("Fira Code")
-                                .text_color(success())
-                                .child(format!("+{}", f.additions)),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .font_family("Fira Code")
-                                .text_color(danger())
-                                .child(format!("-{}", f.deletions)),
-                        )
-                })
-                .when(
-                    selected_parsed.map(|p| p.is_binary).unwrap_or(false),
-                    |el| el.child(badge("binary")),
+                    .child(ghost_button("Check later", {
+                        let state = state.clone();
+                        move |_, _, cx| {
+                            state.update(cx, |state, cx| {
+                                state.add_waymark_for_current_review_location("Check later");
+                                state.waymark_draft.clear();
+                                state.persist_active_review_session();
+                                cx.notify();
+                            });
+                        }
+                    }))
+                    .child(ghost_button("Security-sensitive", {
+                        let state = state.clone();
+                        move |_, _, cx| {
+                            state.update(cx, |state, cx| {
+                                state.add_waymark_for_current_review_location("Security-sensitive");
+                                state.waymark_draft.clear();
+                                state.persist_active_review_session();
+                                cx.notify();
+                            });
+                        }
+                    })),
+            )
+        })
+        .when(current_location.is_none(), |el| {
+            el.child(
+                div()
+                    .mt(px(8.0))
+                    .text_size(px(12.0))
+                    .text_color(fg_muted())
+                    .child("Open a diff line or source location to add a waypoint."),
+            )
+        })
+        .when(!waymarks.is_empty(), |el| {
+            el.child(
+                div().mt(px(12.0)).flex().flex_col().gap(px(8.0)).children(
+                    waymarks
+                        .iter()
+                        .rev()
+                        .map(|waymark| render_waymark_card(state, waymark)),
                 ),
+            )
+        })
+}
+
+fn render_context_task_routes_panel(
+    state: &Entity<AppState>,
+    detail: &PullRequestDetail,
+    selected_file: Option<&PullRequestFile>,
+    selected_parsed: Option<&ParsedDiffFile>,
+    _semantic_file: Option<&SemanticDiffFile>,
+    prepared_file: Option<&PreparedFileContent>,
+    review_context: &ReviewContextData,
+    active_task_route: Option<&crate::review_session::ReviewTaskRoute>,
+    route_loading: bool,
+    route_message: Option<String>,
+    route_error: Option<String>,
+    cx: &App,
+) -> impl IntoElement {
+    let selected_section = review_context.selected_section.as_ref();
+    let focus_terms = selected_section
+        .map(|section| collect_section_focus_terms(section, selected_parsed))
+        .unwrap_or_default();
+    let changed_route = selected_file.and_then(|file| {
+        build_changed_touch_route(detail, file.path.as_str(), selected_section, &focus_terms)
+    });
+    let current_location = state.read(cx).current_review_location();
+    let callsite_query = selected_file.and_then(|file| {
+        build_review_symbol_route_query(
+            state,
+            file.path.as_str(),
+            selected_section,
+            selected_parsed,
+            prepared_file,
+            cx,
+        )
+    });
+    let action_count = usize::from(changed_route.is_some()) + usize::from(callsite_query.is_some());
+
+    nested_panel()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .font_family("Fira Code")
+                        .text_color(fg_subtle())
+                        .child("TASK PATHS"),
+                )
+                .child(badge(&action_count.to_string())),
+        )
+        .when_some(active_task_route, |el, route| {
+            el.child(
+                div()
+                    .mt(px(10.0))
+                    .px(px(10.0))
+                    .py(px(9.0))
+                    .rounded(radius_sm())
+                    .border_1()
+                    .border_color(border_default())
+                    .bg(bg_overlay())
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(fg_emphasis())
+                            .child(route.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .mt(px(6.0))
+                            .text_size(px(11.0))
+                            .text_color(fg_muted())
+                            .child(route.summary.clone()),
+                    )
+                    .child(
+                        div()
+                            .mt(px(8.0))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(8.0))
+                            .child(badge(&format!("{} stops", route.stops.len())))
+                            .child(ghost_button("Clear", {
+                                let state = state.clone();
+                                move |_, _, cx| {
+                                    state.update(cx, |state, cx| {
+                                        state.set_active_review_task_route(None);
+                                        state.persist_active_review_session();
+                                        cx.notify();
+                                    });
+                                }
+                            })),
+                    ),
+            )
+        })
+        .when(route_loading, |el| {
+            el.child(
+                div()
+                    .mt(px(10.0))
+                    .text_size(px(12.0))
+                    .text_color(fg_muted())
+                    .child("Tracing task route…"),
+            )
+        })
+        .when_some(route_error, |el, error| {
+            el.child(div().mt(px(10.0)).child(error_text(&error)))
+        })
+        .when_some(route_message, |el, message| {
+            el.child(
+                div()
+                    .mt(px(10.0))
+                    .text_size(px(12.0))
+                    .text_color(fg_muted())
+                    .child(message),
+            )
+        })
+        .when_some(changed_route, |el, route| {
+            el.child(render_task_route_action_card(
+                "Jump to related changed sections",
+                &route.title,
+                &route.summary,
+                Some(format!("{} stops", route.stops.len())),
+                {
+                    let state = state.clone();
+                    let route = route.clone();
+                    move |_, _, cx| {
+                        state.update(cx, |state, cx| {
+                            state.set_active_review_task_route(Some(route.clone()));
+                            state.persist_active_review_session();
+                            cx.notify();
+                        });
+                    }
+                },
+            ))
+        })
+        .when_some(
+            callsite_query
+                .zip(current_location)
+                .map(|(query, current_location)| (query, current_location)),
+            |el, (query, current_location)| {
+                el.child(render_task_route_action_card(
+                    "Symbol graph",
+                    &format!("Call sites of {}", query.focus.term),
+                    "Use LSP references to walk outward from this changed symbol.",
+                    Some("references".to_string()),
+                    {
+                        let state = state.clone();
+                        let detail = detail.clone();
+                        let query = query.clone();
+                        let current_location = current_location.clone();
+                        move |_, window, cx| {
+                            activate_callsite_review_route(
+                                &state,
+                                detail.clone(),
+                                current_location.clone(),
+                                query.clone(),
+                                window,
+                                cx,
+                            );
+                        }
+                    },
+                ))
+            },
+        )
+        .when(
+            action_count == 0 && active_task_route.is_none() && !route_loading,
+            |el| {
+                el.child(
+                    div()
+                        .mt(px(8.0))
+                        .text_size(px(12.0))
+                        .text_color(fg_muted())
+                        .child("No route suggestions are available for this focus yet."),
+                )
+            },
+        )
+}
+
+fn render_task_route_action_card(
+    eyebrow: &str,
+    title: &str,
+    summary: &str,
+    badge_text: Option<String>,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .mt(px(10.0))
+        .px(px(10.0))
+        .py(px(9.0))
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(border_muted())
+        .bg(bg_surface())
+        .cursor_pointer()
+        .hover(|style| style.bg(hover_bg()))
+        .on_mouse_down(MouseButton::Left, on_click)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .font_family("Fira Code")
+                        .text_color(accent())
+                        .child(eyebrow.to_ascii_uppercase()),
+                )
+                .when_some(badge_text, |el, badge_text| el.child(badge(&badge_text))),
+        )
+        .child(
+            div()
+                .mt(px(6.0))
+                .text_size(px(12.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_emphasis())
+                .child(title.to_string()),
+        )
+        .child(
+            div()
+                .mt(px(4.0))
+                .text_size(px(11.0))
+                .text_color(fg_muted())
+                .child(summary.to_string()),
+        )
+}
+
+fn render_waymark_card(
+    state: &Entity<AppState>,
+    waymark: &crate::review_session::ReviewWaymark,
+) -> impl IntoElement {
+    let state_for_open = state.clone();
+    let state_for_remove = state.clone();
+    let location = waymark.location.clone();
+    let name = waymark.name.clone();
+    let remove_id = waymark.id.clone();
+
+    div()
+        .px(px(10.0))
+        .py(px(8.0))
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(border_muted())
+        .bg(bg_surface())
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .justify_between()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.0))
+                        .min_w_0()
+                        .cursor_pointer()
+                        .hover(|style| style.text_color(fg_emphasis()))
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                            open_review_location_card(&state_for_open, &location, window, cx);
+                        })
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(fg_emphasis())
+                                .child(name),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(fg_muted())
+                                .child(waymark.location.label.clone()),
+                        ),
+                )
+                .child(ghost_button("Remove", move |_, _, cx| {
+                    state_for_remove.update(cx, |state, cx| {
+                        if state.remove_review_waymark(&remove_id) {
+                            state.persist_active_review_session();
+                            cx.notify();
+                        }
+                    });
+                })),
+        )
+}
+
+fn render_context_threads_panel(review_context: &ReviewContextData) -> impl IntoElement {
+    nested_panel()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .font_family("Fira Code")
+                        .text_color(fg_subtle())
+                        .child("THREADS"),
+                )
+                .child(badge(&review_context.file_threads.len().to_string())),
+        )
+        .when(review_context.file_threads.is_empty(), |el| {
+            el.child(
+                div()
+                    .mt(px(8.0))
+                    .text_size(px(12.0))
+                    .text_color(fg_muted())
+                    .child("No file-local review threads."),
+            )
+        })
+        .when(!review_context.file_threads.is_empty(), |el| {
+            el.child(div().mt(px(10.0)).flex().flex_col().gap(px(10.0)).children(
+                review_context.file_threads.iter().take(4).map(|thread| {
+                    div()
+                        .pt(px(10.0))
+                        .border_t(px(1.0))
+                        .border_color(border_muted())
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .font_family("Fira Code")
+                                .text_color(fg_subtle())
+                                .child(format!(
+                                    "{} • {}{}",
+                                    thread.author_login,
+                                    thread.location_label,
+                                    if thread.is_resolved {
+                                        " • resolved"
+                                    } else {
+                                        ""
+                                    }
+                                )),
+                        )
+                        .child(
+                            div()
+                                .mt(px(6.0))
+                                .text_size(px(12.0))
+                                .text_color(fg_default())
+                                .child(thread.preview.clone()),
+                        )
+                        .child(
+                            div()
+                                .mt(px(4.0))
+                                .text_size(px(11.0))
+                                .text_color(fg_muted())
+                                .child(thread.updated_at.clone()),
+                        )
+                }),
+            ))
+        })
+}
+
+fn render_context_related_panel(
+    state: &Entity<AppState>,
+    review_context: &ReviewContextData,
+) -> impl IntoElement {
+    nested_panel()
+        .child(
+            div()
+                .text_size(px(10.0))
+                .font_family("Fira Code")
+                .text_color(fg_subtle())
+                .child("RELATED"),
+        )
+        .when(!review_context.related_files.is_empty(), |el| {
+            el.child(div().mt(px(10.0)).flex().flex_col().gap(px(8.0)).children(
+                review_context.related_files.iter().map(|item| {
+                    render_related_file_row(
+                        state,
+                        item.path.as_str(),
+                        item.reason.as_str(),
+                        item.changed,
+                        false,
+                    )
+                }),
+            ))
+        })
+        .when(!review_context.docs_and_tests.is_empty(), |el| {
+            el.child(
+                div()
+                    .mt(px(12.0))
+                    .pt(px(12.0))
+                    .border_t(px(1.0))
+                    .border_color(border_muted())
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .children(review_context.docs_and_tests.iter().map(|item| {
+                        render_related_file_row(
+                            state,
+                            item.path.as_str(),
+                            item.reason.as_str(),
+                            item.changed,
+                            true,
+                        )
+                    })),
+            )
+        })
+}
+
+fn render_related_file_row(
+    state: &Entity<AppState>,
+    path: &str,
+    reason: &str,
+    changed: bool,
+    prefer_source: bool,
+) -> impl IntoElement {
+    let state = state.clone();
+    let path = path.to_string();
+    let display_path = path.clone();
+    let reason_label = reason.to_string();
+
+    div()
+        .px(px(10.0))
+        .py(px(8.0))
+        .rounded(radius_sm())
+        .bg(bg_surface())
+        .border_1()
+        .border_color(border_muted())
+        .cursor_pointer()
+        .hover(|style| style.bg(hover_bg()))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            if prefer_source {
+                open_review_source_location(
+                    &state,
+                    path.clone(),
+                    None,
+                    Some(reason_label.clone()),
+                    window,
+                    cx,
+                );
+            } else {
+                open_review_diff_location(&state, path.clone(), None, window, cx);
+            }
+        })
+        .child(
+            div()
+                .text_size(px(12.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(fg_emphasis())
+                .child(display_path),
+        )
+        .child(
+            div()
+                .mt(px(4.0))
+                .text_size(px(11.0))
+                .text_color(fg_muted())
+                .child(format!(
+                    "{}{}",
+                    reason,
+                    if changed { " • changed" } else { "" }
+                )),
         )
 }
 
@@ -1222,6 +3566,7 @@ fn render_file_diff(
     state: &Entity<AppState>,
     file: &PullRequestFile,
     parsed: Option<&ParsedDiffFile>,
+    semantic_file: Option<&SemanticDiffFile>,
     prepared_file: Option<&PreparedFileContent>,
     selected_anchor: Option<&DiffAnchor>,
     diff_view_state: DiffFileViewState,
@@ -1235,8 +3580,18 @@ fn render_file_diff(
     let prepared_file = prepared_file.cloned();
     let file_lsp_context =
         build_diff_file_lsp_context(state, file.path.as_str(), prepared_file.as_ref(), cx);
+    let semantic_sections =
+        semantic_file.map(|semantic_file| Arc::new(semantic_file.sections.clone()));
 
-    let items = build_diff_view_items(file, parsed, prepared_file.as_ref(), &rows);
+    let items = build_diff_view_items(
+        state,
+        file,
+        parsed,
+        semantic_file,
+        prepared_file.as_ref(),
+        &rows,
+        cx,
+    );
 
     if list_state.item_count() != items.len() {
         list_state.reset(items.len());
@@ -1291,6 +3646,7 @@ fn render_file_diff(
                     render_virtualized_diff_rows(
                         &state,
                         rows,
+                        semantic_sections,
                         parsed_file_index,
                         highlighted_hunks,
                         file_lsp_context,
@@ -1298,6 +3654,7 @@ fn render_file_diff(
                         list_state,
                         items,
                     )
+                    .with_sizing_behavior(ListSizingBehavior::Auto)
                     .flex_grow()
                     .min_h_0(),
                 ),
@@ -1307,6 +3664,7 @@ fn render_file_diff(
 fn render_virtualized_diff_rows(
     state: &Entity<AppState>,
     rows: Arc<Vec<DiffRenderRow>>,
+    semantic_sections: Option<Arc<Vec<SemanticDiffSection>>>,
     parsed_file_index: Option<usize>,
     highlighted_hunks: Option<Arc<Vec<Vec<Vec<SyntaxSpan>>>>>,
     file_lsp_context: Option<DiffFileLspContext>,
@@ -1317,6 +3675,14 @@ fn render_virtualized_diff_rows(
     let state = state.clone();
 
     list(list_state, move |ix, _window, cx| match items[ix] {
+        DiffViewItem::SemanticSection(section_ix) => semantic_sections
+            .as_ref()
+            .and_then(|sections| sections.get(section_ix))
+            .map(|section| {
+                render_semantic_section_header(&state, section, selected_anchor.as_ref(), cx)
+                    .into_any_element()
+            })
+            .unwrap_or_else(|| div().into_any_element()),
         DiffViewItem::Gap(gap) => render_diff_gap_row(gap).into_any_element(),
         DiffViewItem::Row(row_ix) => render_virtualized_diff_row(
             &state,
@@ -1335,6 +3701,7 @@ fn render_virtualized_diff_rows(
 enum DiffViewItem {
     Row(usize),
     Gap(DiffGapSummary),
+    SemanticSection(usize),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1377,6 +3744,16 @@ struct DiffLineLspQuery {
     repo_root: PathBuf,
     query_key: String,
     token_label: String,
+    request: lsp::LspTextDocumentRequest,
+}
+
+#[derive(Clone)]
+struct ReviewSymbolRouteQuery {
+    detail_key: String,
+    lsp_session_manager: Arc<lsp::LspSessionManager>,
+    repo_root: PathBuf,
+    query_key: String,
+    focus: ReviewSymbolFocus,
     request: lsp::LspTextDocumentRequest,
 }
 
@@ -1445,6 +3822,51 @@ fn build_diff_file_lsp_context(
         file_path: file_path.to_string(),
         reference: prepared_file.reference.clone(),
         document_text: prepared_file.text.clone(),
+    })
+}
+
+fn build_review_symbol_route_query(
+    state: &Entity<AppState>,
+    file_path: &str,
+    selected_section: Option<&SemanticDiffSection>,
+    selected_parsed: Option<&ParsedDiffFile>,
+    prepared_file: Option<&PreparedFileContent>,
+    cx: &App,
+) -> Option<ReviewSymbolRouteQuery> {
+    let selected_section = selected_section?;
+    let prepared_file = prepared_file?;
+    let focus = build_section_symbol_focus(selected_section, selected_parsed, Some(prepared_file))?;
+
+    let app_state = state.read(cx);
+    let detail_key = app_state.active_pr_key.clone()?;
+    let detail_state = app_state.detail_states.get(&detail_key)?;
+    let local_repo_status = detail_state.local_repository_status.as_ref()?;
+    if !local_repo_status.ready_for_snapshot_features() {
+        return None;
+    }
+
+    let lsp_status = detail_state.lsp_statuses.get(file_path)?;
+    if !lsp_status.is_ready() || !lsp_status.capabilities.references_supported {
+        return None;
+    }
+
+    let repo_root = PathBuf::from(local_repo_status.path.as_ref()?);
+
+    Some(ReviewSymbolRouteQuery {
+        detail_key,
+        lsp_session_manager: app_state.lsp_session_manager.clone(),
+        repo_root,
+        query_key: format!(
+            "{}:{}:{}:{}:task-route",
+            file_path, prepared_file.reference, focus.line, focus.column
+        ),
+        request: lsp::LspTextDocumentRequest {
+            file_path: file_path.to_string(),
+            document_text: prepared_file.text.clone(),
+            line: focus.line,
+            column: focus.column,
+        },
+        focus,
     })
 }
 
@@ -1551,6 +3973,148 @@ fn request_diff_line_lsp_details(query: DiffLineLspQuery, window: &mut Window, c
         .detach();
 }
 
+fn activate_callsite_review_route(
+    state: &Entity<AppState>,
+    detail: PullRequestDetail,
+    current_location: ReviewLocation,
+    query: ReviewSymbolRouteQuery,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let cached_route = state
+        .read(cx)
+        .detail_states
+        .get(&query.detail_key)
+        .and_then(|detail_state| detail_state.lsp_symbol_states.get(&query.query_key))
+        .and_then(|symbol_state| symbol_state.details.as_ref())
+        .and_then(|details| {
+            build_callsite_route(
+                &detail,
+                current_location.clone(),
+                &query.focus.term,
+                &details.reference_targets,
+            )
+        });
+
+    if let Some(route) = cached_route {
+        state.update(cx, |state, cx| {
+            if let Some(detail_state) = state.detail_states.get_mut(&query.detail_key) {
+                detail_state.review_route_loading = false;
+                detail_state.review_route_message =
+                    Some(format!("Loaded call sites of {}.", query.focus.term));
+                detail_state.review_route_error = None;
+            }
+            state.set_active_review_task_route(Some(route));
+            state.persist_active_review_session();
+            cx.notify();
+        });
+        return;
+    }
+
+    let query_key = query.query_key.clone();
+    let detail_key = query.detail_key.clone();
+    let focus_term = query.focus.term.clone();
+
+    state.update(cx, |state, cx| {
+        let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
+            return;
+        };
+        detail_state.review_route_loading = true;
+        detail_state.review_route_message = Some(format!("Tracing call sites of {focus_term}…"));
+        detail_state.review_route_error = None;
+
+        let symbol_state = detail_state
+            .lsp_symbol_states
+            .entry(query_key.clone())
+            .or_default();
+        if !symbol_state.loading {
+            symbol_state.loading = true;
+            symbol_state.error = None;
+        }
+
+        cx.notify();
+    });
+
+    window
+        .spawn(cx, {
+            let state = state.clone();
+            let detail_key = detail_key.clone();
+            let query_key = query_key.clone();
+            let lsp_session_manager = query.lsp_session_manager.clone();
+            let repo_root = query.repo_root.clone();
+            let request = query.request.clone();
+            let focus_term = focus_term.clone();
+            async move |cx: &mut AsyncWindowContext| {
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { lsp_session_manager.symbol_details(&repo_root, &request) })
+                    .await;
+
+                state
+                    .update(cx, |state, cx| {
+                        let mut activated_route = None;
+                        let mut route_message = None;
+                        let mut route_error = None;
+
+                        {
+                            let Some(detail_state) = state.detail_states.get_mut(&detail_key)
+                            else {
+                                return;
+                            };
+                            let symbol_state = detail_state
+                                .lsp_symbol_states
+                                .entry(query_key.clone())
+                                .or_default();
+                            symbol_state.loading = false;
+
+                            detail_state.review_route_loading = false;
+                            match result {
+                                Ok(details) => {
+                                    symbol_state.details = Some(details.clone());
+                                    symbol_state.error = None;
+
+                                    if let Some(route) = build_callsite_route(
+                                        &detail,
+                                        current_location.clone(),
+                                        &focus_term,
+                                        &details.reference_targets,
+                                    ) {
+                                        route_message = Some(format!(
+                                            "Loaded {} route with {} stops.",
+                                            route.title,
+                                            route.stops.len()
+                                        ));
+                                        activated_route = Some(route);
+                                    } else {
+                                        route_error = Some(format!(
+                                            "No call sites found for {}.",
+                                            focus_term
+                                        ));
+                                    }
+                                }
+                                Err(error) => {
+                                    symbol_state.details = None;
+                                    symbol_state.error = Some(error.clone());
+                                    route_error = Some(error);
+                                }
+                            }
+
+                            detail_state.review_route_message = route_message.clone();
+                            detail_state.review_route_error = route_error.clone();
+                        }
+
+                        if let Some(route) = activated_route {
+                            state.set_active_review_task_route(Some(route));
+                            state.persist_active_review_session();
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+            }
+        })
+        .detach();
+}
+
 fn navigate_to_diff_lsp_definition(query: DiffLineLspQuery, window: &mut Window, cx: &mut App) {
     // Try to read cached definition targets
     let targets = query
@@ -1585,19 +4149,20 @@ fn navigate_to_diff_lsp_definition(query: DiffLineLspQuery, window: &mut Window,
                         let target = target.clone();
                         state
                             .update(cx, |state, cx| {
-                                state.selected_file_path = Some(target.path.clone());
-                                state.selected_diff_anchor = Some(DiffAnchor {
-                                    file_path: target.path.clone(),
-                                    hunk_header: None,
-                                    line: Some(target.line as i64),
-                                    side: Some("RIGHT".to_string()),
-                                    thread_id: None,
-                                });
+                                state.navigate_to_review_location(
+                                    ReviewLocation::from_source(
+                                        target.path.clone(),
+                                        Some(target.line),
+                                        Some("Jumped to definition".to_string()),
+                                    ),
+                                    true,
+                                );
+                                state.persist_active_review_session();
                                 cx.notify();
                             })
                             .ok();
 
-                        load_pull_request_file_content_flow(state, None, cx).await;
+                        load_local_source_file_content_flow(state, target.path.clone(), cx).await;
                     }
                 }
             }
@@ -1611,37 +4176,53 @@ fn navigate_to_definition_target(
     window: &mut Window,
     cx: &mut App,
 ) {
-    state.update(cx, |state, cx| {
-        state.selected_file_path = Some(target.path.clone());
-        state.selected_diff_anchor = Some(DiffAnchor {
-            file_path: target.path.clone(),
-            hunk_header: None,
-            line: Some(target.line as i64),
-            side: Some("RIGHT".to_string()),
-            thread_id: None,
-        });
-        cx.notify();
-    });
-    ensure_selected_file_content_loaded(state, window, cx);
+    open_review_source_location(
+        state,
+        target.path.clone(),
+        Some(target.line),
+        Some("Jumped to definition".to_string()),
+        window,
+        cx,
+    );
 }
 
 fn build_diff_view_items(
+    state: &Entity<AppState>,
     file: &PullRequestFile,
     parsed: Option<&ParsedDiffFile>,
+    semantic_file: Option<&SemanticDiffFile>,
     prepared_file: Option<&PreparedFileContent>,
     rows: &[DiffRenderRow],
+    cx: &App,
 ) -> Vec<DiffViewItem> {
     let mut items = Vec::with_capacity(rows.len() + 4);
     let mut last_hunk_index = None;
+    let mut current_section_ix = None;
     let last_hunk_row_index = rows.iter().rposition(|row| {
         matches!(
             row,
             DiffRenderRow::HunkHeader { .. } | DiffRenderRow::Line { .. }
         )
     });
+    let collapsed_sections = state
+        .read(cx)
+        .active_review_session()
+        .map(|session| session.collapsed_sections.clone())
+        .unwrap_or_default();
 
     for (row_index, row) in rows.iter().enumerate() {
         if let DiffRenderRow::HunkHeader { hunk_index } = row {
+            if let Some(section_ix) = semantic_file
+                .and_then(|semantic_file| semantic_file.section_index_for_hunk(*hunk_index))
+            {
+                if current_section_ix != Some(section_ix) {
+                    items.push(DiffViewItem::SemanticSection(section_ix));
+                    current_section_ix = Some(section_ix);
+                }
+            } else {
+                current_section_ix = None;
+            }
+
             if let Some(gap) =
                 diff_gap_before_hunk(file, parsed, prepared_file, last_hunk_index, *hunk_index)
             {
@@ -1650,7 +4231,23 @@ fn build_diff_view_items(
             last_hunk_index = Some(*hunk_index);
         }
 
-        items.push(DiffViewItem::Row(row_index));
+        let is_collapsed = current_section_ix
+            .and_then(|section_ix| {
+                semantic_file.and_then(|semantic_file| semantic_file.sections.get(section_ix))
+            })
+            .map(|section| collapsed_sections.contains(&section.id))
+            .unwrap_or(false);
+        let should_skip = is_collapsed
+            && matches!(
+                row,
+                DiffRenderRow::HunkHeader { .. }
+                    | DiffRenderRow::Line { .. }
+                    | DiffRenderRow::InlineThread { .. }
+            );
+
+        if !should_skip {
+            items.push(DiffViewItem::Row(row_index));
+        }
 
         if Some(row_index) == last_hunk_row_index {
             if let Some(last_hunk_index) = last_hunk_index {
@@ -1852,6 +4449,105 @@ fn render_diff_gap_label(summary: DiffGapSummary) -> String {
     }
 }
 
+fn render_semantic_section_header(
+    state: &Entity<AppState>,
+    section: &SemanticDiffSection,
+    selected_anchor: Option<&DiffAnchor>,
+    cx: &App,
+) -> impl IntoElement {
+    let state_for_open = state.clone();
+    let state_for_toggle = state.clone();
+    let path = section
+        .anchor
+        .as_ref()
+        .map(|anchor| anchor.file_path.clone())
+        .unwrap_or_default();
+    let anchor = section.anchor.clone();
+    let section_id = section.id.clone();
+    let is_selected = selected_anchor
+        .and_then(|selected_anchor| selected_anchor.hunk_header.as_deref())
+        .zip(
+            section
+                .anchor
+                .as_ref()
+                .and_then(|anchor| anchor.hunk_header.as_deref()),
+        )
+        .map(|(left, right)| left == right)
+        .unwrap_or(false)
+        || selected_anchor
+            .and_then(|selected_anchor| selected_anchor.line)
+            .zip(section.anchor.as_ref().and_then(|anchor| anchor.line))
+            .map(|(left, right)| left == right)
+            .unwrap_or(false);
+    let collapsed = state.read(cx).is_review_section_collapsed(&section.id);
+
+    div()
+        .px(px(14.0))
+        .py(px(10.0))
+        .border_b(px(1.0))
+        .border_color(border_muted())
+        .bg(if is_selected {
+            bg_selected()
+        } else {
+            bg_surface()
+        })
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .justify_between()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.0))
+                        .min_w_0()
+                        .cursor_pointer()
+                        .hover(|style| style.text_color(fg_emphasis()))
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                            open_review_diff_location(
+                                &state_for_open,
+                                path.clone(),
+                                anchor.clone(),
+                                window,
+                                cx,
+                            );
+                        })
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .font_family("Fira Code")
+                                .text_color(accent())
+                                .child(section.kind.label().to_ascii_uppercase()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(fg_emphasis())
+                                .child(section.title.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(fg_muted())
+                                .child(section.summary.clone()),
+                        ),
+                )
+                .child(ghost_button(
+                    if collapsed { "Expand" } else { "Fold" },
+                    move |_, _, cx| {
+                        state_for_toggle.update(cx, |state, cx| {
+                            state.toggle_review_section_collapse(&section_id);
+                            state.persist_active_review_session();
+                            cx.notify();
+                        });
+                    },
+                )),
+        )
+}
+
 fn prepare_diff_view_state(
     app_state: &AppState,
     detail: &PullRequestDetail,
@@ -1993,25 +4689,27 @@ fn render_virtualized_diff_row(
         } => parsed_file
             .and_then(|parsed| {
                 let path = parsed.path.as_str();
-                parsed
-                    .hunks
-                    .get(*hunk_index)
-                    .and_then(|hunk| hunk.lines.get(*line_index))
-                    .map(|line| {
+                parsed.hunks.get(*hunk_index).and_then(|hunk| {
+                    hunk.lines.get(*line_index).map(|line| {
+                        let hunk_header = hunk.header.as_str();
                         let spans = highlighted_hunks
                             .and_then(|hunks| hunks.get(*hunk_index))
                             .and_then(|lines| lines.get(*line_index))
                             .map(|spans| spans.as_slice());
                         let line_lsp_context = build_diff_line_lsp_context(file_lsp_context, line);
-                        render_diff_line(
+                        render_reviewable_diff_line(
+                            state,
                             path,
+                            Some(hunk_header),
                             line,
                             spans,
                             selected_anchor,
                             line_lsp_context.as_ref(),
+                            cx,
                         )
                         .into_any_element()
                     })
+                })
             })
             .unwrap_or_else(|| div().into_any_element()),
         DiffRenderRow::NoTextHunks => render_diff_state_row(
@@ -2143,6 +4841,359 @@ fn render_file_stat_bar(additions: i64, deletions: i64) -> impl IntoElement {
         }))
 }
 
+fn build_review_line_action_target(
+    file_path: &str,
+    hunk_header: Option<&str>,
+    line: &ParsedDiffLine,
+) -> Option<ReviewLineActionTarget> {
+    let side = if matches!(line.kind, DiffLineKind::Deletion) {
+        Some("LEFT")
+    } else if matches!(line.kind, DiffLineKind::Addition | DiffLineKind::Context) {
+        Some("RIGHT")
+    } else {
+        None
+    }?;
+
+    let line_number = match side {
+        "LEFT" => line.left_line_number,
+        _ => line.right_line_number,
+    }?;
+    let display_line = usize::try_from(line_number).ok().filter(|line| *line > 0)?;
+
+    Some(ReviewLineActionTarget {
+        anchor: DiffAnchor {
+            file_path: file_path.to_string(),
+            hunk_header: hunk_header.map(str::to_string),
+            line: Some(line_number),
+            side: Some(side.to_string()),
+            thread_id: None,
+        },
+        label: format!("{file_path}:{display_line}"),
+    })
+}
+
+fn render_reviewable_diff_line(
+    state: &Entity<AppState>,
+    file_path: &str,
+    hunk_header: Option<&str>,
+    line: &ParsedDiffLine,
+    syntax_spans: Option<&[SyntaxSpan]>,
+    selected_anchor: Option<&DiffAnchor>,
+    lsp_context: Option<&DiffLineLspContext>,
+    cx: &App,
+) -> impl IntoElement {
+    let line_action_target = build_review_line_action_target(file_path, hunk_header, line);
+    let (active_line_action, waypoint) = {
+        let app_state = state.read(cx);
+        let active_line_action = app_state.active_review_line_action.clone();
+        let waypoint = line_action_target
+            .as_ref()
+            .and_then(|target| {
+                app_state
+                    .active_review_session()
+                    .and_then(|session| session.waymark_for_location(&target.review_location()))
+            })
+            .cloned();
+        (active_line_action, waypoint)
+    };
+
+    let popup_open = line_action_target
+        .as_ref()
+        .zip(active_line_action.as_ref())
+        .map(|(line_target, active_target)| line_target.stable_key() == active_target.stable_key())
+        .unwrap_or(false);
+    let waypoint_for_chip = waypoint.clone();
+
+    div()
+        .relative()
+        .child(render_diff_line(
+            file_path,
+            line,
+            syntax_spans,
+            selected_anchor,
+            lsp_context,
+            line_action_target.map(|target| (state.clone(), target)),
+        ))
+        .when(!popup_open, |el| {
+            if let Some(waypoint) = waypoint_for_chip {
+                el.child(
+                    div()
+                        .absolute()
+                        .top(px(2.0))
+                        .right(px(12.0))
+                        .child(render_waypoint_pill(&waypoint.name, false)),
+                )
+            } else {
+                el
+            }
+        })
+}
+
+fn render_waypoint_pill(label: &str, active: bool) -> impl IntoElement {
+    div()
+        .px(px(9.0))
+        .py(px(4.0))
+        .rounded(px(999.0))
+        .border_1()
+        .border_color(if active { purple() } else { waypoint_border() })
+        .bg(if active {
+            waypoint_active_bg()
+        } else {
+            waypoint_bg()
+        })
+        .shadow_sm()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(div().w(px(8.0)).h(px(8.0)).rounded(px(999.0)).bg(purple()))
+                .child(
+                    div()
+                        .max_w(px(220.0))
+                        .whitespace_nowrap()
+                        .overflow_x_hidden()
+                        .text_ellipsis()
+                        .text_size(px(11.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(waypoint_fg())
+                        .child(label.to_string()),
+                ),
+        )
+}
+
+fn render_review_line_action_overlay(
+    state: &Entity<AppState>,
+    target: &ReviewLineActionTarget,
+    position: Point<Pixels>,
+    mode: ReviewLineActionMode,
+    cx: &App,
+) -> impl IntoElement {
+    let has_waypoint = state
+        .read(cx)
+        .active_review_session()
+        .and_then(|session| session.waymark_for_location(&target.review_location()))
+        .is_some();
+
+    anchored()
+        .position(position)
+        .anchor(Corner::TopLeft)
+        .offset(point(px(12.0), px(10.0)))
+        .snap_to_window_with_margin(px(12.0))
+        .child(render_review_line_action_popup(
+            state,
+            Some(target),
+            mode,
+            has_waypoint,
+            cx,
+        ))
+}
+
+fn render_review_line_action_popup(
+    state: &Entity<AppState>,
+    target: Option<&ReviewLineActionTarget>,
+    mode: ReviewLineActionMode,
+    has_waypoint: bool,
+    cx: &App,
+) -> impl IntoElement {
+    let inline_comment_draft = state.read(cx).inline_comment_draft.clone();
+    let inline_comment_loading = state.read(cx).inline_comment_loading;
+    let inline_comment_error = state.read(cx).inline_comment_error.clone();
+    let popup_key = target
+        .map(|target| target.stable_key())
+        .unwrap_or_else(|| "line-action-popup".to_string());
+    let popup_animation_key = popup_key.bytes().fold(0usize, |acc, byte| {
+        acc.wrapping_mul(33).wrapping_add(byte as usize)
+    });
+
+    div()
+        .min_w(px(248.0))
+        .max_w(px(320.0))
+        .rounded(radius())
+        .border_1()
+        .border_color(border_default())
+        .bg(bg_overlay())
+        .shadow_sm()
+        .on_any_mouse_down(|_, _, cx| {
+            cx.stop_propagation();
+        })
+        .child(
+            div()
+                .px(px(12.0))
+                .py(px(10.0))
+                .border_b(px(1.0))
+                .border_color(border_muted())
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .font_family("Fira Code")
+                        .text_color(waypoint_fg())
+                        .child(
+                            target
+                                .map(|target| target.label.to_uppercase())
+                                .unwrap_or_else(|| "LINE ACTION".to_string()),
+                        ),
+                ),
+        )
+        .child(match mode {
+            ReviewLineActionMode::Menu => div()
+                .p(px(10.0))
+                .flex()
+                .gap(px(8.0))
+                .child(line_action_button("Comment", false, {
+                    let state = state.clone();
+                    move |_, _, cx| {
+                        state.update(cx, |state, cx| {
+                            state.review_line_action_mode = ReviewLineActionMode::Comment;
+                            state.inline_comment_error = None;
+                            cx.notify();
+                        });
+                    }
+                }))
+                .child(line_action_button("Add waypoint", has_waypoint, {
+                    let state = state.clone();
+                    move |_, _, cx| {
+                        let default_name = {
+                            let app_state = state.read(cx);
+                            default_waymark_name(
+                                app_state.selected_file_path.as_deref(),
+                                None,
+                                app_state.selected_diff_anchor.as_ref(),
+                            )
+                        };
+                        state.update(cx, |state, cx| {
+                            state.add_waymark_for_current_review_location(default_name.clone());
+                            state.persist_active_review_session();
+                            cx.notify();
+                        });
+                    }
+                }))
+                .into_any_element(),
+            ReviewLineActionMode::Comment => div()
+                .p(px(10.0))
+                .flex()
+                .flex_col()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .px(px(10.0))
+                        .py(px(9.0))
+                        .rounded(radius_sm())
+                        .border_1()
+                        .border_color(border_default())
+                        .bg(bg_surface())
+                        .text_color(if inline_comment_draft.is_empty() {
+                            fg_subtle()
+                        } else {
+                            fg_emphasis()
+                        })
+                        .child(
+                            AppTextInput::new(
+                                format!(
+                                    "inline-comment-{}",
+                                    target.map(|target| target.stable_key()).unwrap_or_default()
+                                ),
+                                state.clone(),
+                                AppTextFieldKind::InlineCommentDraft,
+                                "Comment on this line…",
+                            )
+                            .autofocus(true),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .font_family("Fira Code")
+                                .text_color(fg_subtle())
+                                .child("cmd-enter submit • esc close"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(6.0))
+                                .child(ghost_button("Back", {
+                                    let state = state.clone();
+                                    move |_, _, cx| {
+                                        state.update(cx, |state, cx| {
+                                            state.review_line_action_mode =
+                                                ReviewLineActionMode::Menu;
+                                            state.inline_comment_error = None;
+                                            cx.notify();
+                                        });
+                                    }
+                                }))
+                                .child(review_button(
+                                    if inline_comment_loading {
+                                        "Submitting..."
+                                    } else {
+                                        "Submit"
+                                    },
+                                    {
+                                        let state = state.clone();
+                                        move |_, window, cx| {
+                                            trigger_submit_inline_comment(&state, window, cx);
+                                        }
+                                    },
+                                )),
+                        ),
+                )
+                .when_some(inline_comment_error, |el, error| {
+                    el.child(error_text(&error))
+                })
+                .into_any_element(),
+        })
+        .with_animation(
+            ("review-line-action-popup", popup_animation_key),
+            Animation::new(Duration::from_millis(140)).with_easing(ease_in_out),
+            move |el, delta| {
+                el.mt(lerp_px(8.0, 0.0, delta))
+                    .opacity(delta.clamp(0.0, 1.0))
+                    .border_color(lerp_rgba(transparent(), border_default(), delta))
+                    .bg(lerp_rgba(bg_surface(), bg_overlay(), delta))
+            },
+        )
+}
+
+fn line_action_button(
+    label: &str,
+    active: bool,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .px(px(12.0))
+        .py(px(8.0))
+        .rounded(px(999.0))
+        .border_1()
+        .border_color(if active { purple() } else { border_default() })
+        .bg(if active { waypoint_bg() } else { bg_surface() })
+        .text_size(px(12.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(if active { waypoint_fg() } else { fg_emphasis() })
+        .cursor_pointer()
+        .hover(|style| style.bg(hover_bg()))
+        .on_mouse_down(MouseButton::Left, on_click)
+        .child(label.to_string())
+}
+
+fn lerp_px(from: f32, to: f32, progress: f32) -> Pixels {
+    px(from + (to - from) * progress)
+}
+
+fn lerp_rgba(from: Rgba, to: Rgba, progress: f32) -> Rgba {
+    Rgba {
+        r: from.r + (to.r - from.r) * progress,
+        g: from.g + (to.g - from.g) * progress,
+        b: from.b + (to.b - from.b) * progress,
+        a: from.a + (to.a - from.a) * progress,
+    }
+}
+
 fn render_hunk(
     file_path: &str,
     hunk: &ParsedDiffHunk,
@@ -2184,6 +5235,7 @@ fn render_diff_line_with_threads(
             None,
             selected_anchor,
             None,
+            None,
         ))
         .when(!threads.is_empty(), |el| {
             el.child(
@@ -2212,8 +5264,10 @@ fn render_diff_line(
     syntax_spans: Option<&[SyntaxSpan]>,
     selected_anchor: Option<&DiffAnchor>,
     lsp_context: Option<&DiffLineLspContext>,
+    line_action: Option<(Entity<AppState>, ReviewLineActionTarget)>,
 ) -> impl IntoElement {
     let is_selected = line_matches_diff_anchor(line, selected_anchor);
+    let row_action = line_action.clone();
 
     let left_num = line
         .left_line_number
@@ -2290,6 +5344,12 @@ fn render_diff_line(
         .when(is_selected, |el| {
             el.border_l(px(2.0)).border_color(transparent())
         })
+        .when_some(row_action, |el, (state, target)| {
+            el.cursor_pointer()
+                .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+                    open_review_line_action(&state, target.clone(), event.position, cx);
+                })
+        })
         .child(
             div()
                 .flex()
@@ -2333,6 +5393,7 @@ fn render_diff_line(
             syntax_spans,
             fallback_text_color,
             lsp_context,
+            line_action,
         ))
 }
 
@@ -2342,6 +5403,7 @@ fn render_syntax_content(
     syntax_spans: Option<&[SyntaxSpan]>,
     fallback_color: Rgba,
     lsp_context: Option<&DiffLineLspContext>,
+    line_action: Option<(Entity<AppState>, ReviewLineActionTarget)>,
 ) -> Div {
     let content = line.content.as_str();
     let content_div = div()
@@ -2367,17 +5429,21 @@ fn render_syntax_content(
     };
 
     if spans.is_empty() {
-        return content_div
-            .text_color(fallback_color)
-            .child(SelectableText::new(
-                format!(
-                    "diff-line:{}:{}:{}",
-                    file_path,
-                    line.left_line_number.unwrap_or_default(),
-                    line.right_line_number.unwrap_or_default()
-                ),
-                content.to_string(),
-            ));
+        let mut selectable = SelectableText::new(
+            format!(
+                "diff-line:{}:{}:{}",
+                file_path,
+                line.left_line_number.unwrap_or_default(),
+                line.right_line_number.unwrap_or_default()
+            ),
+            content.to_string(),
+        );
+        if let Some((state, target)) = line_action {
+            selectable = selectable.on_click_unmatched(move |window, cx| {
+                open_review_line_action(&state, target.clone(), window.mouse_position(), cx);
+            });
+        }
+        return content_div.text_color(fallback_color).child(selectable);
     }
 
     let selection_id = format!(
@@ -2395,6 +5461,7 @@ fn render_syntax_content(
         let tooltip_tokens = token_ranges.clone();
         let click_context = lsp_context.clone();
         let click_tokens = token_ranges.clone();
+        let unmatched_click = line_action.clone();
         let click_ranges: Vec<std::ops::Range<usize>> =
             token_ranges.iter().map(|t| t.byte_range.clone()).collect();
         let interactive = if let Some(runs) = code_text_runs(spans) {
@@ -2440,18 +5507,30 @@ fn render_syntax_content(
             ))
         });
 
+        let interactive = if let Some((state, target)) = unmatched_click {
+            interactive.on_click_unmatched(move |window, cx| {
+                open_review_line_action(&state, target.clone(), window.mouse_position(), cx);
+            })
+        } else {
+            interactive
+        };
+
         return content_div.text_color(fallback_color).child(interactive);
     }
 
-    if let Some(runs) = code_text_runs(spans) {
-        content_div
-            .text_color(fallback_color)
-            .child(SelectableText::new(selection_id, content.to_string()).with_runs(runs))
+    let mut selectable = if let Some(runs) = code_text_runs(spans) {
+        SelectableText::new(selection_id, content.to_string()).with_runs(runs)
     } else {
-        content_div
-            .text_color(fallback_color)
-            .child(SelectableText::new(selection_id, content.to_string()))
+        SelectableText::new(selection_id, content.to_string())
+    };
+
+    if let Some((state, target)) = line_action {
+        selectable = selectable.on_click_unmatched(move |window, cx| {
+            open_review_line_action(&state, target.clone(), window.mouse_position(), cx);
+        });
     }
+
+    content_div.text_color(fallback_color).child(selectable)
 }
 
 fn build_diff_highlights(parsed_file: &ParsedDiffFile) -> Arc<Vec<Vec<Vec<SyntaxSpan>>>> {
@@ -2749,12 +5828,14 @@ fn render_tour_diff_preview(
     let preview_items = {
         let app_state = state.read(cx);
         build_tour_diff_preview_items(
+            state,
             app_state.active_detail(),
             file,
             parsed_file,
             prepared_file,
             &rows,
             selected_anchor,
+            cx,
         )
     };
 
@@ -2762,6 +5843,7 @@ fn render_tour_diff_preview(
         .items
         .iter()
         .map(|item| match item {
+            DiffViewItem::SemanticSection(_) => div().into_any_element(),
             DiffViewItem::Gap(gap) => render_diff_gap_row(*gap).into_any_element(),
             DiffViewItem::Row(row_ix) => render_virtualized_diff_row(
                 state,
@@ -2830,8 +5912,15 @@ fn render_full_tour_diff_preview(
                 .map(|spans| spans.as_slice());
             let line_lsp_context = build_diff_line_lsp_context(file_lsp_context, line);
             elements.push(
-                render_diff_line(file_path, line, spans, anchor, line_lsp_context.as_ref())
-                    .into_any_element(),
+                render_diff_line(
+                    file_path,
+                    line,
+                    spans,
+                    anchor,
+                    line_lsp_context.as_ref(),
+                    None,
+                )
+                .into_any_element(),
             );
         }
     }
@@ -2848,14 +5937,24 @@ struct TourDiffPreviewItems {
 }
 
 fn build_tour_diff_preview_items(
+    state: &Entity<AppState>,
     detail: Option<&PullRequestDetail>,
     file: &PullRequestFile,
     parsed_file: &ParsedDiffFile,
     prepared_file: Option<&PreparedFileContent>,
     rows: &[DiffRenderRow],
     selected_anchor: Option<&DiffAnchor>,
+    cx: &App,
 ) -> TourDiffPreviewItems {
-    let full_items = build_diff_view_items(file, Some(parsed_file), prepared_file, rows);
+    let full_items = build_diff_view_items(
+        state,
+        file,
+        Some(parsed_file),
+        None,
+        prepared_file,
+        rows,
+        cx,
+    );
     if full_items.len() <= TOUR_PREVIEW_MAX_ITEMS {
         return TourDiffPreviewItems {
             items: full_items,

@@ -3,6 +3,7 @@ use gpui::*;
 
 use crate::app_assets::APP_LOGO_ASSET;
 use crate::github;
+use crate::review_session::load_review_session;
 use crate::state::*;
 use crate::theme::*;
 
@@ -51,6 +52,8 @@ impl RootView {
                     cx.notify();
                 })
                 .ok();
+
+            maybe_bootstrap_debug_pull_request(&model, cache.as_ref(), cx).await;
 
             // Check gh version
             let gh_result = cx
@@ -111,6 +114,96 @@ impl RootView {
 
         Self { state }
     }
+}
+
+async fn maybe_bootstrap_debug_pull_request(
+    model: &Entity<AppState>,
+    cache: &crate::cache::CacheStore,
+    cx: &mut AsyncWindowContext,
+) {
+    let Some(debug_target) = std::env::var("REVIEWBUDDY_DEBUG_OPEN_PR")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return;
+    };
+
+    let Some((repository, number)) = parse_debug_pull_request_target(&debug_target) else {
+        return;
+    };
+
+    let snapshot = match cx
+        .background_executor()
+        .spawn({
+            let cache = cache.clone();
+            let repository = repository.clone();
+            async move { github::load_pull_request_detail(&cache, &repository, number) }
+        })
+        .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(_) => return,
+    };
+
+    let Some(detail) = snapshot.detail.clone() else {
+        return;
+    };
+
+    let review_session = load_review_session(cache, &pr_key(&repository, number))
+        .ok()
+        .flatten();
+    let summary = github::PullRequestSummary {
+        repository: detail.repository.clone(),
+        number: detail.number,
+        title: detail.title.clone(),
+        author_login: detail.author_login.clone(),
+        is_draft: detail.is_draft,
+        comments_count: detail.comments_count,
+        additions: detail.additions,
+        deletions: detail.deletions,
+        changed_files: detail.changed_files,
+        state: detail.state.clone(),
+        review_decision: detail.review_decision.clone(),
+        updated_at: detail.updated_at.clone(),
+        url: detail.url.clone(),
+    };
+    let detail_key = pr_key(&repository, number);
+
+    model
+        .update(cx, |state, cx| {
+            if !state
+                .open_tabs
+                .iter()
+                .any(|tab| pr_key(&tab.repository, tab.number) == detail_key)
+            {
+                state.open_tabs.insert(0, summary);
+            }
+
+            state.active_section = SectionId::Pulls;
+            state.active_surface = PullRequestSurface::Files;
+            state.active_pr_key = Some(detail_key.clone());
+            state.pr_header_compact = false;
+            state.review_body.clear();
+            state.review_editor_active = false;
+            state.review_message = None;
+            state.review_success = false;
+
+            let detail_state = state.detail_states.entry(detail_key.clone()).or_default();
+            detail_state.snapshot = Some(snapshot.clone());
+            detail_state.loading = false;
+            detail_state.syncing = false;
+            detail_state.error = None;
+
+            state.apply_review_session_document(&detail_key, review_session.clone());
+            cx.notify();
+        })
+        .ok();
+}
+
+fn parse_debug_pull_request_target(target: &str) -> Option<(String, i64)> {
+    let (repository, number) = target.trim().rsplit_once('#')?;
+    let number = number.parse::<i64>().ok()?;
+    Some((repository.to_string(), number))
 }
 
 impl Render for RootView {

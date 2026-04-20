@@ -14,8 +14,13 @@ use crate::github::{
 use crate::local_repo::LocalRepositoryStatus;
 use crate::lsp::{LspServerStatus, LspSessionManager, LspSymbolDetails};
 use crate::managed_lsp::{ManagedServerInstallStatus, ManagedServerKind};
+use crate::review_session::{
+    add_waymark, load_review_session, location_label, push_history_location, push_route_location,
+    remove_waymark, save_review_session, ReviewCenterMode, ReviewLocation, ReviewSessionDocument,
+    ReviewSessionState, ReviewSourceTarget, ReviewTaskRoute, ReviewWaymark,
+};
 use crate::syntax::SyntaxSpan;
-use gpui::{px, ListAlignment, ListState, ScrollHandle};
+use gpui::{px, ListAlignment, ListState, Pixels, Point, ScrollHandle};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SectionId {
@@ -58,18 +63,14 @@ pub enum PullRequestSurface {
 impl PullRequestSurface {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Overview => "Overview",
-            Self::Files => "Files",
+            Self::Overview => "Briefing",
+            Self::Files => "Review",
             Self::Tour => "Tour",
         }
     }
 
     pub fn all() -> &'static [PullRequestSurface] {
-        &[
-            PullRequestSurface::Overview,
-            PullRequestSurface::Files,
-            PullRequestSurface::Tour,
-        ]
+        &[PullRequestSurface::Overview, PullRequestSurface::Files]
     }
 }
 
@@ -91,6 +92,10 @@ pub struct DetailState {
     pub lsp_statuses: std::collections::HashMap<String, LspServerStatus>,
     pub lsp_loading_paths: std::collections::HashSet<String>,
     pub lsp_symbol_states: std::collections::HashMap<String, LspSymbolState>,
+    pub review_route_loading: bool,
+    pub review_route_message: Option<String>,
+    pub review_route_error: Option<String>,
+    pub review_session: ReviewSessionState,
 }
 
 impl Default for DetailState {
@@ -108,6 +113,10 @@ impl Default for DetailState {
             lsp_statuses: std::collections::HashMap::new(),
             lsp_loading_paths: std::collections::HashSet::new(),
             lsp_symbol_states: std::collections::HashMap::new(),
+            review_route_loading: false,
+            review_route_message: None,
+            review_route_error: None,
+            review_session: ReviewSessionState::default(),
         }
     }
 }
@@ -225,6 +234,34 @@ pub struct PreparedFileLine {
     pub spans: Vec<SyntaxSpan>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ReviewLineActionMode {
+    #[default]
+    Menu,
+    Comment,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewLineActionTarget {
+    pub anchor: DiffAnchor,
+    pub label: String,
+}
+
+impl ReviewLineActionTarget {
+    pub fn stable_key(&self) -> String {
+        format!(
+            "{}:{}:{}",
+            self.anchor.file_path,
+            self.anchor.side.as_deref().unwrap_or(""),
+            self.anchor.line.unwrap_or_default()
+        )
+    }
+
+    pub fn review_location(&self) -> ReviewLocation {
+        ReviewLocation::from_diff(self.anchor.file_path.clone(), Some(self.anchor.clone()))
+    }
+}
+
 #[derive(Clone)]
 pub struct DiffFileViewState {
     pub rows: Arc<Vec<DiffRenderRow>>,
@@ -282,6 +319,7 @@ pub struct AppState {
     pub selected_file_path: Option<String>,
     pub selected_diff_anchor: Option<DiffAnchor>,
     pub diff_view_states: RefCell<std::collections::HashMap<String, DiffFileViewState>>,
+    pub review_nav_list_states: RefCell<std::collections::HashMap<String, ListState>>,
     // Review form
     pub review_action: ReviewAction,
     pub review_body: String,
@@ -289,12 +327,22 @@ pub struct AppState {
     pub review_loading: bool,
     pub review_message: Option<String>,
     pub review_success: bool,
+    pub waymark_draft: String,
+    pub active_review_line_action: Option<ReviewLineActionTarget>,
+    pub active_review_line_action_position: Option<Point<Pixels>>,
+    pub review_line_action_mode: ReviewLineActionMode,
+    pub inline_comment_draft: String,
+    pub inline_comment_loading: bool,
+    pub inline_comment_error: Option<String>,
     pub pr_header_compact: bool,
 
     // Command palette
     pub palette_open: bool,
     pub palette_query: String,
     pub palette_selected_index: usize,
+    pub waypoint_spotlight_open: bool,
+    pub waypoint_spotlight_query: String,
+    pub waypoint_spotlight_selected_index: usize,
 
     // Code tours
     pub code_tour_provider_statuses: Vec<CodeTourProviderStatus>,
@@ -314,7 +362,7 @@ pub struct AppState {
 impl AppState {
     pub fn new(cache: CacheStore) -> Self {
         let cache_path = cache.path().display().to_string();
-        Self {
+        let mut state = Self {
             cache: Arc::new(cache),
             lsp_session_manager: Arc::new(LspSessionManager::new()),
             active_section: SectionId::Overview,
@@ -335,16 +383,27 @@ impl AppState {
             selected_file_path: None,
             selected_diff_anchor: None,
             diff_view_states: RefCell::new(std::collections::HashMap::new()),
+            review_nav_list_states: RefCell::new(std::collections::HashMap::new()),
             review_action: ReviewAction::Comment,
             review_body: String::new(),
             review_editor_active: false,
             review_loading: false,
             review_message: None,
             review_success: false,
+            waymark_draft: String::new(),
+            active_review_line_action: None,
+            active_review_line_action_position: None,
+            review_line_action_mode: ReviewLineActionMode::Menu,
+            inline_comment_draft: String::new(),
+            inline_comment_loading: false,
+            inline_comment_error: None,
             pr_header_compact: false,
             palette_open: false,
             palette_query: String::new(),
             palette_selected_index: 0,
+            waypoint_spotlight_open: false,
+            waypoint_spotlight_query: String::new(),
+            waypoint_spotlight_selected_index: 0,
             code_tour_provider_statuses: Vec::new(),
             code_tour_provider_statuses_loaded: false,
             code_tour_provider_loading: false,
@@ -357,7 +416,10 @@ impl AppState {
             tour_content_list_state: ListState::new(0, ListAlignment::Top, px(600.0)),
             code_tour_settings: CodeTourSettingsState::default(),
             managed_lsp_settings: ManagedLspSettingsState::default(),
-        }
+        };
+
+        state.restore_debug_pull_request_from_cache();
+        state
     }
 
     pub fn active_queue(&self) -> Option<&PullRequestQueue> {
@@ -396,6 +458,18 @@ impl AppState {
         detail_state
             .tour_states
             .get(&self.code_tour_settings.settings.provider)
+    }
+
+    pub fn active_review_session(&self) -> Option<&ReviewSessionState> {
+        self.active_detail_state()
+            .map(|detail_state| &detail_state.review_session)
+    }
+
+    pub fn active_review_session_mut(&mut self) -> Option<&mut ReviewSessionState> {
+        let key = self.active_pr_key.clone()?;
+        self.detail_states
+            .get_mut(&key)
+            .map(|detail_state| &mut detail_state.review_session)
     }
 
     pub fn active_local_repository_status(&self) -> Option<&LocalRepositoryStatus> {
@@ -469,4 +543,301 @@ impl AppState {
             .iter()
             .find(|q| q.id == "authored")
     }
+
+    pub fn current_review_location(&self) -> Option<ReviewLocation> {
+        let session = self.active_review_session();
+        if let Some(source_target) = session.and_then(|session| {
+            (session.center_mode == ReviewCenterMode::SourceBrowser)
+                .then(|| session.source_target.clone())
+                .flatten()
+        }) {
+            return Some(ReviewLocation::from_source(
+                source_target.path,
+                source_target.line,
+                source_target.reason,
+            ));
+        }
+
+        self.selected_file_path.clone().map(|file_path| {
+            ReviewLocation::from_diff(file_path, self.selected_diff_anchor.clone())
+        })
+    }
+
+    pub fn selected_diff_line_target(&self) -> Option<ReviewLineActionTarget> {
+        let file_path = self.selected_file_path.clone()?;
+        let anchor = self.selected_diff_anchor.as_ref()?;
+        let side = anchor.side.as_deref()?;
+        let line = anchor.line?;
+        let line_number = usize::try_from(line).ok().filter(|line| *line > 0)?;
+
+        Some(ReviewLineActionTarget {
+            anchor: DiffAnchor {
+                file_path: file_path.clone(),
+                hunk_header: anchor.hunk_header.clone(),
+                line: Some(line),
+                side: Some(side.to_string()),
+                thread_id: None,
+            },
+            label: location_label(&file_path, Some(line_number)),
+        })
+    }
+
+    pub fn active_review_task_route(&self) -> Option<&ReviewTaskRoute> {
+        self.active_review_session()
+            .and_then(|session| session.task_route.as_ref())
+    }
+
+    pub fn apply_review_session_document(
+        &mut self,
+        detail_key: &str,
+        document: Option<ReviewSessionDocument>,
+    ) {
+        if let Some(document) = document {
+            self.selected_file_path = document.selected_file_path.clone();
+            self.selected_diff_anchor = document.selected_diff_anchor.clone();
+            if let Some(detail_state) = self.detail_states.get_mut(detail_key) {
+                detail_state.review_session = ReviewSessionState::from_document(document);
+            }
+        } else {
+            if let Some(detail_state) = self.detail_states.get_mut(detail_key) {
+                detail_state.review_session.loaded = true;
+                detail_state.review_session.error = None;
+            }
+        }
+    }
+
+    pub fn navigate_to_review_location(&mut self, location: ReviewLocation, push_history: bool) {
+        let previous = if push_history {
+            self.current_review_location()
+        } else {
+            None
+        };
+        let Some(detail_key) = self.active_pr_key.clone() else {
+            return;
+        };
+
+        let path_is_changed = self
+            .detail_states
+            .get(&detail_key)
+            .and_then(|detail_state| detail_state.snapshot.as_ref())
+            .and_then(|snapshot| snapshot.detail.as_ref())
+            .map(|detail| {
+                detail
+                    .files
+                    .iter()
+                    .any(|file| file.path == location.file_path)
+            })
+            .unwrap_or(false);
+
+        match location.mode {
+            ReviewCenterMode::SemanticDiff => {
+                self.selected_file_path = Some(location.file_path.clone());
+                self.selected_diff_anchor = location.anchor.clone();
+            }
+            ReviewCenterMode::SourceBrowser => {
+                if path_is_changed {
+                    self.selected_file_path = Some(location.file_path.clone());
+                }
+            }
+        }
+
+        let Some(session) = self.active_review_session_mut() else {
+            return;
+        };
+
+        if push_history {
+            if let Some(previous) = previous.filter(|previous| previous != &location) {
+                push_history_location(&mut session.history_back, previous);
+                session.history_forward.clear();
+            }
+        }
+
+        session.center_mode = location.mode;
+        session.source_target = location.as_source_target();
+        session.last_read = Some(location.clone());
+        push_route_location(&mut session.route, location);
+    }
+
+    pub fn current_waymark(&self) -> Option<&ReviewWaymark> {
+        self.active_review_session().and_then(|session| {
+            self.selected_diff_line_target()
+                .map(|target| target.review_location())
+                .or_else(|| self.current_review_location())
+                .and_then(|location| session.waymark_for_location(&location))
+        })
+    }
+
+    pub fn add_waymark_for_current_review_location(
+        &mut self,
+        name: impl Into<String>,
+    ) -> Option<ReviewWaymark> {
+        let location = self
+            .selected_diff_line_target()
+            .map(|target| target.review_location())
+            .or_else(|| self.current_review_location())?;
+        let session = self.active_review_session_mut()?;
+        Some(add_waymark(&mut session.waymarks, location, name))
+    }
+
+    pub fn remove_review_waymark(&mut self, waymark_id: &str) -> bool {
+        let Some(session) = self.active_review_session_mut() else {
+            return false;
+        };
+
+        remove_waymark(&mut session.waymarks, waymark_id)
+    }
+
+    pub fn navigate_review_back(&mut self) -> bool {
+        let current = self.current_review_location();
+        let target = {
+            let Some(session) = self.active_review_session_mut() else {
+                return false;
+            };
+            session.history_back.pop()
+        };
+
+        let Some(target) = target else {
+            return false;
+        };
+
+        if let Some(current) = current {
+            if let Some(session) = self.active_review_session_mut() {
+                push_history_location(&mut session.history_forward, current);
+            }
+        }
+
+        self.navigate_to_review_location(target, false);
+        true
+    }
+
+    pub fn navigate_review_forward(&mut self) -> bool {
+        let current = self.current_review_location();
+        let target = {
+            let Some(session) = self.active_review_session_mut() else {
+                return false;
+            };
+            session.history_forward.pop()
+        };
+
+        let Some(target) = target else {
+            return false;
+        };
+
+        if let Some(current) = current {
+            if let Some(session) = self.active_review_session_mut() {
+                push_history_location(&mut session.history_back, current);
+            }
+        }
+
+        self.navigate_to_review_location(target, false);
+        true
+    }
+
+    pub fn toggle_review_section_collapse(&mut self, section_id: &str) {
+        let Some(session) = self.active_review_session_mut() else {
+            return;
+        };
+
+        if !session.collapsed_sections.insert(section_id.to_string()) {
+            session.collapsed_sections.remove(section_id);
+        }
+    }
+
+    pub fn is_review_section_collapsed(&self, section_id: &str) -> bool {
+        self.active_review_session()
+            .map(|session| session.collapsed_sections.contains(section_id))
+            .unwrap_or(false)
+    }
+
+    pub fn set_review_center_mode(&mut self, mode: ReviewCenterMode) {
+        if let Some(session) = self.active_review_session_mut() {
+            session.center_mode = mode;
+            if mode == ReviewCenterMode::SemanticDiff {
+                session.source_target = None;
+            }
+        }
+    }
+
+    pub fn set_review_source_target(&mut self, target: ReviewSourceTarget) {
+        if let Some(session) = self.active_review_session_mut() {
+            session.center_mode = ReviewCenterMode::SourceBrowser;
+            session.source_target = Some(target);
+        }
+    }
+
+    pub fn set_active_review_task_route(&mut self, route: Option<ReviewTaskRoute>) {
+        if let Some(session) = self.active_review_session_mut() {
+            session.task_route = route;
+        }
+    }
+
+    pub fn persist_active_review_session(&self) {
+        let Some(detail_key) = self.active_pr_key.as_deref() else {
+            return;
+        };
+        let Some(session) = self.active_review_session() else {
+            return;
+        };
+
+        let document = session.to_document(
+            self.selected_file_path.as_deref(),
+            self.selected_diff_anchor.as_ref(),
+        );
+        let _ = save_review_session(self.cache.as_ref(), detail_key, &document);
+    }
+
+    fn restore_debug_pull_request_from_cache(&mut self) {
+        let Some((repository, number)) = std::env::var("REVIEWBUDDY_DEBUG_OPEN_PR")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .and_then(|value| parse_debug_pull_request_target(&value))
+        else {
+            return;
+        };
+
+        let Ok(snapshot) =
+            crate::github::load_pull_request_detail(self.cache.as_ref(), &repository, number)
+        else {
+            return;
+        };
+        let Some(detail) = snapshot.detail.clone() else {
+            return;
+        };
+
+        let summary = PullRequestSummary {
+            repository: detail.repository.clone(),
+            number: detail.number,
+            title: detail.title.clone(),
+            author_login: detail.author_login.clone(),
+            is_draft: detail.is_draft,
+            comments_count: detail.comments_count,
+            additions: detail.additions,
+            deletions: detail.deletions,
+            changed_files: detail.changed_files,
+            state: detail.state.clone(),
+            review_decision: detail.review_decision.clone(),
+            updated_at: detail.updated_at.clone(),
+            url: detail.url.clone(),
+        };
+        let detail_key = pr_key(&repository, number);
+
+        self.open_tabs.insert(0, summary);
+        self.active_section = SectionId::Pulls;
+        self.active_surface = PullRequestSurface::Files;
+        self.active_pr_key = Some(detail_key.clone());
+        self.detail_states
+            .entry(detail_key.clone())
+            .or_default()
+            .snapshot = Some(snapshot);
+
+        if let Ok(document) = load_review_session(self.cache.as_ref(), &detail_key) {
+            self.apply_review_session_document(&detail_key, document);
+        }
+    }
+}
+
+fn parse_debug_pull_request_target(target: &str) -> Option<(String, i64)> {
+    let (repository, number) = target.trim().rsplit_once('#')?;
+    let number = number.parse::<i64>().ok()?;
+    Some((repository.to_string(), number))
 }

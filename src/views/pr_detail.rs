@@ -677,9 +677,9 @@ fn render_overview_summary_strip(
 ) -> impl IntoElement {
     let state = state.clone();
     let action_label = if is_own_pull_request {
-        "Inspect changes"
+        "Open review workspace"
     } else {
-        "Review changes"
+        "Start review"
     };
 
     nested_panel().child(

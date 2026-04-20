@@ -148,6 +148,22 @@ pub fn purple() -> Rgba {
     hex(0xb396df)
 }
 
+pub fn waypoint_bg() -> Rgba {
+    hex_alpha(0xb396df, 0.16)
+}
+
+pub fn waypoint_active_bg() -> Rgba {
+    hex_alpha(0xb396df, 0.24)
+}
+
+pub fn waypoint_border() -> Rgba {
+    hex_alpha(0xb396df, 0.34)
+}
+
+pub fn waypoint_fg() -> Rgba {
+    hex(0xe3d4fb)
+}
+
 pub fn hover_bg() -> Rgba {
     hex(0x232526)
 }
