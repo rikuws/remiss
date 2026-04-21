@@ -28,17 +28,19 @@ impl ReviewCenterMode {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum ReviewSidebarMode {
+pub enum ReviewInspectorMode {
     #[default]
-    Guide,
+    Graph,
     Context,
+    Evolution,
 }
 
-impl ReviewSidebarMode {
+impl ReviewInspectorMode {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Guide => "Guide",
+            Self::Graph => "Graph",
             Self::Context => "Context",
+            Self::Evolution => "Evolution",
         }
     }
 }
@@ -170,7 +172,11 @@ pub struct ReviewSessionDocument {
     #[serde(default)]
     pub center_mode: ReviewCenterMode,
     #[serde(default)]
-    pub sidebar_mode: ReviewSidebarMode,
+    pub inspector_mode: ReviewInspectorMode,
+    #[serde(default = "default_true")]
+    pub show_file_tree: bool,
+    #[serde(default = "default_true")]
+    pub show_inspector: bool,
     #[serde(default)]
     pub source_target: Option<ReviewSourceTarget>,
     #[serde(default)]
@@ -194,7 +200,9 @@ pub struct ReviewSessionState {
     pub loaded: bool,
     pub error: Option<String>,
     pub center_mode: ReviewCenterMode,
-    pub sidebar_mode: ReviewSidebarMode,
+    pub inspector_mode: ReviewInspectorMode,
+    pub show_file_tree: bool,
+    pub show_inspector: bool,
     pub source_target: Option<ReviewSourceTarget>,
     pub waymarks: Vec<ReviewWaymark>,
     pub task_route: Option<ReviewTaskRoute>,
@@ -211,7 +219,9 @@ impl Default for ReviewSessionState {
             loaded: false,
             error: None,
             center_mode: ReviewCenterMode::SemanticDiff,
-            sidebar_mode: ReviewSidebarMode::Guide,
+            inspector_mode: ReviewInspectorMode::Graph,
+            show_file_tree: true,
+            show_inspector: true,
             source_target: None,
             waymarks: Vec::new(),
             task_route: None,
@@ -230,7 +240,9 @@ impl ReviewSessionState {
             loaded: true,
             error: None,
             center_mode: document.center_mode,
-            sidebar_mode: document.sidebar_mode,
+            inspector_mode: document.inspector_mode,
+            show_file_tree: document.show_file_tree,
+            show_inspector: document.show_inspector,
             source_target: document.source_target,
             waymarks: document.waymarks,
             task_route: document.task_route,
@@ -251,7 +263,9 @@ impl ReviewSessionState {
             selected_file_path: selected_file_path.map(str::to_string),
             selected_diff_anchor: selected_diff_anchor.cloned(),
             center_mode: self.center_mode,
-            sidebar_mode: self.sidebar_mode,
+            inspector_mode: self.inspector_mode,
+            show_file_tree: self.show_file_tree,
+            show_inspector: self.show_inspector,
             source_target: self.source_target.clone(),
             waymarks: self.waymarks.clone(),
             task_route: self.task_route.clone(),
@@ -268,6 +282,10 @@ impl ReviewSessionState {
             .iter()
             .find(|waymark| waymark.location.same_spot_as(location))
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 pub fn location_label(file_path: &str, line: Option<usize>) -> String {

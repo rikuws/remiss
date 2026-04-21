@@ -14,10 +14,11 @@ use crate::github::{
 use crate::local_repo::LocalRepositoryStatus;
 use crate::lsp::{LspServerStatus, LspSessionManager, LspSymbolDetails};
 use crate::managed_lsp::{ManagedServerInstallStatus, ManagedServerKind};
+use crate::review_graph::ReviewSymbolEvolutionState;
 use crate::review_session::{
     add_waymark, load_review_session, location_label, push_history_location, push_route_location,
-    remove_waymark, save_review_session, ReviewCenterMode, ReviewLocation, ReviewSessionDocument,
-    ReviewSessionState, ReviewSidebarMode, ReviewSourceTarget, ReviewTaskRoute, ReviewWaymark,
+    remove_waymark, save_review_session, ReviewCenterMode, ReviewInspectorMode, ReviewLocation,
+    ReviewSessionDocument, ReviewSessionState, ReviewSourceTarget, ReviewTaskRoute, ReviewWaymark,
 };
 use crate::syntax::{self, SyntaxSpan};
 use crate::theme::{self, ThemePreference};
@@ -93,6 +94,7 @@ pub struct DetailState {
     pub lsp_statuses: std::collections::HashMap<String, LspServerStatus>,
     pub lsp_loading_paths: std::collections::HashSet<String>,
     pub lsp_symbol_states: std::collections::HashMap<String, LspSymbolState>,
+    pub review_evolution_states: std::collections::HashMap<String, ReviewSymbolEvolutionState>,
     pub review_route_loading: bool,
     pub review_route_message: Option<String>,
     pub review_route_error: Option<String>,
@@ -114,6 +116,7 @@ impl Default for DetailState {
             lsp_statuses: std::collections::HashMap::new(),
             lsp_loading_paths: std::collections::HashSet::new(),
             lsp_symbol_states: std::collections::HashMap::new(),
+            review_evolution_states: std::collections::HashMap::new(),
             review_route_loading: false,
             review_route_message: None,
             review_route_error: None,
@@ -850,9 +853,22 @@ impl AppState {
         }
     }
 
-    pub fn set_review_sidebar_mode(&mut self, mode: ReviewSidebarMode) {
+    pub fn set_review_inspector_mode(&mut self, mode: ReviewInspectorMode) {
         if let Some(session) = self.active_review_session_mut() {
-            session.sidebar_mode = mode;
+            session.inspector_mode = mode;
+            session.show_inspector = true;
+        }
+    }
+
+    pub fn set_review_file_tree_visible(&mut self, visible: bool) {
+        if let Some(session) = self.active_review_session_mut() {
+            session.show_file_tree = visible;
+        }
+    }
+
+    pub fn set_review_inspector_visible(&mut self, visible: bool) {
+        if let Some(session) = self.active_review_session_mut() {
+            session.show_inspector = visible;
         }
     }
 

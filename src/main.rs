@@ -16,6 +16,7 @@ mod markdown;
 mod notifications;
 mod platform_macos;
 mod review_context;
+mod review_graph;
 mod review_queue;
 mod review_routes;
 mod review_session;

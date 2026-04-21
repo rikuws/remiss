@@ -330,7 +330,7 @@ pub fn sidebar_width() -> Pixels {
 }
 
 pub fn file_tree_width() -> Pixels {
-    px(240.0)
+    px(252.0)
 }
 
 pub fn detail_side_width() -> Pixels {
