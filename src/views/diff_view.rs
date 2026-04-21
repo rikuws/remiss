@@ -3,6 +3,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use gpui::prelude::*;
 use gpui::*;
 
+use crate::app_assets::{SIDEBAR_COLLAPSE_ASSET, SIDEBAR_EXPAND_ASSET};
 use crate::code_display::{
     build_interactive_code_tokens, build_lsp_hover_tooltip_view, code_text_runs,
     render_highlighted_code_block, render_highlighted_code_content, InteractiveCodeToken,
@@ -727,6 +728,16 @@ pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement
                 cx,
             ))
         })
+        .child(render_review_panel_toggle(
+            state,
+            ReviewPanelToggleSide::FileTree,
+            review_session.show_file_tree,
+        ))
+        .child(render_review_panel_toggle(
+            state,
+            ReviewPanelToggleSide::Inspector,
+            review_session.show_inspector,
+        ))
         .when(waypoint_spotlight_open, |el| {
             el.child(render_waypoint_spotlight(state, cx))
         })
@@ -746,6 +757,98 @@ pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement
             },
         )
         .into_any_element()
+}
+
+const REVIEW_INSPECTOR_PANE_WIDTH: f32 = 320.0;
+const REVIEW_PANEL_TOGGLE_SIZE: f32 = 22.0;
+const REVIEW_PANEL_TOGGLE_HIDDEN_INSET: f32 = 10.0;
+const REVIEW_PANEL_TOGGLE_OVERLAP: f32 = REVIEW_PANEL_TOGGLE_SIZE / 2.0;
+const REVIEW_PANEL_TOGGLE_TOP: f32 = 10.0;
+
+#[derive(Clone, Copy)]
+enum ReviewPanelToggleSide {
+    FileTree,
+    Inspector,
+}
+
+fn render_review_panel_toggle(
+    state: &Entity<AppState>,
+    side: ReviewPanelToggleSide,
+    visible: bool,
+) -> AnyElement {
+    let (icon_asset, tooltip) = match (side, visible) {
+        (ReviewPanelToggleSide::FileTree, true) => (SIDEBAR_COLLAPSE_ASSET, "Hide file tree"),
+        (ReviewPanelToggleSide::FileTree, false) => (SIDEBAR_EXPAND_ASSET, "Show file tree"),
+        (ReviewPanelToggleSide::Inspector, true) => (SIDEBAR_EXPAND_ASSET, "Hide inspector"),
+        (ReviewPanelToggleSide::Inspector, false) => (SIDEBAR_COLLAPSE_ASSET, "Show inspector"),
+    };
+    let button_id = match side {
+        ReviewPanelToggleSide::FileTree => "review-file-tree-toggle",
+        ReviewPanelToggleSide::Inspector => "review-inspector-toggle",
+    };
+    let state = state.clone();
+    let button = div()
+        .id(button_id)
+        .w(px(REVIEW_PANEL_TOGGLE_SIZE))
+        .h(px(REVIEW_PANEL_TOGGLE_SIZE))
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(if visible {
+            border_default()
+        } else {
+            border_muted()
+        })
+        .bg(if visible { bg_surface() } else { bg_overlay() })
+        .shadow_sm()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .hover(|style| style.bg(hover_bg()))
+        .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            state.update(cx, |state, cx| {
+                match side {
+                    ReviewPanelToggleSide::FileTree => {
+                        state.set_review_file_tree_visible(!visible);
+                    }
+                    ReviewPanelToggleSide::Inspector => {
+                        state.set_review_inspector_visible(!visible);
+                    }
+                }
+                state.persist_active_review_session();
+                cx.notify();
+            });
+        })
+        .child(
+            svg()
+                .path(icon_asset.to_string())
+                .size(px(12.0))
+                .text_color(if visible { fg_emphasis() } else { fg_muted() }),
+        );
+
+    match side {
+        ReviewPanelToggleSide::FileTree => div()
+            .absolute()
+            .top(px(REVIEW_PANEL_TOGGLE_TOP))
+            .left(if visible {
+                file_tree_width() - px(REVIEW_PANEL_TOGGLE_OVERLAP)
+            } else {
+                px(REVIEW_PANEL_TOGGLE_HIDDEN_INSET)
+            })
+            .child(button)
+            .into_any_element(),
+        ReviewPanelToggleSide::Inspector => div()
+            .absolute()
+            .top(px(REVIEW_PANEL_TOGGLE_TOP))
+            .right(if visible {
+                px(REVIEW_INSPECTOR_PANE_WIDTH - REVIEW_PANEL_TOGGLE_OVERLAP)
+            } else {
+                px(REVIEW_PANEL_TOGGLE_HIDDEN_INSET)
+            })
+            .child(button)
+            .into_any_element(),
+    }
 }
 
 fn review_cache_key(active_pr_key: Option<&str>, scope: &str) -> String {
@@ -880,7 +983,7 @@ fn render_review_inspector_pane(
     });
 
     div()
-        .w(px(320.0))
+        .w(px(REVIEW_INSPECTOR_PANE_WIDTH))
         .flex_shrink_0()
         .min_h_0()
         .flex()
@@ -933,84 +1036,62 @@ fn render_review_inspector_pane(
                     div()
                         .flex()
                         .items_center()
-                        .justify_between()
                         .gap(px(8.0))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(workspace_mode_button(
-                                    ReviewInspectorMode::Graph.label(),
-                                    inspector_mode == ReviewInspectorMode::Graph,
-                                    {
-                                        let state = state.clone();
-                                        let symbol_query = symbol_query.clone();
-                                        move |_, window, cx| {
-                                            state.update(cx, |state, cx| {
-                                                state.set_review_inspector_mode(
-                                                    ReviewInspectorMode::Graph,
-                                                );
-                                                state.persist_active_review_session();
-                                                cx.notify();
-                                            });
-                                            if let Some(query) = symbol_query.clone() {
-                                                request_review_symbol_details(
-                                                    query, false, window, cx,
-                                                );
-                                            }
-                                        }
-                                    },
-                                ))
-                                .child(workspace_mode_button(
-                                    ReviewInspectorMode::Context.label(),
-                                    inspector_mode == ReviewInspectorMode::Context,
-                                    {
-                                        let state = state.clone();
-                                        move |_, _, cx| {
-                                            state.update(cx, |state, cx| {
-                                                state.set_review_inspector_mode(
-                                                    ReviewInspectorMode::Context,
-                                                );
-                                                state.persist_active_review_session();
-                                                cx.notify();
-                                            });
-                                        }
-                                    },
-                                ))
-                                .child(workspace_mode_button(
-                                    ReviewInspectorMode::Evolution.label(),
-                                    inspector_mode == ReviewInspectorMode::Evolution,
-                                    {
-                                        let state = state.clone();
-                                        let evolution_query = evolution_query.clone().flatten();
-                                        move |_, window, cx| {
-                                            state.update(cx, |state, cx| {
-                                                state.set_review_inspector_mode(
-                                                    ReviewInspectorMode::Evolution,
-                                                );
-                                                state.persist_active_review_session();
-                                                cx.notify();
-                                            });
-                                            if let Some(query) = evolution_query.clone() {
-                                                request_symbol_evolution_timeline(
-                                                    query, false, window, cx,
-                                                );
-                                            }
-                                        }
-                                    },
-                                )),
-                        )
-                        .child(ghost_button("Hide", {
-                            let state = state.clone();
-                            move |_, _, cx| {
-                                state.update(cx, |state, cx| {
-                                    state.set_review_inspector_visible(false);
-                                    state.persist_active_review_session();
-                                    cx.notify();
-                                });
-                            }
-                        })),
+                        .flex_wrap()
+                        .child(workspace_mode_button(
+                            ReviewInspectorMode::Graph.label(),
+                            inspector_mode == ReviewInspectorMode::Graph,
+                            {
+                                let state = state.clone();
+                                let symbol_query = symbol_query.clone();
+                                move |_, window, cx| {
+                                    state.update(cx, |state, cx| {
+                                        state.set_review_inspector_mode(ReviewInspectorMode::Graph);
+                                        state.persist_active_review_session();
+                                        cx.notify();
+                                    });
+                                    if let Some(query) = symbol_query.clone() {
+                                        request_review_symbol_details(query, false, window, cx);
+                                    }
+                                }
+                            },
+                        ))
+                        .child(workspace_mode_button(
+                            ReviewInspectorMode::Context.label(),
+                            inspector_mode == ReviewInspectorMode::Context,
+                            {
+                                let state = state.clone();
+                                move |_, _, cx| {
+                                    state.update(cx, |state, cx| {
+                                        state.set_review_inspector_mode(
+                                            ReviewInspectorMode::Context,
+                                        );
+                                        state.persist_active_review_session();
+                                        cx.notify();
+                                    });
+                                }
+                            },
+                        ))
+                        .child(workspace_mode_button(
+                            ReviewInspectorMode::Evolution.label(),
+                            inspector_mode == ReviewInspectorMode::Evolution,
+                            {
+                                let state = state.clone();
+                                let evolution_query = evolution_query.clone().flatten();
+                                move |_, window, cx| {
+                                    state.update(cx, |state, cx| {
+                                        state.set_review_inspector_mode(
+                                            ReviewInspectorMode::Evolution,
+                                        );
+                                        state.persist_active_review_session();
+                                        cx.notify();
+                                    });
+                                    if let Some(query) = evolution_query.clone() {
+                                        request_symbol_evolution_timeline(query, false, window, cx);
+                                    }
+                                }
+                            },
+                        )),
                 )
                 .child(
                     div()
@@ -3095,8 +3176,6 @@ fn render_diff_toolbar(
     let state_for_clear_route = state.clone();
     let state_for_semantic = state.clone();
     let state_for_source = state.clone();
-    let state_for_files_pane = state.clone();
-    let state_for_inspector_pane = state.clone();
     let waymark_name = default_waymark_name(
         selected_file.map(|file| file.path.as_str()),
         semantic_file.and_then(|semantic| semantic.section_for_anchor(selected_anchor)),
@@ -3108,7 +3187,8 @@ fn render_diff_toolbar(
         .items_center()
         .justify_between()
         .gap(px(12.0))
-        .px(px(18.0))
+        .pl(if show_file_tree { px(18.0) } else { px(46.0) })
+        .pr(if show_inspector { px(18.0) } else { px(46.0) })
         .py(px(8.0))
         .bg(bg_surface())
         .border_b(px(1.0))
@@ -3229,26 +3309,6 @@ fn render_diff_toolbar(
                         }
                     },
                 ))
-                .child(workspace_mode_button("Files", show_file_tree, {
-                    let state = state_for_files_pane.clone();
-                    move |_, _, cx| {
-                        state.update(cx, |state, cx| {
-                            state.set_review_file_tree_visible(!show_file_tree);
-                            state.persist_active_review_session();
-                            cx.notify();
-                        });
-                    }
-                }))
-                .child(workspace_mode_button("Inspector", show_inspector, {
-                    let state = state_for_inspector_pane.clone();
-                    move |_, _, cx| {
-                        state.update(cx, |state, cx| {
-                            state.set_review_inspector_visible(!show_inspector);
-                            state.persist_active_review_session();
-                            cx.notify();
-                        });
-                    }
-                }))
                 .child(ghost_button("Back", {
                     let state = state_for_back.clone();
                     move |_, window, cx| {
