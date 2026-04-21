@@ -632,7 +632,7 @@ pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement
     };
 
     let files = &detail.files;
-    let review_queue = build_review_queue(detail);
+    let review_queue = prepare_review_queue(&s, detail);
     let selected_anchor = s.selected_diff_anchor.clone();
     let review_session = s.active_review_session().cloned().unwrap_or_default();
     let waypoint_spotlight_open = s.waypoint_spotlight_open;
@@ -647,6 +647,7 @@ pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement
         .map(|file| file.path.as_str())
         .or_else(|| {
             review_queue
+                .as_ref()
                 .default_item()
                 .map(|item| item.file_path.as_str())
                 .or_else(|| detail.parsed_diff.first().map(|file| file.path.as_str()))
@@ -655,19 +656,26 @@ pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement
     let selected_file = selected_path.and_then(|path| files.iter().find(|file| file.path == path));
     let selected_parsed =
         selected_file.and_then(|file| find_parsed_diff_file(&detail.parsed_diff, &file.path));
-    let semantic_file = selected_file
-        .map(|file| build_semantic_diff_file(file, selected_parsed, &detail.review_threads));
+    let semantic_file = selected_file.map(|file| prepare_semantic_diff_file(&s, detail, file));
     let prepared_file = selected_file.and_then(|file| {
         s.active_detail_state()
             .and_then(|detail_state| detail_state.file_content_states.get(&file.path))
             .and_then(|file_state| file_state.prepared.as_ref())
+    });
+    let selected_queue_item = selected_file.and_then(|file| {
+        review_queue
+            .as_ref()
+            .all_items()
+            .find(|item| item.file_path == file.path)
+            .cloned()
     });
     let review_context = selected_file
         .zip(semantic_file.as_ref())
         .map(|(file, semantic)| {
             build_review_context(
                 detail,
-                semantic,
+                selected_queue_item.clone(),
+                semantic.as_ref(),
                 file.path.as_str(),
                 selected_anchor.as_ref(),
             )
@@ -700,7 +708,7 @@ pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement
                     detail,
                     selected_path,
                     selected_anchor.as_ref(),
-                    semantic_file.as_ref(),
+                    semantic_file.as_deref(),
                     cx,
                 )),
         )
@@ -708,11 +716,11 @@ pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement
             el.child(render_review_inspector_pane(
                 state,
                 detail,
-                &review_queue,
+                review_queue.as_ref(),
                 selected_path,
                 selected_file,
                 selected_parsed,
-                semantic_file.as_ref(),
+                semantic_file.as_deref(),
                 prepared_file,
                 review_context.as_ref(),
                 &review_session,
@@ -740,14 +748,81 @@ pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement
         .into_any_element()
 }
 
+fn review_cache_key(active_pr_key: Option<&str>, scope: &str) -> String {
+    format!("{}:{scope}", active_pr_key.unwrap_or("detached"))
+}
+
+fn prepare_review_queue(app_state: &AppState, detail: &PullRequestDetail) -> Arc<ReviewQueue> {
+    let cache_key = review_cache_key(app_state.active_pr_key.as_deref(), "review-queue");
+    let revision = detail.updated_at.clone();
+
+    if let Some(cached) = app_state
+        .review_queue_cache
+        .borrow()
+        .get(&cache_key)
+        .filter(|cached| cached.revision == revision)
+        .cloned()
+    {
+        return cached.queue;
+    }
+
+    let queue = Arc::new(build_review_queue(detail));
+    app_state.review_queue_cache.borrow_mut().insert(
+        cache_key,
+        CachedReviewQueue {
+            revision,
+            queue: queue.clone(),
+        },
+    );
+    queue
+}
+
+fn prepare_semantic_diff_file(
+    app_state: &AppState,
+    detail: &PullRequestDetail,
+    file: &PullRequestFile,
+) -> Arc<SemanticDiffFile> {
+    let cache_key = format!(
+        "{}:{}",
+        review_cache_key(app_state.active_pr_key.as_deref(), "semantic-diff"),
+        file.path
+    );
+    let revision = detail.updated_at.clone();
+
+    if let Some(cached) = app_state
+        .semantic_diff_cache
+        .borrow()
+        .get(&cache_key)
+        .filter(|cached| cached.revision == revision)
+        .cloned()
+    {
+        return cached.semantic;
+    }
+
+    let parsed = find_parsed_diff_file(&detail.parsed_diff, &file.path);
+    let semantic = Arc::new(build_semantic_diff_file(
+        file,
+        parsed,
+        &detail.review_threads,
+    ));
+    app_state.semantic_diff_cache.borrow_mut().insert(
+        cache_key,
+        CachedSemanticDiffFile {
+            revision,
+            semantic: semantic.clone(),
+        },
+    );
+    semantic
+}
+
 fn render_review_file_tree_pane(
     state: &Entity<AppState>,
     detail: &PullRequestDetail,
     selected_path: Option<&str>,
     _review_session: &crate::review_session::ReviewSessionState,
-    _cx: &App,
+    cx: &App,
 ) -> impl IntoElement {
-    render_file_tree(detail, selected_path, state.clone())
+    render_file_tree(state, detail, selected_path, cx)
 }
 
 fn render_review_inspector_pane(
@@ -1717,11 +1792,23 @@ fn queue_metric(label: String, fg: gpui::Rgba, bg: gpui::Rgba) -> impl IntoEleme
 }
 
 fn render_file_tree(
+    state: &Entity<AppState>,
     detail: &PullRequestDetail,
     selected_path: Option<&str>,
-    state: Entity<AppState>,
+    cx: &App,
 ) -> impl IntoElement {
-    let tree_rows = build_review_file_tree_rows(detail);
+    let tree_rows = {
+        let app_state = state.read(cx);
+        prepare_review_file_tree_rows(&app_state, detail)
+    };
+    let list_state = {
+        let app_state = state.read(cx);
+        prepare_review_file_tree_list_state(&app_state)
+    };
+    if list_state.item_count() != tree_rows.len() {
+        list_state.reset(tree_rows.len());
+    }
+    let selected_path = selected_path.map(str::to_string);
 
     div()
         .w(file_tree_width())
@@ -1730,8 +1817,6 @@ fn render_file_tree(
         .bg(bg_surface())
         .border_r(px(1.0))
         .border_color(border_default())
-        .id("file-tree-scroll")
-        .overflow_y_scroll()
         .flex()
         .flex_col()
         .child(
@@ -1783,23 +1868,90 @@ fn render_file_tree(
                         ),
                 ),
         )
-        .px(px(8.0))
-        .py(px(8.0))
-        .children(tree_rows.into_iter().map(|row| {
-            match row {
-                ReviewFileTreeRow::Directory {
-                    name,
-                    depth,
-                    additions,
-                    deletions,
-                } => render_file_tree_directory_row(name, depth, additions, deletions)
-                    .into_any_element(),
-                ReviewFileTreeRow::File { file, depth } => {
-                    render_file_tree_file_row(state.clone(), file, depth, selected_path)
-                        .into_any_element()
-                }
-            }
-        }))
+        .child(
+            div()
+                .id("file-tree-scroll")
+                .flex_grow()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .px(px(8.0))
+                .py(px(8.0))
+                .child(
+                    list(list_state, {
+                        let state = state.clone();
+                        let tree_rows = tree_rows.clone();
+                        let selected_path = selected_path.clone();
+                        move |ix, _window, _cx| match tree_rows[ix].clone() {
+                            ReviewFileTreeRow::Directory {
+                                name,
+                                depth,
+                                additions,
+                                deletions,
+                            } => render_file_tree_directory_row(name, depth, additions, deletions)
+                                .into_any_element(),
+                            ReviewFileTreeRow::File {
+                                path,
+                                name,
+                                depth,
+                                additions,
+                                deletions,
+                            } => render_file_tree_file_row(
+                                state.clone(),
+                                path,
+                                name,
+                                additions,
+                                deletions,
+                                depth,
+                                selected_path.as_deref(),
+                            )
+                            .into_any_element(),
+                        }
+                    })
+                    .with_sizing_behavior(ListSizingBehavior::Auto)
+                    .flex_grow()
+                    .min_h_0(),
+                ),
+        )
+}
+
+const REVIEW_FILE_TREE_ROW_HEIGHT: f32 = 26.0;
+
+fn prepare_review_file_tree_list_state(app_state: &AppState) -> ListState {
+    let key = review_cache_key(app_state.active_pr_key.as_deref(), "review-file-tree");
+    let mut list_states = app_state.review_file_tree_list_states.borrow_mut();
+    list_states
+        .entry(key)
+        .or_insert_with(|| ListState::new(0, ListAlignment::Top, px(REVIEW_FILE_TREE_ROW_HEIGHT)))
+        .clone()
+}
+
+fn prepare_review_file_tree_rows(
+    app_state: &AppState,
+    detail: &PullRequestDetail,
+) -> Arc<Vec<ReviewFileTreeRow>> {
+    let cache_key = review_cache_key(app_state.active_pr_key.as_deref(), "review-file-tree-rows");
+    let revision = detail.updated_at.clone();
+
+    if let Some(cached) = app_state
+        .review_file_tree_cache
+        .borrow()
+        .get(&cache_key)
+        .filter(|cached| cached.revision == revision)
+        .cloned()
+    {
+        return cached.rows;
+    }
+
+    let rows = Arc::new(build_review_file_tree_rows(detail));
+    app_state.review_file_tree_cache.borrow_mut().insert(
+        cache_key,
+        CachedReviewFileTree {
+            revision,
+            rows: rows.clone(),
+        },
+    );
+    rows
 }
 
 #[derive(Default)]
@@ -1809,20 +1961,7 @@ struct ReviewFileTreeNode {
     deletions: i64,
     file_count: usize,
     children: std::collections::BTreeMap<String, ReviewFileTreeNode>,
-    files: Vec<(PullRequestFile, usize)>,
-}
-
-enum ReviewFileTreeRow {
-    Directory {
-        name: String,
-        depth: usize,
-        additions: i64,
-        deletions: i64,
-    },
-    File {
-        file: PullRequestFile,
-        depth: usize,
-    },
+    files: Vec<ReviewFileTreeRow>,
 }
 
 fn build_review_file_tree_rows(detail: &PullRequestDetail) -> Vec<ReviewFileTreeRow> {
@@ -1847,7 +1986,13 @@ fn build_review_file_tree_rows(detail: &PullRequestDetail) -> Vec<ReviewFileTree
                 cursor.deletions += file.deletions;
                 cursor.file_count += 1;
             } else {
-                cursor.files.push((file.clone(), 0));
+                cursor.files.push(ReviewFileTreeRow::File {
+                    path: file.path.clone(),
+                    name: segment.to_string(),
+                    depth: 0,
+                    additions: file.additions,
+                    deletions: file.deletions,
+                });
             }
         }
     }
@@ -1876,11 +2021,23 @@ fn flatten_review_file_tree(
     }
 
     let file_depth = if depth == 0 { 0 } else { depth + 1 };
-    for (file, _thread_count) in &node.files {
-        rows.push(ReviewFileTreeRow::File {
-            file: file.clone(),
-            depth: file_depth,
-        });
+    for file in &node.files {
+        if let ReviewFileTreeRow::File {
+            path,
+            name,
+            additions,
+            deletions,
+            ..
+        } = file
+        {
+            rows.push(ReviewFileTreeRow::File {
+                path: path.clone(),
+                name: name.clone(),
+                depth: file_depth,
+                additions: *additions,
+                deletions: *deletions,
+            });
+        }
     }
 }
 
@@ -1994,13 +2151,14 @@ fn render_file_tree_directory_row(
 
 fn render_file_tree_file_row(
     state: Entity<AppState>,
-    file: PullRequestFile,
+    path: String,
+    file_name: String,
+    additions: i64,
+    deletions: i64,
     depth: usize,
     selected_path: Option<&str>,
 ) -> impl IntoElement {
-    let path = file.path.clone();
-    let is_active = selected_path == Some(file.path.as_str());
-    let file_name = path.rsplit('/').next().unwrap_or(path.as_str()).to_string();
+    let is_active = selected_path == Some(path.as_str());
     let file_name_for_tooltip = file_name.clone();
     let file_name_id = path.bytes().fold(5381usize, |acc, byte| {
         acc.wrapping_mul(33).wrapping_add(byte as usize)
@@ -2067,10 +2225,7 @@ fn render_file_tree_file_row(
                                 .child(file_name),
                         ),
                 )
-                .child(render_file_tree_diff_summary(
-                    file.additions,
-                    file.deletions,
-                )),
+                .child(render_file_tree_diff_summary(additions, deletions)),
         )
 }
 

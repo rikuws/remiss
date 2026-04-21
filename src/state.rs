@@ -15,11 +15,13 @@ use crate::local_repo::LocalRepositoryStatus;
 use crate::lsp::{LspServerStatus, LspSessionManager, LspSymbolDetails};
 use crate::managed_lsp::{ManagedServerInstallStatus, ManagedServerKind};
 use crate::review_graph::ReviewSymbolEvolutionState;
+use crate::review_queue::ReviewQueue;
 use crate::review_session::{
     add_waymark, load_review_session, location_label, push_history_location, push_route_location,
     remove_waymark, save_review_session, ReviewCenterMode, ReviewInspectorMode, ReviewLocation,
     ReviewSessionDocument, ReviewSessionState, ReviewSourceTarget, ReviewTaskRoute, ReviewWaymark,
 };
+use crate::semantic_diff::SemanticDiffFile;
 use crate::syntax::{self, SyntaxSpan};
 use crate::theme::{self, ThemePreference};
 use gpui::{px, ListAlignment, ListState, Pixels, Point, ScrollHandle, WindowAppearance};
@@ -332,6 +334,41 @@ impl DiffFileViewState {
     }
 }
 
+#[derive(Clone)]
+pub struct CachedReviewQueue {
+    pub revision: String,
+    pub queue: Arc<ReviewQueue>,
+}
+
+#[derive(Clone)]
+pub struct CachedSemanticDiffFile {
+    pub revision: String,
+    pub semantic: Arc<SemanticDiffFile>,
+}
+
+#[derive(Clone, Debug)]
+pub enum ReviewFileTreeRow {
+    Directory {
+        name: String,
+        depth: usize,
+        additions: i64,
+        deletions: i64,
+    },
+    File {
+        path: String,
+        name: String,
+        depth: usize,
+        additions: i64,
+        deletions: i64,
+    },
+}
+
+#[derive(Clone)]
+pub struct CachedReviewFileTree {
+    pub revision: String,
+    pub rows: Arc<Vec<ReviewFileTreeRow>>,
+}
+
 pub struct AppState {
     pub cache: Arc<CacheStore>,
     pub lsp_session_manager: Arc<LspSessionManager>,
@@ -366,6 +403,10 @@ pub struct AppState {
     pub selected_file_path: Option<String>,
     pub selected_diff_anchor: Option<DiffAnchor>,
     pub diff_view_states: RefCell<std::collections::HashMap<String, DiffFileViewState>>,
+    pub review_queue_cache: RefCell<std::collections::HashMap<String, CachedReviewQueue>>,
+    pub semantic_diff_cache: RefCell<std::collections::HashMap<String, CachedSemanticDiffFile>>,
+    pub review_file_tree_cache: RefCell<std::collections::HashMap<String, CachedReviewFileTree>>,
+    pub review_file_tree_list_states: RefCell<std::collections::HashMap<String, ListState>>,
     pub review_nav_list_states: RefCell<std::collections::HashMap<String, ListState>>,
     // Review form
     pub review_action: ReviewAction,
@@ -440,6 +481,10 @@ impl AppState {
             selected_file_path: None,
             selected_diff_anchor: None,
             diff_view_states: RefCell::new(std::collections::HashMap::new()),
+            review_queue_cache: RefCell::new(std::collections::HashMap::new()),
+            semantic_diff_cache: RefCell::new(std::collections::HashMap::new()),
+            review_file_tree_cache: RefCell::new(std::collections::HashMap::new()),
+            review_file_tree_list_states: RefCell::new(std::collections::HashMap::new()),
             review_nav_list_states: RefCell::new(std::collections::HashMap::new()),
             review_action: ReviewAction::Comment,
             review_body: String::new(),

@@ -1,7 +1,7 @@
 use crate::{
     code_tour::DiffAnchor,
     github::{PullRequestDetail, PullRequestReviewThread},
-    review_queue::{build_review_queue, ReviewQueueItem},
+    review_queue::ReviewQueueItem,
     semantic_diff::{SemanticDiffFile, SemanticDiffSection},
 };
 
@@ -42,16 +42,11 @@ pub struct ReviewContextData {
 
 pub fn build_review_context(
     detail: &PullRequestDetail,
+    queue_item: Option<ReviewQueueItem>,
     semantic: &SemanticDiffFile,
     selected_file_path: &str,
     selected_anchor: Option<&DiffAnchor>,
 ) -> ReviewContextData {
-    let queue = build_review_queue(detail);
-    let queue_item = queue
-        .all_items()
-        .find(|item| item.file_path == selected_file_path)
-        .cloned();
-
     let file_threads = detail
         .review_threads
         .iter()
