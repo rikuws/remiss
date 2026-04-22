@@ -363,8 +363,6 @@ pub enum ReviewFileTreeRow {
     Directory {
         name: String,
         depth: usize,
-        additions: i64,
-        deletions: i64,
     },
     File {
         path: String,

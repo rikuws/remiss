@@ -80,7 +80,7 @@ impl ReviewGraphEdgeKind {
             Self::Inherits => "inherits",
             Self::Composes => "composes",
             Self::DataFlow => "data flow",
-            Self::Touches => "touches",
+            Self::Touches => "same diff",
         }
     }
 }
@@ -375,40 +375,25 @@ pub fn build_review_symbol_graph(
             .then_with(|| left.to.cmp(&right.to))
     });
 
-    let modified_count = nodes
-        .iter()
-        .filter(|node| node.state == ReviewGraphNodeState::Modified)
-        .count();
-    let impacted_count = nodes
-        .iter()
-        .filter(|node| node.state == ReviewGraphNodeState::Impacted)
-        .count();
+    let modified_count = nodes.iter().filter(|node| node.in_diff).count();
+    let impacted_count = nodes.len().saturating_sub(modified_count);
 
     ReviewSymbolGraph {
         headline: if focus_candidate.descriptor.kind == ReviewGraphNodeKind::File {
-            format!("Changed symbols in {}", file_name(selected_file_path))
+            format!("Changed entities in {}", file_name(selected_file_path))
         } else {
-            format!("Graph around {focus_label}")
+            format!("Impact map for {focus_label}")
         },
-        summary: if focus_term.is_some() {
+        summary: if impacted_count > 0 {
             format!(
-                "{modified_count} modified and {impacted_count} impacted neighbor{} around this focus.",
-                if modified_count + impacted_count == 1 {
-                    ""
-                } else {
-                    "s"
-                }
+                "{modified_count} changed entit{} plus {impacted_count} direct neighbor{} in this local review graph.",
+                if modified_count == 1 { "y" } else { "ies" },
+                if impacted_count == 1 { "" } else { "s" }
             )
         } else {
             format!(
-                "{} changed symbol{} in {}.",
-                modified_count.max(nodes.len().saturating_sub(1)),
-                if modified_count.max(nodes.len().saturating_sub(1)) == 1 {
-                    ""
-                } else {
-                    "s"
-                },
-                file_name(selected_file_path)
+                "{modified_count} changed entit{} in this diff slice. Trace neighbors to expand callers, callees, and related types.",
+                if modified_count == 1 { "y" } else { "ies" }
             )
         },
         focus_node_id: Some(focus_candidate.id.clone()),

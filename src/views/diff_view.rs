@@ -943,6 +943,7 @@ fn render_review_inspector_pane(
 ) -> impl IntoElement {
     let inspector_mode = review_session.inspector_mode;
     let selected_anchor = state.read(cx).selected_diff_anchor.clone();
+    let selected_section = review_context.and_then(|context| context.selected_section.as_ref());
     let line_focus_term = prepared_file
         .and_then(|prepared_file| {
             build_anchor_symbol_focus(selected_anchor.as_ref(), prepared_file)
@@ -957,6 +958,38 @@ fn render_review_inspector_pane(
         .current_review_location()
         .map(|location| location.label.clone())
         .unwrap_or_else(|| "Select a file or section to focus the review.".to_string());
+    let inspector_title = selected_section
+        .map(|section| section.title.clone())
+        .or_else(|| line_focus_term.clone())
+        .unwrap_or_else(|| selected_file_label.clone());
+    let inspector_summary = selected_file
+        .map(|file| {
+            let mut parts = vec![file.path.clone()];
+            if let Some(section) = selected_section {
+                parts.push(format!(
+                    "{} section • +{} / -{}",
+                    section.kind.label(),
+                    section.additions,
+                    section.deletions
+                ));
+                if section.thread_count > 0 {
+                    parts.push(format!(
+                        "{} open thread{}",
+                        section.thread_count,
+                        if section.thread_count == 1 { "" } else { "s" }
+                    ));
+                }
+            } else {
+                parts.push(format!(
+                    "{} file • +{} / -{}",
+                    label_for_change_type(&file.change_type),
+                    file.additions,
+                    file.deletions
+                ));
+            }
+            parts.join(" • ")
+        })
+        .unwrap_or_else(|| current_location_label.clone());
     let symbol_query = selected_file.and_then(|file| {
         review_context
             .and_then(|context| context.selected_section.as_ref())
@@ -999,7 +1032,7 @@ fn render_review_inspector_pane(
                 .border_color(border_default())
                 .flex()
                 .flex_col()
-                .gap(px(10.0))
+                .gap(px(12.0))
                 .child(
                     div()
                         .flex()
@@ -1014,22 +1047,19 @@ fn render_review_inspector_pane(
                         )
                         .child(
                             div()
-                                .text_size(px(13.0))
+                                .text_size(px(14.0))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(fg_emphasis())
                                 .whitespace_nowrap()
                                 .overflow_x_hidden()
                                 .text_ellipsis()
-                                .child(selected_file_label),
+                                .child(inspector_title),
                         )
                         .child(
                             div()
                                 .text_size(px(12.0))
                                 .text_color(fg_muted())
-                                .whitespace_nowrap()
-                                .overflow_x_hidden()
-                                .text_ellipsis()
-                                .child(current_location_label),
+                                .child(inspector_summary),
                         ),
                 )
                 .child(
@@ -1037,7 +1067,6 @@ fn render_review_inspector_pane(
                         .flex()
                         .items_center()
                         .gap(px(8.0))
-                        .flex_wrap()
                         .child(workspace_mode_button(
                             ReviewInspectorMode::Graph.label(),
                             inspector_mode == ReviewInspectorMode::Graph,
@@ -1092,31 +1121,6 @@ fn render_review_inspector_pane(
                                 }
                             },
                         )),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(6.0))
-                        .flex_wrap()
-                        .child(badge(&format!("{} files", detail.changed_files)))
-                        .child(badge(&format!("{} comments", detail.comments_count)))
-                        .child(badge(&format!("{} commits", detail.commits_count)))
-                        .when_some(semantic_file, |el, semantic_file| {
-                            el.child(badge(&format!("{} sections", semantic_file.sections.len())))
-                        })
-                        .when_some(selected_file, |el, file| {
-                            el.child(render_change_type_chip(&file.change_type))
-                                .child(queue_metric(
-                                    format!("+{}", file.additions),
-                                    success(),
-                                    success_muted(),
-                                ))
-                                .child(queue_metric(
-                                    format!("-{}", file.deletions),
-                                    danger(),
-                                    danger_muted(),
-                                ))
-                        }),
                 ),
         )
         .child(match inspector_mode {
@@ -1964,13 +1968,9 @@ fn render_file_tree(
                         let tree_rows = tree_rows.clone();
                         let selected_path = selected_path.clone();
                         move |ix, _window, _cx| match tree_rows[ix].clone() {
-                            ReviewFileTreeRow::Directory {
-                                name,
-                                depth,
-                                additions,
-                                deletions,
-                            } => render_file_tree_directory_row(name, depth, additions, deletions)
-                                .into_any_element(),
+                            ReviewFileTreeRow::Directory { name, depth } => {
+                                render_file_tree_directory_row(name, depth).into_any_element()
+                            }
                             ReviewFileTreeRow::File {
                                 path,
                                 name,
@@ -2038,9 +2038,6 @@ fn prepare_review_file_tree_rows(
 #[derive(Default)]
 struct ReviewFileTreeNode {
     name: String,
-    additions: i64,
-    deletions: i64,
-    file_count: usize,
     children: std::collections::BTreeMap<String, ReviewFileTreeNode>,
     files: Vec<ReviewFileTreeRow>,
 }
@@ -2048,10 +2045,6 @@ struct ReviewFileTreeNode {
 fn build_review_file_tree_rows(detail: &PullRequestDetail) -> Vec<ReviewFileTreeRow> {
     let mut root = ReviewFileTreeNode::default();
     for file in &detail.files {
-        root.additions += file.additions;
-        root.deletions += file.deletions;
-        root.file_count += 1;
-
         let mut cursor = &mut root;
         let mut segments = file.path.split('/').peekable();
         while let Some(segment) = segments.next() {
@@ -2063,9 +2056,6 @@ fn build_review_file_tree_rows(detail: &PullRequestDetail) -> Vec<ReviewFileTree
                         name: segment.to_string(),
                         ..ReviewFileTreeNode::default()
                     });
-                cursor.additions += file.additions;
-                cursor.deletions += file.deletions;
-                cursor.file_count += 1;
             } else {
                 cursor.files.push(ReviewFileTreeRow::File {
                     path: file.path.clone(),
@@ -2092,8 +2082,6 @@ fn flatten_review_file_tree(
         rows.push(ReviewFileTreeRow::Directory {
             name: node.name.clone(),
             depth,
-            additions: node.additions,
-            deletions: node.deletions,
         });
     }
 
@@ -2185,12 +2173,7 @@ fn render_file_tree_directory_icon() -> impl IntoElement {
         )
 }
 
-fn render_file_tree_directory_row(
-    name: String,
-    depth: usize,
-    additions: i64,
-    deletions: i64,
-) -> impl IntoElement {
+fn render_file_tree_directory_row(name: String, depth: usize) -> impl IntoElement {
     div()
         .w_full()
         .flex_shrink_0()
@@ -2225,8 +2208,7 @@ fn render_file_tree_directory_row(
                                 .overflow_x_hidden()
                                 .child(name),
                         ),
-                )
-                .child(render_file_tree_diff_summary(additions, deletions)),
+                ),
         )
 }
 
@@ -3157,19 +3139,77 @@ fn render_diff_toolbar(
     show_inspector: bool,
     selected_anchor: Option<&DiffAnchor>,
 ) -> impl IntoElement {
-    let local_status_badge = local_repo_status.map(|status| {
-        if status.ready_for_local_features {
-            "checkout ready"
-        } else if !status.is_valid_repository {
-            "needs repair"
-        } else if !status.matches_expected_head {
-            "needs sync"
-        } else if !status.is_worktree_clean {
-            "dirty checkout"
-        } else {
-            "checkout pending"
+    let selected_section =
+        semantic_file.and_then(|semantic| semantic.section_for_anchor(selected_anchor));
+    let focus_title = selected_section
+        .map(|section| section.title.clone())
+        .or_else(|| selected_file.map(|file| file.path.clone()))
+        .unwrap_or_else(|| format!("{total_files} changed files"));
+    let mut focus_meta = Vec::new();
+    if let Some(file) = selected_file {
+        if selected_section.is_some() {
+            focus_meta.push(file.path.clone());
         }
-    });
+        focus_meta.push(
+            selected_section
+                .map(|section| {
+                    format!(
+                        "{} section • +{} / -{}",
+                        section.kind.label(),
+                        section.additions,
+                        section.deletions
+                    )
+                })
+                .unwrap_or_else(|| {
+                    format!(
+                        "{} file • +{} / -{}",
+                        label_for_change_type(&file.change_type),
+                        file.additions,
+                        file.deletions
+                    )
+                }),
+        );
+    } else {
+        focus_meta.push(format!("{total_files} changed files"));
+    }
+    if file_thread_count > 0 {
+        focus_meta.push(format!(
+            "{} open thread{}",
+            file_thread_count,
+            if file_thread_count == 1 { "" } else { "s" }
+        ));
+    }
+    if selected_parsed
+        .map(|parsed| parsed.is_binary)
+        .unwrap_or(false)
+    {
+        focus_meta.push("binary diff".to_string());
+    }
+    if local_repo_loading {
+        focus_meta.push("preparing checkout".to_string());
+    } else if file_document
+        .map(|document| document.source != REPOSITORY_FILE_SOURCE_LOCAL_CHECKOUT)
+        .unwrap_or(false)
+    {
+        focus_meta.push("GitHub snapshot".to_string());
+    } else if let Some(status) = local_repo_status.filter(|status| !status.ready_for_local_features)
+    {
+        focus_meta.push(if !status.is_valid_repository {
+            "checkout needs repair".to_string()
+        } else if !status.matches_expected_head {
+            "checkout needs sync".to_string()
+        } else if !status.is_worktree_clean {
+            "checkout is dirty".to_string()
+        } else {
+            "checkout pending".to_string()
+        });
+    }
+    if lsp_loading {
+        focus_meta.push("indexing symbols".to_string());
+    } else if let Some(status) = lsp_status.filter(|status| !status.is_ready()) {
+        focus_meta.push(status.badge_label().to_string());
+    }
+    let focus_summary = focus_meta.join(" • ");
     let state_for_back = state.clone();
     let state_for_forward = state.clone();
     let state_for_waymark = state.clone();
@@ -3196,80 +3236,41 @@ fn render_diff_toolbar(
         .child(
             div()
                 .flex()
-                .items_center()
-                .gap(px(8.0))
+                .items_start()
+                .gap(px(10.0))
                 .flex_grow()
                 .min_w_0()
                 .child(
                     div()
-                        .text_size(px(10.0))
-                        .font_family("Fira Code")
-                        .text_color(fg_subtle())
-                        .whitespace_nowrap()
-                        .overflow_x_hidden()
-                        .text_ellipsis()
-                        .child(format!("REVIEW • {total_files} changed")),
-                )
-                .child(
-                    div()
                         .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .flex_wrap()
-                        .when_some(semantic_file, |el, semantic_file| {
-                            el.child(badge(&format!(
-                                "{} section{}",
-                                semantic_file.sections.len(),
-                                if semantic_file.sections.len() == 1 {
-                                    ""
-                                } else {
-                                    "s"
-                                }
-                            )))
-                        })
-                        .when(local_repo_loading, |el| {
-                            el.child(badge("Preparing checkout"))
-                        })
-                        .when_some(local_status_badge, |el, status_badge| {
-                            el.child(badge(status_badge))
-                        })
-                        .when_some(file_document, |el, document| {
-                            if document.source != REPOSITORY_FILE_SOURCE_LOCAL_CHECKOUT {
-                                el.child(badge("GitHub snapshot"))
-                            } else {
-                                el.child(badge("local checkout"))
-                            }
-                        })
-                        .when(lsp_loading, |el| el.child(badge("Starting LSP")))
-                        .when_some(lsp_status, |el, status| {
-                            if !status.is_ready() {
-                                el.child(badge(status.badge_label()))
-                            } else {
-                                el.child(badge(status.badge_label()))
-                            }
-                        })
-                        .when(file_thread_count > 0, |el| {
-                            el.child(badge(&format!(
-                                "{file_thread_count} thread{}",
-                                if file_thread_count == 1 { "" } else { "s" }
-                            )))
-                        })
-                        .when_some(selected_file, |el, f| {
-                            el.child(render_change_type_chip(&f.change_type))
-                                .child(queue_metric(
-                                    format!("+{}", f.additions),
-                                    success(),
-                                    success_muted(),
-                                ))
-                                .child(queue_metric(
-                                    format!("-{}", f.deletions),
-                                    danger(),
-                                    danger_muted(),
-                                ))
-                        })
-                        .when(
-                            selected_parsed.map(|p| p.is_binary).unwrap_or(false),
-                            |el| el.child(badge("binary")),
+                        .flex_col()
+                        .gap(px(3.0))
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .font_family("Fira Code")
+                                .text_color(fg_subtle())
+                                .child(format!("REVIEW • {total_files} changed")),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(fg_emphasis())
+                                .whitespace_nowrap()
+                                .overflow_x_hidden()
+                                .text_ellipsis()
+                                .child(focus_title),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(fg_muted())
+                                .whitespace_nowrap()
+                                .overflow_x_hidden()
+                                .text_ellipsis()
+                                .child(focus_summary),
                         ),
                 ),
         )
@@ -3533,6 +3534,16 @@ fn render_review_graph_content(
                                     .gap(px(6.0))
                                     .flex_wrap()
                                     .child(metric_pill(
+                                        format!("{} nodes", graph.nodes.len()),
+                                        fg_emphasis(),
+                                        bg_emphasis(),
+                                    ))
+                                    .child(metric_pill(
+                                        format!("{} edges", graph.edges.len()),
+                                        accent(),
+                                        accent_muted(),
+                                    ))
+                                    .child(metric_pill(
                                         format!("{} modified", graph.modified_count),
                                         success(),
                                         success_muted(),
@@ -3542,6 +3553,18 @@ fn render_review_graph_content(
                                         accent(),
                                         accent_muted(),
                                     )),
+                            )
+                            .when(
+                                symbol_query.is_some() && lsp_details.is_none() && !loading,
+                                |el| {
+                                    el.child(
+                                        div()
+                                            .mt(px(10.0))
+                                            .text_size(px(12.0))
+                                            .text_color(fg_muted())
+                                            .child("LSP neighbors are not loaded yet, so this graph is currently limited to changed entities in the active review slice."),
+                                    )
+                                },
                             )
                         })
                         .when(loading, |el| {
@@ -3567,86 +3590,8 @@ fn render_review_graph_content(
                         }),
                 )
                 .when_some(graph.as_ref(), |el, graph| {
-                    if let Some(focus_id) = graph.focus_node_id.as_deref() {
-                        let node_index = graph
-                            .nodes
-                            .iter()
-                            .map(|node| (node.id.clone(), node.clone()))
-                            .collect::<std::collections::BTreeMap<_, _>>();
-                        let focus_node = node_index.get(focus_id).cloned();
-                        let incoming = graph
-                            .edges
-                            .iter()
-                            .filter(|edge| edge.to == focus_id)
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        let outgoing = graph
-                            .edges
-                            .iter()
-                            .filter(|edge| edge.from == focus_id)
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        let connected = incoming
-                            .iter()
-                            .map(|edge| edge.from.clone())
-                            .chain(outgoing.iter().map(|edge| edge.to.clone()))
-                            .collect::<std::collections::BTreeSet<_>>();
-                        let loose_nodes = graph
-                            .nodes
-                            .iter()
-                            .filter(|node| node.id != focus_id && !connected.contains(&node.id))
-                            .cloned()
-                            .collect::<Vec<_>>();
-
-                        el.when_some(focus_node, |el, focus_node| {
-                            el.child(render_review_graph_focus_card(state, &focus_node))
-                        })
-                        .when(!incoming.is_empty(), |el| {
-                            el.child(render_review_graph_edge_group(
-                                state,
-                                "Incoming",
-                                "Changed callers and references pointing into the current focus.",
-                                incoming
-                                    .iter()
-                                    .filter_map(|edge| {
-                                        node_index
-                                            .get(&edge.from)
-                                            .cloned()
-                                            .map(|node| (node, edge.kind, true))
-                                    })
-                                    .collect(),
-                            ))
-                        })
-                        .when(!outgoing.is_empty(), |el| {
-                            el.child(render_review_graph_edge_group(
-                                state,
-                                "Outgoing",
-                                "Definitions, dependencies, and downstream touched by this focus.",
-                                outgoing
-                                    .iter()
-                                    .filter_map(|edge| {
-                                        node_index
-                                            .get(&edge.to)
-                                            .cloned()
-                                            .map(|node| (node, edge.kind, false))
-                                    })
-                                    .collect(),
-                            ))
-                        })
-                        .when(!loose_nodes.is_empty(), |el| {
-                            el.child(render_review_graph_edge_group(
-                                state,
-                                "Changed File",
-                                "Modified symbols in the same file that are nearby even when the relationship is only structural.",
-                                loose_nodes
-                                    .into_iter()
-                                    .map(|node| (node, ReviewGraphEdgeKind::Touches, false))
-                                    .collect(),
-                            ))
-                        })
-                    } else {
-                        el
-                    }
+                    el.child(render_review_graph_map_panel(state, graph))
+                        .child(render_review_graph_edges_panel(state, graph))
                 })
                 .when(selected_file.is_none(), |el| {
                     el.child(panel_state_text("Select a file to open the review graph."))
@@ -3654,70 +3599,69 @@ fn render_review_graph_content(
         )
 }
 
-fn render_review_graph_focus_card(
-    state: &Entity<AppState>,
-    node: &crate::review_graph::ReviewSymbolGraphNode,
-) -> impl IntoElement {
-    let location = node.location.clone();
-    let state = state.clone();
-
-    nested_panel()
-        .child(
-            div()
-                .text_size(px(10.0))
-                .font_family("Fira Code")
-                .text_color(fg_subtle())
-                .child("FOCUS"),
-        )
-        .child(
-            div()
-                .mt(px(10.0))
-                .px(px(12.0))
-                .py(px(10.0))
-                .rounded(radius_sm())
-                .border_1()
-                .border_color(border_default())
-                .bg(bg_overlay())
-                .cursor_pointer()
-                .hover(|style| style.bg(hover_bg()))
-                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                    open_review_location_card(&state, &location, window, cx);
-                })
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(8.0))
-                        .child(
-                            div()
-                                .text_size(px(13.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(fg_emphasis())
-                                .child(node.label.clone()),
-                        )
-                        .child(render_graph_state_badge(node.state)),
-                )
-                .child(
-                    div()
-                        .mt(px(6.0))
-                        .text_size(px(11.0))
-                        .text_color(fg_muted())
-                        .child(format!("{} • {}", node.kind.label(), node.subtitle)),
-                ),
-        )
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum ReviewGraphEntityStatus {
+    Modified,
+    Impacted,
 }
 
-fn render_review_graph_edge_group(
+#[derive(Clone)]
+struct ReviewGraphLaneEntry {
+    node: crate::review_graph::ReviewSymbolGraphNode,
+    kinds: Vec<ReviewGraphEdgeKind>,
+}
+
+#[derive(Clone, Default)]
+struct ReviewGraphOverviewGroup {
+    entries: Vec<ReviewGraphLaneEntry>,
+    hidden_count: usize,
+}
+
+#[derive(Clone, Default)]
+struct ReviewGraphOverviewLayout {
+    structural: ReviewGraphOverviewGroup,
+    incoming: ReviewGraphOverviewGroup,
+    outgoing: ReviewGraphOverviewGroup,
+    nearby: ReviewGraphOverviewGroup,
+}
+
+fn render_review_graph_map_panel(
     state: &Entity<AppState>,
-    title: &str,
-    summary: &str,
-    entries: Vec<(
-        crate::review_graph::ReviewSymbolGraphNode,
-        ReviewGraphEdgeKind,
-        bool,
-    )>,
+    graph: &crate::review_graph::ReviewSymbolGraph,
 ) -> impl IntoElement {
+    let node_index = graph
+        .nodes
+        .iter()
+        .map(|node| (node.id.clone(), node.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let focus_id = graph.focus_node_id.as_deref();
+    let focus_node = focus_id.and_then(|focus_id| node_index.get(focus_id).cloned());
+    let incoming = focus_id
+        .map(|focus_id| collect_review_graph_lane_entries(graph, &node_index, focus_id, true))
+        .unwrap_or_default();
+    let outgoing = focus_id
+        .map(|focus_id| collect_review_graph_lane_entries(graph, &node_index, focus_id, false))
+        .unwrap_or_default();
+    let connected_ids = incoming
+        .iter()
+        .map(|entry| entry.node.id.clone())
+        .chain(outgoing.iter().map(|entry| entry.node.id.clone()))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut nearby = graph
+        .nodes
+        .iter()
+        .filter(|node| Some(node.id.as_str()) != focus_id && !connected_ids.contains(&node.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    nearby.sort_by(compare_review_graph_nodes);
+    let has_focus_node = focus_node.is_some();
+    let has_incoming = !incoming.is_empty();
+    let has_outgoing = !outgoing.is_empty();
+    let has_nearby = !nearby.is_empty();
+    let incoming_count = incoming.len();
+    let outgoing_count = outgoing.len();
+    let overview = build_review_graph_overview_layout(&incoming, &outgoing, &nearby);
+
     nested_panel()
         .child(
             div()
@@ -3730,55 +3674,662 @@ fn render_review_graph_edge_group(
                         .text_size(px(10.0))
                         .font_family("Fira Code")
                         .text_color(fg_subtle())
-                        .child(title.to_string()),
+                        .child("IMPACT MAP"),
                 )
-                .child(badge(&entries.len().to_string())),
+                .child(badge(&graph.nodes.len().to_string())),
         )
         .child(
             div()
                 .mt(px(8.0))
                 .text_size(px(11.0))
                 .text_color(fg_muted())
-                .child(summary.to_string()),
+                .child("A local mini-map of changed entities and their direct logical neighbors. Click any entity to jump into the diff hunk or impacted source location."),
         )
         .child(
             div()
                 .mt(px(10.0))
                 .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .children(entries.into_iter().map(|(node, edge_kind, incoming)| {
-                    render_review_graph_node_card(state, node, edge_kind, incoming)
-                })),
+                .gap(px(6.0))
+                .flex_wrap()
+                .child(metric_pill("changed entity", success(), success_muted()))
+                .child(metric_pill("impacted neighbor", accent(), accent_muted()))
+                .child(metric_pill("focus", accent(), bg_selected())),
+        )
+        .child(render_review_graph_overview_canvas(
+            state,
+            focus_node.as_ref(),
+            &overview,
+        ))
+        .when_some(focus_node, |el, focus_node| {
+            el.child(render_review_graph_focus_card(
+                state,
+                &focus_node,
+                incoming_count,
+                outgoing_count,
+            ))
+        })
+        .when(has_incoming, |el| {
+            el.child(render_review_graph_lane(
+                state,
+                "Incoming to focus",
+                "Direct callers, references, and hierarchy edges that point into the changed entity.",
+                incoming,
+            ))
+        })
+        .when(has_outgoing, |el| {
+            el.child(render_review_graph_lane(
+                state,
+                "Outgoing from focus",
+                "Callees, definitions, types, and downstream dependencies reached from the changed entity.",
+                outgoing,
+            ))
+        })
+        .when(has_nearby, |el| {
+            el.child(render_review_graph_nearby_lane(
+                state,
+                "Same review slice",
+                "Additional changed entities nearby when the graph could not recover an explicit logical edge yet.",
+                nearby,
+            ))
+        })
+        .when(has_focus_node && !has_incoming && !has_outgoing && !has_nearby, |el| {
+                el.child(
+                    div()
+                        .mt(px(10.0))
+                        .child(panel_state_text(
+                            "No neighboring entities were recovered yet. Trace neighbors to expand this change into callers, callees, definitions, and related types.",
+                        )),
+                )
+            },
         )
 }
 
-fn render_review_graph_node_card(
-    state: &Entity<AppState>,
-    node: crate::review_graph::ReviewSymbolGraphNode,
-    edge_kind: ReviewGraphEdgeKind,
+fn build_review_graph_overview_layout(
+    incoming: &[ReviewGraphLaneEntry],
+    outgoing: &[ReviewGraphLaneEntry],
+    nearby: &[crate::review_graph::ReviewSymbolGraphNode],
+) -> ReviewGraphOverviewLayout {
+    const MAX_STRUCTURAL_ENTRIES: usize = 2;
+    const MAX_SIDE_ENTRIES: usize = 3;
+    const MAX_NEARBY_ENTRIES: usize = 2;
+
+    let mut structural_by_node = std::collections::BTreeMap::<String, ReviewGraphLaneEntry>::new();
+
+    for entry in incoming.iter().chain(outgoing.iter()) {
+        if !entry
+            .kinds
+            .iter()
+            .any(|kind| review_graph_is_structural_kind(*kind))
+        {
+            continue;
+        }
+
+        let merged = structural_by_node
+            .entry(entry.node.id.clone())
+            .or_insert_with(|| ReviewGraphLaneEntry {
+                node: entry.node.clone(),
+                kinds: Vec::new(),
+            });
+
+        for kind in &entry.kinds {
+            if !merged.kinds.contains(kind) {
+                merged.kinds.push(*kind);
+            }
+        }
+        merged.kinds.sort();
+    }
+
+    let mut structural_entries = structural_by_node.into_values().collect::<Vec<_>>();
+    structural_entries.sort_by(|left, right| compare_review_graph_nodes(&left.node, &right.node));
+
+    let structural_ids = structural_entries
+        .iter()
+        .map(|entry| entry.node.id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let incoming_entries = incoming
+        .iter()
+        .filter(|entry| !structural_ids.contains(&entry.node.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let outgoing_entries = outgoing
+        .iter()
+        .filter(|entry| !structural_ids.contains(&entry.node.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let nearby_entries = nearby
+        .iter()
+        .cloned()
+        .map(|node| ReviewGraphLaneEntry {
+            node,
+            kinds: vec![ReviewGraphEdgeKind::Touches],
+        })
+        .collect::<Vec<_>>();
+
+    ReviewGraphOverviewLayout {
+        structural: build_review_graph_overview_group(structural_entries, MAX_STRUCTURAL_ENTRIES),
+        incoming: build_review_graph_overview_group(incoming_entries, MAX_SIDE_ENTRIES),
+        outgoing: build_review_graph_overview_group(outgoing_entries, MAX_SIDE_ENTRIES),
+        nearby: build_review_graph_overview_group(nearby_entries, MAX_NEARBY_ENTRIES),
+    }
+}
+
+fn build_review_graph_overview_group(
+    entries: Vec<ReviewGraphLaneEntry>,
+    max_visible: usize,
+) -> ReviewGraphOverviewGroup {
+    let hidden_count = entries.len().saturating_sub(max_visible);
+    ReviewGraphOverviewGroup {
+        entries: entries.into_iter().take(max_visible).collect(),
+        hidden_count,
+    }
+}
+
+fn review_graph_is_structural_kind(kind: ReviewGraphEdgeKind) -> bool {
+    matches!(
+        kind,
+        ReviewGraphEdgeKind::Defines
+            | ReviewGraphEdgeKind::Inherits
+            | ReviewGraphEdgeKind::Composes
+    )
+}
+
+fn collect_review_graph_lane_entries(
+    graph: &crate::review_graph::ReviewSymbolGraph,
+    node_index: &std::collections::BTreeMap<String, crate::review_graph::ReviewSymbolGraphNode>,
+    focus_id: &str,
     incoming: bool,
+) -> Vec<ReviewGraphLaneEntry> {
+    let mut grouped = std::collections::BTreeMap::<
+        String,
+        (
+            crate::review_graph::ReviewSymbolGraphNode,
+            std::collections::BTreeSet<ReviewGraphEdgeKind>,
+        ),
+    >::new();
+
+    for edge in graph.edges.iter().filter(|edge| {
+        if incoming {
+            edge.to == focus_id
+        } else {
+            edge.from == focus_id
+        }
+    }) {
+        let node_id = if incoming { &edge.from } else { &edge.to };
+        let Some(node) = node_index.get(node_id).cloned() else {
+            continue;
+        };
+        let entry = grouped
+            .entry(node_id.clone())
+            .or_insert_with(|| (node, std::collections::BTreeSet::new()));
+        entry.1.insert(edge.kind);
+    }
+
+    let mut entries = grouped
+        .into_values()
+        .map(|(node, kinds)| ReviewGraphLaneEntry {
+            node,
+            kinds: kinds.into_iter().collect(),
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| compare_review_graph_nodes(&left.node, &right.node));
+    entries
+}
+
+fn render_review_graph_overview_canvas(
+    state: &Entity<AppState>,
+    focus_node: Option<&crate::review_graph::ReviewSymbolGraphNode>,
+    overview: &ReviewGraphOverviewLayout,
 ) -> impl IntoElement {
-    let location = node.location.clone();
-    let relation = if incoming {
-        format!("{} into focus", edge_kind.label())
-    } else {
-        format!("focus {}", edge_kind.label())
-    };
-    let state_for_open = state.clone();
+    let focus_node = focus_node.cloned();
+    let has_structural = !overview.structural.entries.is_empty();
+    let has_incoming = !overview.incoming.entries.is_empty();
+    let has_outgoing = !overview.outgoing.entries.is_empty();
+    let has_nearby = !overview.nearby.entries.is_empty();
 
     div()
-        .px(px(12.0))
+        .mt(px(12.0))
+        .px(px(10.0))
         .py(px(10.0))
         .rounded(radius_sm())
         .border_1()
         .border_color(border_default())
-        .bg(bg_overlay())
+        .bg(bg_inset())
+        .child(
+            div()
+                .relative()
+                .h(px(236.0))
+                .w_full()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(0.0))
+                        .bottom(px(0.0))
+                        .left(px(50.0))
+                        .w(px(1.0))
+                        .bg(border_muted())
+                        .opacity(0.5),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(0.0))
+                        .bottom(px(0.0))
+                        .right(px(50.0))
+                        .w(px(1.0))
+                        .bg(border_muted())
+                        .opacity(0.5),
+                )
+                .when(has_structural, |el| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .top(px(14.0))
+                            .left(px(52.0))
+                            .right(px(52.0))
+                            .h(px(42.0))
+                            .rounded(px(20.0))
+                            .bg(accent_muted())
+                            .border_1()
+                            .border_color(border_muted())
+                            .opacity(0.7),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(0.0))
+                            .left(px(0.0))
+                            .right(px(0.0))
+                            .flex()
+                            .justify_center()
+                            .child(render_review_graph_overview_caption("STRUCTURE")),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(24.0))
+                            .left(px(30.0))
+                            .right(px(30.0))
+                            .flex()
+                            .justify_center()
+                            .gap(px(8.0))
+                            .children(overview.structural.entries.iter().cloned().map(|entry| {
+                                render_review_graph_overview_chip(state, entry, px(86.0))
+                            })),
+                    )
+                    .when(overview.structural.hidden_count > 0, |el| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .top(px(18.0))
+                                .right(px(6.0))
+                                .child(render_review_graph_overview_overflow_badge(
+                                    overview.structural.hidden_count,
+                                )),
+                        )
+                    })
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(56.0))
+                            .left(px(0.0))
+                            .right(px(0.0))
+                            .flex()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .w(px(1.0))
+                                    .h(px(22.0))
+                                    .bg(accent())
+                                    .opacity(0.75),
+                            ),
+                    )
+                })
+                .when(has_incoming, |el| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .top(px(84.0))
+                            .left(px(0.0))
+                            .w(px(76.0))
+                            .h(px(74.0))
+                            .rounded(px(24.0))
+                            .bg(bg_emphasis())
+                            .border_1()
+                            .border_color(border_muted())
+                            .opacity(0.7),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(72.0))
+                            .left(px(4.0))
+                            .child(render_review_graph_overview_caption("IN")),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(92.0))
+                            .left(px(6.0))
+                            .w(px(64.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.0))
+                            .children(overview.incoming.entries.iter().cloned().map(|entry| {
+                                render_review_graph_overview_chip(state, entry, px(64.0))
+                            })),
+                    )
+                    .when(overview.incoming.hidden_count > 0, |el| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .top(px(142.0))
+                                .left(px(10.0))
+                                .child(render_review_graph_overview_overflow_badge(
+                                    overview.incoming.hidden_count,
+                                )),
+                        )
+                    })
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(114.0))
+                            .left(px(74.0))
+                            .w(px(26.0))
+                            .h(px(1.0))
+                            .bg(border_default())
+                            .opacity(0.8),
+                    )
+                })
+                .when(has_outgoing, |el| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .top(px(84.0))
+                            .right(px(0.0))
+                            .w(px(76.0))
+                            .h(px(74.0))
+                            .rounded(px(24.0))
+                            .bg(bg_emphasis())
+                            .border_1()
+                            .border_color(border_muted())
+                            .opacity(0.7),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(72.0))
+                            .right(px(6.0))
+                            .child(render_review_graph_overview_caption("OUT")),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(92.0))
+                            .right(px(6.0))
+                            .w(px(64.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.0))
+                            .children(overview.outgoing.entries.iter().cloned().map(|entry| {
+                                render_review_graph_overview_chip(state, entry, px(64.0))
+                            })),
+                    )
+                    .when(overview.outgoing.hidden_count > 0, |el| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .top(px(142.0))
+                                .right(px(10.0))
+                                .child(render_review_graph_overview_overflow_badge(
+                                    overview.outgoing.hidden_count,
+                                )),
+                        )
+                    })
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(114.0))
+                            .right(px(74.0))
+                            .w(px(26.0))
+                            .h(px(1.0))
+                            .bg(border_default())
+                            .opacity(0.8),
+                    )
+                })
+                .when_some(focus_node, |el, focus_node| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .top(px(78.0))
+                            .left(px(82.0))
+                            .right(px(82.0))
+                            .child(render_review_graph_overview_focus_chip(state, focus_node)),
+                    )
+                })
+                .when(has_nearby, |el| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .left(px(46.0))
+                            .right(px(46.0))
+                            .bottom(px(0.0))
+                            .h(px(46.0))
+                            .rounded(px(22.0))
+                            .bg(success_muted())
+                            .border_1()
+                            .border_color(border_muted())
+                            .opacity(0.78),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(0.0))
+                            .right(px(0.0))
+                            .bottom(px(54.0))
+                            .flex()
+                            .justify_center()
+                            .child(render_review_graph_overview_caption("SAME DIFF")),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(26.0))
+                            .right(px(26.0))
+                            .bottom(px(10.0))
+                            .flex()
+                            .justify_center()
+                            .gap(px(8.0))
+                            .children(overview.nearby.entries.iter().cloned().map(|entry| {
+                                render_review_graph_overview_chip(state, entry, px(86.0))
+                            })),
+                    )
+                    .when(overview.nearby.hidden_count > 0, |el| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .bottom(px(12.0))
+                                .right(px(8.0))
+                                .child(render_review_graph_overview_overflow_badge(
+                                    overview.nearby.hidden_count,
+                                )),
+                        )
+                    })
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(150.0))
+                            .left(px(0.0))
+                            .right(px(0.0))
+                            .flex()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .w(px(1.0))
+                                    .h(px(20.0))
+                                    .bg(success())
+                                    .opacity(0.75),
+                            ),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .mt(px(10.0))
+                .text_size(px(11.0))
+                .text_color(fg_muted())
+                .child(
+                    "Overview-first mini-map inspired by the paper: structural context above, direct incoming and outgoing neighbors to the sides, and same-diff entities grouped below.",
+                ),
+        )
+}
+
+fn compare_review_graph_nodes(
+    left: &crate::review_graph::ReviewSymbolGraphNode,
+    right: &crate::review_graph::ReviewSymbolGraphNode,
+) -> std::cmp::Ordering {
+    review_graph_entity_status(left)
+        .cmp(&review_graph_entity_status(right))
+        .then_with(|| left.in_diff.cmp(&right.in_diff).reverse())
+        .then_with(|| left.label.cmp(&right.label))
+        .then_with(|| left.location.label.cmp(&right.location.label))
+}
+
+fn render_review_graph_overview_caption(label: &str) -> impl IntoElement {
+    div()
+        .text_size(px(9.0))
+        .font_family("Fira Code")
+        .text_color(fg_subtle())
+        .child(label.to_string())
+}
+
+fn render_review_graph_overview_overflow_badge(hidden_count: usize) -> impl IntoElement {
+    metric_pill(format!("+{hidden_count}"), fg_default(), bg_overlay())
+}
+
+fn render_review_graph_overview_focus_chip(
+    state: &Entity<AppState>,
+    node: crate::review_graph::ReviewSymbolGraphNode,
+) -> impl IntoElement {
+    let location = node.location.clone();
+    let state = state.clone();
+
+    div()
+        .px(px(10.0))
+        .py(px(9.0))
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(accent())
+        .bg(bg_selected())
         .cursor_pointer()
         .hover(|style| style.bg(hover_bg()))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            open_review_location_card(&state_for_open, &location, window, cx);
+            open_review_location_card(&state, &location, window, cx);
         })
+        .child(
+            div()
+                .text_size(px(9.0))
+                .font_family("Fira Code")
+                .text_color(fg_subtle())
+                .child("FOCUS"),
+        )
+        .child(
+            div()
+                .mt(px(4.0))
+                .text_size(px(11.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_emphasis())
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .overflow_x_hidden()
+                .child(node.label),
+        )
+}
+
+fn render_review_graph_overview_chip(
+    state: &Entity<AppState>,
+    entry: ReviewGraphLaneEntry,
+    width: Pixels,
+) -> impl IntoElement {
+    let node = entry.node;
+    let location = node.location.clone();
+    let state = state.clone();
+    let marker_color = review_graph_status_color(&node);
+    let border = review_graph_border_color(&node);
+
+    div()
+        .w(width)
+        .px(px(7.0))
+        .py(px(6.0))
+        .rounded(px(999.0))
+        .border_1()
+        .border_color(border)
+        .bg(if node.in_diff { bg_surface() } else { bg_overlay() })
+        .cursor_pointer()
+        .hover(|style| style.bg(hover_bg()))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            open_review_location_card(&state, &location, window, cx);
+        })
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .w(px(6.0))
+                        .h(px(6.0))
+                        .rounded(px(999.0))
+                        .bg(marker_color),
+                )
+                .child(
+                    div()
+                        .text_size(px(8.0))
+                        .font_family("Fira Code")
+                        .text_color(fg_subtle())
+                        .child(review_graph_kind_marker(node.kind)),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_size(px(10.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(fg_emphasis())
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .overflow_x_hidden()
+                        .child(node.label),
+                ),
+        )
+}
+
+fn review_graph_kind_marker(kind: crate::review_graph::ReviewGraphNodeKind) -> &'static str {
+    match kind {
+        crate::review_graph::ReviewGraphNodeKind::File => "F",
+        crate::review_graph::ReviewGraphNodeKind::Function => "FN",
+        crate::review_graph::ReviewGraphNodeKind::Method => "M",
+        crate::review_graph::ReviewGraphNodeKind::Type => "T",
+        crate::review_graph::ReviewGraphNodeKind::Module => "MO",
+        crate::review_graph::ReviewGraphNodeKind::Data => "D",
+        crate::review_graph::ReviewGraphNodeKind::Branch => "B",
+        crate::review_graph::ReviewGraphNodeKind::Unknown => "?",
+    }
+}
+
+fn render_review_graph_lane(
+    state: &Entity<AppState>,
+    title: &str,
+    summary: &str,
+    entries: Vec<ReviewGraphLaneEntry>,
+) -> impl IntoElement {
+    let entry_count = entries.len();
+
+    div()
+        .mt(px(12.0))
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
         .child(
             div()
                 .flex()
@@ -3790,38 +4341,455 @@ fn render_review_graph_node_card(
                         .text_size(px(12.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(fg_emphasis())
-                        .child(node.label.clone()),
+                        .child(title.to_string()),
                 )
-                .child(render_graph_state_badge(node.state)),
+                .child(badge(&entry_count.to_string())),
         )
         .child(
             div()
-                .mt(px(6.0))
+                .text_size(px(11.0))
+                .text_color(fg_muted())
+                .child(summary.to_string()),
+        )
+        .children(entries.into_iter().enumerate().map(|(index, entry)| {
+            render_review_graph_lane_entry(state, entry, index + 1 < entry_count)
+        }))
+}
+
+fn render_review_graph_nearby_lane(
+    state: &Entity<AppState>,
+    title: &str,
+    summary: &str,
+    nodes: Vec<crate::review_graph::ReviewSymbolGraphNode>,
+) -> impl IntoElement {
+    let node_count = nodes.len();
+
+    div()
+        .mt(px(12.0))
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .child(
+            div()
                 .flex()
-                .gap(px(6.0))
-                .flex_wrap()
-                .child(metric_pill(relation, accent(), accent_muted()))
-                .child(metric_pill(
-                    node.kind.label().to_string(),
-                    fg_muted(),
-                    bg_emphasis(),
-                )),
+                .items_center()
+                .justify_between()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg_emphasis())
+                        .child(title.to_string()),
+                )
+                .child(badge(&node_count.to_string())),
+        )
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(fg_muted())
+                .child(summary.to_string()),
+        )
+        .children(nodes.into_iter().enumerate().map(|(index, node)| {
+            render_review_graph_lane_entry(
+                state,
+                ReviewGraphLaneEntry {
+                    node,
+                    kinds: vec![ReviewGraphEdgeKind::Touches],
+                },
+                index + 1 < node_count,
+            )
+        }))
+}
+
+fn render_review_graph_lane_entry(
+    state: &Entity<AppState>,
+    entry: ReviewGraphLaneEntry,
+    show_connector: bool,
+) -> impl IntoElement {
+    let node = entry.node;
+    let relation_kinds = entry.kinds;
+    let marker_color = review_graph_status_color(&node);
+    let location = node.location.clone();
+    let state_for_open = state.clone();
+    let border = review_graph_border_color(&node);
+
+    div()
+        .flex()
+        .items_start()
+        .gap(px(10.0))
+        .child(
+            div()
+                .pt(px(6.0))
+                .flex()
+                .flex_col()
+                .items_center()
+                .child(
+                    div()
+                        .w(px(8.0))
+                        .h(px(8.0))
+                        .rounded(px(999.0))
+                        .bg(marker_color),
+                )
+                .when(show_connector, |el| {
+                    el.child(
+                        div()
+                            .mt(px(4.0))
+                            .w(px(1.0))
+                            .h(px(34.0))
+                            .bg(border_default()),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .flex_grow()
+                .min_w_0()
+                .px(px(12.0))
+                .py(px(10.0))
+                .rounded(radius_sm())
+                .border_1()
+                .border_color(border)
+                .bg(if node.state == ReviewGraphNodeState::Focus {
+                    bg_selected()
+                } else {
+                    bg_overlay()
+                })
+                .cursor_pointer()
+                .hover(|style| style.bg(hover_bg()))
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    open_review_location_card(&state_for_open, &location, window, cx);
+                })
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(fg_emphasis())
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .overflow_x_hidden()
+                                .child(node.label.clone()),
+                        )
+                        .child(render_review_graph_node_badges(&node)),
+                )
+                .child(div().mt(px(6.0)).flex().gap(px(6.0)).flex_wrap().children(
+                    relation_kinds.iter().map(|kind| {
+                        metric_pill(kind.label().to_string(), accent(), accent_muted())
+                    }),
+                ))
+                .child(
+                    div()
+                        .mt(px(6.0))
+                        .text_size(px(11.0))
+                        .text_color(fg_muted())
+                        .line_clamp(2)
+                        .child(review_graph_location_summary(&node)),
+                ),
+        )
+}
+
+fn render_review_graph_edges_panel(
+    state: &Entity<AppState>,
+    graph: &crate::review_graph::ReviewSymbolGraph,
+) -> impl IntoElement {
+    let node_index = graph
+        .nodes
+        .iter()
+        .map(|node| (node.id.clone(), node.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let edge_rows = graph
+        .edges
+        .iter()
+        .filter_map(|edge| {
+            node_index
+                .get(&edge.from)
+                .cloned()
+                .zip(node_index.get(&edge.to).cloned())
+                .map(|(from, to)| (from, edge.kind, to))
+        })
+        .collect::<Vec<_>>();
+
+    nested_panel()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .font_family("Fira Code")
+                        .text_color(fg_subtle())
+                        .child("RELATIONSHIPS"),
+                )
+                .child(badge(&graph.edges.len().to_string())),
+        )
+        .child(
+            div()
+                .mt(px(8.0))
+                .text_size(px(11.0))
+                .text_color(fg_muted())
+                .child("Each row is one recovered logical relationship in the local review graph."),
+        )
+        .when(edge_rows.is_empty(), |el| {
+            el.child(
+                div()
+                    .mt(px(10.0))
+                    .child(panel_state_text(
+                        "No explicit relationships were recovered yet. Trace neighbors to pull in calls, definitions, inheritance, composition, or data-flow links.",
+                    )),
+            )
+        })
+        .when(!edge_rows.is_empty(), |el| {
+            el.child(
+                div()
+                    .mt(px(10.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .children(
+                        edge_rows
+                            .into_iter()
+                            .map(|(from, kind, to)| render_review_graph_edge_row(state, from, kind, to)),
+                    ),
+            )
+        })
+}
+
+fn render_review_graph_focus_card(
+    state: &Entity<AppState>,
+    node: &crate::review_graph::ReviewSymbolGraphNode,
+    incoming_count: usize,
+    outgoing_count: usize,
+) -> impl IntoElement {
+    let location = node.location.clone();
+    let state = state.clone();
+
+    div()
+        .mt(px(12.0))
+        .px(px(12.0))
+        .py(px(10.0))
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(accent())
+        .bg(bg_selected())
+        .cursor_pointer()
+        .hover(|style| style.bg(hover_bg()))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            open_review_location_card(&state, &location, window, cx);
+        })
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.0))
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .font_family("Fira Code")
+                                .text_color(fg_subtle())
+                                .child("FOCUS"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(fg_emphasis())
+                                .child(node.label.clone()),
+                        ),
+                )
+                .child(render_review_graph_node_badges(node)),
         )
         .child(
             div()
                 .mt(px(6.0))
                 .text_size(px(11.0))
                 .text_color(fg_muted())
-                .child(node.subtitle),
+                .line_clamp(2)
+                .child(review_graph_location_summary(node)),
+        )
+        .child(
+            div()
+                .mt(px(8.0))
+                .flex()
+                .gap(px(6.0))
+                .flex_wrap()
+                .child(metric_pill(
+                    format!("{incoming_count} incoming"),
+                    accent(),
+                    accent_muted(),
+                ))
+                .child(metric_pill(
+                    format!("{outgoing_count} outgoing"),
+                    fg_default(),
+                    bg_emphasis(),
+                )),
         )
 }
 
-fn render_graph_state_badge(state: ReviewGraphNodeState) -> impl IntoElement {
-    match state {
-        ReviewGraphNodeState::Focus => metric_pill("focus", accent(), accent_muted()),
-        ReviewGraphNodeState::Modified => metric_pill("modified", success(), success_muted()),
-        ReviewGraphNodeState::Impacted => metric_pill("impacted", fg_default(), bg_emphasis()),
+fn render_review_graph_edge_row(
+    state: &Entity<AppState>,
+    from: crate::review_graph::ReviewSymbolGraphNode,
+    edge_kind: ReviewGraphEdgeKind,
+    to: crate::review_graph::ReviewSymbolGraphNode,
+) -> impl IntoElement {
+    div()
+        .px(px(12.0))
+        .py(px(10.0))
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(border_default())
+        .bg(bg_overlay())
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(render_review_graph_inline_node(state, from))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .font_family("Fira Code")
+                        .text_color(fg_subtle())
+                        .child("->"),
+                )
+                .child(metric_pill(
+                    edge_kind.label().to_string(),
+                    accent(),
+                    accent_muted(),
+                ))
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .font_family("Fira Code")
+                        .text_color(fg_subtle())
+                        .child("->"),
+                ),
+        )
+        .child(render_review_graph_inline_node(state, to))
+}
+
+fn render_review_graph_inline_node(
+    state: &Entity<AppState>,
+    node: crate::review_graph::ReviewSymbolGraphNode,
+) -> impl IntoElement {
+    let location = node.location.clone();
+    let state_for_open = state.clone();
+    let border = review_graph_border_color(&node);
+
+    div()
+        .flex_grow()
+        .min_w_0()
+        .px(px(10.0))
+        .py(px(8.0))
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(border)
+        .bg(if node.state == ReviewGraphNodeState::Focus {
+            bg_selected()
+        } else {
+            bg_surface()
+        })
+        .cursor_pointer()
+        .hover(|style| style.bg(hover_bg()))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            open_review_location_card(&state_for_open, &location, window, cx);
+        })
+        .child(
+            div()
+                .text_size(px(11.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_emphasis())
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .overflow_x_hidden()
+                .child(node.label.clone()),
+        )
+        .child(
+            div()
+                .mt(px(4.0))
+                .text_size(px(10.0))
+                .text_color(fg_muted())
+                .line_clamp(2)
+                .child(review_graph_location_summary(&node)),
+        )
+}
+
+fn review_graph_entity_status(
+    node: &crate::review_graph::ReviewSymbolGraphNode,
+) -> ReviewGraphEntityStatus {
+    if node.in_diff {
+        ReviewGraphEntityStatus::Modified
+    } else {
+        ReviewGraphEntityStatus::Impacted
     }
+}
+
+fn review_graph_status_color(node: &crate::review_graph::ReviewSymbolGraphNode) -> gpui::Rgba {
+    match review_graph_entity_status(node) {
+        ReviewGraphEntityStatus::Modified => success(),
+        ReviewGraphEntityStatus::Impacted => accent(),
+    }
+}
+
+fn review_graph_border_color(node: &crate::review_graph::ReviewSymbolGraphNode) -> gpui::Rgba {
+    if node.state == ReviewGraphNodeState::Focus {
+        accent()
+    } else {
+        match review_graph_entity_status(node) {
+            ReviewGraphEntityStatus::Modified => success(),
+            ReviewGraphEntityStatus::Impacted => border_default(),
+        }
+    }
+}
+
+fn review_graph_location_summary(node: &crate::review_graph::ReviewSymbolGraphNode) -> String {
+    format!(
+        "{} • {} • {}",
+        node.kind.label(),
+        if node.in_diff {
+            "changed diff"
+        } else {
+            "impacted source"
+        },
+        node.location.label.as_str()
+    )
+}
+
+fn render_review_graph_node_badges(
+    node: &crate::review_graph::ReviewSymbolGraphNode,
+) -> impl IntoElement {
+    let mut badges = div().flex().items_center().gap(px(6.0));
+    if node.state == ReviewGraphNodeState::Focus {
+        badges = badges.child(metric_pill("focus", accent(), bg_selected()));
+    }
+
+    badges.child(match review_graph_entity_status(node) {
+        ReviewGraphEntityStatus::Modified => {
+            metric_pill("modified", success(), success_muted()).into_any_element()
+        }
+        ReviewGraphEntityStatus::Impacted => {
+            metric_pill("impacted", accent(), accent_muted()).into_any_element()
+        }
+    })
 }
 
 fn render_review_evolution_content(
@@ -7502,10 +8470,7 @@ where
     let mut ops = Vec::new();
 
     while left_ix > 0 || right_ix > 0 {
-        if left_ix > 0
-            && right_ix > 0
-            && eq(&left[left_ix - 1], &right[right_ix - 1])
-        {
+        if left_ix > 0 && right_ix > 0 && eq(&left[left_ix - 1], &right[right_ix - 1]) {
             ops.push(InlineDiffOp::Equal(left_ix - 1, right_ix - 1));
             left_ix -= 1;
             right_ix -= 1;
@@ -7777,9 +8742,7 @@ fn decorated_diff_text_runs(
     let mut current_emphasis = emphasized[0];
 
     for (index, ch) in chars.into_iter().enumerate() {
-        if index > 0
-            && (colors[index] != current_color || emphasized[index] != current_emphasis)
-        {
+        if index > 0 && (colors[index] != current_color || emphasized[index] != current_emphasis) {
             runs.push(TextRun {
                 len: segment.len(),
                 font: font("Fira Code"),
