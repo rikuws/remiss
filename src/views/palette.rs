@@ -369,7 +369,7 @@ fn apply_command_action(
                 prepare_settings_view(state, window, cx);
             }
             state.update(cx, |s, cx| {
-                s.active_section = section;
+                s.set_active_section(section);
                 s.active_pr_key = None;
                 s.palette_open = false;
                 s.palette_query.clear();

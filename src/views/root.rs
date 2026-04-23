@@ -202,7 +202,7 @@ async fn maybe_bootstrap_debug_pull_request(
                 state.open_tabs.insert(0, summary);
             }
 
-            state.active_section = SectionId::Pulls;
+            state.set_active_section(SectionId::Pulls);
             state.active_surface = PullRequestSurface::Files;
             state.active_pr_key = Some(detail_key.clone());
             state.pr_header_compact = false;
@@ -242,7 +242,7 @@ impl Render for RootView {
             .bg(bg_canvas())
             .text_color(fg_default())
             .text_size(px(14.0))
-            .font_family(".AppleSystemUIFont")
+            .font_family(ui_font_family())
             .child(render_app_sidebar(&self.state, cx))
             .child(render_main_column(&self.state, cx))
             .when(palette_open, |el| el.child(render_palette(&self.state, cx)))
@@ -403,7 +403,7 @@ fn render_app_sidebar(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                                 prepare_settings_view(&state, window, cx);
                                             }
                                             state.update(cx, |s, cx| {
-                                                s.active_section = section;
+                                                s.set_active_section(section);
                                                 s.active_pr_key = None;
                                                 s.palette_open = false;
                                                 s.palette_selected_index = 0;
@@ -538,7 +538,7 @@ fn render_workspace_tabs_strip(state: &Entity<AppState>, cx: &App) -> impl IntoE
                         move |_, _, cx| {
                             state.update(cx, |s, cx| {
                                 s.active_pr_key = Some(key.clone());
-                                s.active_section = SectionId::Pulls;
+                                s.set_active_section(SectionId::Pulls);
                                 s.palette_open = false;
                                 s.palette_selected_index = 0;
                                 cx.notify();

@@ -30,7 +30,7 @@ mod views;
 
 use gpui::*;
 
-use app_assets::AppAssets;
+use app_assets::{load_bundled_fonts, AppAssets};
 use app_storage::cache_path;
 use cache::CacheStore;
 use platform_macos::apply_app_icon;
@@ -47,6 +47,10 @@ fn main() {
         .with_assets(AppAssets::new())
         .run(|cx: &mut App| {
             apply_app_icon();
+            let bundled_fonts = load_bundled_fonts().expect("Failed to load bundled fonts");
+            cx.text_system()
+                .add_fonts(bundled_fonts)
+                .expect("Failed to register bundled fonts");
 
             let cache = CacheStore::new(cache_path()).expect("Failed to initialize cache");
             let app_state = cx.new(|_| AppState::new(cache));
