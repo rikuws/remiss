@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cache::CacheStore;
 use crate::code_tour::{
@@ -55,6 +56,16 @@ impl SectionId {
             SectionId::Settings,
         ]
     }
+}
+
+fn random_overview_greeting_index() -> usize {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0);
+    let mixed = nanos ^ nanos.rotate_left(13) ^ nanos.rotate_right(7);
+
+    mixed as usize
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -390,6 +401,7 @@ pub struct AppState {
     pub active_pr_key: Option<String>,
     pub open_tabs: Vec<PullRequestSummary>,
     pub muted_repos: std::collections::HashSet<String>,
+    pub overview_greeting_index: usize,
 
     // Workspace data
     pub workspace: Option<WorkspaceSnapshot>,
@@ -476,6 +488,7 @@ impl AppState {
             active_pr_key: None,
             open_tabs: Vec::new(),
             muted_repos: std::collections::HashSet::new(),
+            overview_greeting_index: random_overview_greeting_index(),
             workspace: None,
             workspace_loading: true,
             workspace_syncing: false,
@@ -536,6 +549,13 @@ impl AppState {
 
     pub fn resolved_theme(&self) -> theme::ActiveTheme {
         theme::resolve_theme(self.theme_preference, self.window_appearance)
+    }
+
+    pub fn set_active_section(&mut self, section: SectionId) {
+        if section == SectionId::Overview {
+            self.overview_greeting_index = random_overview_greeting_index();
+        }
+        self.active_section = section;
     }
 
     pub fn set_theme_preference(&mut self, preference: ThemePreference) {
@@ -991,7 +1011,7 @@ impl AppState {
         let detail_key = pr_key(&repository, number);
 
         self.open_tabs.insert(0, summary);
-        self.active_section = SectionId::Pulls;
+        self.set_active_section(SectionId::Pulls);
         self.active_surface = PullRequestSurface::Files;
         self.active_pr_key = Some(detail_key.clone());
         self.detail_states

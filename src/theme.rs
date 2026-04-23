@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use crate::cache::CacheStore;
 
 const THEME_SETTINGS_CACHE_KEY: &str = "theme-settings-v1";
+const UI_FONT_FAMILY: &str = ".AppleSystemUIFont";
+const DISPLAY_SERIF_FONT_FAMILY: &str = "Instrument Serif";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -159,6 +161,14 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+pub fn ui_font_family() -> &'static str {
+    UI_FONT_FAMILY
+}
+
+pub fn display_serif_font_family() -> &'static str {
+    DISPLAY_SERIF_FONT_FAMILY
 }
 
 pub fn bg_canvas() -> Rgba {

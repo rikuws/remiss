@@ -4265,7 +4265,11 @@ fn render_review_graph_overview_chip(
         .rounded(px(999.0))
         .border_1()
         .border_color(border)
-        .bg(if node.in_diff { bg_surface() } else { bg_overlay() })
+        .bg(if node.in_diff {
+            bg_surface()
+        } else {
+            bg_overlay()
+        })
         .cursor_pointer()
         .hover(|style| style.bg(hover_bg()))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
