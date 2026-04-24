@@ -1263,6 +1263,8 @@ pub fn user_avatar(
 
     match avatar_url {
         Some(url) => {
+            let url = avatar_image_url(&url, size);
+            let inner_size = avatar_inner_size(size);
             let loading_login = login.clone();
             let fallback_login = login.clone();
             div()
@@ -1277,22 +1279,65 @@ pub fn user_avatar(
                 } else {
                     bg_emphasis()
                 })
+                .flex()
+                .items_center()
+                .justify_center()
                 .flex_shrink_0()
                 .child(
                     img(url)
-                        .size(px(size))
+                        .size(px(inner_size))
+                        .rounded(px(inner_size / 2.0))
+                        .overflow_hidden()
                         .object_fit(ObjectFit::Cover)
                         .with_loading(move || {
-                            avatar_placeholder(&loading_login, size, emphasized).into_any_element()
+                            avatar_placeholder(&loading_login, inner_size, emphasized)
+                                .into_any_element()
                         })
                         .with_fallback(move || {
-                            avatar_placeholder(&fallback_login, size, emphasized).into_any_element()
+                            avatar_placeholder(&fallback_login, inner_size, emphasized)
+                                .into_any_element()
                         }),
                 )
                 .into_any_element()
         }
         None => avatar_placeholder(&login, size, emphasized).into_any_element(),
     }
+}
+
+fn avatar_inner_size(size: f32) -> f32 {
+    (size - 2.0).max(1.0)
+}
+
+fn avatar_image_url(url: &str, display_size: f32) -> String {
+    if !url.contains("avatars.githubusercontent.com") {
+        return url.to_string();
+    }
+
+    let image_size = ((display_size * 3.0).ceil() as usize).clamp(96, 256);
+    let (url_without_fragment, fragment) = url
+        .split_once('#')
+        .map(|(url, fragment)| (url, Some(fragment)))
+        .unwrap_or((url, None));
+    let (base, query) = url_without_fragment
+        .split_once('?')
+        .unwrap_or((url_without_fragment, ""));
+    let mut params = query
+        .split('&')
+        .filter(|param| !param.is_empty() && !param.starts_with("s="))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    params.push(format!("s={image_size}"));
+
+    let mut output = if params.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}?{}", params.join("&"))
+    };
+    if let Some(fragment) = fragment {
+        output.push('#');
+        output.push_str(fragment);
+    }
+    output
 }
 
 fn avatar_placeholder(login: &str, size: f32, emphasized: bool) -> Div {
