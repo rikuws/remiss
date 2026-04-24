@@ -631,11 +631,8 @@ mod tests {
             let root = workspace.join("repo");
             fs::create_dir_all(&root).expect("failed to create repo directory");
             run_git(&root, ["init"]);
-            run_git(&root, ["config", "user.name", "ReviewBuddy Tests"]);
-            run_git(
-                &root,
-                ["config", "user.email", "reviewbuddy-tests@example.com"],
-            );
+            run_git(&root, ["config", "user.name", "Remiss Tests"]);
+            run_git(&root, ["config", "user.email", "remiss-tests@example.com"]);
             run_git(
                 &root,
                 [
@@ -677,7 +674,7 @@ mod tests {
             .as_nanos();
         let test_id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "gh-ui-{prefix}-{nanos}-{test_id}-{}",
+            "remiss-{prefix}-{nanos}-{test_id}-{}",
             std::process::id()
         ));
         fs::create_dir_all(&path).expect("failed to create temp directory");

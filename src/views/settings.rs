@@ -4,6 +4,7 @@ use gpui::prelude::*;
 use gpui::*;
 
 use crate::app_storage;
+use crate::branding::APP_NAME;
 use crate::code_tour::{self, CodeTourProvider, CodeTourProviderStatus};
 use crate::managed_lsp::{
     self, ManagedServerInstallState, ManagedServerInstallStatus, ManagedServerKind,
@@ -393,7 +394,7 @@ pub fn render_settings_view(state: &Entity<AppState>, cx: &App) -> impl IntoElem
                                         .text_color(fg_muted())
                                         .max_w(px(760.0))
                                         .child(
-                                            "Download or repair the LSPs ReviewBuddy can manage itself. This screen also surfaces install failures and broken local metadata.",
+                                            "Download or repair the LSPs Remiss can manage itself. This screen also surfaces install failures and broken local metadata.",
                                         ),
                                 )
                                 .child(
@@ -483,7 +484,7 @@ fn render_theme_settings_panel(state: &Entity<AppState>, s: &AppState) -> impl I
     let system_appearance = appearance_label(s.window_appearance);
     let summary_copy = match theme_preference {
         ThemePreference::System => format!(
-            "ReviewBuddy follows the operating system by default. The current system appearance is {system_appearance}."
+            "{APP_NAME} follows the operating system by default. The current system appearance is {system_appearance}."
         ),
         ThemePreference::Light => {
             "Manual override is active. Switch back to System to follow the operating system again."
@@ -578,7 +579,7 @@ fn render_code_tour_settings_panel(state: &Entity<AppState>, s: &AppState) -> im
                     .text_color(fg_muted())
                     .max_w(px(760.0))
                     .child(
-                        "Pick the guide provider here, then enable automatic background generation per repository. ReviewBuddy only regenerates a guide when the pull request code version changes; otherwise it keeps using the cached guide.",
+                        "Pick the guide provider here, then enable automatic background generation per repository. Remiss only regenerates a guide when the pull request code version changes; otherwise it keeps using the cached guide.",
                     ),
             )
             .child(
@@ -701,7 +702,7 @@ fn render_code_tour_settings_panel(state: &Entity<AppState>, s: &AppState) -> im
                             .text_color(fg_muted())
                             .max_w(px(760.0))
                             .child(
-                                "Repositories stay disabled by default. When you enable one, ReviewBuddy refreshes the managed checkout for matching pull requests and caches the configured guide in the background.",
+                                "Repositories stay disabled by default. When you enable one, Remiss refreshes the managed checkout for matching pull requests and caches the configured guide in the background.",
                             ),
                     )
                     .when(repository_names.is_empty(), |el| {

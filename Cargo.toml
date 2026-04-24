@@ -1,7 +1,7 @@
 [package]
-name = "gh-ui"
+name = "remiss"
 version = "0.1.0"
-description = "Fast native desktop review tooling for GitHub built around gh"
+description = "Human-centered desktop code review where computers and humans review together"
 authors = ["Riku Wikman"]
 edition = "2021"
 

@@ -2,6 +2,7 @@ mod agents;
 mod app_assets;
 mod app_http;
 mod app_storage;
+mod branding;
 mod cache;
 mod code_display;
 mod code_tour;
@@ -36,6 +37,7 @@ use gpui::*;
 use app_assets::{load_bundled_fonts, AppAssets};
 use app_http::UreqHttpClient;
 use app_storage::cache_path;
+use branding::APP_NAME;
 use cache::CacheStore;
 use platform_macos::apply_app_icon;
 use state::AppState;
@@ -70,7 +72,7 @@ fn main() {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     titlebar: Some(TitlebarOptions {
-                        title: Some("ReviewBuddy".into()),
+                        title: Some(APP_NAME.into()),
                         ..Default::default()
                     }),
                     ..Default::default()

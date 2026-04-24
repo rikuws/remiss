@@ -1,12 +1,28 @@
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
-const APP_DATA_DIR: &str = "gh-ui-tool";
+const APP_DATA_DIR: &str = "remiss";
+const LEGACY_APP_DATA_DIR: &str = "gh-ui-tool";
 const MANAGED_LSP_DIR: &str = "lsp-servers";
 const MANAGED_REPOSITORIES_DIR: &str = "managed-repositories";
 
 pub fn data_dir_root() -> PathBuf {
     if let Some(data_dir) = dirs::data_local_dir() {
-        return data_dir.join(APP_DATA_DIR);
+        let root = data_dir.join(APP_DATA_DIR);
+        if root.exists() {
+            return root;
+        }
+
+        let legacy_root = data_dir.join(LEGACY_APP_DATA_DIR);
+        if legacy_root.exists() {
+            let _ = fs::rename(&legacy_root, &root);
+            if root.exists() {
+                return root;
+            }
+
+            return legacy_root;
+        }
+
+        return root;
     }
 
     std::env::current_dir()

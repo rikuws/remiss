@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This document defines the visual rules for the next phase of `gh-ui` / `ReviewBuddy`.
+This document defines the visual rules for the next phase of Remiss.
 It is intended to stop the product from drifting back into generic "developer tool dark mode"
 while still protecting the clarity and speed required for serious code review work.
 

@@ -411,7 +411,7 @@ mod tests {
 
     fn temp_cache() -> CacheStore {
         let path = std::env::temp_dir().join(format!(
-            "gh-ui-notification-test-{}-{}.sqlite3",
+            "remiss-notification-test-{}-{}.sqlite3",
             std::process::id(),
             notification_timestamp_ms()
         ));

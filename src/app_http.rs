@@ -11,7 +11,10 @@ impl UreqHttpClient {
     pub fn new() -> Self {
         Self {
             agent: ureq::Agent::new(),
-            user_agent: http_client::http::HeaderValue::from_static("gh-ui/0.1"),
+            user_agent: http_client::http::HeaderValue::from_static(concat!(
+                "remiss/",
+                env!("CARGO_PKG_VERSION")
+            )),
         }
     }
 }

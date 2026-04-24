@@ -10,7 +10,7 @@ pub fn shared() -> &'static Runtime {
             .worker_threads(2)
             .enable_io()
             .enable_time()
-            .thread_name("gh-ui-agents")
+            .thread_name("remiss-agents")
             .build()
             .expect("failed to build shared tokio runtime for agents")
     })

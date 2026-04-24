@@ -409,7 +409,7 @@ impl LspSession {
             json!({
                 "processId": std::process::id(),
                 "clientInfo": {
-                    "name": "ReviewBuddy",
+                    "name": crate::branding::APP_NAME,
                     "version": env!("CARGO_PKG_VERSION"),
                 },
                 "rootUri": root_uri,
@@ -1322,8 +1322,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("time went backwards")
             .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("gh-ui-lsp-{prefix}-{nanos}-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "remiss-lsp-{prefix}-{nanos}-{}",
+            std::process::id()
+        ));
         fs::create_dir_all(&path).expect("failed to create temp directory");
         path
     }
@@ -1473,12 +1475,12 @@ mod tests {
 
     #[test]
     fn parses_definition_targets_from_location_links() {
-        let repo_root = PathBuf::from("/tmp/reviewbuddy");
+        let repo_root = PathBuf::from("/tmp/remiss");
         let targets = parse_definition_targets(
             &repo_root,
             &json!([
                 {
-                    "targetUri": "file:///tmp/reviewbuddy/src/lsp.rs",
+                    "targetUri": "file:///tmp/remiss/src/lsp.rs",
                     "targetSelectionRange": {
                         "start": {
                             "line": 9,
@@ -1492,7 +1494,7 @@ mod tests {
         assert_eq!(
             targets,
             vec![LspDefinitionTarget {
-                uri: "file:///tmp/reviewbuddy/src/lsp.rs".to_string(),
+                uri: "file:///tmp/remiss/src/lsp.rs".to_string(),
                 path: "src/lsp.rs".to_string(),
                 line: 10,
                 column: 5,

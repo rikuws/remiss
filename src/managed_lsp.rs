@@ -16,7 +16,7 @@ use zip::ZipArchive;
 
 use crate::app_storage;
 
-const USER_AGENT: &str = concat!("gh-ui/", env!("CARGO_PKG_VERSION"));
+const USER_AGENT: &str = concat!("remiss/", env!("CARGO_PKG_VERSION"));
 const MINIMUM_JDTLS_JAVA_MAJOR_VERSION: u32 = 21;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -61,7 +61,7 @@ impl ManagedServerKind {
                 Some("Uses an app-managed Node.js runtime.")
             }
             ManagedServerKind::Gopls => {
-                Some("Install still needs the Go toolchain on PATH so ReviewBuddy can build gopls.")
+                Some("Install still needs the Go toolchain on PATH so Remiss can build gopls.")
             }
             ManagedServerKind::Jdtls => {
                 Some("Download is app-managed, but running JDTLS still needs Java 21+.")
@@ -300,7 +300,7 @@ fn install_jdtls(repo_root: &Path) -> Result<ManagedServerConfiguration, String>
     let java_major_version = java_major_version(&java)?;
     if java_major_version < MINIMUM_JDTLS_JAVA_MAJOR_VERSION {
         return Err(format!(
-            "ReviewBuddy downloaded JDTLS, but it still needs Java {MINIMUM_JDTLS_JAVA_MAJOR_VERSION}+ on PATH or JAVA_HOME. Found Java {java_major_version}."
+            "Remiss downloaded JDTLS, but it still needs Java {MINIMUM_JDTLS_JAVA_MAJOR_VERSION}+ on PATH or JAVA_HOME. Found Java {java_major_version}."
         ));
     }
 
@@ -655,7 +655,7 @@ fn install_gopls() -> Result<ManagedServerConfiguration, String> {
     }
 
     let go = resolve_binary_from_path("go").ok_or_else(|| {
-        "ReviewBuddy can manage gopls installation automatically, but it still needs the Go toolchain on PATH."
+        "Remiss can manage gopls installation automatically, but it still needs the Go toolchain on PATH."
             .to_string()
     })?;
     let module: GoModuleVersion =
@@ -1332,7 +1332,7 @@ fn resolve_java_binary() -> Result<PathBuf, String> {
 
     resolve_binary_from_path("java").ok_or_else(|| {
         format!(
-            "ReviewBuddy can download JDTLS automatically, but it still needs Java {MINIMUM_JDTLS_JAVA_MAJOR_VERSION}+ on PATH or JAVA_HOME."
+            "Remiss can download JDTLS automatically, but it still needs Java {MINIMUM_JDTLS_JAVA_MAJOR_VERSION}+ on PATH or JAVA_HOME."
         )
     })
 }

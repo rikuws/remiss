@@ -2,9 +2,10 @@ use gpui::prelude::*;
 use gpui::*;
 
 use crate::app_assets::{
-    OVERVIEW_MY_PULL_REQUESTS_ASSET, OVERVIEW_OPEN_PULL_REQUESTS_ASSET,
+    BRAND_HERO_LANDSCAPE_ASSET, OVERVIEW_MY_PULL_REQUESTS_ASSET, OVERVIEW_OPEN_PULL_REQUESTS_ASSET,
     OVERVIEW_REVIEW_REQUESTS_ASSET,
 };
+use crate::branding::APP_TAGLINE_LABEL;
 use crate::review_queue::default_review_file;
 use crate::review_session::{load_review_session, location_label};
 use crate::state::*;
@@ -12,11 +13,11 @@ use crate::theme::*;
 use crate::{github, notifications};
 
 use super::settings::render_settings_view;
-use super::welcome_shader::{render_welcome_shader, WELCOME_SHADER_RADIUS};
 use super::workspace_sync::trigger_sync_workspace;
 use std::collections::BTreeMap;
 
 const DETAIL_AUTO_REFRESH_TTL_MS: i64 = 5 * 60 * 1000;
+const OVERVIEW_HERO_RADIUS: f32 = 8.0;
 
 pub fn render_section_workspace(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let s = state.read(cx);
@@ -218,9 +219,20 @@ fn overview_ambient_strip(
         .w_full()
         .h(px(112.0))
         .flex_shrink_0()
-        .rounded(px(WELCOME_SHADER_RADIUS))
+        .rounded(px(OVERVIEW_HERO_RADIUS))
         .overflow_hidden()
-        .child(render_welcome_shader())
+        .child(
+            img(BRAND_HERO_LANDSCAPE_ASSET)
+                .w_full()
+                .h_full()
+                .object_fit(ObjectFit::Cover),
+        )
+        .child(div().absolute().inset_0().bg(Rgba {
+            r: 0.02,
+            g: 0.03,
+            b: 0.04,
+            a: 0.34,
+        }))
         .child(
             div()
                 .absolute()
@@ -246,7 +258,7 @@ fn overview_ambient_strip(
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .font_family("Fira Code")
                                 .text_color(hero_text_primary())
-                                .child("REVIEW BRIEFING"),
+                                .child(APP_TAGLINE_LABEL),
                         )
                         .child(
                             div()

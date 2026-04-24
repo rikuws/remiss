@@ -5,7 +5,6 @@ mod root;
 mod sections;
 mod settings;
 mod tour_view;
-mod welcome_shader;
 mod workspace_sync;
 
 pub use diff_view::{

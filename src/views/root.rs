@@ -2,10 +2,11 @@ use gpui::prelude::*;
 use gpui::*;
 
 use crate::app_assets::{
-    APP_LOGO_ASSET, SIDEBAR_COLLAPSE_ASSET, SIDEBAR_DARK_ASSET, SIDEBAR_EXPAND_ASSET,
+    APP_MARK_ASSET, SIDEBAR_COLLAPSE_ASSET, SIDEBAR_DARK_ASSET, SIDEBAR_EXPAND_ASSET,
     SIDEBAR_LIGHT_ASSET, SIDEBAR_OVERVIEW_ASSET, SIDEBAR_PULLS_ASSET, SIDEBAR_REVIEWS_ASSET,
     SIDEBAR_SETTINGS_ASSET, SIDEBAR_SYNC_ASSET, SIDEBAR_SYSTEM_ASSET,
 };
+use crate::branding::{APP_NAME, APP_TAGLINE_LABEL};
 use crate::github;
 use crate::review_session::load_review_session;
 use crate::state::*;
@@ -144,7 +145,8 @@ async fn maybe_bootstrap_debug_pull_request(
     cache: &crate::cache::CacheStore,
     cx: &mut AsyncWindowContext,
 ) {
-    let Some(debug_target) = std::env::var("REVIEWBUDDY_DEBUG_OPEN_PR")
+    let Some(debug_target) = std::env::var("REMISS_DEBUG_OPEN_PR")
+        .or_else(|_| std::env::var("REVIEWBUDDY_DEBUG_OPEN_PR"))
         .ok()
         .filter(|value| !value.trim().is_empty())
     else {
@@ -319,7 +321,12 @@ fn render_app_sidebar(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                 .items_center()
                                 .gap(px(10.0))
                                 .pb(px(8.0))
-                                .child(img(APP_LOGO_ASSET).size(px(22.0)))
+                                .child(
+                                    svg()
+                                        .path(APP_MARK_ASSET.to_string())
+                                        .size(px(22.0))
+                                        .text_color(fg_emphasis()),
+                                )
                                 .child(sidebar_utility_button(SIDEBAR_EXPAND_ASSET, false, true, {
                                     let state = state_for_toggle.clone();
                                     move |_, _, cx| {
@@ -343,29 +350,36 @@ fn render_app_sidebar(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                         .items_center()
                                         .gap(px(10.0))
                                         .min_w_0()
-                                        .child(img(APP_LOGO_ASSET).size(px(24.0)))
+                                        .child(
+                                            svg()
+                                                .path(APP_MARK_ASSET.to_string())
+                                                .size(px(24.0))
+                                                .text_color(fg_emphasis()),
+                                        )
                                         .child(
                                             div()
                                                 .flex()
                                                 .flex_col()
-                                                .gap(px(2.0))
+                                                .gap(px(1.0))
                                                 .min_w_0()
                                                 .child(
                                                     div()
-                                                        .text_size(px(13.0))
-                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .text_size(px(20.0))
+                                                        .line_height(px(21.0))
+                                                        .font_family(display_serif_font_family())
+                                                        .font_weight(FontWeight::NORMAL)
                                                         .text_color(fg_emphasis())
-                                                        .child("ReviewBuddy"),
+                                                        .child(APP_NAME),
                                                 )
                                                 .child(
                                                     div()
                                                         .text_size(px(10.0))
                                                         .font_family("Fira Code")
-                                                        .text_color(fg_subtle())
+                                                        .text_color(ochre())
                                                         .text_ellipsis()
                                                         .whitespace_nowrap()
                                                         .overflow_x_hidden()
-                                                        .child("review workspace"),
+                                                        .child(APP_TAGLINE_LABEL),
                                                 ),
                                         ),
                                 )

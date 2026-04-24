@@ -1,7 +1,8 @@
 use gpui::prelude::*;
 use gpui::*;
 
-use crate::app_assets::APP_LOGO_ASSET;
+use crate::app_assets::APP_MARK_ASSET;
+use crate::branding::APP_NAME;
 use crate::selectable_text::{AppTextFieldKind, AppTextInput};
 use crate::state::*;
 use crate::theme::*;
@@ -67,13 +68,18 @@ pub fn render_palette(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                         .flex()
                                         .items_center()
                                         .gap(px(10.0))
-                                        .child(img(APP_LOGO_ASSET).size(px(18.0)))
+                                        .child(
+                                            svg()
+                                                .path(APP_MARK_ASSET.to_string())
+                                                .size(px(18.0))
+                                                .text_color(accent()),
+                                        )
                                         .child(
                                             div()
                                                 .text_size(px(13.0))
                                                 .font_weight(FontWeight::SEMIBOLD)
                                                 .text_color(fg_emphasis())
-                                                .child("Command palette"),
+                                                .child(format!("{APP_NAME} command")),
                                         ),
                                 )
                                 .child(
