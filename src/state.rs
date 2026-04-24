@@ -15,6 +15,7 @@ use crate::github::{
 use crate::local_repo::LocalRepositoryStatus;
 use crate::lsp::{LspServerStatus, LspSessionManager, LspSymbolDetails};
 use crate::managed_lsp::{ManagedServerInstallStatus, ManagedServerKind};
+use crate::notifications;
 use crate::review_graph::ReviewSymbolEvolutionState;
 use crate::review_queue::ReviewQueue;
 use crate::review_session::{
@@ -411,6 +412,7 @@ pub struct AppState {
 
     // PR detail data (keyed by pr_key)
     pub detail_states: std::collections::HashMap<String, DetailState>,
+    pub unread_review_comment_ids: std::collections::BTreeSet<String>,
 
     // Bootstrap
     pub gh_available: bool,
@@ -484,6 +486,8 @@ impl AppState {
             WindowAppearance::Light,
         ));
         let cache_path = cache.path().display().to_string();
+        let unread_review_comment_ids =
+            notifications::load_unread_review_comment_ids(&cache).unwrap_or_default();
         let mut state = Self {
             cache: Arc::new(cache),
             lsp_session_manager: Arc::new(LspSessionManager::new()),
@@ -499,6 +503,7 @@ impl AppState {
             workspace_syncing: false,
             workspace_error: None,
             detail_states: std::collections::HashMap::new(),
+            unread_review_comment_ids,
             gh_available: false,
             gh_version: None,
             cache_path,
@@ -626,6 +631,42 @@ impl AppState {
             .as_ref()?
             .detail
             .as_ref()
+    }
+
+    pub fn is_review_comment_unread(&self, comment_id: &str) -> bool {
+        self.unread_review_comment_ids.contains(comment_id)
+    }
+
+    pub fn unread_review_comment_ids_for_detail(&self, detail: &PullRequestDetail) -> Vec<String> {
+        detail
+            .review_threads
+            .iter()
+            .flat_map(|thread| &thread.comments)
+            .filter(|comment| self.is_review_comment_unread(&comment.id))
+            .map(|comment| comment.id.clone())
+            .collect()
+    }
+
+    pub fn mark_review_comments_read<I>(&mut self, comment_ids: I)
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let comment_ids = comment_ids.into_iter().collect::<Vec<_>>();
+        if comment_ids.is_empty() {
+            return;
+        }
+
+        match notifications::mark_review_comments_read(self.cache.as_ref(), comment_ids.clone()) {
+            Ok(unread_ids) => {
+                self.unread_review_comment_ids = unread_ids;
+            }
+            Err(error) => {
+                eprintln!("Failed to persist review comment read state: {error}");
+                for comment_id in comment_ids {
+                    self.unread_review_comment_ids.remove(&comment_id);
+                }
+            }
+        }
     }
 
     pub fn active_detail_state(&self) -> Option<&DetailState> {

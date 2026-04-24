@@ -5,11 +5,11 @@ use crate::app_assets::{
     OVERVIEW_MY_PULL_REQUESTS_ASSET, OVERVIEW_OPEN_PULL_REQUESTS_ASSET,
     OVERVIEW_REVIEW_REQUESTS_ASSET,
 };
-use crate::github;
 use crate::review_queue::default_review_file;
 use crate::review_session::load_review_session;
 use crate::state::*;
 use crate::theme::*;
+use crate::{github, notifications};
 
 use super::settings::render_settings_view;
 use super::welcome_shader::{render_welcome_shader, WELCOME_SHADER_RADIUS};
@@ -1442,19 +1442,27 @@ pub fn open_pull_request(
                 .spawn({
                     let cache = cache.clone();
                     let repository = repository.clone();
-                    async move { github::sync_pull_request_detail(&cache, &repository, number) }
+                    async move {
+                        notifications::sync_pull_request_detail_with_read_state(
+                            &cache,
+                            &repository,
+                            number,
+                        )
+                    }
                 })
                 .await;
 
             model
                 .update(cx, |s, cx| {
+                    let mut next_unread_ids = None;
                     let ds = s.detail_states.entry(detail_key.clone()).or_default();
                     ds.loading = false;
                     ds.syncing = false;
                     match sync_result {
-                        Ok(snapshot) => {
+                        Ok((snapshot, unread_ids)) => {
                             ds.snapshot = Some(snapshot);
                             ds.error = None;
+                            next_unread_ids = Some(unread_ids);
                         }
                         Err(e) => {
                             ds.error = Some(e);
@@ -1471,6 +1479,9 @@ pub fn open_pull_request(
                                     )
                                 });
                         }
+                    }
+                    if let Some(unread_ids) = next_unread_ids {
+                        s.unread_review_comment_ids = unread_ids;
                     }
                     cx.notify();
                 })

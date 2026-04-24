@@ -13,11 +13,13 @@ use crate::{
 };
 
 const NOTIFICATION_STATE_CACHE_KEY: &str = "notification-state-v1";
+const REVIEW_COMMENT_READ_STATE_CACHE_KEY: &str = "review-comment-read-state-v1";
 
 #[derive(Debug, Clone)]
 pub struct WorkspaceSyncOutcome {
     pub workspace: WorkspaceSnapshot,
     pub notifications: Vec<SystemNotification>,
+    pub unread_review_comment_ids: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +32,13 @@ pub struct SystemNotification {
 struct PersistedNotificationState {
     review_requested_pr_keys: Vec<String>,
     thread_last_comment_ids: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct ReviewCommentReadState {
+    observed_pr_keys: BTreeSet<String>,
+    known_comment_ids: BTreeSet<String>,
+    unread_comment_ids: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,7 +93,42 @@ pub fn sync_workspace_with_notifications(
     Ok(WorkspaceSyncOutcome {
         workspace,
         notifications: evaluation.notifications,
+        unread_review_comment_ids: load_unread_review_comment_ids(cache)?,
     })
+}
+
+pub fn load_unread_review_comment_ids(cache: &CacheStore) -> Result<BTreeSet<String>, String> {
+    Ok(load_review_comment_read_state(cache)?.unread_comment_ids)
+}
+
+pub fn mark_review_comments_read<I>(
+    cache: &CacheStore,
+    comment_ids: I,
+) -> Result<BTreeSet<String>, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut read_state = load_review_comment_read_state(cache)?;
+    for comment_id in comment_ids {
+        read_state.unread_comment_ids.remove(&comment_id);
+    }
+    save_review_comment_read_state(cache, &read_state)?;
+    Ok(read_state.unread_comment_ids)
+}
+
+pub fn sync_pull_request_detail_with_read_state(
+    cache: &CacheStore,
+    repository: &str,
+    number: i64,
+) -> Result<(github::PullRequestDetailSnapshot, BTreeSet<String>), String> {
+    let snapshot = github::sync_pull_request_detail(cache, repository, number)?;
+    if let Some(detail) = snapshot.detail.as_ref() {
+        let viewer_login = snapshot.auth.active_login.as_deref();
+        let unread_ids = record_review_comments(cache, detail, viewer_login)?;
+        return Ok((snapshot, unread_ids));
+    }
+
+    Ok((snapshot, load_unread_review_comment_ids(cache)?))
 }
 
 pub fn deliver_system_notifications(notifications: &[SystemNotification]) {
@@ -121,11 +165,21 @@ fn build_notification_input(
                 &pull_request.repository,
                 pull_request.number,
             ) {
-                Ok(snapshot) => snapshot
-                    .detail
-                    .as_ref()
-                    .map(|detail| extract_tracked_threads(detail, pull_request, &viewer_login))
-                    .unwrap_or_default(),
+                Ok(snapshot) => {
+                    if let Some(detail) = snapshot.detail.as_ref() {
+                        if let Err(error) =
+                            record_review_comments(cache, detail, Some(&viewer_login))
+                        {
+                            eprintln!(
+                                "Failed to record review comment read state for {}#{}: {error}",
+                                pull_request.repository, pull_request.number
+                            );
+                        }
+                        extract_tracked_threads(detail, pull_request, &viewer_login)
+                    } else {
+                        Vec::new()
+                    }
+                }
                 Err(error) => {
                     eprintln!(
                         "Failed to load review threads for {}#{} notifications: {error}",
@@ -141,6 +195,50 @@ fn build_notification_input(
         review_requested_prs,
         tracked_threads,
     }
+}
+
+fn record_review_comments(
+    cache: &CacheStore,
+    detail: &PullRequestDetail,
+    viewer_login: Option<&str>,
+) -> Result<BTreeSet<String>, String> {
+    let mut read_state = load_review_comment_read_state(cache)?;
+    let detail_key = pr_key(&detail.repository, detail.number);
+    let first_pr_observation = !read_state.observed_pr_keys.contains(&detail_key);
+    let viewer_login = viewer_login.unwrap_or_default();
+
+    for comment in detail
+        .review_threads
+        .iter()
+        .flat_map(|thread| &thread.comments)
+    {
+        let newly_known = read_state.known_comment_ids.insert(comment.id.clone());
+        if newly_known && !first_pr_observation && comment.author_login != viewer_login {
+            read_state.unread_comment_ids.insert(comment.id.clone());
+        }
+    }
+
+    read_state.observed_pr_keys.insert(detail_key);
+    save_review_comment_read_state(cache, &read_state)?;
+    Ok(read_state.unread_comment_ids)
+}
+
+fn load_review_comment_read_state(cache: &CacheStore) -> Result<ReviewCommentReadState, String> {
+    Ok(cache
+        .get::<ReviewCommentReadState>(REVIEW_COMMENT_READ_STATE_CACHE_KEY)?
+        .map(|document| document.value)
+        .unwrap_or_default())
+}
+
+fn save_review_comment_read_state(
+    cache: &CacheStore,
+    read_state: &ReviewCommentReadState,
+) -> Result<(), String> {
+    cache.put(
+        REVIEW_COMMENT_READ_STATE_CACHE_KEY,
+        read_state,
+        notification_timestamp_ms(),
+    )
 }
 
 fn review_requested_pull_requests(workspace: &WorkspaceSnapshot) -> Vec<TrackedPullRequest> {
@@ -309,6 +407,15 @@ fn notification_timestamp_ms() -> i64 {
 mod tests {
     use super::*;
 
+    fn temp_cache() -> CacheStore {
+        let path = std::env::temp_dir().join(format!(
+            "gh-ui-notification-test-{}-{}.sqlite3",
+            std::process::id(),
+            notification_timestamp_ms()
+        ));
+        CacheStore::new(path).expect("failed to create temp cache")
+    }
+
     fn pull_request(key: &str, repository: &str, number: i64, title: &str) -> TrackedPullRequest {
         TrackedPullRequest {
             pr_key: key.to_string(),
@@ -337,6 +444,85 @@ mod tests {
             pull_request: pull_request.clone(),
             owner_login: owner_login.to_string(),
             comments,
+        }
+    }
+
+    fn review_comment(id: &str, author_login: &str) -> PullRequestReviewComment {
+        PullRequestReviewComment {
+            id: id.to_string(),
+            author_login: author_login.to_string(),
+            body: format!("body-{id}"),
+            path: "src/main.rs".to_string(),
+            line: Some(1),
+            original_line: Some(1),
+            start_line: None,
+            original_start_line: None,
+            state: "PUBLISHED".to_string(),
+            created_at: "2026-04-24T10:00:00Z".to_string(),
+            updated_at: "2026-04-24T10:00:00Z".to_string(),
+            published_at: Some("2026-04-24T10:00:00Z".to_string()),
+            reply_to_id: None,
+            url: format!("https://example.com/{id}"),
+        }
+    }
+
+    fn review_thread(comments: Vec<PullRequestReviewComment>) -> PullRequestReviewThread {
+        PullRequestReviewThread {
+            id: "thread-1".to_string(),
+            path: "src/main.rs".to_string(),
+            line: Some(1),
+            original_line: Some(1),
+            start_line: None,
+            original_start_line: None,
+            diff_side: "RIGHT".to_string(),
+            start_diff_side: None,
+            is_collapsed: false,
+            is_outdated: false,
+            is_resolved: false,
+            subject_type: "LINE".to_string(),
+            resolved_by_login: None,
+            viewer_can_reply: true,
+            viewer_can_resolve: true,
+            viewer_can_unresolve: false,
+            comments,
+        }
+    }
+
+    fn detail_with_thread_comments(
+        repository: &str,
+        number: i64,
+        comments: Vec<PullRequestReviewComment>,
+    ) -> PullRequestDetail {
+        PullRequestDetail {
+            id: "pr-id".to_string(),
+            repository: repository.to_string(),
+            number,
+            title: "PR".to_string(),
+            body: String::new(),
+            url: "https://example.com/pr".to_string(),
+            author_login: "author".to_string(),
+            state: "OPEN".to_string(),
+            is_draft: false,
+            review_decision: None,
+            base_ref_name: "main".to_string(),
+            head_ref_name: "branch".to_string(),
+            base_ref_oid: None,
+            head_ref_oid: None,
+            additions: 1,
+            deletions: 0,
+            changed_files: 1,
+            comments_count: 0,
+            commits_count: 1,
+            created_at: "2026-04-24T09:00:00Z".to_string(),
+            updated_at: "2026-04-24T10:00:00Z".to_string(),
+            labels: Vec::new(),
+            reviewers: Vec::new(),
+            comments: Vec::new(),
+            latest_reviews: Vec::new(),
+            review_threads: vec![review_thread(comments)],
+            files: Vec::new(),
+            raw_diff: String::new(),
+            parsed_diff: Vec::new(),
         }
     }
 
@@ -466,5 +652,36 @@ mod tests {
         let evaluation = evaluate_notifications(&input, Some(&previous));
 
         assert!(evaluation.notifications.is_empty());
+    }
+
+    #[test]
+    fn review_comment_read_state_tracks_new_foreign_comments_until_marked_read() {
+        let cache = temp_cache();
+        let baseline =
+            detail_with_thread_comments("org/repo", 42, vec![review_comment("c1", "alice")]);
+
+        let unread =
+            record_review_comments(&cache, &baseline, Some("me")).expect("baseline record failed");
+
+        assert!(unread.is_empty());
+
+        let updated = detail_with_thread_comments(
+            "org/repo",
+            42,
+            vec![
+                review_comment("c1", "alice"),
+                review_comment("c2", "bob"),
+                review_comment("c3", "me"),
+            ],
+        );
+        let unread =
+            record_review_comments(&cache, &updated, Some("me")).expect("updated record failed");
+
+        assert_eq!(unread, BTreeSet::from(["c2".to_string()]));
+
+        let unread =
+            mark_review_comments_read(&cache, vec!["c2".to_string()]).expect("mark read failed");
+
+        assert!(unread.is_empty());
     }
 }

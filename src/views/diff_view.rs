@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, path::PathBuf, sync::Arc, time::Duration};
 
 use gpui::prelude::*;
 use gpui::*;
@@ -13,7 +13,6 @@ use crate::diff::{
     build_diff_render_rows, find_parsed_diff_file, find_parsed_diff_file_with_index, DiffLineKind,
     DiffRenderRow, ParsedDiffFile, ParsedDiffHunk, ParsedDiffLine,
 };
-use crate::github;
 use crate::github::{
     PullRequestDetail, PullRequestFile, PullRequestReviewComment, PullRequestReviewThread,
     RepositoryFileContent, REPOSITORY_FILE_SOURCE_LOCAL_CHECKOUT,
@@ -41,6 +40,7 @@ use crate::source_browser::render_source_browser;
 use crate::state::*;
 use crate::syntax::{self, SyntaxSpan};
 use crate::theme::*;
+use crate::{github, notifications};
 
 use super::sections::{
     badge, badge_success, error_text, ghost_button, nested_panel, panel_state_text, review_button,
@@ -347,7 +347,11 @@ pub fn trigger_submit_inline_comment(state: &Entity<AppState>, window: &mut Wind
             let sync_result = cx
                 .background_executor()
                 .spawn(async move {
-                    github::sync_pull_request_detail(&cache, &repository_for_sync, number)
+                    notifications::sync_pull_request_detail_with_read_state(
+                        &cache,
+                        &repository_for_sync,
+                        number,
+                    )
                 })
                 .await;
 
@@ -371,9 +375,10 @@ pub fn trigger_submit_inline_comment(state: &Entity<AppState>, window: &mut Wind
                     let detail_key = pr_key(&repository, number);
                     let detail_state = state.detail_states.entry(detail_key).or_default();
                     match sync_result {
-                        Ok(snapshot) => {
+                        Ok((snapshot, unread_ids)) => {
                             detail_state.snapshot = Some(snapshot);
                             detail_state.error = None;
+                            state.unread_review_comment_ids = unread_ids;
                         }
                         Err(error) => {
                             detail_state.error = Some(error);
@@ -7538,7 +7543,12 @@ fn render_virtualized_diff_row(
                     .py(px(10.0))
                     .border_b(px(1.0))
                     .border_color(border_muted())
-                    .child(render_review_thread(thread, selected_anchor))
+                    .child(render_review_thread(
+                        thread,
+                        selected_anchor,
+                        &s.unread_review_comment_ids,
+                        state,
+                    ))
                     .into_any_element()
             })
             .unwrap_or_else(|| div().into_any_element()),
@@ -7552,7 +7562,12 @@ fn render_virtualized_diff_row(
                     .border_b(px(1.0))
                     .border_color(border_muted())
                     .bg(bg_inset())
-                    .child(render_review_thread(thread, selected_anchor))
+                    .child(render_review_thread(
+                        thread,
+                        selected_anchor,
+                        &s.unread_review_comment_ids,
+                        state,
+                    ))
                     .into_any_element()
             })
             .unwrap_or_else(|| div().into_any_element()),
@@ -7565,7 +7580,12 @@ fn render_virtualized_diff_row(
                     .border_b(px(1.0))
                     .border_color(border_muted())
                     .bg(bg_inset())
-                    .child(render_review_thread(thread, selected_anchor))
+                    .child(render_review_thread(
+                        thread,
+                        selected_anchor,
+                        &s.unread_review_comment_ids,
+                        state,
+                    ))
                     .into_any_element()
             })
             .unwrap_or_else(|| div().into_any_element()),
@@ -8129,6 +8149,8 @@ fn render_hunk(
     hunk: &ParsedDiffHunk,
     line_threads: &[&PullRequestReviewThread],
     selected_anchor: Option<&DiffAnchor>,
+    unread_comment_ids: &BTreeSet<String>,
+    state: &Entity<AppState>,
 ) -> impl IntoElement {
     div()
         .flex()
@@ -8146,6 +8168,8 @@ fn render_hunk(
                         line,
                         &threads_for_line,
                         selected_anchor,
+                        unread_comment_ids,
+                        state,
                     )
                 })),
         )
@@ -8157,6 +8181,8 @@ fn render_diff_line_with_threads(
     line: &ParsedDiffLine,
     threads: &[&PullRequestReviewThread],
     selected_anchor: Option<&DiffAnchor>,
+    unread_comment_ids: &BTreeSet<String>,
+    state: &Entity<AppState>,
 ) -> impl IntoElement {
     div()
         .flex()
@@ -8184,11 +8210,9 @@ fn render_diff_line_with_threads(
                     .flex()
                     .flex_col()
                     .gap(px(6.0))
-                    .children(
-                        threads
-                            .iter()
-                            .map(|thread| render_review_thread(thread, selected_anchor)),
-                    ),
+                    .children(threads.iter().map(|thread| {
+                        render_review_thread(thread, selected_anchor, unread_comment_ids, state)
+                    })),
             )
         })
 }
@@ -9035,8 +9059,18 @@ fn build_diff_highlights(parsed_file: &ParsedDiffFile) -> Arc<Vec<Vec<DiffLineHi
 fn render_review_thread(
     thread: &PullRequestReviewThread,
     selected_anchor: Option<&DiffAnchor>,
+    unread_comment_ids: &BTreeSet<String>,
+    state: &Entity<AppState>,
 ) -> impl IntoElement {
     let is_selected = thread_matches_diff_anchor(thread, selected_anchor);
+    let thread_unread_comment_ids = thread
+        .comments
+        .iter()
+        .filter(|comment| unread_comment_ids.contains(&comment.id))
+        .map(|comment| comment.id.clone())
+        .collect::<Vec<_>>();
+    let unread_count = thread_unread_comment_ids.len();
+    let state_for_mark_read = state.clone();
     let thread_border = transparent();
     let header_bg = if is_selected {
         accent_muted()
@@ -9072,25 +9106,43 @@ fn render_review_thread(
                         .child(badge(&thread.subject_type.to_lowercase()))
                         .when(thread.is_resolved, |el| el.child(badge_success("resolved")))
                         .when(thread.is_outdated, |el| el.child(badge("outdated"))),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .when(unread_count > 0, |el| {
+                            el.child(badge(&format!("{unread_count} new")))
+                                .child(ghost_button("Mark read", move |_, _, cx| {
+                                    state_for_mark_read.update(cx, |state, cx| {
+                                        state.mark_review_comments_read(
+                                            thread_unread_comment_ids.clone(),
+                                        );
+                                        cx.notify();
+                                    });
+                                }))
+                        }),
                 ),
         )
-        .child(
-            div().p(px(12.0)).flex().flex_col().gap(px(8.0)).children(
-                thread
-                    .comments
-                    .iter()
-                    .map(|comment| render_thread_comment(comment)),
-            ),
-        )
+        .child(div().p(px(12.0)).flex().flex_col().gap(px(8.0)).children(
+            thread.comments.iter().map(|comment| {
+                render_thread_comment(comment, unread_comment_ids.contains(&comment.id))
+            }),
+        ))
 }
 
-fn render_thread_comment(comment: &PullRequestReviewComment) -> impl IntoElement {
+fn render_thread_comment(comment: &PullRequestReviewComment, is_unread: bool) -> impl IntoElement {
     div()
         .p(px(12.0))
         .rounded(radius_sm())
         .border_1()
-        .border_color(border_muted())
-        .bg(bg_surface())
+        .border_color(if is_unread { accent() } else { border_muted() })
+        .bg(if is_unread {
+            accent_muted()
+        } else {
+            bg_surface()
+        })
         .flex()
         .flex_col()
         .gap(px(6.0))
@@ -9114,7 +9166,8 @@ fn render_thread_comment(comment: &PullRequestReviewComment) -> impl IntoElement
                             .unwrap_or(&comment.created_at)
                             .to_string(),
                     ),
-                ),
+                )
+                .when(is_unread, |el| el.child(badge("new"))),
         )
         .child(if comment.body.is_empty() {
             div()

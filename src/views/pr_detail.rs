@@ -10,6 +10,7 @@ use crate::github::{
     ReviewAction,
 };
 use crate::markdown::render_markdown;
+use crate::notifications;
 use crate::selectable_text::{AppTextFieldKind, AppTextInput, SelectableText};
 use crate::state::*;
 use crate::theme::*;
@@ -39,6 +40,8 @@ struct OwnPrFeedbackItem {
     preview: String,
     subject_type: String,
     feedback_count: usize,
+    unread_count: usize,
+    unread_comment_ids: Vec<String>,
     is_resolved: bool,
     is_outdated: bool,
 }
@@ -53,6 +56,8 @@ struct ThreadDigestItem {
     preview: String,
     subject_type: String,
     comment_count: usize,
+    unread_count: usize,
+    unread_comment_ids: Vec<String>,
     is_resolved: bool,
     is_outdated: bool,
     resolved_by_login: Option<String>,
@@ -145,11 +150,12 @@ fn summarize_review_status(
 fn summarize_own_pr_feedback(
     review_threads: &[PullRequestReviewThread],
     viewer_login: &str,
+    unread_comment_ids: &BTreeSet<String>,
 ) -> Vec<OwnPrFeedbackItem> {
     let viewer_login = viewer_login.trim();
     let mut items = review_threads
         .iter()
-        .filter_map(|thread| own_pr_feedback_item(thread, viewer_login))
+        .filter_map(|thread| own_pr_feedback_item(thread, viewer_login, unread_comment_ids))
         .collect::<Vec<_>>();
 
     items.sort_by(|left, right| {
@@ -164,6 +170,7 @@ fn summarize_own_pr_feedback(
 fn own_pr_feedback_item(
     thread: &PullRequestReviewThread,
     viewer_login: &str,
+    unread_comment_ids: &BTreeSet<String>,
 ) -> Option<OwnPrFeedbackItem> {
     let anchor = review_thread_anchor(thread)?;
     let latest_feedback = thread
@@ -176,6 +183,7 @@ fn own_pr_feedback_item(
         .iter()
         .filter(|comment| comment.author_login != viewer_login)
         .count();
+    let unread_comment_ids = thread_unread_comment_ids(thread, unread_comment_ids);
 
     Some(OwnPrFeedbackItem {
         file_path: thread.path.clone(),
@@ -188,6 +196,8 @@ fn own_pr_feedback_item(
         preview: summarize_feedback_preview(latest_feedback),
         subject_type: thread.subject_type.clone(),
         feedback_count,
+        unread_count: unread_comment_ids.len(),
+        unread_comment_ids,
         is_resolved: thread.is_resolved,
         is_outdated: thread.is_outdated,
         anchor,
@@ -282,6 +292,10 @@ pub fn render_pr_workspace(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
     let error = detail_state.and_then(|d| d.error.clone());
     let show_loading_state = detail.is_none() && (loading || syncing);
     let header_compact = surface != PullRequestSurface::Overview || s.pr_header_compact;
+    let unread_review_comment_ids = detail
+        .map(|detail| s.unread_review_comment_ids_for_detail(detail))
+        .unwrap_or_default();
+    let unread_review_comment_count = unread_review_comment_ids.len();
 
     let state_for_surface = state.clone();
     let state_for_refresh = state.clone();
@@ -303,6 +317,8 @@ pub fn render_pr_workspace(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
             syncing,
             surface,
             header_compact,
+            unread_review_comment_count,
+            unread_review_comment_ids,
             state_for_refresh,
             state_for_surface,
         ))
@@ -356,6 +372,8 @@ fn render_pr_header(
     syncing: bool,
     surface: PullRequestSurface,
     compact: bool,
+    unread_review_comment_count: usize,
+    unread_review_comment_ids: Vec<String>,
     state_for_refresh: Entity<AppState>,
     state_for_surface: Entity<AppState>,
 ) -> impl IntoElement {
@@ -363,6 +381,7 @@ fn render_pr_header(
     let author = author.to_string();
     let repository = repository.to_string();
     let breadcrumb = format!("Pull Requests / {} / #{}", repository, number).to_uppercase();
+    let state_for_mark_read = state_for_refresh.clone();
 
     let header_copy = div()
         .flex()
@@ -486,6 +505,18 @@ fn render_pr_header(
                 .flex()
                 .gap(px(6.0))
                 .flex_wrap()
+                .when(unread_review_comment_count > 0, |el| {
+                    let unread_review_comment_ids = unread_review_comment_ids.clone();
+                    el.child(ghost_button(
+                        &format!("Mark read ({unread_review_comment_count})"),
+                        move |_, _, cx| {
+                            state_for_mark_read.update(cx, |state, cx| {
+                                state.mark_review_comments_read(unread_review_comment_ids.clone());
+                                cx.notify();
+                            });
+                        },
+                    ))
+                })
                 .child(ghost_button(
                     if compact {
                         "Browser"
@@ -631,10 +662,17 @@ fn render_overview_surface(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
     let own_pr_feedback = viewer_login
         .as_deref()
         .filter(|_| is_own_pull_request)
-        .map(|viewer_login| summarize_own_pr_feedback(&detail.review_threads, viewer_login))
+        .map(|viewer_login| {
+            summarize_own_pr_feedback(
+                &detail.review_threads,
+                viewer_login,
+                &s.unread_review_comment_ids,
+            )
+        })
         .unwrap_or_default();
-    let thread_digest = summarize_thread_activity(&detail.review_threads);
-    let recent_activity = summarize_recent_activity(detail);
+    let thread_digest =
+        summarize_thread_activity(&detail.review_threads, &s.unread_review_comment_ids);
+    let recent_activity = summarize_recent_activity(detail, &s.unread_review_comment_ids);
     let participants = summarize_participants(detail, &review_status);
 
     let state_for_review = state.clone();
@@ -1106,6 +1144,7 @@ fn render_own_feedback_card(
     let state = state.clone();
     let selected_file_path = item.file_path.clone();
     let selected_anchor = item.anchor.clone();
+    let unread_comment_ids = item.unread_comment_ids.clone();
     let updated_at = format_relative_time(&item.updated_at);
 
     div()
@@ -1119,6 +1158,7 @@ fn render_own_feedback_card(
         .hover(|style| style.bg(hover_bg()))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             state.update(cx, |state, cx| {
+                state.mark_review_comments_read(unread_comment_ids.clone());
                 state.selected_file_path = Some(selected_file_path.clone());
                 state.selected_diff_anchor = Some(selected_anchor.clone());
                 cx.notify();
@@ -1153,6 +1193,14 @@ fn render_own_feedback_card(
                             ))
                         })
                         .when(item.is_outdated, |el| el.child(subtle_badge("outdated")))
+                        .when(item.unread_count > 0, |el| {
+                            el.child(tone_badge(
+                                &format!("{} new", item.unread_count),
+                                accent(),
+                                accent_muted(),
+                                accent(),
+                            ))
+                        })
                         .child(subtle_badge(&format!("{} feedback", item.feedback_count))),
                 ),
         )
@@ -1186,6 +1234,7 @@ fn render_thread_digest_card(
     let state = state.clone();
     let selected_file_path = item.file_path.clone();
     let selected_anchor = item.anchor.clone();
+    let unread_comment_ids = item.unread_comment_ids.clone();
     let updated_at = format_relative_time(&item.updated_at);
     let resolved_by = item.resolved_by_login.clone();
 
@@ -1200,6 +1249,7 @@ fn render_thread_digest_card(
         .hover(|style| style.bg(hover_bg()))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             state.update(cx, |state, cx| {
+                state.mark_review_comments_read(unread_comment_ids.clone());
                 state.selected_file_path = Some(selected_file_path.clone());
                 state.selected_diff_anchor = Some(selected_anchor.clone());
                 cx.notify();
@@ -1241,6 +1291,14 @@ fn render_thread_digest_card(
                             el.child(tone_badge("open", accent(), accent_muted(), accent()))
                         })
                         .when(item.is_outdated, |el| el.child(subtle_badge("outdated")))
+                        .when(item.unread_count > 0, |el| {
+                            el.child(tone_badge(
+                                &format!("{} new", item.unread_count),
+                                accent(),
+                                accent_muted(),
+                                accent(),
+                            ))
+                        })
                         .child(subtle_badge(&format!("{} comments", item.comment_count))),
                 ),
         )
@@ -1536,9 +1594,13 @@ pub fn trigger_submit_review(state: &Entity<AppState>, window: &mut Window, cx: 
             let repo_for_sync = repo.clone();
             let sync_result = cx
                 .background_executor()
-                .spawn(
-                    async move { github::sync_pull_request_detail(&cache, &repo_for_sync, number) },
-                )
+                .spawn(async move {
+                    notifications::sync_pull_request_detail_with_read_state(
+                        &cache,
+                        &repo_for_sync,
+                        number,
+                    )
+                })
                 .await;
 
             model
@@ -1546,9 +1608,10 @@ pub fn trigger_submit_review(state: &Entity<AppState>, window: &mut Window, cx: 
                     let ds = s.detail_states.entry(detail_key.clone()).or_default();
                     ds.loading = false;
                     ds.syncing = false;
-                    if let Ok(snapshot) = sync_result {
+                    if let Ok((snapshot, unread_ids)) = sync_result {
                         ds.snapshot = Some(snapshot);
                         ds.error = None;
+                        s.unread_review_comment_ids = unread_ids;
                     }
                     cx.notify();
                 })
@@ -2312,10 +2375,13 @@ fn build_review_snapshot_text(
     )
 }
 
-fn summarize_thread_activity(review_threads: &[PullRequestReviewThread]) -> Vec<ThreadDigestItem> {
+fn summarize_thread_activity(
+    review_threads: &[PullRequestReviewThread],
+    unread_comment_ids: &BTreeSet<String>,
+) -> Vec<ThreadDigestItem> {
     let mut items = review_threads
         .iter()
-        .filter_map(thread_digest_item)
+        .filter_map(|thread| thread_digest_item(thread, unread_comment_ids))
         .collect::<Vec<_>>();
 
     items.sort_by(|left, right| {
@@ -2327,12 +2393,16 @@ fn summarize_thread_activity(review_threads: &[PullRequestReviewThread]) -> Vec<
     items
 }
 
-fn thread_digest_item(thread: &PullRequestReviewThread) -> Option<ThreadDigestItem> {
+fn thread_digest_item(
+    thread: &PullRequestReviewThread,
+    unread_comment_ids: &BTreeSet<String>,
+) -> Option<ThreadDigestItem> {
     let anchor = review_thread_anchor(thread)?;
     let location_label = feedback_location_label(thread, &anchor);
     let latest_comment = thread.comments.iter().rev().find(|comment| {
         !comment.author_login.trim().is_empty() || !comment.body.trim().is_empty()
     })?;
+    let unread_comment_ids = thread_unread_comment_ids(thread, unread_comment_ids);
 
     Some(ThreadDigestItem {
         anchor,
@@ -2346,13 +2416,30 @@ fn thread_digest_item(thread: &PullRequestReviewThread) -> Option<ThreadDigestIt
         preview: summarize_feedback_preview(latest_comment),
         subject_type: thread.subject_type.clone(),
         comment_count: thread.comments.len(),
+        unread_count: unread_comment_ids.len(),
+        unread_comment_ids,
         is_resolved: thread.is_resolved,
         is_outdated: thread.is_outdated,
         resolved_by_login: thread.resolved_by_login.clone(),
     })
 }
 
-fn summarize_recent_activity(detail: &github::PullRequestDetail) -> Vec<ActivityItem> {
+fn thread_unread_comment_ids(
+    thread: &PullRequestReviewThread,
+    unread_comment_ids: &BTreeSet<String>,
+) -> Vec<String> {
+    thread
+        .comments
+        .iter()
+        .filter(|comment| unread_comment_ids.contains(&comment.id))
+        .map(|comment| comment.id.clone())
+        .collect()
+}
+
+fn summarize_recent_activity(
+    detail: &github::PullRequestDetail,
+    unread_comment_ids: &BTreeSet<String>,
+) -> Vec<ActivityItem> {
     let mut items = detail
         .comments
         .iter()
@@ -2364,7 +2451,7 @@ fn summarize_recent_activity(detail: &github::PullRequestDetail) -> Vec<Activity
         detail
             .review_threads
             .iter()
-            .filter_map(activity_item_for_thread),
+            .filter_map(|thread| activity_item_for_thread(thread, unread_comment_ids)),
     );
 
     items.sort_by(|left, right| {
@@ -2414,9 +2501,15 @@ fn activity_item_for_review(review: &PullRequestReview) -> ActivityItem {
     }
 }
 
-fn activity_item_for_thread(thread: &PullRequestReviewThread) -> Option<ActivityItem> {
-    let digest = thread_digest_item(thread)?;
+fn activity_item_for_thread(
+    thread: &PullRequestReviewThread,
+    unread_comment_ids: &BTreeSet<String>,
+) -> Option<ActivityItem> {
+    let digest = thread_digest_item(thread, unread_comment_ids)?;
     let mut status_parts = Vec::new();
+    if digest.unread_count > 0 {
+        status_parts.push(format!("{} new", digest.unread_count));
+    }
     if digest.is_resolved {
         status_parts.push("Resolved".to_string());
     }
@@ -2595,7 +2688,9 @@ fn trigger_sync_pr(
 
             let result = cx
                 .background_executor()
-                .spawn(async move { github::sync_pull_request_detail(&cache, &repo, number) })
+                .spawn(async move {
+                    notifications::sync_pull_request_detail_with_read_state(&cache, &repo, number)
+                })
                 .await;
 
             let detail_key = key;
@@ -2605,9 +2700,10 @@ fn trigger_sync_pr(
                     ds.loading = false;
                     ds.syncing = false;
                     match result {
-                        Ok(snapshot) => {
+                        Ok((snapshot, unread_ids)) => {
                             ds.snapshot = Some(snapshot);
                             ds.error = None;
+                            s.unread_review_comment_ids = unread_ids;
                         }
                         Err(e) => ds.error = Some(e),
                     }
@@ -2661,6 +2757,8 @@ fn format_ms(ms: i64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::{
         humanize_review_state, participant_display_name, summarize_own_pr_feedback,
         summarize_participants, summarize_recent_activity, summarize_review_status,
@@ -2740,6 +2838,7 @@ mod tests {
                 ),
             ],
             "author",
+            &BTreeSet::new(),
         );
 
         assert_eq!(items.len(), 2);
@@ -2789,7 +2888,7 @@ mod tests {
             )],
         );
 
-        let items = summarize_recent_activity(&detail);
+        let items = summarize_recent_activity(&detail, &BTreeSet::new());
 
         assert_eq!(items.len(), 3);
         assert_eq!(items[0].kind, ActivityItemKind::Thread);

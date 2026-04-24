@@ -50,6 +50,7 @@ pub async fn sync_workspace_flow(model: Entity<AppState>, cx: &mut AsyncWindowCo
                     state.workspace_syncing = false;
                     state.gh_available = outcome.workspace.auth.is_authenticated;
                     state.workspace = Some(outcome.workspace);
+                    state.unread_review_comment_ids = outcome.unread_review_comment_ids;
                     state.workspace_error = None;
                     cx.notify();
                 })
