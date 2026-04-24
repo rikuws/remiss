@@ -2,7 +2,10 @@ use std::time::Duration;
 
 use gpui::*;
 
-use crate::{code_tour, code_tour_background, notifications, state::AppState};
+use crate::{
+    code_tour, code_tour_background, notifications,
+    state::{pr_key, AppState},
+};
 
 pub const WORKSPACE_SYNC_POLL_INTERVAL: Duration = Duration::from_secs(90);
 
@@ -45,12 +48,22 @@ pub async fn sync_workspace_flow(model: Entity<AppState>, cx: &mut AsyncWindowCo
         Ok(outcome) => {
             let notifications = outcome.notifications.clone();
             let workspace = outcome.workspace.clone();
+            let review_detail_snapshots = outcome.review_detail_snapshots.clone();
             model
                 .update(cx, |state, cx| {
                     state.workspace_syncing = false;
                     state.gh_available = outcome.workspace.auth.is_authenticated;
                     state.workspace = Some(outcome.workspace);
                     state.unread_review_comment_ids = outcome.unread_review_comment_ids;
+                    for snapshot in review_detail_snapshots {
+                        if let Some(detail) = snapshot.detail.as_ref() {
+                            let key = pr_key(&detail.repository, detail.number);
+                            let detail_state = state.detail_states.entry(key).or_default();
+                            detail_state.snapshot = Some(snapshot);
+                            detail_state.loading = false;
+                            detail_state.error = None;
+                        }
+                    }
                     state.workspace_error = None;
                     cx.notify();
                 })

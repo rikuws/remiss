@@ -10,8 +10,8 @@ use gpui::{
 use crate::theme::bg_canvas;
 
 const PERIOD_SECONDS: f32 = 5.0;
-const MESH_CELL_SIZE: f32 = 10.0;
-pub(super) const WELCOME_SHADER_RADIUS: f32 = 44.0;
+const MESH_CELL_SIZE: f32 = 4.0;
+pub(super) const WELCOME_SHADER_RADIUS: f32 = 8.0;
 
 #[derive(Clone, Copy)]
 struct MeshStop {
@@ -191,7 +191,7 @@ fn sample_mesh(u: f32, v: f32, aspect: f32, t: f32, stops: &[MeshStop]) -> Rgba 
 
     let shade = 1.0 - 0.72 * vignette(u, v);
     let light_sweep = 0.07 * (u * 8.0 - v * 5.2 + t).sin().max(0.0);
-    let grain = (hash_noise(u, v) - 0.5) * 0.018;
+    let grain = (hash_noise(u, v) - 0.5) * 0.006;
 
     Rgba {
         r: (r * shade + light_sweep + grain).clamp(0.0, 1.0),

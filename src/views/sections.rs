@@ -6,7 +6,7 @@ use crate::app_assets::{
     OVERVIEW_REVIEW_REQUESTS_ASSET,
 };
 use crate::review_queue::default_review_file;
-use crate::review_session::load_review_session;
+use crate::review_session::{load_review_session, location_label};
 use crate::state::*;
 use crate::theme::*;
 use crate::{github, notifications};
@@ -43,6 +43,8 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let workspace_error = s.workspace_error.clone();
     let first_open_tab = s.open_tabs.first().cloned();
     let overview_greeting_index = s.overview_greeting_index;
+    let workspace_syncing = s.workspace_syncing;
+    let review_comment_items = overview_review_comment_items(&s, &review_items);
 
     let welcome_greeting =
         overview_welcome_greeting(&viewer_name, is_auth, overview_greeting_index).to_string();
@@ -59,188 +61,731 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let state_for_authored = state.clone();
     let state_for_review_requests = state.clone();
     let state_for_items = state.clone();
-    let state_for_review_board = state.clone();
+    let state_for_strip_review_board = state.clone();
+    let state_for_strip_sync = state.clone();
+    let state_for_empty_sync = state.clone();
+    let state_for_comment_items = state.clone();
+    let show_empty_state = is_auth
+        && !workspace_loading
+        && workspace_error.is_none()
+        && review_items.is_empty()
+        && review_comment_items.is_empty();
 
     div()
         .p(px(28.0))
         .px(px(40.0))
         .flex()
         .flex_col()
+        .gap(px(18.0))
         .flex_grow()
         .min_h_0()
         .h_full()
         .id("overview-scroll")
         .overflow_y_scroll()
+        .child(overview_ambient_strip(
+            welcome_greeting,
+            workspace_syncing,
+            is_auth,
+            move |_, _, cx| {
+                activate_queue(
+                    &state_for_strip_review_board,
+                    SectionId::Reviews,
+                    "reviewRequested",
+                    cx,
+                );
+            },
+            move |_, window, cx| trigger_sync_workspace(&state_for_strip_sync, window, cx),
+        ))
         .child(
-            div().w_full().h_full().flex().child(
+            div()
+                .w_full()
+                .flex()
+                .flex_wrap()
+                .gap(px(12.0))
+                .child(overview_metric_card(
+                    OVERVIEW_OPEN_PULL_REQUESTS_ASSET,
+                    "Open Pull Requests",
+                    open_tab_count,
+                    first_open_tab.is_some(),
+                    {
+                        let state = state_for_open_pull_requests.clone();
+                        let summary = first_open_tab.clone();
+                        move |_, window, cx| {
+                            if let Some(summary) = summary.clone() {
+                                open_pull_request(&state, summary, window, cx);
+                            }
+                        }
+                    },
+                ))
+                .child(overview_metric_card(
+                    OVERVIEW_MY_PULL_REQUESTS_ASSET,
+                    "My Pull Requests",
+                    authored_count,
+                    is_auth,
+                    {
+                        let state = state_for_authored.clone();
+                        move |_, _, cx| {
+                            activate_queue(&state, SectionId::Pulls, "authored", cx);
+                        }
+                    },
+                ))
+                .child(overview_metric_card(
+                    OVERVIEW_REVIEW_REQUESTS_ASSET,
+                    "Review Requests",
+                    review_count,
+                    is_auth,
+                    {
+                        let state = state_for_review_requests.clone();
+                        move |_, _, cx| {
+                            activate_queue(&state, SectionId::Reviews, "reviewRequested", cx);
+                        }
+                    },
+                )),
+        )
+        .when(show_empty_state, |el| {
+            el.child(overview_empty_state_panel(move |_, window, cx| {
+                trigger_sync_workspace(&state_for_empty_sync, window, cx);
+            }))
+        })
+        .when(!show_empty_state, |el| {
+            el.child(
                 div()
                     .w_full()
-                    .h_full()
-                    .min_w_0()
                     .flex()
                     .flex_wrap()
                     .items_start()
-                    .gap(px(24.0))
+                    .gap(px(18.0))
+                    .child(div().flex_1().min_w(px(480.0)).child(
+                        overview_review_comment_briefing_panel(
+                            review_comment_items.clone(),
+                            workspace_loading,
+                            workspace_error.clone(),
+                            is_auth,
+                            state_for_comment_items.clone(),
+                        ),
+                    ))
                     .child(
                         div()
-                            .relative()
                             .flex_1()
-                            .h_full()
-                            .min_w(px(520.0))
-                            .min_h(px(620.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .p(px(48.0))
-                            .rounded(px(WELCOME_SHADER_RADIUS))
-                            .overflow_hidden()
-                            .child(render_welcome_shader())
-                            .child(
-                                div()
-                                    .relative()
-                                    .max_w(px(640.0))
-                                    .text_size(px(56.0))
-                                    .line_height(px(58.0))
-                                    .font_family(display_serif_font_family())
-                                    .font_weight(FontWeight::NORMAL)
-                                    .text_align(TextAlign::Center)
-                                    .text_color(hero_text_primary())
-                                    .child(welcome_greeting.clone()),
-                            ),
+                            .min_w(px(380.0))
+                            .child(overview_review_requests_panel(
+                                review_items,
+                                review_count,
+                                queue_copy,
+                                workspace_loading,
+                                workspace_error.clone(),
+                                is_auth,
+                                state_for_items.clone(),
+                            )),
+                    ),
+            )
+        })
+}
+
+#[derive(Clone)]
+struct OverviewReviewCommentItem {
+    summary: github::PullRequestSummary,
+    author_login: String,
+    location: String,
+    preview: String,
+    timestamp: String,
+    unread: bool,
+    is_resolved: bool,
+    is_outdated: bool,
+}
+
+fn overview_ambient_strip(
+    welcome_greeting: String,
+    workspace_syncing: bool,
+    is_auth: bool,
+    on_review_board: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+    on_sync: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .relative()
+        .w_full()
+        .h(px(112.0))
+        .rounded(px(WELCOME_SHADER_RADIUS))
+        .overflow_hidden()
+        .child(render_welcome_shader())
+        .child(
+            div()
+                .absolute()
+                .top(px(0.0))
+                .right(px(0.0))
+                .bottom(px(0.0))
+                .left(px(0.0))
+                .p(px(20.0))
+                .px(px(24.0))
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(18.0))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .font_family("Fira Code")
+                                .text_color(hero_text_primary())
+                                .child("REVIEW BRIEFING"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(30.0))
+                                .line_height(px(32.0))
+                                .font_family(display_serif_font_family())
+                                .font_weight(FontWeight::NORMAL)
+                                .text_color(hero_text_primary())
+                                .line_clamp(1)
+                                .child(welcome_greeting),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .flex_shrink_0()
+                        .when(is_auth, |el| {
+                            el.child(ambient_button("Review board", on_review_board))
+                        })
+                        .child(ambient_button(
+                            if workspace_syncing {
+                                "Syncing..."
+                            } else {
+                                "Refresh"
+                            },
+                            on_sync,
+                        )),
+                ),
+        )
+}
+
+fn ambient_button(
+    label: &str,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .px(px(13.0))
+        .py(px(7.0))
+        .rounded(radius_sm())
+        .bg(Rgba {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 0.14,
+        })
+        .border_1()
+        .border_color(Rgba {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 0.16,
+        })
+        .text_color(hero_text_primary())
+        .text_size(px(13.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .cursor_pointer()
+        .hover(|style| {
+            style.bg(Rgba {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 0.22,
+            })
+        })
+        .on_mouse_down(MouseButton::Left, on_click)
+        .child(label.to_string())
+}
+
+fn overview_metric_card(
+    icon_asset: &str,
+    label: &str,
+    count: i64,
+    interactive: bool,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .flex_1()
+        .min_w(px(190.0))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(14.0))
+        .p(px(14.0))
+        .px(px(16.0))
+        .rounded(radius())
+        .bg(bg_surface())
+        .border_1()
+        .border_color(border_muted())
+        .when(interactive, |el| {
+            el.cursor_pointer()
+                .hover(|style| style.bg(hover_bg()))
+                .on_mouse_down(MouseButton::Left, on_click)
+        })
+        .child(
+            div()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(7.0))
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .font_family("Fira Code")
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(fg_subtle())
+                        .child(label.to_uppercase()),
+                )
+                .child(
+                    div()
+                        .text_size(px(27.0))
+                        .line_height(px(29.0))
+                        .font_family(display_serif_font_family())
+                        .font_weight(FontWeight::NORMAL)
+                        .text_color(fg_emphasis())
+                        .child(count.to_string()),
+                ),
+        )
+        .child(
+            div()
+                .w(px(34.0))
+                .h(px(34.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .flex_shrink_0()
+                .rounded(radius())
+                .bg(bg_overlay())
+                .border_1()
+                .border_color(border_muted())
+                .child(
+                    svg()
+                        .path(icon_asset.to_string())
+                        .size(px(17.0))
+                        .text_color(fg_muted()),
+                ),
+        )
+}
+
+fn overview_empty_state_panel(
+    on_sync: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    panel().child(
+        div()
+            .p(px(28.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(20.0))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(eyebrow("All clear"))
+                    .child(
+                        div()
+                            .text_size(px(22.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(fg_emphasis())
+                            .child("No review work needs attention."),
                     )
                     .child(
                         div()
-                            .flex_1()
-                            .min_w(px(320.0))
-                            .max_w(px(380.0))
-                            .flex()
-                            .flex_col()
-                            .gap(px(16.0))
-                            .when(is_auth, |el| el.child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(8.0))
-                                    .flex_wrap()
-                                    .child(review_button("Open review board", {
-                                        let state = state_for_review_board.clone();
-                                        move |_, _, cx| {
-                                            activate_queue(
-                                                &state,
-                                                SectionId::Reviews,
-                                                "reviewRequested",
-                                                cx,
-                                            );
-                                        }
-                                    })),
-                            ))
-                            .child(stat_card(
-                                OVERVIEW_OPEN_PULL_REQUESTS_ASSET,
-                                "Open Pull Requests",
-                                open_tab_count,
-                                first_open_tab.is_some(),
-                                {
-                                    let state = state_for_open_pull_requests.clone();
-                                    let summary = first_open_tab.clone();
-                                    move |_, window, cx| {
-                                        if let Some(summary) = summary.clone() {
-                                            open_pull_request(&state, summary, window, cx);
-                                        }
-                                    }
-                                },
-                            ))
-                            .child(stat_card(
-                                OVERVIEW_MY_PULL_REQUESTS_ASSET,
-                                "My Pull Requests",
-                                authored_count,
-                                is_auth,
-                                {
-                                    let state = state_for_authored.clone();
-                                    move |_, _, cx| {
-                                        activate_queue(&state, SectionId::Pulls, "authored", cx);
-                                    }
-                                },
-                            ))
-                            .child(stat_card(
-                                OVERVIEW_REVIEW_REQUESTS_ASSET,
-                                "Review Requests",
-                                review_count,
-                                is_auth,
-                                {
-                                    let state = state_for_review_requests.clone();
-                                    move |_, _, cx| {
-                                        activate_queue(
-                                            &state,
-                                            SectionId::Reviews,
-                                            "reviewRequested",
-                                            cx,
-                                        );
-                                    }
-                                },
-                            ))
+                            .text_size(px(13.0))
+                            .line_height(px(20.0))
+                            .text_color(fg_muted())
                             .child(
-                                panel().child(
-                                    div()
-                                        .p(px(20.0))
-                                        .px(px(22.0))
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(16.0))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_col()
-                                                .gap(px(4.0))
-                                                .min_w_0()
-                                                .child(eyebrow("Needs your attention"))
-                                                .child(
-                                                    div()
-                                                        .text_size(px(18.0))
-                                                        .font_weight(FontWeight::SEMIBOLD)
-                                                        .text_color(fg_emphasis())
-                                                        .child("Recent Pull Requests"),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_size(px(13.0))
-                                                        .line_height(px(20.0))
-                                                        .text_color(fg_muted())
-                                                        .child(queue_copy),
-                                                ),
-                                        )
-                                        .when(workspace_loading, |el| {
-                                            el.child(panel_state_text(
-                                                "Loading review requests...",
-                                            ))
-                                        })
-                                        .when_some(workspace_error.clone(), |el, err| {
-                                            el.child(error_text(&err))
-                                        })
-                                        .when(
-                                            !workspace_loading
-                                                && workspace_error.is_none()
-                                                && review_items.is_empty(),
-                                            |el| {
-                                                el.child(panel_state_text(if is_auth {
-                                                    "No pull requests are currently requesting your review."
-                                                } else {
-                                                    "Authenticate with gh to populate the review queue."
-                                                }))
-                                            },
-                                        )
-                                        .child(div().flex().flex_col().gap(px(10.0)).children(
-                                            review_items.into_iter().map(|item| {
-                                                let state = state_for_items.clone();
-                                                pr_list_row(item, move |summary, window, cx| {
-                                                    open_pull_request(&state, summary, window, cx);
-                                                })
-                                            }),
-                                        )),
-                                ),
+                                "No unread review comments or review requests were found in the current workspace snapshot.",
                             ),
                     ),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .child(review_button("Refresh workspace", on_sync)),
             ),
+    )
+}
+
+fn overview_review_comment_briefing_panel(
+    items: Vec<OverviewReviewCommentItem>,
+    workspace_loading: bool,
+    workspace_error: Option<String>,
+    is_auth: bool,
+    state: Entity<AppState>,
+) -> impl IntoElement {
+    let has_unread = items.iter().any(|item| item.unread);
+    let copy = if workspace_loading {
+        "Checking the current review queue for new thread replies."
+    } else if workspace_error.is_some() {
+        "Workspace sync needs attention before the comment briefing can refresh."
+    } else if has_unread {
+        "Newest unread replies on review threads in your queue."
+    } else {
+        "Latest review-thread activity from the current review queue."
+    };
+
+    panel().child(
+        div()
+            .p(px(20.0))
+            .px(px(22.0))
+            .flex()
+            .flex_col()
+            .gap(px(16.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .min_w_0()
+                    .child(eyebrow("Newest comments"))
+                    .child(
+                        div()
+                            .text_size(px(18.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(fg_emphasis())
+                            .child("Review Comment Briefing"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .line_height(px(20.0))
+                            .text_color(fg_muted())
+                            .child(copy),
+                    ),
+            )
+            .when(workspace_loading, |el| {
+                el.child(panel_state_text("Loading review comments..."))
+            })
+            .when_some(workspace_error.clone(), |el, err| {
+                el.child(error_text(&err))
+            })
+            .when(
+                !workspace_loading && workspace_error.is_none() && items.is_empty(),
+                |el| {
+                    el.child(panel_state_text(if is_auth {
+                        "No new review comments are waiting in the current queue."
+                    } else {
+                        "Authenticate with gh to populate review comments."
+                    }))
+                },
+            )
+            .child(
+                div().flex().flex_col().gap(px(10.0)).children(
+                    items
+                        .into_iter()
+                        .map(|item| overview_review_comment_row(item, state.clone())),
+                ),
+            ),
+    )
+}
+
+fn overview_review_requests_panel(
+    review_items: Vec<github::PullRequestSummary>,
+    review_count: i64,
+    queue_copy: String,
+    workspace_loading: bool,
+    workspace_error: Option<String>,
+    is_auth: bool,
+    state: Entity<AppState>,
+) -> impl IntoElement {
+    let visible_count = review_items.len().min(5);
+    let remaining_count = review_count.saturating_sub(visible_count as i64);
+
+    panel().child(
+        div()
+            .p(px(20.0))
+            .px(px(22.0))
+            .flex()
+            .flex_col()
+            .gap(px(16.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .min_w_0()
+                    .child(eyebrow("Needs your attention"))
+                    .child(
+                        div()
+                            .text_size(px(18.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(fg_emphasis())
+                            .child("Review Requests"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .line_height(px(20.0))
+                            .text_color(fg_muted())
+                            .child(queue_copy),
+                    ),
+            )
+            .when(workspace_loading, |el| {
+                el.child(panel_state_text("Loading review requests..."))
+            })
+            .when_some(workspace_error.clone(), |el, err| {
+                el.child(error_text(&err))
+            })
+            .when(
+                !workspace_loading && workspace_error.is_none() && review_items.is_empty(),
+                |el| {
+                    el.child(panel_state_text(if is_auth {
+                        "No pull requests are currently requesting your review."
+                    } else {
+                        "Authenticate with gh to populate the review queue."
+                    }))
+                },
+            )
+            .child(div().flex().flex_col().gap(px(10.0)).children(
+                review_items.into_iter().take(5).map(|item| {
+                    let state = state.clone();
+                    pr_list_row(item, move |summary, window, cx| {
+                        open_pull_request(&state, summary, window, cx);
+                    })
+                }),
+            ))
+            .when(remaining_count > 0, |el| {
+                el.child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(fg_subtle())
+                        .child(format!("{remaining_count} more in the review board")),
+                )
+            }),
+    )
+}
+
+fn overview_review_comment_row(
+    item: OverviewReviewCommentItem,
+    state: Entity<AppState>,
+) -> impl IntoElement {
+    let summary = item.summary.clone();
+    let repo_ref = format!("{} #{}", summary.repository, summary.number);
+    let title = summary.title.clone();
+    let meta = format!(
+        "{} commented {}",
+        item.author_login,
+        format_relative_time(&item.timestamp)
+    );
+    let location = item.location.clone();
+    let preview = item.preview.clone();
+
+    div()
+        .w_full()
+        .p(px(14.0))
+        .rounded(radius_sm())
+        .bg(bg_overlay())
+        .border_1()
+        .border_color(border_muted())
+        .cursor_pointer()
+        .hover(|style| style.bg(hover_bg()).text_color(fg_emphasis()))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            open_pull_request(&state, summary.clone(), window, cx);
+        })
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_start()
+                        .justify_between()
+                        .gap(px(14.0))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap(px(4.0))
+                                .child(
+                                    div()
+                                        .text_size(px(10.0))
+                                        .font_family("Fira Code")
+                                        .text_color(fg_subtle())
+                                        .child(repo_ref),
+                                )
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(fg_emphasis())
+                                        .text_size(px(14.0))
+                                        .line_clamp(1)
+                                        .child(title),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(6.0))
+                                .flex_wrap()
+                                .justify_end()
+                                .when(item.unread, |el| {
+                                    el.child(pill_badge("new", accent(), accent_muted(), accent()))
+                                })
+                                .when(item.is_resolved, |el| el.child(subtle_pill("resolved")))
+                                .when(item.is_outdated, |el| el.child(subtle_pill("outdated"))),
+                        ),
+                )
+                .child(div().text_size(px(12.0)).text_color(fg_muted()).child(meta))
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .line_height(px(19.0))
+                        .text_color(fg_default())
+                        .line_clamp(2)
+                        .child(preview),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .font_family("Fira Code")
+                        .text_size(px(10.0))
+                        .text_color(fg_subtle())
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .overflow_x_hidden()
+                        .child(location),
+                ),
         )
+}
+
+fn overview_review_comment_items(
+    state: &AppState,
+    review_items: &[github::PullRequestSummary],
+) -> Vec<OverviewReviewCommentItem> {
+    let mut summaries = BTreeMap::new();
+    for item in review_items {
+        summaries.insert(pr_key(&item.repository, item.number), item.clone());
+    }
+
+    let viewer_login = state
+        .workspace
+        .as_ref()
+        .and_then(|workspace| workspace.viewer.as_ref())
+        .map(|viewer| viewer.login.as_str())
+        .unwrap_or_default();
+    let mut unread_items = Vec::new();
+    let mut latest_items = Vec::new();
+
+    for (key, detail_state) in &state.detail_states {
+        let Some(summary) = summaries.get(key) else {
+            continue;
+        };
+        let Some(detail) = detail_state
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.detail.as_ref())
+        else {
+            continue;
+        };
+
+        for thread in &detail.review_threads {
+            let mut latest_foreign_comment = None;
+            for comment in &thread.comments {
+                let unread = state.unread_review_comment_ids.contains(&comment.id);
+                if unread {
+                    unread_items.push(overview_comment_item_for_comment(
+                        summary, thread, comment, true,
+                    ));
+                }
+
+                if !thread.is_resolved
+                    && !comment.body.trim().is_empty()
+                    && (viewer_login.is_empty() || comment.author_login != viewer_login)
+                {
+                    latest_foreign_comment = Some(comment);
+                }
+            }
+
+            if unread_items.is_empty() {
+                if let Some(comment) = latest_foreign_comment {
+                    latest_items.push(overview_comment_item_for_comment(
+                        summary, thread, comment, false,
+                    ));
+                }
+            }
+        }
+    }
+
+    let mut items = if unread_items.is_empty() {
+        latest_items
+    } else {
+        unread_items
+    };
+    items.sort_by(|left, right| {
+        right
+            .timestamp
+            .cmp(&left.timestamp)
+            .then_with(|| left.location.cmp(&right.location))
+    });
+    items.truncate(5);
+    items
+}
+
+fn overview_comment_item_for_comment(
+    summary: &github::PullRequestSummary,
+    thread: &github::PullRequestReviewThread,
+    comment: &github::PullRequestReviewComment,
+    unread: bool,
+) -> OverviewReviewCommentItem {
+    OverviewReviewCommentItem {
+        summary: summary.clone(),
+        author_login: comment.author_login.clone(),
+        location: overview_comment_location(thread, comment),
+        preview: summarize_overview_comment(&comment.body),
+        timestamp: comment
+            .published_at
+            .clone()
+            .unwrap_or_else(|| comment.updated_at.clone()),
+        unread,
+        is_resolved: thread.is_resolved,
+        is_outdated: thread.is_outdated,
+    }
+}
+
+fn overview_comment_location(
+    thread: &github::PullRequestReviewThread,
+    comment: &github::PullRequestReviewComment,
+) -> String {
+    let path = if comment.path.trim().is_empty() {
+        thread.path.as_str()
+    } else {
+        comment.path.as_str()
+    };
+    let line = comment
+        .line
+        .or(comment.original_line)
+        .or(thread.line)
+        .or(thread.original_line)
+        .and_then(|line| usize::try_from(line).ok());
+
+    location_label(path, line)
+}
+
+fn summarize_overview_comment(text: &str) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return "No comment body.".to_string();
+    }
+
+    let limit = 180usize;
+    let mut preview = collapsed.chars().take(limit).collect::<String>();
+    if collapsed.chars().count() > limit {
+        preview.push_str("...");
+    }
+    preview
 }
 
 fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
@@ -735,76 +1280,6 @@ pub fn meta_row(label: &str, value: &str) -> impl IntoElement {
                 .text_size(px(11.0))
                 .whitespace_normal()
                 .child(value.to_string()),
-        )
-}
-
-fn stat_card(
-    icon_asset: &str,
-    label: &str,
-    count: i64,
-    interactive: bool,
-    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    div()
-        .w_full()
-        .flex()
-        .items_start()
-        .justify_between()
-        .gap(px(18.0))
-        .p(px(18.0))
-        .px(px(18.0))
-        .min_h(px(110.0))
-        .rounded(px(22.0))
-        .bg(bg_surface())
-        .border_1()
-        .border_color(border_muted())
-        .when(interactive, |el| {
-            el.cursor_pointer()
-                .hover(|style| style.bg(hover_bg()))
-                .on_mouse_down(MouseButton::Left, on_click)
-        })
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(10.0))
-                .min_w_0()
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .font_family("Fira Code")
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(fg_subtle())
-                        .child(label.to_uppercase()),
-                )
-                .child(
-                    div()
-                        .text_size(px(34.0))
-                        .line_height(px(36.0))
-                        .font_family(display_serif_font_family())
-                        .font_weight(FontWeight::NORMAL)
-                        .text_color(fg_emphasis())
-                        .child(count.to_string()),
-                ),
-        )
-        .child(
-            div()
-                .w(px(42.0))
-                .h(px(42.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .flex_shrink_0()
-                .rounded(px(16.0))
-                .bg(bg_overlay())
-                .border_1()
-                .border_color(border_muted())
-                .child(
-                    svg()
-                        .path(icon_asset.to_string())
-                        .size(px(20.0))
-                        .text_color(fg_muted()),
-                ),
         )
 }
 

@@ -20,6 +20,7 @@ pub struct WorkspaceSyncOutcome {
     pub workspace: WorkspaceSnapshot,
     pub notifications: Vec<SystemNotification>,
     pub unread_review_comment_ids: BTreeSet<String>,
+    pub review_detail_snapshots: Vec<github::PullRequestDetailSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,7 +83,7 @@ pub fn sync_workspace_with_notifications(
     let previous = cache
         .get::<PersistedNotificationState>(NOTIFICATION_STATE_CACHE_KEY)?
         .map(|document| document.value);
-    let input = build_notification_input(cache, &workspace);
+    let (input, review_detail_snapshots) = build_notification_input(cache, &workspace);
     let evaluation = evaluate_notifications(&input, previous.as_ref());
     cache.put(
         NOTIFICATION_STATE_CACHE_KEY,
@@ -94,6 +95,7 @@ pub fn sync_workspace_with_notifications(
         workspace,
         notifications: evaluation.notifications,
         unread_review_comment_ids: load_unread_review_comment_ids(cache)?,
+        review_detail_snapshots,
     })
 }
 
@@ -147,7 +149,7 @@ pub fn deliver_system_notifications(notifications: &[SystemNotification]) {
 fn build_notification_input(
     cache: &CacheStore,
     workspace: &WorkspaceSnapshot,
-) -> NotificationInput {
+) -> (NotificationInput, Vec<github::PullRequestDetailSnapshot>) {
     let review_requested_prs = review_requested_pull_requests(workspace);
     let viewer_login = workspace
         .viewer
@@ -157,44 +159,44 @@ fn build_notification_input(
         .unwrap_or_default()
         .to_string();
 
-    let tracked_threads = review_requested_prs
-        .iter()
-        .flat_map(|pull_request| {
-            match github::sync_pull_request_detail(
-                cache,
-                &pull_request.repository,
-                pull_request.number,
-            ) {
-                Ok(snapshot) => {
-                    if let Some(detail) = snapshot.detail.as_ref() {
-                        if let Err(error) =
-                            record_review_comments(cache, detail, Some(&viewer_login))
-                        {
-                            eprintln!(
-                                "Failed to record review comment read state for {}#{}: {error}",
-                                pull_request.repository, pull_request.number
-                            );
-                        }
-                        extract_tracked_threads(detail, pull_request, &viewer_login)
-                    } else {
-                        Vec::new()
-                    }
-                }
-                Err(error) => {
-                    eprintln!(
-                        "Failed to load review threads for {}#{} notifications: {error}",
-                        pull_request.repository, pull_request.number
-                    );
-                    Vec::new()
-                }
-            }
-        })
-        .collect();
+    let mut tracked_threads = Vec::new();
+    let mut review_detail_snapshots = Vec::new();
 
-    NotificationInput {
-        review_requested_prs,
-        tracked_threads,
+    for pull_request in &review_requested_prs {
+        match github::sync_pull_request_detail(cache, &pull_request.repository, pull_request.number)
+        {
+            Ok(snapshot) => {
+                if let Some(detail) = snapshot.detail.as_ref() {
+                    if let Err(error) = record_review_comments(cache, detail, Some(&viewer_login)) {
+                        eprintln!(
+                            "Failed to record review comment read state for {}#{}: {error}",
+                            pull_request.repository, pull_request.number
+                        );
+                    }
+                    tracked_threads.extend(extract_tracked_threads(
+                        detail,
+                        pull_request,
+                        &viewer_login,
+                    ));
+                }
+                review_detail_snapshots.push(snapshot);
+            }
+            Err(error) => {
+                eprintln!(
+                    "Failed to load review threads for {}#{} notifications: {error}",
+                    pull_request.repository, pull_request.number
+                );
+            }
+        }
     }
+
+    (
+        NotificationInput {
+            review_requested_prs,
+            tracked_threads,
+        },
+        review_detail_snapshots,
+    )
 }
 
 fn record_review_comments(
