@@ -5,8 +5,8 @@ use gpui::*;
 
 use crate::{
     code_display::{
-        build_prepared_file_lsp_context, render_prepared_file_with_line_numbers,
-        render_prepared_file_with_line_numbers_and_diffs, PreparedFileLineDiffKind,
+        build_prepared_file_lsp_context, render_virtualized_prepared_file_with_line_numbers,
+        render_virtualized_prepared_file_with_line_numbers_and_diffs, PreparedFileLineDiffKind,
         PreparedFileLineDiffs,
     },
     diff::{DiffLineKind, ParsedDiffFile},
@@ -110,14 +110,20 @@ pub fn render_source_browser(
 
     let lsp_context =
         build_prepared_file_lsp_context(state, target.path.as_str(), Some(&prepared_file), cx);
+    let list_state = prepare_source_browser_list_state(state, target.path.as_str(), cx);
     let full_file = if let Some(parsed) = parsed {
-        render_prepared_file_with_line_numbers_and_diffs(
+        render_virtualized_prepared_file_with_line_numbers_and_diffs(
             &prepared_file,
             lsp_context.as_ref(),
             build_full_file_diff_lines(parsed),
+            list_state,
         )
     } else {
-        render_prepared_file_with_line_numbers(&prepared_file, lsp_context.as_ref())
+        render_virtualized_prepared_file_with_line_numbers(
+            &prepared_file,
+            lsp_context.as_ref(),
+            list_state,
+        )
     };
 
     shell
@@ -126,14 +132,36 @@ pub fn render_source_browser(
                 .flex_grow()
                 .min_h_0()
                 .id("source-browser-scroll")
-                .overflow_y_scroll()
                 .p(px(18.0))
                 .flex()
                 .flex_col()
                 .gap(px(16.0))
-                .child(source_panel("Full file").child(full_file)),
+                .child(
+                    source_panel("Full file")
+                        .flex_grow()
+                        .min_h_0()
+                        .child(full_file),
+                ),
         )
         .into_any_element()
+}
+
+fn prepare_source_browser_list_state(
+    state: &Entity<AppState>,
+    file_path: &str,
+    cx: &App,
+) -> ListState {
+    let app_state = state.read(cx);
+    let state_key = format!(
+        "source:{}:{file_path}",
+        app_state.active_pr_key.as_deref().unwrap_or("detached")
+    );
+    app_state
+        .source_browser_list_states
+        .borrow_mut()
+        .entry(state_key)
+        .or_insert_with(|| ListState::new(0, ListAlignment::Top, px(400.0)))
+        .clone()
 }
 
 fn build_full_file_diff_lines(parsed: &ParsedDiffFile) -> PreparedFileLineDiffs {

@@ -432,6 +432,7 @@ pub struct AppState {
     pub review_file_tree_cache: RefCell<std::collections::HashMap<String, CachedReviewFileTree>>,
     pub review_file_tree_list_states: RefCell<std::collections::HashMap<String, ListState>>,
     pub review_nav_list_states: RefCell<std::collections::HashMap<String, ListState>>,
+    pub source_browser_list_states: RefCell<std::collections::HashMap<String, ListState>>,
     // Review form
     pub review_action: ReviewAction,
     pub review_body: String,
@@ -521,6 +522,7 @@ impl AppState {
             review_file_tree_cache: RefCell::new(std::collections::HashMap::new()),
             review_file_tree_list_states: RefCell::new(std::collections::HashMap::new()),
             review_nav_list_states: RefCell::new(std::collections::HashMap::new()),
+            source_browser_list_states: RefCell::new(std::collections::HashMap::new()),
             review_action: ReviewAction::Comment,
             review_body: String::new(),
             review_editor_active: false,

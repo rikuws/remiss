@@ -235,6 +235,33 @@ pub fn render_prepared_file_with_line_numbers_and_diffs(
     )
 }
 
+pub fn render_virtualized_prepared_file_with_line_numbers(
+    prepared_file: &PreparedFileContent,
+    lsp_context: Option<&PreparedFileLspContext>,
+    list_state: ListState,
+) -> AnyElement {
+    render_virtualized_prepared_code_block_lines(
+        prepared_file.lines.clone(),
+        lsp_context.cloned(),
+        None,
+        list_state,
+    )
+}
+
+pub fn render_virtualized_prepared_file_with_line_numbers_and_diffs(
+    prepared_file: &PreparedFileContent,
+    lsp_context: Option<&PreparedFileLspContext>,
+    diff_lines: PreparedFileLineDiffs,
+    list_state: ListState,
+) -> AnyElement {
+    render_virtualized_prepared_code_block_lines(
+        prepared_file.lines.clone(),
+        lsp_context.cloned(),
+        Some(diff_lines),
+        list_state,
+    )
+}
+
 fn numbered_highlighted_code_lines(
     source_hint: &str,
     text: &str,
@@ -295,6 +322,45 @@ fn render_prepared_code_block_lines(
         .into_any_element()
 }
 
+fn render_virtualized_prepared_code_block_lines(
+    lines: Arc<Vec<PreparedFileLine>>,
+    lsp_context: Option<PreparedFileLspContext>,
+    diff_lines: Option<PreparedFileLineDiffs>,
+    list_state: ListState,
+) -> AnyElement {
+    let line_count = lines.len();
+    if list_state.item_count() != line_count {
+        list_state.reset(line_count);
+    }
+
+    div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .flex_grow()
+        .min_h_0()
+        .rounded(radius())
+        .bg(bg_inset())
+        .overflow_hidden()
+        .child(
+            div()
+                .px(px(16.0))
+                .py(px(12.0))
+                .flex()
+                .flex_col()
+                .flex_grow()
+                .min_h_0()
+                .child(render_virtualized_prepared_code_lines(
+                    lines,
+                    lsp_context,
+                    diff_lines,
+                    list_state,
+                )),
+        )
+        .into_any_element()
+}
+
 fn render_prepared_code_lines(
     lines: Vec<PreparedFileLine>,
     lsp_context: Option<&PreparedFileLspContext>,
@@ -337,6 +403,63 @@ fn render_prepared_code_lines(
                         show_diff_markers,
                     )
                 })),
+        )
+}
+
+fn render_virtualized_prepared_code_lines(
+    lines: Arc<Vec<PreparedFileLine>>,
+    lsp_context: Option<PreparedFileLspContext>,
+    diff_lines: Option<PreparedFileLineDiffs>,
+    list_state: ListState,
+) -> impl IntoElement {
+    let block_id = CODE_BLOCK_ID.fetch_add(1, Ordering::Relaxed);
+    let show_diff_markers = diff_lines.is_some();
+
+    div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .flex_grow()
+        .min_h_0()
+        .id(ElementId::Name(
+            format!("prepared-code-block-{block_id}").into(),
+        ))
+        .whitespace_nowrap()
+        .font_family("Fira Code")
+        .text_size(px(12.0))
+        .text_color(fg_default())
+        .overflow_x_scroll()
+        .child(
+            list(list_state, move |ix, _window, _cx| {
+                let Some(line) = lines.get(ix).cloned() else {
+                    return div().into_any_element();
+                };
+
+                let line_lsp_context =
+                    lsp_context
+                        .as_ref()
+                        .map(|context| PreparedFileLineLspContext {
+                            file: context.clone(),
+                            line_number: line.line_number,
+                        });
+                let diff_kind = diff_lines
+                    .as_ref()
+                    .and_then(|diff_lines| diff_lines.get(&line.line_number))
+                    .copied();
+
+                render_prepared_code_line_with_diff(
+                    block_id,
+                    line,
+                    line_lsp_context,
+                    diff_kind,
+                    show_diff_markers,
+                )
+                .into_any_element()
+            })
+            .with_sizing_behavior(ListSizingBehavior::Auto)
+            .flex_grow()
+            .min_h_0(),
         )
 }
 
