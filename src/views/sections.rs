@@ -2052,8 +2052,6 @@ pub fn open_pull_request(
         s.review_message = None;
         s.review_success = false;
         s.pr_header_compact = false;
-        s.active_tour_outline_id = "overview".to_string();
-        s.collapsed_tour_panels.clear();
 
         s.detail_states.entry(key.clone()).or_default();
         s.apply_review_session_document(&key, cached_review_session.clone());

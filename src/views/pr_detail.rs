@@ -11,16 +11,17 @@ use crate::github::{
 };
 use crate::markdown::render_markdown;
 use crate::notifications;
+use crate::review_session::ReviewCenterMode;
 use crate::selectable_text::{AppTextFieldKind, AppTextInput, SelectableText};
 use crate::state::*;
 use crate::theme::*;
 
+use super::ai_tour::refresh_active_tour_flow;
 use super::diff_view::{enter_files_surface, render_files_view};
 use super::sections::{
     badge, error_text, eyebrow, format_relative_time, ghost_button, nested_panel, panel_state_text,
     review_button, success_text, user_avatar,
 };
-use super::tour_view::{enter_tour_surface, refresh_active_tour_flow, render_tour_view};
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct ReviewStatusSummary {
@@ -363,10 +364,6 @@ pub fn render_pr_workspace(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
             detail.is_some() && surface == PullRequestSurface::Files,
             |el| el.child(render_files_view(state, cx)),
         )
-        .when(
-            detail.is_some() && surface == PullRequestSurface::Tour,
-            |el| el.child(render_tour_view(state, cx)),
-        )
         .into_any_element()
 }
 
@@ -612,9 +609,7 @@ fn render_pr_surface_tabs(
             let target_surface = *surface_id;
             let state = state_for_surface.clone();
             surface_tab(surface_id.label(), is_active, move |_, window, cx| {
-                if target_surface == PullRequestSurface::Tour {
-                    enter_tour_surface(&state, window, cx);
-                } else if target_surface == PullRequestSurface::Files {
+                if target_surface == PullRequestSurface::Files {
                     enter_files_surface(&state, window, cx);
                 } else {
                     state.update(cx, |st, cx| {
@@ -2797,8 +2792,11 @@ fn trigger_sync_pr(
 
             let should_refresh_tour = model
                 .read_with(cx, |s, _| {
-                    s.active_surface == PullRequestSurface::Tour
+                    s.active_surface == PullRequestSurface::Files
                         && s.active_pr_key.as_deref() == Some(&detail_key)
+                        && s.active_review_session()
+                            .map(|session| session.center_mode == ReviewCenterMode::AiTour)
+                            .unwrap_or(false)
                 })
                 .ok()
                 .unwrap_or(false);

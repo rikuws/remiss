@@ -3,14 +3,19 @@ use std::{collections::BTreeSet, path::PathBuf, sync::Arc, time::Duration};
 use gpui::prelude::*;
 use gpui::*;
 
-use crate::app_assets::{SIDEBAR_COLLAPSE_ASSET, SIDEBAR_EXPAND_ASSET};
+use crate::app_assets::{
+    SIDEBAR_COLLAPSE_ASSET, SIDEBAR_EXPAND_ASSET, TOUR_API_IO_ASSET, TOUR_AUTH_SECURITY_ASSET,
+    TOUR_CONFIG_ASSET, TOUR_DATA_STATE_ASSET, TOUR_DOCS_ASSET, TOUR_INFRA_ASSET, TOUR_OTHER_ASSET,
+    TOUR_PERFORMANCE_ASSET, TOUR_REFACTOR_ASSET, TOUR_RELIABILITY_ASSET, TOUR_TESTS_ASSET,
+    TOUR_UI_UX_ASSET,
+};
 use crate::code_display::{
     build_interactive_code_tokens, build_lsp_hover_tooltip_view, code_text_runs,
     render_highlighted_code_block, render_highlighted_code_content, InteractiveCodeToken,
 };
 use crate::code_tour::{
     line_matches_diff_anchor, thread_matches_diff_anchor, CodeTourProvider, CodeTourProviderStatus,
-    DiffAnchor, GeneratedCodeTour, TourSection, TourStep,
+    DiffAnchor, GeneratedCodeTour, TourSection, TourSectionCategory, TourSectionPriority, TourStep,
 };
 use crate::diff::{
     build_diff_render_rows, find_parsed_diff_file, find_parsed_diff_file_with_index, DiffLineKind,
@@ -45,11 +50,11 @@ use crate::syntax::{self, SyntaxSpan};
 use crate::theme::*;
 use crate::{github, notifications};
 
+use super::ai_tour::{refresh_active_tour, trigger_generate_tour};
 use super::sections::{
     badge, badge_success, error_text, eyebrow, ghost_button, nested_panel, panel_state_text,
     review_button, success_text, user_avatar,
 };
-use super::tour_view::{refresh_active_tour, trigger_generate_tour};
 
 pub fn enter_files_surface(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
     state.update(cx, |s, cx| {
@@ -3374,7 +3379,9 @@ fn render_ai_tour_view(
         Some(tour) => {
             let section_count = tour.sections.len();
             let mut items = Vec::new();
-            items.push(AiTourContentItem::Header);
+            if section_count > 0 {
+                items.push(AiTourContentItem::SemanticOverview);
+            }
             if tour_generating || tour_loading || provider_loading {
                 items.push(AiTourContentItem::Progress);
             }
@@ -3391,12 +3398,23 @@ fn render_ai_tour_view(
             if ai_tour_section_list_state.item_count() != items.len() {
                 ai_tour_section_list_state.reset(items.len());
             }
+            let section_targets = items
+                .iter()
+                .enumerate()
+                .filter_map(|(item_ix, item)| match item {
+                    AiTourContentItem::Section(section_ix) => Some((*section_ix, item_ix)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
 
             let tour = Arc::new(tour);
             let detail = Arc::new(detail.clone());
             let state_for_sections = state.clone();
             let tour_for_sections = tour.clone();
             let detail_for_sections = detail.clone();
+            let list_state_for_overview = ai_tour_section_list_state.clone();
+            let tour_for_overview = tour.clone();
+            let section_targets_for_overview = Arc::new(section_targets);
             let items = Arc::new(items);
 
             shell
@@ -3404,16 +3422,18 @@ fn render_ai_tour_view(
                     list(
                         ai_tour_section_list_state.clone(),
                         move |ix, _window, cx| match items[ix] {
-                            AiTourContentItem::Header => div()
-                                .pt(px(18.0))
+                            AiTourContentItem::SemanticOverview => div()
+                                .when(ix == 0, |el| el.pt(px(18.0)))
                                 .px(px(18.0))
                                 .pb(px(14.0))
-                                .child(render_ai_tour_header(
-                                    &tour,
+                                .child(render_ai_tour_semantic_overview(
+                                    tour_for_overview.as_ref(),
                                     provider,
                                     provider_status.as_ref(),
                                     local_repo_loading,
                                     &generate_label,
+                                    list_state_for_overview.clone(),
+                                    section_targets_for_overview.clone(),
                                     {
                                         let state = state_for_generate.clone();
                                         move |_, window, cx| {
@@ -3424,6 +3444,7 @@ fn render_ai_tour_view(
                                 .into_any_element(),
                             AiTourContentItem::Pending => div().into_any_element(),
                             AiTourContentItem::Progress => div()
+                                .when(ix == 0, |el| el.pt(px(18.0)))
                                 .px(px(18.0))
                                 .pb(px(14.0))
                                 .child(render_ai_tour_progress_panel(
@@ -3436,6 +3457,7 @@ fn render_ai_tour_view(
                                 ))
                                 .into_any_element(),
                             AiTourContentItem::StatusMessages => div()
+                                .when(ix == 0, |el| el.pt(px(18.0)))
                                 .px(px(18.0))
                                 .pb(px(14.0))
                                 .child(render_ai_tour_status_messages(
@@ -3447,6 +3469,7 @@ fn render_ai_tour_view(
                                 ))
                                 .into_any_element(),
                             AiTourContentItem::Empty => div()
+                                .when(ix == 0, |el| el.pt(px(18.0)))
                                 .px(px(18.0))
                                 .pb(px(14.0))
                                 .child(nested_panel().child(panel_state_text(
@@ -3546,7 +3569,7 @@ fn render_ai_tour_view(
 
 #[derive(Clone, Copy)]
 enum AiTourContentItem {
-    Header,
+    SemanticOverview,
     Pending,
     Progress,
     StatusMessages,
@@ -3570,107 +3593,6 @@ fn ai_tour_generate_label(
     } else {
         format!("Generate with {}", provider.label())
     }
-}
-
-fn render_ai_tour_header(
-    tour: &GeneratedCodeTour,
-    provider: CodeTourProvider,
-    provider_status: Option<&CodeTourProviderStatus>,
-    local_repo_loading: bool,
-    generate_label: &str,
-    on_generate: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    nested_panel()
-        .child(
-            div()
-                .flex()
-                .items_start()
-                .justify_between()
-                .gap(px(16.0))
-                .flex_wrap()
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        .min_w_0()
-                        .child(eyebrow("AI tour"))
-                        .child(
-                            div()
-                                .text_size(px(20.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(fg_emphasis())
-                                .child("Guided review"),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(13.0))
-                                .text_color(fg_default())
-                                .max_w(px(760.0))
-                                .child(SelectableText::new(
-                                    "ai-tour-summary",
-                                    tour.summary.clone(),
-                                )),
-                        )
-                        .when(!tour.review_focus.trim().is_empty(), |el| {
-                            el.child(div().text_size(px(12.0)).text_color(fg_muted()).child(
-                                SelectableText::new(
-                                    "ai-tour-review-focus",
-                                    tour.review_focus.clone(),
-                                ),
-                            ))
-                        }),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_end()
-                        .gap(px(8.0))
-                        .flex_wrap()
-                        .child(badge(provider.label()))
-                        .when_some(provider_status, |el, status| {
-                            el.child(badge(ai_tour_provider_status_label(status)))
-                        })
-                        .when(local_repo_loading, |el| {
-                            el.child(badge("Preparing checkout"))
-                        })
-                        .child(review_button(generate_label, on_generate)),
-                ),
-        )
-        .when(
-            !tour.open_questions.is_empty() || !tour.warnings.is_empty(),
-            |el| {
-                el.child(
-                    div()
-                        .mt(px(14.0))
-                        .pt(px(14.0))
-                        .border_t(px(1.0))
-                        .border_color(border_muted())
-                        .flex()
-                        .gap(px(8.0))
-                        .flex_wrap()
-                        .when(!tour.open_questions.is_empty(), |el| {
-                            el.child(badge(&format!(
-                                "{} open question{}",
-                                tour.open_questions.len(),
-                                if tour.open_questions.len() == 1 {
-                                    ""
-                                } else {
-                                    "s"
-                                }
-                            )))
-                        })
-                        .when(!tour.warnings.is_empty(), |el| {
-                            el.child(badge(&format!(
-                                "{} warning{}",
-                                tour.warnings.len(),
-                                if tour.warnings.len() == 1 { "" } else { "s" }
-                            )))
-                        }),
-                )
-            },
-        )
 }
 
 fn ai_tour_provider_status_label(status: &CodeTourProviderStatus) -> &'static str {
@@ -3847,6 +3769,380 @@ fn render_ai_tour_status_messages(
         })
 }
 
+fn render_ai_tour_semantic_overview(
+    tour: &GeneratedCodeTour,
+    provider: CodeTourProvider,
+    provider_status: Option<&CodeTourProviderStatus>,
+    local_repo_loading: bool,
+    generate_label: &str,
+    list_state: ListState,
+    section_targets: Arc<Vec<(usize, usize)>>,
+    on_generate: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    nested_panel()
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .justify_between()
+                .gap(px(16.0))
+                .flex_wrap()
+                .mb(px(12.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.0))
+                        .child(eyebrow("Semantic groups"))
+                        .child(
+                            div()
+                                .text_size(px(18.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(fg_emphasis())
+                                .child("Review map"),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .gap(px(8.0))
+                        .flex_wrap()
+                        .child(badge(&format!(
+                            "{} group{}",
+                            tour.sections.len(),
+                            if tour.sections.len() == 1 { "" } else { "s" }
+                        )))
+                        .when(!tour.open_questions.is_empty(), |el| {
+                            el.child(badge(&format!(
+                                "{} open question{}",
+                                tour.open_questions.len(),
+                                if tour.open_questions.len() == 1 {
+                                    ""
+                                } else {
+                                    "s"
+                                }
+                            )))
+                        })
+                        .when(!tour.warnings.is_empty(), |el| {
+                            el.child(badge(&format!(
+                                "{} warning{}",
+                                tour.warnings.len(),
+                                if tour.warnings.len() == 1 { "" } else { "s" }
+                            )))
+                        })
+                        .child(badge(provider.label()))
+                        .when_some(provider_status, |el, status| {
+                            el.child(badge(ai_tour_provider_status_label(status)))
+                        })
+                        .when(local_repo_loading, |el| {
+                            el.child(badge("Preparing checkout"))
+                        })
+                        .child(review_button(generate_label, on_generate)),
+                ),
+        )
+        .child(
+            div()
+                .border_1()
+                .border_color(border_muted())
+                .rounded(radius_sm())
+                .overflow_hidden()
+                .children(
+                    tour.sections
+                        .iter()
+                        .enumerate()
+                        .map(|(section_ix, section)| {
+                            render_ai_tour_semantic_overview_row(
+                                tour,
+                                section,
+                                section_ix,
+                                section_ix > 0,
+                                list_state.clone(),
+                                section_targets.clone(),
+                            )
+                        }),
+                ),
+        )
+}
+
+fn render_ai_tour_semantic_overview_row(
+    tour: &GeneratedCodeTour,
+    section: &TourSection,
+    section_ix: usize,
+    show_divider: bool,
+    list_state: ListState,
+    section_targets: Arc<Vec<(usize, usize)>>,
+) -> impl IntoElement {
+    let metrics = ai_tour_section_metrics(tour, section);
+    let target_index = section_targets
+        .iter()
+        .find(|(candidate_ix, _)| *candidate_ix == section_ix)
+        .map(|(_, item_ix)| *item_ix)
+        .unwrap_or(0);
+
+    div()
+        .min_h(px(64.0))
+        .px(px(12.0))
+        .py(px(10.0))
+        .bg(bg_surface())
+        .when(show_divider, |el| {
+            el.border_t(px(1.0)).border_color(border_muted())
+        })
+        .cursor_pointer()
+        .hover(|style| style.bg(hover_bg()))
+        .on_mouse_down(MouseButton::Left, move |_, _, _| {
+            list_state.scroll_to(ListOffset {
+                item_ix: target_index,
+                offset_in_item: px(0.0),
+            });
+        })
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(12.0))
+                .min_w_0()
+                .child(render_ai_tour_category_icon(section.category, 34.0, 17.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.0))
+                        .min_w_0()
+                        .flex_1()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .text_size(px(13.0))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(fg_emphasis())
+                                        .min_w_0()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .overflow_x_hidden()
+                                        .child(section.title.clone()),
+                                )
+                                .child(render_ai_tour_priority_chip(section.priority)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(fg_muted())
+                                .line_clamp(1)
+                                .child(section.summary.clone()),
+                        ),
+                )
+                .child(render_ai_tour_section_metrics(metrics)),
+        )
+}
+
+fn render_ai_tour_section_metrics(metrics: AiTourSectionMetrics) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_end()
+        .gap(px(6.0))
+        .flex_wrap()
+        .max_w(px(280.0))
+        .child(ai_tour_metric_chip(&format!(
+            "{} file{}",
+            metrics.file_count,
+            if metrics.file_count == 1 { "" } else { "s" }
+        )))
+        .child(ai_tour_metric_chip(&format!(
+            "{} thread{}",
+            metrics.unresolved_thread_count,
+            if metrics.unresolved_thread_count == 1 {
+                ""
+            } else {
+                "s"
+            }
+        )))
+        .child(ai_tour_metric_chip(&format!(
+            "+{} / -{}",
+            metrics.additions, metrics.deletions
+        )))
+}
+
+fn render_ai_tour_category_icon(
+    category: TourSectionCategory,
+    tile_size: f32,
+    icon_size: f32,
+) -> impl IntoElement {
+    div()
+        .w(px(tile_size))
+        .h(px(tile_size))
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(ai_tour_category_border(category))
+        .bg(ai_tour_category_bg(category))
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .child(
+            svg()
+                .path(ai_tour_category_icon_asset(category).to_string())
+                .size(px(icon_size))
+                .text_color(ai_tour_category_fg(category)),
+        )
+}
+
+fn render_ai_tour_priority_chip(priority: TourSectionPriority) -> impl IntoElement {
+    div()
+        .px(px(7.0))
+        .py(px(2.0))
+        .rounded(px(999.0))
+        .bg(ai_tour_priority_bg(priority))
+        .border_1()
+        .border_color(ai_tour_priority_border(priority))
+        .flex_shrink_0()
+        .text_size(px(10.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .font_family("Fira Code")
+        .text_color(ai_tour_priority_fg(priority))
+        .child(priority.label())
+}
+
+fn ai_tour_metric_chip(text: &str) -> impl IntoElement {
+    div()
+        .px(px(7.0))
+        .py(px(2.0))
+        .rounded(px(999.0))
+        .bg(bg_subtle())
+        .border_1()
+        .border_color(border_muted())
+        .text_size(px(10.0))
+        .font_family("Fira Code")
+        .text_color(fg_muted())
+        .whitespace_nowrap()
+        .child(text.to_string())
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct AiTourSectionMetrics {
+    file_count: usize,
+    additions: i64,
+    deletions: i64,
+    unresolved_thread_count: i64,
+}
+
+fn ai_tour_section_metrics(
+    tour: &GeneratedCodeTour,
+    section: &TourSection,
+) -> AiTourSectionMetrics {
+    let mut metrics = AiTourSectionMetrics::default();
+
+    for step_id in &section.step_ids {
+        if let Some(step) = tour.steps.iter().find(|step| step.id == *step_id) {
+            metrics.file_count += 1;
+            metrics.additions += step.additions;
+            metrics.deletions += step.deletions;
+            metrics.unresolved_thread_count += step.unresolved_thread_count;
+        }
+    }
+
+    metrics
+}
+
+fn ai_tour_category_icon_asset(category: TourSectionCategory) -> &'static str {
+    match category {
+        TourSectionCategory::AuthSecurity => TOUR_AUTH_SECURITY_ASSET,
+        TourSectionCategory::DataState => TOUR_DATA_STATE_ASSET,
+        TourSectionCategory::ApiIo => TOUR_API_IO_ASSET,
+        TourSectionCategory::UiUx => TOUR_UI_UX_ASSET,
+        TourSectionCategory::Tests => TOUR_TESTS_ASSET,
+        TourSectionCategory::Docs => TOUR_DOCS_ASSET,
+        TourSectionCategory::Config => TOUR_CONFIG_ASSET,
+        TourSectionCategory::Infra => TOUR_INFRA_ASSET,
+        TourSectionCategory::Refactor => TOUR_REFACTOR_ASSET,
+        TourSectionCategory::Performance => TOUR_PERFORMANCE_ASSET,
+        TourSectionCategory::Reliability => TOUR_RELIABILITY_ASSET,
+        TourSectionCategory::Other => TOUR_OTHER_ASSET,
+    }
+}
+
+fn ai_tour_category_fg(category: TourSectionCategory) -> Rgba {
+    match category {
+        TourSectionCategory::AuthSecurity => danger(),
+        TourSectionCategory::DataState => accent(),
+        TourSectionCategory::ApiIo => ochre(),
+        TourSectionCategory::UiUx => fg_emphasis(),
+        TourSectionCategory::Tests => success(),
+        TourSectionCategory::Docs => fg_muted(),
+        TourSectionCategory::Config => ochre(),
+        TourSectionCategory::Infra => accent(),
+        TourSectionCategory::Refactor => fg_default(),
+        TourSectionCategory::Performance => ochre(),
+        TourSectionCategory::Reliability => success(),
+        TourSectionCategory::Other => fg_muted(),
+    }
+}
+
+fn ai_tour_category_bg(category: TourSectionCategory) -> Rgba {
+    match category {
+        TourSectionCategory::AuthSecurity => danger_muted(),
+        TourSectionCategory::DataState => accent_muted(),
+        TourSectionCategory::ApiIo => ochre_muted(),
+        TourSectionCategory::UiUx => bg_emphasis(),
+        TourSectionCategory::Tests => success_muted(),
+        TourSectionCategory::Docs => bg_subtle(),
+        TourSectionCategory::Config => ochre_muted(),
+        TourSectionCategory::Infra => accent_muted(),
+        TourSectionCategory::Refactor => bg_subtle(),
+        TourSectionCategory::Performance => ochre_muted(),
+        TourSectionCategory::Reliability => success_muted(),
+        TourSectionCategory::Other => bg_subtle(),
+    }
+}
+
+fn ai_tour_category_border(category: TourSectionCategory) -> Rgba {
+    match category {
+        TourSectionCategory::AuthSecurity => danger(),
+        TourSectionCategory::DataState => accent(),
+        TourSectionCategory::ApiIo => ochre(),
+        TourSectionCategory::UiUx => border_default(),
+        TourSectionCategory::Tests => success(),
+        TourSectionCategory::Docs => border_muted(),
+        TourSectionCategory::Config => ochre(),
+        TourSectionCategory::Infra => accent(),
+        TourSectionCategory::Refactor => border_default(),
+        TourSectionCategory::Performance => ochre(),
+        TourSectionCategory::Reliability => success(),
+        TourSectionCategory::Other => border_muted(),
+    }
+}
+
+fn ai_tour_priority_fg(priority: TourSectionPriority) -> Rgba {
+    match priority {
+        TourSectionPriority::Low => success(),
+        TourSectionPriority::Medium => ochre(),
+        TourSectionPriority::High => danger(),
+    }
+}
+
+fn ai_tour_priority_bg(priority: TourSectionPriority) -> Rgba {
+    match priority {
+        TourSectionPriority::Low => success_muted(),
+        TourSectionPriority::Medium => ochre_muted(),
+        TourSectionPriority::High => danger_muted(),
+    }
+}
+
+fn ai_tour_priority_border(priority: TourSectionPriority) -> Rgba {
+    match priority {
+        TourSectionPriority::Low => success(),
+        TourSectionPriority::Medium => ochre(),
+        TourSectionPriority::High => danger(),
+    }
+}
+
 fn render_ai_tour_section(
     state: &Entity<AppState>,
     detail: &PullRequestDetail,
@@ -3864,6 +4160,7 @@ fn render_ai_tour_section(
                 .find(|step| step.id.as_str() == step_id.as_str())
         })
         .collect::<Vec<_>>();
+    let metrics = ai_tour_section_metrics(generated_tour, section);
 
     nested_panel()
         .child(
@@ -3877,27 +4174,44 @@ fn render_ai_tour_section(
                     div()
                         .flex()
                         .flex_col()
-                        .gap(px(6.0))
+                        .gap(px(8.0))
                         .min_w_0()
-                        .child(eyebrow("Group"))
+                        .child(eyebrow(section.category.label()))
                         .child(
                             div()
-                                .text_size(px(18.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(fg_emphasis())
-                                .child(section.title.clone()),
+                                .flex()
+                                .items_center()
+                                .gap(px(12.0))
+                                .min_w_0()
+                                .child(render_ai_tour_category_icon(section.category, 34.0, 17.0))
+                                .child(
+                                    div()
+                                        .text_size(px(18.0))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(fg_emphasis())
+                                        .min_w_0()
+                                        .line_clamp(2)
+                                        .child(section.title.clone()),
+                                ),
                         ),
                 )
                 .child(
                     div()
                         .flex()
+                        .items_center()
+                        .justify_end()
                         .gap(px(6.0))
                         .flex_wrap()
+                        .child(render_ai_tour_priority_chip(section.priority))
                         .child(badge(&section.badge))
-                        .child(badge(&format!(
+                        .child(ai_tour_metric_chip(&format!(
                             "{} file{}",
-                            section_steps.len(),
-                            if section_steps.len() == 1 { "" } else { "s" }
+                            metrics.file_count,
+                            if metrics.file_count == 1 { "" } else { "s" }
+                        )))
+                        .child(ai_tour_metric_chip(&format!(
+                            "+{} / -{}",
+                            metrics.additions, metrics.deletions
                         ))),
                 ),
         )
