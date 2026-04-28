@@ -7,11 +7,11 @@ use sha1::{Digest, Sha1};
 use crate::{
     agents,
     cache::CacheStore,
-    diff::{DiffLineKind, ParsedDiffFile, ParsedDiffLine},
+    diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk, ParsedDiffLine},
     github::{PullRequestDetail, PullRequestFile, PullRequestReviewThread},
 };
 
-const CODE_TOUR_CACHE_KEY_PREFIX: &str = "code-tour-v3";
+const CODE_TOUR_CACHE_KEY_PREFIX: &str = "code-tour-v4";
 const CODE_TOUR_SETTINGS_CACHE_KEY: &str = "code-tour-settings-v1";
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -688,13 +688,12 @@ fn badge_for_change_type(change_type: &str) -> &'static str {
 }
 
 fn first_anchor_for_parsed_file(parsed_file: &ParsedDiffFile) -> Option<DiffAnchor> {
-    for hunk in &parsed_file.hunks {
-        for line in &hunk.lines {
-            if let Some(anchor) =
-                resolve_diff_line_anchor(&parsed_file.path, line, Some(&hunk.header))
-            {
-                return Some(anchor);
-            }
+    if let Some(location) = representative_diff_location(parsed_file) {
+        let hunk = &parsed_file.hunks[location.hunk_index];
+        let line = &hunk.lines[location.line_index];
+        let anchor = resolve_diff_line_anchor(&parsed_file.path, line, Some(&hunk.header));
+        if let Some(anchor) = anchor {
+            return Some(anchor);
         }
     }
 
@@ -720,12 +719,11 @@ fn first_anchor_for_parsed_file(parsed_file: &ParsedDiffFile) -> Option<DiffAnch
 }
 
 fn snippet_for_parsed_file(parsed_file: &ParsedDiffFile) -> Option<String> {
-    let first_hunk = parsed_file.hunks.first()?;
-    let lines = first_hunk
-        .lines
+    let location = representative_diff_location(parsed_file)?;
+    let hunk = parsed_file.hunks.get(location.hunk_index)?;
+    let snippet_lines = snippet_lines_for_hunk(hunk, location.line_index, 6);
+    let lines = snippet_lines
         .iter()
-        .filter(|line| line.kind != DiffLineKind::Meta)
-        .take(6)
         .map(|line| {
             format!(
                 "{}{}",
@@ -740,10 +738,285 @@ fn snippet_for_parsed_file(parsed_file: &ParsedDiffFile) -> Option<String> {
         .collect::<Vec<_>>();
 
     if lines.is_empty() {
-        Some(first_hunk.header.clone())
+        Some(hunk.header.clone())
     } else {
-        Some(format!("{}\n{}", first_hunk.header, lines.join("\n")))
+        Some(format!("{}\n{}", hunk.header, lines.join("\n")))
     }
+}
+
+#[derive(Clone, Copy)]
+struct RepresentativeDiffLocation {
+    hunk_index: usize,
+    line_index: usize,
+}
+
+fn representative_diff_location(
+    parsed_file: &ParsedDiffFile,
+) -> Option<RepresentativeDiffLocation> {
+    let mut best: Option<(i64, RepresentativeDiffLocation)> = None;
+
+    for (hunk_index, hunk) in parsed_file.hunks.iter().enumerate() {
+        let hunk_score = hunk_relevance_score(hunk);
+        let import_block = hunk_looks_like_import_block(hunk);
+
+        for (line_index, line) in hunk.lines.iter().enumerate() {
+            if !matches!(line.kind, DiffLineKind::Addition | DiffLineKind::Deletion) {
+                continue;
+            }
+
+            let score = hunk_score + diff_line_relevance_score(line, import_block);
+            let location = RepresentativeDiffLocation {
+                hunk_index,
+                line_index,
+            };
+
+            if best
+                .as_ref()
+                .map(|(best_score, _)| score > *best_score)
+                .unwrap_or(true)
+            {
+                best = Some((score, location));
+            }
+        }
+    }
+
+    best.map(|(_, location)| location)
+        .or_else(|| first_anchorable_diff_location(parsed_file))
+}
+
+fn first_anchorable_diff_location(
+    parsed_file: &ParsedDiffFile,
+) -> Option<RepresentativeDiffLocation> {
+    for (hunk_index, hunk) in parsed_file.hunks.iter().enumerate() {
+        for (line_index, line) in hunk.lines.iter().enumerate() {
+            if resolve_diff_line_anchor(&parsed_file.path, line, Some(&hunk.header)).is_some() {
+                return Some(RepresentativeDiffLocation {
+                    hunk_index,
+                    line_index,
+                });
+            }
+        }
+    }
+
+    None
+}
+
+fn hunk_relevance_score(hunk: &ParsedDiffHunk) -> i64 {
+    let import_block = hunk_looks_like_import_block(hunk);
+    let mut changed_count = 0;
+    let mut meaningful_count = 0;
+    let mut declaration_count = 0;
+    let mut behavior_count = 0;
+
+    for line in &hunk.lines {
+        if !matches!(line.kind, DiffLineKind::Addition | DiffLineKind::Deletion) {
+            continue;
+        }
+
+        changed_count += 1;
+        let content = line.content.trim();
+        if is_low_signal_diff_line(content)
+            || (import_block && is_import_block_member_line(content))
+        {
+            continue;
+        }
+
+        meaningful_count += 1;
+        if looks_like_declaration_line(content) {
+            declaration_count += 1;
+        }
+        if looks_like_behavior_line(content) {
+            behavior_count += 1;
+        }
+    }
+
+    if changed_count == 0 {
+        return -200;
+    }
+
+    if meaningful_count == 0 {
+        return -100 + changed_count.min(12) as i64;
+    }
+
+    meaningful_count * 12
+        + declaration_count * 36
+        + behavior_count * 8
+        + changed_count.min(18) as i64
+}
+
+fn diff_line_relevance_score(line: &ParsedDiffLine, import_block: bool) -> i64 {
+    let content = line.content.trim();
+    let mut score = match line.kind {
+        DiffLineKind::Addition => 24,
+        DiffLineKind::Deletion => 20,
+        DiffLineKind::Context => 4,
+        DiffLineKind::Meta => -80,
+    };
+
+    if content.is_empty() {
+        return score - 50;
+    }
+
+    if is_low_signal_diff_line(content) || (import_block && is_import_block_member_line(content)) {
+        score -= 60;
+    } else {
+        score += 18;
+    }
+
+    if looks_like_declaration_line(content) {
+        score += 42;
+    }
+
+    if looks_like_behavior_line(content) {
+        score += 14;
+    }
+
+    if content.len() > 80 {
+        score += 4;
+    }
+
+    score
+}
+
+fn snippet_lines_for_hunk(
+    hunk: &ParsedDiffHunk,
+    focus_line_index: usize,
+    max_lines: usize,
+) -> Vec<&ParsedDiffLine> {
+    let renderable_indices = hunk
+        .lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| (line.kind != DiffLineKind::Meta).then_some(index))
+        .collect::<Vec<_>>();
+
+    if renderable_indices.is_empty() || max_lines == 0 {
+        return Vec::new();
+    }
+
+    let focus_position = renderable_indices
+        .iter()
+        .position(|index| *index == focus_line_index)
+        .unwrap_or(0);
+    let mut start = focus_position.saturating_sub(2);
+    let end = (start + max_lines).min(renderable_indices.len());
+    if end.saturating_sub(start) < max_lines {
+        start = end.saturating_sub(max_lines);
+    }
+
+    renderable_indices[start..end]
+        .iter()
+        .filter_map(|index| hunk.lines.get(*index))
+        .collect()
+}
+
+fn hunk_looks_like_import_block(hunk: &ParsedDiffHunk) -> bool {
+    hunk.lines.iter().any(|line| {
+        let content = line.content.trim();
+        is_import_statement_line(content)
+            || content == "import ("
+            || content.starts_with("import {")
+            || content.starts_with("use {")
+    })
+}
+
+fn is_low_signal_diff_line(content: &str) -> bool {
+    if content.is_empty() {
+        return true;
+    }
+
+    let trimmed = content.trim();
+    if matches!(
+        trimmed,
+        "{" | "}" | ");" | ")," | "};" | "}," | ")" | "]" | "];" | "],"
+    ) {
+        return true;
+    }
+
+    is_comment_only_line(trimmed)
+        || is_import_statement_line(trimmed)
+        || is_reexport_statement_line(trimmed)
+}
+
+fn is_comment_only_line(content: &str) -> bool {
+    content.starts_with("//")
+        || content.starts_with("/*")
+        || content.starts_with('*')
+        || (content.starts_with('#') && !content.starts_with("#["))
+}
+
+fn is_import_statement_line(content: &str) -> bool {
+    content.starts_with("import ")
+        || content.starts_with("import(")
+        || content.starts_with("from ")
+        || content.starts_with("use ")
+        || content.starts_with("pub use ")
+        || content.starts_with("mod ")
+        || content.starts_with("package ")
+        || content.starts_with("@import ")
+}
+
+fn is_reexport_statement_line(content: &str) -> bool {
+    content.starts_with("export {")
+        || content.starts_with("export *")
+        || content.starts_with("export type {")
+}
+
+fn is_import_block_member_line(content: &str) -> bool {
+    let normalized = content
+        .trim()
+        .trim_matches('{')
+        .trim_matches('}')
+        .trim_end_matches(',')
+        .trim_end_matches(';')
+        .trim();
+
+    !normalized.is_empty()
+        && normalized.len() <= 80
+        && normalized.chars().all(|ch| {
+            ch.is_ascii_alphanumeric()
+                || matches!(ch, '_' | '$' | ':' | '.' | '/' | '-' | '"' | '\'' | ' ')
+        })
+        && !normalized.contains('(')
+        && !normalized.contains('=')
+        && !looks_like_declaration_line(normalized)
+}
+
+fn looks_like_declaration_line(content: &str) -> bool {
+    let trimmed = content
+        .trim_start_matches("pub ")
+        .trim_start_matches("async ")
+        .trim_start_matches("export ")
+        .trim_start_matches("default ");
+
+    trimmed.starts_with("fn ")
+        || trimmed.starts_with("function ")
+        || trimmed.starts_with("class ")
+        || trimmed.starts_with("struct ")
+        || trimmed.starts_with("enum ")
+        || trimmed.starts_with("trait ")
+        || trimmed.starts_with("interface ")
+        || trimmed.starts_with("type ")
+        || trimmed.starts_with("impl ")
+        || trimmed.starts_with("const ")
+        || trimmed.starts_with("let ")
+        || trimmed.starts_with("var ")
+        || trimmed.starts_with("def ")
+}
+
+fn looks_like_behavior_line(content: &str) -> bool {
+    let trimmed = content.trim();
+    trimmed.contains("=>")
+        || trimmed.contains('=')
+        || trimmed.contains('(')
+        || trimmed.starts_with("return ")
+        || trimmed.starts_with("if ")
+        || trimmed.starts_with("match ")
+        || trimmed.starts_with("for ")
+        || trimmed.starts_with("while ")
+        || trimmed.starts_with("await ")
+        || trimmed.starts_with("try ")
+        || trimmed.starts_with("throw ")
 }
 
 fn file_step_score(step: &TourStep) -> i64 {
@@ -943,7 +1216,10 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::PullRequestDetail;
+    use crate::{
+        diff::parse_unified_diff,
+        github::{PullRequestDetail, PullRequestFile},
+    };
 
     fn detail(updated_at: &str, head_ref_oid: Option<&str>, raw_diff: &str) -> PullRequestDetail {
         PullRequestDetail {
@@ -1023,5 +1299,86 @@ mod tests {
         assert_eq!(settings.provider, CodeTourProvider::Codex);
         assert!(settings.automatic_repositories.is_empty());
         assert!(!settings.automatically_generates_for("acme/api"));
+    }
+
+    #[test]
+    fn tour_step_anchor_prefers_code_hunk_over_import_hunk() {
+        let raw_diff = r#"diff --git a/src/service.rs b/src/service.rs
+--- a/src/service.rs
++++ b/src/service.rs
+@@ -1,5 +1,6 @@
+ use crate::config::Config;
++use crate::moved::MovedThing;
+ use crate::old::OldThing;
+ 
+ pub struct Service;
+@@ -40,7 +41,9 @@ fn run_flow(input: Input) -> Output {
+     let prepared = prepare(input);
+-    old_flow(prepared)
++    let checked = validate(prepared);
++    moved_functionality(checked)
+ }
+"#;
+        let parsed = parse_unified_diff(raw_diff);
+        let parsed_file = parsed.first().expect("diff should contain a file");
+
+        let anchor = first_anchor_for_parsed_file(parsed_file).expect("file should have an anchor");
+        assert_eq!(
+            anchor.hunk_header.as_deref(),
+            Some("@@ -40,7 +41,9 @@ fn run_flow(input: Input) -> Output {")
+        );
+        assert_eq!(anchor.side.as_deref(), Some("RIGHT"));
+        assert!(anchor.line.unwrap_or_default() >= 42);
+
+        let snippet = snippet_for_parsed_file(parsed_file).expect("file should have a snippet");
+        assert!(snippet.contains("moved_functionality"));
+        assert!(!snippet.contains("use crate::moved::MovedThing"));
+    }
+
+    #[test]
+    fn build_code_tour_generation_input_uses_representative_file_snippet() {
+        let raw_diff = r#"diff --git a/src/service.rs b/src/service.rs
+--- a/src/service.rs
++++ b/src/service.rs
+@@ -1,5 +1,6 @@
+ use crate::config::Config;
++use crate::moved::MovedThing;
+ use crate::old::OldThing;
+ 
+ pub struct Service;
+@@ -40,7 +41,9 @@ fn run_flow(input: Input) -> Output {
+     let prepared = prepare(input);
+-    old_flow(prepared)
++    let checked = validate(prepared);
++    moved_functionality(checked)
+ }
+"#;
+        let mut detail = detail("2026-04-17T10:00:00Z", Some("head123"), raw_diff);
+        detail.files = vec![PullRequestFile {
+            path: "src/service.rs".to_string(),
+            additions: 3,
+            deletions: 1,
+            change_type: "MODIFIED".to_string(),
+        }];
+        detail.parsed_diff = parse_unified_diff(raw_diff);
+
+        let input = build_code_tour_generation_input(&detail, CodeTourProvider::Codex, "/tmp/repo");
+        let step = input
+            .candidate_steps
+            .iter()
+            .find(|step| step.id == "file:src/service.rs")
+            .expect("file step should exist");
+
+        assert_eq!(
+            step.anchor
+                .as_ref()
+                .and_then(|anchor| anchor.hunk_header.as_deref()),
+            Some("@@ -40,7 +41,9 @@ fn run_flow(input: Input) -> Output {")
+        );
+        assert!(step
+            .snippet
+            .as_deref()
+            .unwrap_or_default()
+            .contains("moved_functionality"));
     }
 }
