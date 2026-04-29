@@ -402,7 +402,7 @@ fn render_pr_header(
                 .overflow_hidden()
                 .text_size(px(10.0))
                 .font_weight(FontWeight::SEMIBOLD)
-                .font_family("Fira Code")
+                .font_family(mono_font_family())
                 .text_color(if compact { transparent() } else { fg_subtle() })
                 .text_ellipsis()
                 .whitespace_nowrap()
@@ -577,6 +577,9 @@ fn render_pr_header(
 
     div()
         .flex_shrink_0()
+        .bg(bg_surface())
+        .border_b(px(1.0))
+        .border_color(border_muted())
         .child(top_row)
         .when(!compact, |el| {
             el.child(render_pr_surface_tabs(
@@ -829,7 +832,7 @@ fn render_overview_metric(value: String, label: &str, color: Rgba) -> impl IntoE
         .child(
             div()
                 .text_size(px(13.0))
-                .font_family("Fira Code")
+                .font_family(mono_font_family())
                 .text_color(color)
                 .child(value),
         )
@@ -837,7 +840,7 @@ fn render_overview_metric(value: String, label: &str, color: Rgba) -> impl IntoE
             div()
                 .mt(px(4.0))
                 .text_size(px(10.0))
-                .font_family("Fira Code")
+                .font_family(mono_font_family())
                 .text_color(fg_subtle())
                 .child(label.to_uppercase()),
         )
@@ -874,7 +877,7 @@ fn render_change_meter(additions: i64, deletions: i64) -> impl IntoElement {
                 .flex()
                 .gap(px(8.0))
                 .items_center()
-                .font_family("Fira Code")
+                .font_family(mono_font_family())
                 .text_size(px(12.0))
                 .child(div().text_color(success()).child(format!("+{additions}")))
                 .child(div().text_color(danger()).child(format!("-{deletions}"))),
@@ -900,7 +903,7 @@ fn render_change_meter(additions: i64, deletions: i64) -> impl IntoElement {
             div()
                 .mt(px(4.0))
                 .text_size(px(10.0))
-                .font_family("Fira Code")
+                .font_family(mono_font_family())
                 .text_color(fg_subtle())
                 .child("DIFF".to_string()),
         )
@@ -1036,7 +1039,7 @@ fn render_snapshot_stat(value: String, label: &str, hint: &str, color: Rgba) -> 
             div()
                 .text_size(px(22.0))
                 .font_weight(FontWeight::SEMIBOLD)
-                .font_family("Fira Code")
+                .font_family(mono_font_family())
                 .text_color(color)
                 .child(value),
         )
@@ -1767,7 +1770,7 @@ fn render_submit_review_panel(
                         .child(
                             div()
                                 .text_size(px(11.0))
-                                .font_family("Fira Code")
+                                .font_family(mono_font_family())
                                 .text_color(if review_editor_active {
                                     accent()
                                 } else {
@@ -1782,7 +1785,7 @@ fn render_submit_review_panel(
                         .child(
                             div()
                                 .text_size(px(11.0))
-                                .font_family("Fira Code")
+                                .font_family(mono_font_family())
                                 .text_color(fg_subtle())
                                 .child("cmd-enter submit • esc blur"),
                         ),
@@ -1910,7 +1913,7 @@ fn detail_row(label: &str, value: AnyElement) -> impl IntoElement {
                 .w(px(88.0))
                 .flex_shrink_0()
                 .text_color(fg_subtle())
-                .font_family("Fira Code")
+                .font_family(mono_font_family())
                 .text_size(px(10.0))
                 .child(label.to_uppercase()),
         )
@@ -1928,7 +1931,7 @@ fn detail_value_text(value: &str) -> AnyElement {
     div()
         .text_color(fg_emphasis())
         .font_weight(FontWeight::MEDIUM)
-        .font_family("Fira Code")
+        .font_family(mono_font_family())
         .text_size(px(11.0))
         .whitespace_normal()
         .child(value.to_string())
@@ -1942,7 +1945,7 @@ fn detail_badge(label: &str, fg: Rgba, bg: Rgba, _border: Rgba) -> AnyElement {
         .rounded(px(999.0))
         .bg(bg)
         .text_size(px(11.0))
-        .font_family("Fira Code")
+        .font_family(mono_font_family())
         .font_weight(FontWeight::MEDIUM)
         .text_color(fg)
         .child(label.to_string())
@@ -2205,7 +2208,7 @@ fn participant_display_name(login: &str) -> String {
 fn overflow_safe_code_label(label: &str, color: Rgba) -> impl IntoElement {
     div()
         .min_w_0()
-        .font_family("Fira Code")
+        .font_family(mono_font_family())
         .text_size(px(12.0))
         .text_color(color)
         .text_ellipsis()
@@ -2214,12 +2217,14 @@ fn overflow_safe_code_label(label: &str, color: Rgba) -> impl IntoElement {
         .child(label.to_string())
 }
 
-fn tone_badge(label: &str, fg: Rgba, bg: Rgba, _border: Rgba) -> impl IntoElement {
+fn tone_badge(label: &str, fg: Rgba, bg: Rgba, border: Rgba) -> impl IntoElement {
     div()
         .px(px(8.0))
         .py(px(2.0))
         .rounded(px(999.0))
         .bg(bg)
+        .border_1()
+        .border_color(border)
         .text_size(px(11.0))
         .font_weight(FontWeight::MEDIUM)
         .text_color(fg)
@@ -2318,7 +2323,7 @@ fn pull_request_state_colors(state: &str, is_draft: bool) -> (Rgba, Rgba, Rgba) 
     }
 
     match state {
-        "MERGED" => (purple(), bg_emphasis(), purple()),
+        "MERGED" => (info(), info_muted(), info()),
         "CLOSED" => (danger(), danger_muted(), diff_remove_border()),
         _ => (success(), success_muted(), diff_add_border()),
     }
@@ -2719,10 +2724,21 @@ pub fn surface_tab(
         .py(px(6.0))
         .rounded(radius_sm())
         .text_size(px(12.0))
+        .border_1()
+        .border_color(if active {
+            focus_border()
+        } else {
+            transparent()
+        })
         .cursor_pointer()
         .when(active, |el| el.bg(bg_selected()).text_color(fg_emphasis()))
         .when(!active, |el| el.text_color(fg_muted()))
-        .hover(|style| style.bg(hover_bg()).text_color(fg_emphasis()))
+        .hover(|style| {
+            style
+                .bg(hover_bg())
+                .border_color(focus_border())
+                .text_color(fg_emphasis())
+        })
         .on_mouse_down(MouseButton::Left, on_click)
         .child(label.to_string())
 }

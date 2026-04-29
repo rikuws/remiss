@@ -52,8 +52,8 @@ use crate::{github, notifications};
 
 use super::ai_tour::{refresh_active_tour, trigger_generate_tour};
 use super::sections::{
-    badge, badge_success, error_text, eyebrow, ghost_button, nested_panel, panel_state_text,
-    review_button, success_text, user_avatar,
+    badge, badge_success, error_text, eyebrow, ghost_button, material_surface, nested_panel,
+    panel_state_text, review_button, success_text, user_avatar,
 };
 
 pub fn enter_files_surface(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
@@ -475,21 +475,21 @@ fn render_waypoint_spotlight(state: &Entity<AppState>, cx: &App) -> impl IntoEle
         .child(
             div()
                 .relative()
-                .w(px(560.0))
-                .max_h(px(560.0))
-                .rounded(radius())
+                .w(px(680.0))
+                .max_h(px(620.0))
+                .rounded(radius_lg())
                 .border_1()
                 .border_color(border_default())
-                .bg(bg_surface())
+                .bg(bg_overlay())
                 .shadow_sm()
                 .overflow_hidden()
                 .child(
                     div()
-                        .px(px(20.0))
-                        .py(px(16.0))
+                        .px(px(24.0))
+                        .py(px(20.0))
                         .flex()
                         .flex_col()
-                        .gap(px(12.0))
+                        .gap(px(16.0))
                         .child(
                             div()
                                 .flex()
@@ -521,13 +521,13 @@ fn render_waypoint_spotlight(state: &Entity<AppState>, cx: &App) -> impl IntoEle
                         )
                         .child(
                             div()
-                                .px(px(14.0))
-                                .py(px(12.0))
-                                .rounded(radius_sm())
+                                .px(px(16.0))
+                                .py(px(14.0))
+                                .rounded(radius())
                                 .border_1()
-                                .border_color(border_default())
-                                .bg(bg_overlay())
-                                .text_size(px(13.0))
+                                .border_color(focus_border())
+                                .bg(bg_surface())
+                                .text_size(px(15.0))
                                 .text_color(if query.is_empty() {
                                     fg_subtle()
                                 } else {
@@ -552,7 +552,7 @@ fn render_waypoint_spotlight(state: &Entity<AppState>, cx: &App) -> impl IntoEle
                                 .child(
                                     div()
                                         .text_size(px(11.0))
-                                        .font_family("Fira Code")
+                                        .font_family(mono_font_family())
                                         .text_color(fg_subtle())
                                         .child(format!("{} waypoints", filtered.len())),
                                 )
@@ -562,7 +562,7 @@ fn render_waypoint_spotlight(state: &Entity<AppState>, cx: &App) -> impl IntoEle
                                         .gap(px(6.0))
                                         .items_center()
                                         .text_size(px(11.0))
-                                        .font_family("Fira Code")
+                                        .font_family(mono_font_family())
                                         .text_color(fg_subtle())
                                         .child("↑↓ move")
                                         .child("•")
@@ -576,7 +576,7 @@ fn render_waypoint_spotlight(state: &Entity<AppState>, cx: &App) -> impl IntoEle
                         .flex_col()
                         .id("waypoint-spotlight-scroll")
                         .overflow_y_scroll()
-                        .max_h(px(380.0))
+                        .max_h(px(430.0))
                         .when(filtered.is_empty(), |el| {
                             el.child(
                                 div()
@@ -600,7 +600,7 @@ fn render_waypoint_spotlight(state: &Entity<AppState>, cx: &App) -> impl IntoEle
                     Animation::new(Duration::from_millis(160)).with_easing(ease_in_out),
                     move |el, delta| {
                         el.mt(lerp_px(10.0, 0.0, delta))
-                            .bg(lerp_rgba(bg_canvas(), bg_surface(), delta))
+                            .bg(lerp_rgba(bg_canvas(), bg_overlay(), delta))
                     },
                 ),
         )
@@ -616,17 +616,17 @@ fn render_waypoint_spotlight_row(
 
     div()
         .px(px(20.0))
-        .py(px(12.0))
+        .py(px(13.0))
         .border_t(px(1.0))
         .border_color(if selected {
-            waypoint_border()
+            focus_border()
         } else {
             border_muted()
         })
         .bg(if selected {
-            waypoint_bg()
+            bg_selected()
         } else {
-            bg_surface()
+            bg_overlay()
         })
         .cursor_pointer()
         .hover(|style| style.bg(hover_bg()))
@@ -1012,7 +1012,7 @@ fn render_review_inspector_pane(
                         .child(
                             div()
                                 .text_size(px(10.0))
-                                .font_family("Fira Code")
+                                .font_family(mono_font_family())
                                 .text_color(fg_subtle())
                                 .child("CONTEXT"),
                         )
@@ -1444,7 +1444,7 @@ fn render_review_nav_panel_header(
                     .child(
                         div()
                             .text_size(px(10.0))
-                            .font_family("Fira Code")
+                            .font_family(mono_font_family())
                             .text_color(fg_subtle())
                             .child(eyebrow_label.to_string()),
                     )
@@ -1474,7 +1474,7 @@ fn render_review_nav_bucket_header(bucket: ReviewQueueBucket, count: usize) -> i
                 .child(
                     div()
                         .text_size(px(11.0))
-                        .font_family("Fira Code")
+                        .font_family(mono_font_family())
                         .text_color(fg_subtle())
                         .child(bucket.label().to_ascii_uppercase()),
                 )
@@ -1543,7 +1543,7 @@ fn render_review_queue_row(
                 .child(
                     div()
                         .text_size(px(10.0))
-                        .font_family("Fira Code")
+                        .font_family(mono_font_family())
                         .text_color(accent())
                         .child(item.risk_label.clone()),
                 ),
@@ -1846,9 +1846,11 @@ fn metric_pill(label: impl Into<String>, fg: gpui::Rgba, bg: gpui::Rgba) -> impl
         .py(px(3.0))
         .rounded(px(999.0))
         .bg(bg)
+        .border_1()
+        .border_color(border_muted())
         .text_size(px(12.0))
         .font_weight(FontWeight::MEDIUM)
-        .font_family("Fira Code")
+        .font_family(mono_font_family())
         .text_color(fg)
         .child(label.into())
 }
@@ -1880,17 +1882,17 @@ fn render_file_tree(
         .w(file_tree_width())
         .flex_shrink_0()
         .min_h_0()
-        .bg(bg_surface())
+        .bg(bg_overlay())
         .border_r(px(1.0))
-        .border_color(border_default())
+        .border_color(border_muted())
         .flex()
         .flex_col()
         .child(
             div()
-                .px(px(10.0))
-                .py(px(8.0))
+                .px(px(12.0))
+                .py(px(10.0))
                 .border_b(px(1.0))
-                .border_color(border_default())
+                .border_color(border_muted())
                 .flex()
                 .items_center()
                 .justify_between()
@@ -1905,7 +1907,7 @@ fn render_file_tree(
                 .child(
                     div()
                         .text_size(px(12.0))
-                        .font_family("Fira Code")
+                        .font_family(mono_font_family())
                         .flex()
                         .gap(px(6.0))
                         .items_center()
@@ -1971,7 +1973,7 @@ fn render_file_tree(
         )
 }
 
-const REVIEW_FILE_TREE_ROW_HEIGHT: f32 = 26.0;
+const REVIEW_FILE_TREE_ROW_HEIGHT: f32 = 30.0;
 
 fn prepare_review_file_tree_list_state(app_state: &AppState) -> ListState {
     let key = review_cache_key(app_state.active_pr_key.as_deref(), "review-file-tree");
@@ -2100,21 +2102,21 @@ fn render_file_tree_diff_summary(additions: i64, deletions: i64) -> impl IntoEle
         .child(
             div()
                 .text_size(px(9.0))
-                .font_family("Fira Code")
+                .font_family(mono_font_family())
                 .text_color(success())
                 .child(format!("+{additions}")),
         )
         .child(
             div()
                 .text_size(px(9.0))
-                .font_family("Fira Code")
+                .font_family(mono_font_family())
                 .text_color(fg_subtle())
                 .child("/"),
         )
         .child(
             div()
                 .text_size(px(9.0))
-                .font_family("Fira Code")
+                .font_family(mono_font_family())
                 .text_color(danger())
                 .child(format!("-{deletions}")),
         )
@@ -2154,9 +2156,9 @@ fn render_file_tree_directory_row(name: String, depth: usize) -> impl IntoElemen
         .flex_shrink_0()
         .mb(px(1.0))
         .px(px(6.0))
-        .py(px(3.0))
+        .py(px(4.0))
         .rounded(radius_sm())
-        .hover(|style| style.bg(bg_overlay()))
+        .hover(|style| style.bg(hover_bg()))
         .child(
             div()
                 .flex()
@@ -2209,8 +2211,14 @@ fn render_file_tree_file_row(
         .flex_shrink_0()
         .mb(px(1.0))
         .px(px(6.0))
-        .py(px(3.0))
+        .py(px(4.0))
         .rounded(radius_sm())
+        .border_1()
+        .border_color(if is_active {
+            focus_border()
+        } else {
+            transparent()
+        })
         .bg(if is_active {
             bg_selected()
         } else {
@@ -3183,11 +3191,11 @@ fn render_diff_toolbar(
         .items_center()
         .justify_between()
         .gap(px(12.0))
-        .px(px(12.0))
-        .py(px(6.0))
-        .bg(bg_surface())
+        .px(px(14.0))
+        .py(px(8.0))
+        .bg(bg_overlay())
         .border_b(px(1.0))
-        .border_color(border_default())
+        .border_color(border_muted())
         .child(
             div().flex().items_start().flex_grow().min_w_0().child(
                 div()
@@ -3198,7 +3206,7 @@ fn render_diff_toolbar(
                     .child(
                         div()
                             .text_size(px(13.0))
-                            .font_family("Fira Code")
+                            .font_family(mono_font_family())
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(fg_emphasis())
                             .whitespace_nowrap()
@@ -3209,7 +3217,7 @@ fn render_diff_toolbar(
                     .child(
                         div()
                             .text_size(px(11.0))
-                            .font_family("Fira Code")
+                            .font_family(mono_font_family())
                             .text_color(fg_muted())
                             .min_w_0()
                             .whitespace_nowrap()
@@ -3779,15 +3787,23 @@ fn render_ai_tour_semantic_overview(
     section_targets: Arc<Vec<(usize, usize)>>,
     on_generate: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    nested_panel()
+    div()
+        .rounded(radius())
+        .bg(bg_overlay())
+        .border_1()
+        .border_color(transparent())
+        .shadow_sm()
+        .overflow_hidden()
+        .child(material_surface("review-map").h(px(50.0)).w_full())
         .child(
             div()
+                .p(px(20.0))
+                .pb(px(12.0))
                 .flex()
                 .items_start()
                 .justify_between()
                 .gap(px(16.0))
                 .flex_wrap()
-                .mb(px(12.0))
                 .child(
                     div()
                         .flex()
@@ -3844,10 +3860,11 @@ fn render_ai_tour_semantic_overview(
         )
         .child(
             div()
-                .border_1()
-                .border_color(border_muted())
-                .rounded(radius_sm())
-                .overflow_hidden()
+                .px(px(20.0))
+                .pb(px(20.0))
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
                 .children(
                     tour.sections
                         .iter()
@@ -3870,11 +3887,12 @@ fn render_ai_tour_semantic_overview_row(
     tour: &GeneratedCodeTour,
     section: &TourSection,
     section_ix: usize,
-    show_divider: bool,
+    _show_divider: bool,
     list_state: ListState,
     section_targets: Arc<Vec<(usize, usize)>>,
 ) -> impl IntoElement {
     let metrics = ai_tour_section_metrics(tour, section);
+    let material_key = format!("tour-section-{}-{}", section_ix, section.title);
     let target_index = section_targets
         .iter()
         .find(|(candidate_ix, _)| *candidate_ix == section_ix)
@@ -3882,27 +3900,31 @@ fn render_ai_tour_semantic_overview_row(
         .unwrap_or(0);
 
     div()
-        .min_h(px(64.0))
-        .px(px(12.0))
-        .py(px(10.0))
+        .min_h(px(72.0))
+        .rounded(radius_sm())
         .bg(bg_surface())
-        .when(show_divider, |el| {
-            el.border_t(px(1.0)).border_color(border_muted())
-        })
+        .border_1()
+        .border_color(border_muted())
+        .shadow_sm()
+        .overflow_hidden()
+        .flex()
         .cursor_pointer()
-        .hover(|style| style.bg(hover_bg()))
+        .hover(|style| style.bg(bg_overlay()).border_color(border_default()))
         .on_mouse_down(MouseButton::Left, move |_, _, _| {
             list_state.scroll_to(ListOffset {
                 item_ix: target_index,
                 offset_in_item: px(0.0),
             });
         })
+        .child(material_surface(&material_key).w(px(10.0)).flex_shrink_0())
         .child(
             div()
                 .flex()
                 .items_center()
                 .gap(px(12.0))
                 .min_w_0()
+                .flex_grow()
+                .p(px(12.0))
                 .child(render_ai_tour_category_icon(section.category, 34.0, 17.0))
                 .child(
                     div()
@@ -4005,7 +4027,7 @@ fn render_ai_tour_priority_chip(priority: TourSectionPriority) -> impl IntoEleme
         .flex_shrink_0()
         .text_size(px(10.0))
         .font_weight(FontWeight::SEMIBOLD)
-        .font_family("Fira Code")
+        .font_family(mono_font_family())
         .text_color(ai_tour_priority_fg(priority))
         .child(priority.label())
 }
@@ -4019,7 +4041,7 @@ fn ai_tour_metric_chip(text: &str) -> impl IntoElement {
         .border_1()
         .border_color(border_muted())
         .text_size(px(10.0))
-        .font_family("Fira Code")
+        .font_family(mono_font_family())
         .text_color(fg_muted())
         .whitespace_nowrap()
         .child(text.to_string())
@@ -4072,14 +4094,14 @@ fn ai_tour_category_fg(category: TourSectionCategory) -> Rgba {
     match category {
         TourSectionCategory::AuthSecurity => danger(),
         TourSectionCategory::DataState => accent(),
-        TourSectionCategory::ApiIo => ochre(),
+        TourSectionCategory::ApiIo => warning(),
         TourSectionCategory::UiUx => fg_emphasis(),
         TourSectionCategory::Tests => success(),
         TourSectionCategory::Docs => fg_muted(),
-        TourSectionCategory::Config => ochre(),
+        TourSectionCategory::Config => warning(),
         TourSectionCategory::Infra => accent(),
         TourSectionCategory::Refactor => fg_default(),
-        TourSectionCategory::Performance => ochre(),
+        TourSectionCategory::Performance => warning(),
         TourSectionCategory::Reliability => success(),
         TourSectionCategory::Other => fg_muted(),
     }
@@ -4089,14 +4111,14 @@ fn ai_tour_category_bg(category: TourSectionCategory) -> Rgba {
     match category {
         TourSectionCategory::AuthSecurity => danger_muted(),
         TourSectionCategory::DataState => accent_muted(),
-        TourSectionCategory::ApiIo => ochre_muted(),
+        TourSectionCategory::ApiIo => warning_muted(),
         TourSectionCategory::UiUx => bg_emphasis(),
         TourSectionCategory::Tests => success_muted(),
         TourSectionCategory::Docs => bg_subtle(),
-        TourSectionCategory::Config => ochre_muted(),
+        TourSectionCategory::Config => warning_muted(),
         TourSectionCategory::Infra => accent_muted(),
         TourSectionCategory::Refactor => bg_subtle(),
-        TourSectionCategory::Performance => ochre_muted(),
+        TourSectionCategory::Performance => warning_muted(),
         TourSectionCategory::Reliability => success_muted(),
         TourSectionCategory::Other => bg_subtle(),
     }
@@ -4106,14 +4128,14 @@ fn ai_tour_category_border(category: TourSectionCategory) -> Rgba {
     match category {
         TourSectionCategory::AuthSecurity => danger(),
         TourSectionCategory::DataState => accent(),
-        TourSectionCategory::ApiIo => ochre(),
+        TourSectionCategory::ApiIo => warning(),
         TourSectionCategory::UiUx => border_default(),
         TourSectionCategory::Tests => success(),
         TourSectionCategory::Docs => border_muted(),
-        TourSectionCategory::Config => ochre(),
+        TourSectionCategory::Config => warning(),
         TourSectionCategory::Infra => accent(),
         TourSectionCategory::Refactor => border_default(),
-        TourSectionCategory::Performance => ochre(),
+        TourSectionCategory::Performance => warning(),
         TourSectionCategory::Reliability => success(),
         TourSectionCategory::Other => border_muted(),
     }
@@ -4122,7 +4144,7 @@ fn ai_tour_category_border(category: TourSectionCategory) -> Rgba {
 fn ai_tour_priority_fg(priority: TourSectionPriority) -> Rgba {
     match priority {
         TourSectionPriority::Low => success(),
-        TourSectionPriority::Medium => ochre(),
+        TourSectionPriority::Medium => warning(),
         TourSectionPriority::High => danger(),
     }
 }
@@ -4130,7 +4152,7 @@ fn ai_tour_priority_fg(priority: TourSectionPriority) -> Rgba {
 fn ai_tour_priority_bg(priority: TourSectionPriority) -> Rgba {
     match priority {
         TourSectionPriority::Low => success_muted(),
-        TourSectionPriority::Medium => ochre_muted(),
+        TourSectionPriority::Medium => warning_muted(),
         TourSectionPriority::High => danger_muted(),
     }
 }
@@ -4138,7 +4160,7 @@ fn ai_tour_priority_bg(priority: TourSectionPriority) -> Rgba {
 fn ai_tour_priority_border(priority: TourSectionPriority) -> Rgba {
     match priority {
         TourSectionPriority::Low => success(),
-        TourSectionPriority::Medium => ochre(),
+        TourSectionPriority::Medium => warning(),
         TourSectionPriority::High => danger(),
     }
 }
@@ -4303,7 +4325,7 @@ fn render_ai_tour_step_diff(
                                 .text_size(px(13.0))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(fg_emphasis())
-                                .font_family("Fira Code")
+                                .font_family(mono_font_family())
                                 .whitespace_nowrap()
                                 .overflow_x_hidden()
                                 .text_ellipsis()
@@ -4360,7 +4382,7 @@ fn workspace_mode_button(
         .rounded(radius_sm())
         .border_1()
         .border_color(if active {
-            border_default()
+            focus_border()
         } else {
             transparent()
         })
@@ -4369,7 +4391,12 @@ fn workspace_mode_button(
         .font_weight(FontWeight::MEDIUM)
         .text_color(if active { fg_emphasis() } else { fg_muted() })
         .cursor_pointer()
-        .hover(|style| style.bg(hover_bg()).text_color(fg_emphasis()))
+        .hover(|style| {
+            style
+                .bg(hover_bg())
+                .border_color(focus_border())
+                .text_color(fg_emphasis())
+        })
         .on_mouse_down(MouseButton::Left, on_click)
         .child(label.to_string())
 }
@@ -4519,7 +4546,7 @@ fn render_review_graph_preview_panel(
                         .child(
                             div()
                                 .text_size(px(10.0))
-                                .font_family("Fira Code")
+                                .font_family(mono_font_family())
                                 .text_color(fg_subtle())
                                 .child("SYMBOL GRAPH"),
                         )
@@ -4813,7 +4840,7 @@ fn render_review_graph_expanded_panel(
                         .child(
                             div()
                                 .text_size(px(10.0))
-                                .font_family("Fira Code")
+                                .font_family(mono_font_family())
                                 .text_color(fg_subtle())
                                 .child("FUNCTION / VARIABLE GRAPH"),
                         )
@@ -4963,7 +4990,7 @@ fn render_review_graph_zoom_controls(state: &Entity<AppState>, zoom: f32) -> imp
                 .flex()
                 .items_center()
                 .justify_center()
-                .font_family("Fira Code")
+                .font_family(mono_font_family())
                 .text_size(px(11.0))
                 .text_color(fg_muted())
                 .child(format!("{:.0}%", clamp_review_graph_zoom(zoom) * 100.0)),
@@ -5343,7 +5370,7 @@ fn render_review_graph_lane_header(
         .items_center()
         .justify_center()
         .text_size(px(9.0))
-        .font_family("Fira Code")
+        .font_family(mono_font_family())
         .text_color(fg)
         .child(format!("{label} {count}"))
 }
@@ -5414,7 +5441,7 @@ fn render_review_graph_canvas_node(
     let node_scale = mode.node_scale();
     let marker_color = review_graph_status_color(&node);
     let border = if is_selected {
-        purple()
+        info()
     } else {
         review_graph_border_color(&node)
     };
@@ -5500,7 +5527,7 @@ fn render_review_graph_canvas_node(
                 .child(
                     div()
                         .text_size(px(9.0))
-                        .font_family("Fira Code")
+                        .font_family(mono_font_family())
                         .text_color(fg_subtle())
                         .child(review_graph_kind_marker(node.kind)),
                 )
@@ -5572,7 +5599,7 @@ fn render_review_graph_detail_rail(
         .child(
             div()
                 .text_size(px(10.0))
-                .font_family("Fira Code")
+                .font_family(mono_font_family())
                 .text_color(fg_subtle())
                 .child("SELECTION"),
         )
@@ -5731,7 +5758,7 @@ fn render_review_graph_neighbor_list(
                 .child(
                     div()
                         .text_size(px(10.0))
-                        .font_family("Fira Code")
+                        .font_family(mono_font_family())
                         .text_color(fg_subtle())
                         .child("CALL SITES / DEPENDENCIES"),
                 )
@@ -6038,7 +6065,7 @@ fn review_graph_edge_color(kind: ReviewGraphEdgeKind) -> Rgba {
         ReviewGraphEdgeKind::Defines => success(),
         ReviewGraphEdgeKind::Inherits => waypoint_fg(),
         ReviewGraphEdgeKind::Composes => fg_default(),
-        ReviewGraphEdgeKind::DataFlow => purple(),
+        ReviewGraphEdgeKind::DataFlow => info(),
         ReviewGraphEdgeKind::Touches => border_default(),
     }
 }
@@ -6221,7 +6248,7 @@ fn render_review_evolution_content(
                                 .child(
                                     div()
                                         .text_size(px(10.0))
-                                        .font_family("Fira Code")
+                                        .font_family(mono_font_family())
                                         .text_color(fg_subtle())
                                         .child("EVOLUTION"),
                                 )
@@ -6304,7 +6331,7 @@ fn render_review_evolution_content(
                             .child(
                                 div()
                                     .text_size(px(10.0))
-                                    .font_family("Fira Code")
+                                    .font_family(mono_font_family())
                                     .text_color(fg_subtle())
                                     .child("TIMELINE"),
                             )
@@ -6488,7 +6515,7 @@ fn render_review_context_content(
                         .child(
                             div()
                                 .text_size(px(10.0))
-                                .font_family("Fira Code")
+                                .font_family(mono_font_family())
                                 .text_color(fg_subtle())
                                 .child("REVIEW STATUS"),
                         )
@@ -6544,7 +6571,7 @@ fn render_review_context_content(
                             .child(
                                 div()
                                     .text_size(px(10.0))
-                                    .font_family("Fira Code")
+                                    .font_family(mono_font_family())
                                     .text_color(fg_subtle())
                                     .child("FILE"),
                             )
@@ -6584,7 +6611,7 @@ fn render_context_summary_panel(review_context: &ReviewContextData) -> impl Into
         .child(
             div()
                 .text_size(px(10.0))
-                .font_family("Fira Code")
+                .font_family(mono_font_family())
                 .text_color(fg_subtle())
                 .child("IMPACT"),
         )
@@ -6686,7 +6713,7 @@ fn render_context_waymarks_panel(
                 .child(
                     div()
                         .text_size(px(10.0))
-                        .font_family("Fira Code")
+                        .font_family(mono_font_family())
                         .text_color(fg_subtle())
                         .child("WAYPOINTS"),
                 )
@@ -6829,7 +6856,7 @@ fn render_context_task_routes_panel(
                 .child(
                     div()
                         .text_size(px(10.0))
-                        .font_family("Fira Code")
+                        .font_family(mono_font_family())
                         .text_color(fg_subtle())
                         .child("TASK PATHS"),
                 )
@@ -6990,7 +7017,7 @@ fn render_task_route_action_card(
                 .child(
                     div()
                         .text_size(px(10.0))
-                        .font_family("Fira Code")
+                        .font_family(mono_font_family())
                         .text_color(accent())
                         .child(eyebrow.to_ascii_uppercase()),
                 )
@@ -7083,7 +7110,7 @@ fn render_context_threads_panel(review_context: &ReviewContextData) -> impl Into
                 .child(
                     div()
                         .text_size(px(10.0))
-                        .font_family("Fira Code")
+                        .font_family(mono_font_family())
                         .text_color(fg_subtle())
                         .child("THREADS"),
                 )
@@ -7111,7 +7138,7 @@ fn render_context_threads_panel(review_context: &ReviewContextData) -> impl Into
                                 .items_center()
                                 .gap(px(6.0))
                                 .text_size(px(11.0))
-                                .font_family("Fira Code")
+                                .font_family(mono_font_family())
                                 .text_color(fg_subtle())
                                 .child(user_avatar(
                                     &thread.author_login,
@@ -7162,7 +7189,7 @@ fn render_context_related_panel(
         .child(
             div()
                 .text_size(px(10.0))
-                .font_family("Fira Code")
+                .font_family(mono_font_family())
                 .text_color(fg_subtle())
                 .child("RELATED"),
         )
@@ -8435,7 +8462,7 @@ fn render_diff_gap_row(
         .bg(bg_surface())
         .border_b(px(1.0))
         .border_color(border_muted())
-        .font_family("Fira Code")
+        .font_family(mono_font_family())
         .text_size(px(11.0))
         .child(
             div()
@@ -8564,7 +8591,7 @@ fn render_semantic_section_header(
                         .child(
                             div()
                                 .text_size(px(10.0))
-                                .font_family("Fira Code")
+                                .font_family(mono_font_family())
                                 .text_color(accent())
                                 .flex_shrink_0()
                                 .child(section.kind.label().to_ascii_uppercase()),
@@ -8572,7 +8599,7 @@ fn render_semantic_section_header(
                         .child(
                             div()
                                 .text_size(px(12.0))
-                                .font_family("Fira Code")
+                                .font_family(mono_font_family())
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(fg_emphasis())
                                 .flex_grow()
@@ -8816,14 +8843,14 @@ fn render_diff_section_header(label: &str, count: usize) -> impl IntoElement {
         .child(
             div()
                 .text_size(px(11.0))
-                .font_family("Fira Code")
+                .font_family(mono_font_family())
                 .text_color(fg_muted())
                 .child(label.to_uppercase()),
         )
         .child(
             div()
                 .text_size(px(11.0))
-                .font_family("Fira Code")
+                .font_family(mono_font_family())
                 .text_color(fg_subtle())
                 .child(count.to_string()),
         )
@@ -9039,7 +9066,7 @@ fn render_waypoint_pill(label: &str, active: bool) -> impl IntoElement {
         .py(px(4.0))
         .rounded(px(999.0))
         .border_1()
-        .border_color(if active { purple() } else { waypoint_border() })
+        .border_color(if active { warning() } else { waypoint_border() })
         .bg(if active {
             waypoint_active_bg()
         } else {
@@ -9051,7 +9078,7 @@ fn render_waypoint_pill(label: &str, active: bool) -> impl IntoElement {
                 .flex()
                 .items_center()
                 .gap(px(6.0))
-                .child(div().w(px(8.0)).h(px(8.0)).rounded(px(999.0)).bg(purple()))
+                .child(div().w(px(8.0)).h(px(8.0)).rounded(px(999.0)).bg(warning()))
                 .child(
                     div()
                         .max_w(px(220.0))
@@ -9132,7 +9159,7 @@ fn render_review_line_action_popup(
                 .child(
                     div()
                         .text_size(px(10.0))
-                        .font_family("Fira Code")
+                        .font_family(mono_font_family())
                         .text_color(waypoint_fg())
                         .child(
                             target
@@ -9215,7 +9242,7 @@ fn render_review_line_action_popup(
                         .child(
                             div()
                                 .text_size(px(11.0))
-                                .font_family("Fira Code")
+                                .font_family(mono_font_family())
                                 .text_color(fg_subtle())
                                 .child("cmd-enter submit • esc close"),
                         )
@@ -9276,7 +9303,7 @@ fn line_action_button(
         .py(px(8.0))
         .rounded(px(999.0))
         .border_1()
-        .border_color(if active { purple() } else { border_default() })
+        .border_color(if active { warning() } else { border_default() })
         .bg(if active { waypoint_bg() } else { bg_surface() })
         .text_size(px(12.0))
         .font_weight(FontWeight::MEDIUM)
@@ -9462,7 +9489,7 @@ fn render_diff_line(
         .bg(row_bg)
         .border_b(px(1.0))
         .border_color(row_border)
-        .font_family("Fira Code")
+        .font_family(mono_font_family())
         .text_size(px(12.0))
         .when(is_selected, |el| {
             el.border_l(px(2.0)).border_color(transparent())
@@ -9569,7 +9596,7 @@ fn render_syntax_content(
         .py(px(1.0))
         .whitespace_nowrap()
         .text_size(px(12.0))
-        .font_family("Fira Code");
+        .font_family(mono_font_family());
 
     if content.is_empty() {
         return content_div
@@ -10163,7 +10190,7 @@ fn decorated_diff_text_runs(
         if index > 0 && (colors[index] != current_color || emphasized[index] != current_emphasis) {
             runs.push(TextRun {
                 len: segment.len(),
-                font: font("Fira Code"),
+                font: font(mono_font_family()),
                 color: current_color,
                 background_color: current_emphasis.then_some(emphasis_background),
                 underline: None,
@@ -10180,7 +10207,7 @@ fn decorated_diff_text_runs(
     if !segment.is_empty() {
         runs.push(TextRun {
             len: segment.len(),
-            font: font("Fira Code"),
+            font: font(mono_font_family()),
             color: current_color,
             background_color: current_emphasis.then_some(emphasis_background),
             underline: None,
@@ -10372,7 +10399,7 @@ fn render_hunk_header(
             diff_hunk_bg()
         })
         .text_size(px(11.0))
-        .font_family("Fira Code")
+        .font_family(mono_font_family())
         .text_color(if hunk_is_selected {
             fg_emphasis()
         } else {
@@ -10512,7 +10539,7 @@ fn render_tour_diff_file_with_options(
                     .text_size(px(10.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(fg_subtle())
-                    .font_family("Fira Code")
+                    .font_family(mono_font_family())
                     .mb(px(8.0))
                     .child("CHANGESET"),
             )
@@ -10541,7 +10568,7 @@ fn render_tour_diff_file_header(
                         .text_size(px(10.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(fg_subtle())
-                        .font_family("Fira Code")
+                        .font_family(mono_font_family())
                         .child("CHANGESET"),
                 )
                 .child(
