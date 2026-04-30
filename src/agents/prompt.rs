@@ -73,6 +73,128 @@ pub fn build_tour_prompt(input: &GenerateCodeTourInput) -> String {
     lines.join("\n")
 }
 
+pub fn build_stack_planning_prompt(input_json: &Value) -> String {
+    let context_pretty = serde_json::to_string_pretty(input_json).expect("context must serialize");
+    [
+        "You are helping Remiss, a read-only pull request review IDE, create virtual review stacks.",
+        "",
+        "Your task is to repair and label deterministic candidate layers for one pull request.",
+        "",
+        "A virtual stack is not a Git branch stack. It is a local review lens. It should reconstruct the author's ideal review plan, not categorize the diff.",
+        "",
+        "A good stack is an ordered sequence of conceptual, independently reviewable, dependency-respecting layers.",
+        "Each layer must answer one clear review question and contain at least one substantive change.",
+        "Do not create layers from superficial diff categories such as imports, whitespace, comments, or small cleanup unless the whole layer is a coherent mechanical formatting/comment-only change.",
+        "",
+        "Critical rules:",
+        "- Do not invent atom IDs.",
+        "- Do not omit atom IDs.",
+        "- Assign every atom exactly once.",
+        "- Every atom id from input.atoms MUST appear exactly once across all layer atom_ids and manual_review_atom_ids combined. If you are unsure where an atom belongs, put it in manual_review_atom_ids rather than dropping it.",
+        "- Do not create Git branches or PRs.",
+        "- Do not suggest rewriting history.",
+        "- Start from candidate_layers, dependency_edges, and atom metadata. Repair them when needed; do not perform free-form clustering from raw file categories.",
+        "- dependency_edges only contains symbol-reference and test-target relationships; role-based ordering (foundation/types -> core -> integration -> tests) is implicit in atoms[*].role and must be preserved without explicit edges.",
+        "- Prefer semantic review order over commit boundaries when commits are too coarse.",
+        "- Commits are signals, not authoritative layers.",
+        "- If a PR has only 1-2 commits and many changed lines, usually create semantic layers instead of commit layers.",
+        "- Dependency order matters. If one atom uses code introduced by another, the provider/foundation atom must be in the same or a lower layer.",
+        "- Imports are supporting noise. Attach import atoms to the substantive symbol/file change that requires them.",
+        "- Tests usually belong with the behavior they validate. Use a separate test layer only for integration tests, test infrastructure, pre-refactor characterization tests, or broad acceptance coverage.",
+        "- Refactors should be separate from behavior changes when they would otherwise obscure the behavior change.",
+        "- The final layer must not become a garbage bucket. If the last layer contains more than 40% of substantive atoms or more than two unrelated concerns, split it.",
+        "- Use manual_review_atom_ids for generated, binary, huge, ambiguous, or low-confidence atoms.",
+        "- Preserve reviewer trust by making uncertainty explicit.",
+        "- Prefer fewer coherent layers over many artificial layers.",
+        "",
+        "Choose the dominant decomposition pattern:",
+        "- dependency_chain: foundation/types/schema -> core logic -> integration/API -> UI -> broad tests/docs",
+        "- refactor_then_change",
+        "- mechanical_then_use for generated code, version bumps, schema regeneration, large formatting, or automated migrations",
+        "- vertical_feature_slices when independent subfeatures are each reviewable end-to-end",
+        "- risk_isolation",
+        "- reviewer_boundary",
+        "",
+        "Substantive atoms include type/model/schema/API contracts, core behavior, algorithms, data/control flow, structural refactors, test behavior, integration/wiring, UI behavior, runtime config, generated code when it is the point of the layer, and version bumps.",
+        "Non-substantive atoms include imports, formatting, comment-only edits, small rename fallout, mechanical call-site noise, and file reordering. Attach non-substantive atoms to the substantive atom that caused them.",
+        "",
+        "Before finalizing, run these checks:",
+        "- no import-only layer",
+        "- no misc/remaining/everything-else layer",
+        "- no tail dump",
+        "- every substantive atom assigned exactly once",
+        "- every layer has one clear review question",
+        "- dependency order is valid",
+        "- generic tests-only layers are avoided unless they are integration, infrastructure, characterization, or broad acceptance coverage",
+        "",
+        "Return strict JSON only. No markdown, no prose outside JSON.",
+        "",
+        "Input:",
+        &context_pretty,
+        "",
+        "Required output schema:",
+        r#"{
+  "strategy": "dependency_chain | refactor_then_change | mechanical_then_use | vertical_feature_slices | risk_isolation | reviewer_boundary | semantic_virtual_stack | hybrid_virtual_stack | commit_virtual_stack | flat_manual_review",
+  "confidence": "high | medium | low",
+  "rationale": "short explanation",
+  "layers": [
+    {
+      "title": "imperative, specific, meaningful layer title",
+      "review_question": "what the reviewer should verify",
+      "summary": "what this layer contains",
+      "rationale": "why these atoms belong together and why this layer appears here",
+      "substantive_atom_ids": ["existing substantive atom IDs only"],
+      "attached_noise_atom_ids": ["existing import/formatting/comment atom IDs attached to the substantive change"],
+      "depends_on_layer_indexes": [0],
+      "confidence": "high | medium | low",
+      "review_priority": "start_here | normal | quick_pass | manual_review"
+    }
+  ],
+  "manual_review_atom_ids": ["existing atom IDs only"],
+  "warnings": ["short warning strings"]
+}"#,
+    ]
+    .join("\n")
+}
+
+/// Build a follow-up prompt that asks the model to refine an earlier stack plan
+/// after the response was produced but failed parsing or post-validation.
+///
+/// `failure_kind` should be a short label like "Parse error" or "Validation error".
+/// `failure_message` is the specific failure reason from the parser/validator.
+/// `previous_response` is the model's last raw response (typically JSON).
+pub fn build_stack_planning_refinement_prompt(
+    input_json: &Value,
+    previous_response: &str,
+    failure_kind: &str,
+    failure_message: &str,
+    attempt_number: usize,
+    max_attempts: usize,
+) -> String {
+    const MAX_PREVIOUS_RESPONSE_CHARS: usize = 32_000;
+    let trimmed_previous = trim_text(previous_response, MAX_PREVIOUS_RESPONSE_CHARS);
+    let base = build_stack_planning_prompt(input_json);
+    [
+        base.as_str(),
+        "",
+        "Refinement instructions:",
+        &format!(
+            "This is attempt {} of {}. Your previous response was rejected by post-validation.",
+            attempt_number, max_attempts
+        ),
+        &format!("{}: {}", failure_kind, failure_message),
+        "",
+        "Your previous response was:",
+        &trimmed_previous,
+        "",
+        "Produce a corrected JSON plan that fixes only the specific problem above. Keep the rest of the plan intact when it was already correct.",
+        "Do not over-correct: keep coherent multi-atom layers. Prefer fewer coherent layers over many single-atom layers. If atoms belong together by feature or dependency, keep them together even after the fix.",
+        "If the failure is a tail-dump-style validation issue, prefer moving the offending atoms into the earlier layer whose behavior they support, rather than splitting them into many tiny layers.",
+        "Return strict JSON only. No markdown, no prose outside JSON.",
+    ]
+    .join("\n")
+}
+
 pub fn trim_text(value: &str, max_length: usize) -> String {
     let normalized = value.trim();
     if normalized.chars().count() <= max_length {

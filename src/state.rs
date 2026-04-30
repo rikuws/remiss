@@ -4,8 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cache::CacheStore;
 use crate::code_tour::{
-    build_tour_request_key, CodeTourProvider, CodeTourProviderStatus, CodeTourSettings, DiffAnchor,
-    GeneratedCodeTour,
+    self, build_tour_request_key, CodeTourProvider, CodeTourProviderStatus, CodeTourSettings,
+    DiffAnchor, GeneratedCodeTour,
 };
 use crate::diff::DiffRenderRow;
 use crate::github::{
@@ -24,6 +24,7 @@ use crate::review_session::{
     ReviewSessionDocument, ReviewSessionState, ReviewSourceTarget, ReviewTaskRoute, ReviewWaymark,
 };
 use crate::semantic_diff::SemanticDiffFile;
+use crate::stacks::model::{ReviewStack, StackDiffMode, StackPullRequestRef};
 use crate::syntax::{self, SyntaxSpan};
 use crate::theme::{self, ThemePreference};
 use gpui::{point, px, ListAlignment, ListState, Pixels, Point, ScrollHandle, WindowAppearance};
@@ -101,6 +102,9 @@ pub struct DetailState {
     pub local_repository_status: Option<LocalRepositoryStatus>,
     pub local_repository_loading: bool,
     pub local_repository_error: Option<String>,
+    pub review_intelligence_request_key: Option<String>,
+    pub review_intelligence_loading: bool,
+    pub ai_stack_state: AiStackState,
     pub tour_states: std::collections::HashMap<CodeTourProvider, CodeTourState>,
     pub file_content_states: std::collections::HashMap<String, FileContentState>,
     pub lsp_statuses: std::collections::HashMap<String, LspServerStatus>,
@@ -111,6 +115,9 @@ pub struct DetailState {
     pub review_route_message: Option<String>,
     pub review_route_error: Option<String>,
     pub review_session: ReviewSessionState,
+    pub stack_open_pull_requests: Option<Vec<StackPullRequestRef>>,
+    pub stack_open_pull_requests_loading: bool,
+    pub stack_open_pull_requests_error: Option<String>,
 }
 
 impl Default for DetailState {
@@ -123,6 +130,9 @@ impl Default for DetailState {
             local_repository_status: None,
             local_repository_loading: false,
             local_repository_error: None,
+            review_intelligence_request_key: None,
+            review_intelligence_loading: false,
+            ai_stack_state: AiStackState::default(),
             tour_states: std::collections::HashMap::new(),
             file_content_states: std::collections::HashMap::new(),
             lsp_statuses: std::collections::HashMap::new(),
@@ -133,6 +143,34 @@ impl Default for DetailState {
             review_route_message: None,
             review_route_error: None,
             review_session: ReviewSessionState::default(),
+            stack_open_pull_requests: None,
+            stack_open_pull_requests_loading: false,
+            stack_open_pull_requests_error: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct AiStackState {
+    pub request_key: Option<String>,
+    pub stack: Option<Arc<ReviewStack>>,
+    pub loading: bool,
+    pub generating: bool,
+    pub error: Option<String>,
+    pub message: Option<String>,
+    pub success: bool,
+}
+
+impl Default for AiStackState {
+    fn default() -> Self {
+        Self {
+            request_key: None,
+            stack: None,
+            loading: false,
+            generating: false,
+            error: None,
+            message: None,
+            success: false,
         }
     }
 }
@@ -389,6 +427,13 @@ pub struct CachedReviewFileTree {
     pub rows: Arc<Vec<ReviewFileTreeRow>>,
 }
 
+#[derive(Clone)]
+pub struct CachedReviewStack {
+    pub revision: String,
+    pub open_pr_revision: usize,
+    pub stack: Arc<ReviewStack>,
+}
+
 pub struct AppState {
     pub cache: Arc<CacheStore>,
     pub lsp_session_manager: Arc<LspSessionManager>,
@@ -428,6 +473,7 @@ pub struct AppState {
     pub review_queue_cache: RefCell<std::collections::HashMap<String, CachedReviewQueue>>,
     pub semantic_diff_cache: RefCell<std::collections::HashMap<String, CachedSemanticDiffFile>>,
     pub review_file_tree_cache: RefCell<std::collections::HashMap<String, CachedReviewFileTree>>,
+    pub review_stack_cache: RefCell<std::collections::HashMap<String, CachedReviewStack>>,
     pub review_file_tree_list_states: RefCell<std::collections::HashMap<String, ListState>>,
     pub review_nav_list_states: RefCell<std::collections::HashMap<String, ListState>>,
     pub source_browser_list_states: RefCell<std::collections::HashMap<String, ListState>>,
@@ -485,6 +531,17 @@ impl AppState {
         let cache_path = cache.path().display().to_string();
         let unread_review_comment_ids =
             notifications::load_unread_review_comment_ids(&cache).unwrap_or_default();
+        let initial_code_tour_settings = match code_tour::load_code_tour_settings(&cache) {
+            Ok(settings) => CodeTourSettingsState {
+                settings,
+                loaded: true,
+                ..CodeTourSettingsState::default()
+            },
+            Err(error) => CodeTourSettingsState {
+                error: Some(error),
+                ..CodeTourSettingsState::default()
+            },
+        };
         let mut state = Self {
             cache: Arc::new(cache),
             lsp_session_manager: Arc::new(LspSessionManager::new()),
@@ -514,6 +571,7 @@ impl AppState {
             review_queue_cache: RefCell::new(std::collections::HashMap::new()),
             semantic_diff_cache: RefCell::new(std::collections::HashMap::new()),
             review_file_tree_cache: RefCell::new(std::collections::HashMap::new()),
+            review_stack_cache: RefCell::new(std::collections::HashMap::new()),
             review_file_tree_list_states: RefCell::new(std::collections::HashMap::new()),
             review_nav_list_states: RefCell::new(std::collections::HashMap::new()),
             source_browser_list_states: RefCell::new(std::collections::HashMap::new()),
@@ -550,7 +608,7 @@ impl AppState {
             automatic_tour_request_keys: std::collections::HashSet::new(),
             settings_scroll_handle: ScrollHandle::new(),
             ai_tour_section_list_state: ListState::new(0, ListAlignment::Top, px(720.0)),
-            code_tour_settings: CodeTourSettingsState::default(),
+            code_tour_settings: initial_code_tour_settings,
             managed_lsp_settings: ManagedLspSettingsState::default(),
         };
 
@@ -1005,6 +1063,50 @@ impl AppState {
         if let Some(session) = self.active_review_session_mut() {
             session.center_mode = ReviewCenterMode::SourceBrowser;
             session.source_target = Some(target);
+        }
+    }
+
+    pub fn set_selected_stack_layer(&mut self, layer_id: Option<String>) {
+        if let Some(session) = self.active_review_session_mut() {
+            session.selected_stack_layer_id = layer_id;
+        }
+    }
+
+    pub fn set_stack_diff_mode(&mut self, mode: StackDiffMode) {
+        if let Some(session) = self.active_review_session_mut() {
+            session.stack_diff_mode = mode;
+        }
+    }
+
+    pub fn set_stack_rail_expanded(&mut self, expanded: bool) {
+        if let Some(session) = self.active_review_session_mut() {
+            session.stack_rail_expanded = expanded;
+        }
+    }
+
+    pub fn set_stack_layer_reviewed(
+        &mut self,
+        stack: &ReviewStack,
+        layer_id: &str,
+        reviewed: bool,
+    ) {
+        let Some(session) = self.active_review_session_mut() else {
+            return;
+        };
+        let Some(layer) = stack.layers.iter().find(|layer| layer.id == layer_id) else {
+            return;
+        };
+
+        if reviewed {
+            session.reviewed_stack_layer_ids.insert(layer.id.clone());
+            for atom_id in &layer.atom_ids {
+                session.reviewed_stack_atom_ids.insert(atom_id.clone());
+            }
+        } else {
+            session.reviewed_stack_layer_ids.remove(&layer.id);
+            for atom_id in &layer.atom_ids {
+                session.reviewed_stack_atom_ids.remove(atom_id);
+            }
         }
     }
 
