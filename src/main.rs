@@ -31,6 +31,7 @@ mod command_runner;
 mod diff;
 mod gh;
 mod github;
+mod icons;
 mod local_documents;
 mod local_repo;
 mod lsp;
@@ -38,8 +39,6 @@ mod managed_lsp;
 mod markdown;
 mod notifications;
 mod platform_macos;
-mod review_context;
-mod review_graph;
 mod review_intelligence;
 mod review_queue;
 mod review_routes;
@@ -66,11 +65,10 @@ use cache::CacheStore;
 use platform_macos::apply_app_icon;
 use state::AppState;
 use views::{
-    blur_review_editor, close_palette, close_review_graph_overlay, close_review_line_action,
-    close_waypoint_spotlight, execute_palette_selection, execute_waypoint_spotlight_selection,
-    move_palette_selection, move_waypoint_spotlight_selection, toggle_palette,
-    toggle_waypoint_spotlight, trigger_add_waypoint_shortcut, trigger_submit_inline_comment,
-    trigger_submit_review, RootView,
+    blur_review_editor, close_palette, close_review_line_action, close_waypoint_spotlight,
+    execute_palette_selection, execute_waypoint_spotlight_selection, move_palette_selection,
+    move_waypoint_spotlight_selection, toggle_palette, toggle_waypoint_spotlight,
+    trigger_add_waypoint_shortcut, trigger_submit_inline_comment, trigger_submit_review, RootView,
 };
 
 fn main() {
@@ -106,6 +104,8 @@ fn start_app(cx: &mut App) -> Result<(), String> {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
                 title: Some(APP_NAME.into()),
+                appears_transparent: true,
+                traffic_light_position: Some(point(px(18.0), px(18.0))),
                 ..Default::default()
             }),
             ..Default::default()
@@ -160,12 +160,6 @@ fn start_app(cx: &mut App) -> Result<(), String> {
                 "enter" => execute_waypoint_spotlight_selection(&app_state_for_keys, window, cx),
                 _ => {}
             }
-            return;
-        }
-
-        let review_graph_expanded = app_state_for_keys.read(cx).review_graph_expanded;
-        if review_graph_expanded && keystroke.key == "escape" {
-            close_review_graph_overlay(&app_state_for_keys, cx);
             return;
         }
 

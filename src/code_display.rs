@@ -533,13 +533,13 @@ fn render_prepared_code_line_with_diff(
         Some(PreparedFileLineDiffKind::Addition) => (
             diff_add_bg(),
             diff_add_gutter_bg(),
-            diff_add_border(),
+            transparent(),
             "+",
             success(),
         ),
         None => (
-            transparent(),
-            transparent(),
+            diff_context_bg(),
+            diff_context_gutter_bg(),
             transparent(),
             " ",
             fg_subtle(),
@@ -556,6 +556,8 @@ fn render_prepared_code_line_with_diff(
         .bg(row_bg)
         .border_b(px(1.0))
         .border_color(row_border)
+        .text_color(transparent())
+        .hover(move |style| style.bg(diff_line_hover_bg()).text_color(marker_color))
         .child(
             div()
                 .w(px(56.0))
@@ -572,7 +574,6 @@ fn render_prepared_code_line_with_diff(
                     .w(px(16.0))
                     .flex_shrink_0()
                     .py(px(1.0))
-                    .text_color(marker_color)
                     .child(marker.to_string()),
             )
         })

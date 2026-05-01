@@ -1,10 +1,7 @@
 use gpui::prelude::*;
 use gpui::*;
 
-use crate::app_assets::{
-    OVERVIEW_MY_PULL_REQUESTS_ASSET, OVERVIEW_OPEN_PULL_REQUESTS_ASSET,
-    OVERVIEW_REVIEW_REQUESTS_ASSET,
-};
+use crate::icons::{lucide_icon, LucideIcon};
 use crate::review_queue::default_review_file;
 use crate::review_session::{load_review_session, location_label};
 use crate::shader_surface::{
@@ -97,7 +94,7 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                         .flex_wrap()
                         .gap(px(12.0))
                         .child(overview_metric_card(
-                            OVERVIEW_OPEN_PULL_REQUESTS_ASSET,
+                            LucideIcon::GitPullRequest,
                             "Open Pull Requests",
                             open_tab_count,
                             OverviewShaderVariant::Bands,
@@ -113,7 +110,7 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                             },
                         ))
                         .child(overview_metric_card(
-                            OVERVIEW_MY_PULL_REQUESTS_ASSET,
+                            LucideIcon::GitPullRequestCreate,
                             "My Pull Requests",
                             authored_count,
                             OverviewShaderVariant::Flow,
@@ -126,7 +123,7 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                             },
                         ))
                         .child(overview_metric_card(
-                            OVERVIEW_REVIEW_REQUESTS_ASSET,
+                            LucideIcon::MessageSquareCheck,
                             "Review Requests",
                             review_count,
                             OverviewShaderVariant::Bands,
@@ -243,7 +240,7 @@ fn overview_ambient_strip(welcome_greeting: String) -> impl IntoElement {
 }
 
 fn overview_metric_card(
-    icon_asset: &str,
+    icon: LucideIcon,
     label: &str,
     count: i64,
     shader_variant: OverviewShaderVariant,
@@ -292,12 +289,7 @@ fn overview_metric_card(
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(
-                        svg()
-                            .path(icon_asset.to_string())
-                            .size(px(17.0))
-                            .text_color(fg_emphasis()),
-                    ),
+                    .child(lucide_icon(icon, 17.0, fg_emphasis())),
             ),
         )
         .child(

@@ -125,6 +125,70 @@ fn build_full_file_diff_lines(parsed: &ParsedDiffFile) -> PreparedFileLineDiffs 
     Arc::new(lines)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::build_full_file_diff_lines;
+    use crate::{
+        code_display::PreparedFileLineDiffKind,
+        diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk, ParsedDiffLine},
+    };
+
+    #[test]
+    fn full_file_diff_lines_highlight_added_right_side_lines() {
+        let parsed = ParsedDiffFile {
+            path: "src/lib.rs".to_string(),
+            previous_path: Some("src/lib.rs".to_string()),
+            is_binary: false,
+            hunks: vec![ParsedDiffHunk {
+                header: "@@ -1,2 +1,3 @@".to_string(),
+                lines: vec![
+                    ParsedDiffLine {
+                        kind: DiffLineKind::Context,
+                        prefix: " ".to_string(),
+                        left_line_number: Some(1),
+                        right_line_number: Some(1),
+                        content: "fn main() {".to_string(),
+                    },
+                    ParsedDiffLine {
+                        kind: DiffLineKind::Deletion,
+                        prefix: "-".to_string(),
+                        left_line_number: Some(2),
+                        right_line_number: None,
+                        content: "    old();".to_string(),
+                    },
+                    ParsedDiffLine {
+                        kind: DiffLineKind::Addition,
+                        prefix: "+".to_string(),
+                        left_line_number: None,
+                        right_line_number: Some(2),
+                        content: "    new();".to_string(),
+                    },
+                    ParsedDiffLine {
+                        kind: DiffLineKind::Addition,
+                        prefix: "+".to_string(),
+                        left_line_number: None,
+                        right_line_number: Some(3),
+                        content: "}".to_string(),
+                    },
+                ],
+            }],
+        };
+
+        let highlighted = build_full_file_diff_lines(&parsed);
+
+        assert_eq!(highlighted.len(), 2);
+        assert_eq!(
+            highlighted.get(&2),
+            Some(&PreparedFileLineDiffKind::Addition)
+        );
+        assert_eq!(
+            highlighted.get(&3),
+            Some(&PreparedFileLineDiffKind::Addition)
+        );
+        assert!(!highlighted.contains_key(&1));
+    }
+}
+
 fn source_state_text(message: &str) -> impl IntoElement {
     div()
         .text_size(px(12.0))

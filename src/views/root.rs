@@ -1,17 +1,16 @@
+use std::time::Duration;
+
 use gpui::prelude::*;
 use gpui::*;
 
-use crate::app_assets::{
-    APP_MARK_ASSET, SIDEBAR_COLLAPSE_ASSET, SIDEBAR_DARK_ASSET, SIDEBAR_EXPAND_ASSET,
-    SIDEBAR_LIGHT_ASSET, SIDEBAR_OVERVIEW_ASSET, SIDEBAR_PULLS_ASSET, SIDEBAR_REVIEWS_ASSET,
-    SIDEBAR_SETTINGS_ASSET, SIDEBAR_SYNC_ASSET, SIDEBAR_SYSTEM_ASSET,
-};
-use crate::branding::{APP_NAME, APP_TAGLINE_LABEL};
 use crate::github;
-use crate::review_session::load_review_session;
+use crate::icons::{lucide_icon, LucideIcon};
+use crate::review_session::{load_review_session, ReviewCenterMode};
 use crate::state::*;
 use crate::theme::*;
 
+use super::ai_tour::refresh_active_tour;
+use super::diff_view::{ensure_active_review_focus_loaded, enter_files_surface};
 use super::palette::render_palette;
 use super::pr_detail::render_pr_workspace;
 use super::sections::render_section_workspace;
@@ -25,7 +24,14 @@ pub struct RootView {
 }
 
 const APP_SIDEBAR_EXPANDED_WIDTH: f32 = 216.0;
-const APP_SIDEBAR_COLLAPSED_WIDTH: f32 = 68.0;
+const APP_SIDEBAR_HIDDEN_WIDTH: f32 = 0.0;
+const APP_SIDEBAR_TRAFFIC_LIGHT_CLEARANCE: f32 = 74.0;
+const APP_TITLEBAR_TOGGLE_LEFT: f32 = 88.0;
+const APP_TITLEBAR_TOGGLE_TOP: f32 = 13.0;
+const APP_TITLEBAR_TOGGLE_SIZE: f32 = 24.0;
+const APP_TITLEBAR_TOGGLE_ICON_SIZE: f32 = 13.0;
+const APP_CHROME_HIDDEN_LEFT_INSET: f32 = 206.0;
+const APP_SIDEBAR_ANIMATION_MS: u64 = 220;
 
 impl RootView {
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -236,6 +242,7 @@ impl Render for RootView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
         let palette_open = state.palette_open;
+        let notification_drawer_open = state.notification_drawer_open;
 
         div()
             .relative()
@@ -248,20 +255,24 @@ impl Render for RootView {
             .font_family(ui_font_family())
             .child(render_app_sidebar(&self.state, cx))
             .child(render_main_column(&self.state, cx))
+            .child(render_titlebar_sidebar_toggle(&self.state, cx))
+            .when(notification_drawer_open, |el| {
+                el.child(render_notification_drawer(&self.state, cx))
+            })
             .when(palette_open, |el| el.child(render_palette(&self.state, cx)))
     }
 }
 
 fn render_app_sidebar(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let s = state.read(cx);
-    let collapsed = s.app_sidebar_collapsed;
+    let hidden = s.app_sidebar_collapsed;
     let active_section = s.active_section;
     let is_authenticated = s.is_authenticated();
     let workspace_syncing = s.workspace_syncing;
     let workspace_error = s.workspace_error.clone();
     let theme_preference = s.theme_preference;
-    let sidebar_width = if collapsed {
-        APP_SIDEBAR_COLLAPSED_WIDTH
+    let sidebar_width = if hidden {
+        APP_SIDEBAR_HIDDEN_WIDTH
     } else {
         APP_SIDEBAR_EXPANDED_WIDTH
     };
@@ -290,113 +301,35 @@ fn render_app_sidebar(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     };
 
     let state_for_nav = state.clone();
-    let state_for_toggle = state.clone();
     let state_for_sync = state.clone();
     let state_for_theme = state.clone();
+    let animation_key = ("app-sidebar", usize::from(hidden));
 
     div()
         .w(px(sidebar_width))
         .flex_shrink_0()
         .min_h_0()
         .bg(bg_overlay())
-        .border_r(px(1.0))
+        .border_r(if hidden { px(0.0) } else { px(1.0) })
         .border_color(border_muted())
+        .overflow_hidden()
         .child(
             div()
+                .w(px(APP_SIDEBAR_EXPANDED_WIDTH))
                 .h_full()
                 .min_h_0()
                 .flex()
                 .flex_col()
                 .justify_between()
+                .opacity(if hidden { 0.0 } else { 1.0 })
                 .child(
                     div()
-                        .p(px(10.0))
+                        .px(px(14.0))
+                        .pt(px(APP_SIDEBAR_TRAFFIC_LIGHT_CLEARANCE))
+                        .pb(px(10.0))
                         .flex()
                         .flex_col()
                         .gap(px(8.0))
-                        .child(if collapsed {
-                            div()
-                                .flex()
-                                .flex_col()
-                                .items_center()
-                                .gap(px(10.0))
-                                .pb(px(8.0))
-                                .child(
-                                    img(APP_MARK_ASSET)
-                                        .size(px(30.0))
-                                        .object_fit(ObjectFit::Contain),
-                                )
-                                .child(sidebar_utility_button(SIDEBAR_EXPAND_ASSET, false, true, {
-                                    let state = state_for_toggle.clone();
-                                    move |_, _, cx| {
-                                        state.update(cx, |state, cx| {
-                                            state.app_sidebar_collapsed = false;
-                                            cx.notify();
-                                        });
-                                    }
-                                }))
-                                .into_any_element()
-                        } else {
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap(px(10.0))
-                                .pb(px(8.0))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(10.0))
-                                        .min_w_0()
-                                        .child(
-                                            img(APP_MARK_ASSET)
-                                                .size(px(30.0))
-                                                .object_fit(ObjectFit::Contain),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_col()
-                                                .gap(px(1.0))
-                                                .min_w_0()
-                                                .child(
-                                                    div()
-                                                        .text_size(px(20.0))
-                                                        .line_height(px(21.0))
-                                                        .font_family(display_serif_font_family())
-                                                        .font_weight(FontWeight::NORMAL)
-                                                        .text_color(fg_emphasis())
-                                                        .child(APP_NAME),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_size(px(10.0))
-                                                        .font_family(mono_font_family())
-                                                        .text_color(focus())
-                                                        .text_ellipsis()
-                                                        .whitespace_nowrap()
-                                                        .overflow_x_hidden()
-                                                        .child(APP_TAGLINE_LABEL),
-                                                ),
-                                        ),
-                                )
-                                .child(sidebar_utility_button(
-                                    SIDEBAR_COLLAPSE_ASSET,
-                                    false,
-                                    true,
-                                    {
-                                        let state = state_for_toggle.clone();
-                                        move |_, _, cx| {
-                                            state.update(cx, |state, cx| {
-                                                state.app_sidebar_collapsed = true;
-                                                cx.notify();
-                                            });
-                                        }
-                                    },
-                                ))
-                                .into_any_element()
-                        })
                         .children(
                             SectionId::all()
                                 .iter()
@@ -410,7 +343,7 @@ fn render_app_sidebar(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                         sidebar_icon_for_section(section),
                                         count,
                                         active_section == section,
-                                        collapsed,
+                                        false,
                                         move |_, window, cx| {
                                             if section == SectionId::Settings {
                                                 prepare_settings_view(&state, window, cx);
@@ -429,69 +362,61 @@ fn render_app_sidebar(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                 )
                 .child(
                     div()
-                        .p(px(10.0))
+                        .px(px(14.0))
+                        .pb(px(14.0))
                         .pt(px(12.0))
                         .border_t(px(1.0))
                         .border_color(border_muted())
                         .flex()
                         .flex_col()
                         .gap(px(8.0))
-                        .when(!collapsed, |el| {
-                            el.child(
-                                div()
-                                    .px(px(8.0))
-                                    .py(px(7.0))
-                                    .rounded(radius_sm())
-                                    .bg(bg_surface())
-                                    .border_1()
-                                    .border_color(border_muted())
-                                    .text_size(px(11.0))
-                                    .font_family(mono_font_family())
-                                    .text_color(sync_color)
-                                    .child(status_label),
-                            )
-                        })
+                        .child(
+                            div()
+                                .px(px(8.0))
+                                .py(px(7.0))
+                                .rounded(radius_sm())
+                                .bg(bg_surface())
+                                .border_1()
+                                .border_color(border_muted())
+                                .text_size(px(11.0))
+                                .font_family(mono_font_family())
+                                .text_color(sync_color)
+                                .child(status_label),
+                        )
                         .child(
                             div()
                                 .flex()
                                 .flex_col()
                                 .gap(px(6.0))
-                                .when(!collapsed, |el| {
-                                    el.child(
-                                        div()
-                                            .px(px(6.0))
-                                            .text_size(px(10.0))
-                                            .font_family(mono_font_family())
-                                            .text_color(fg_subtle())
-                                            .child("THEME"),
-                                    )
-                                })
                                 .child(
                                     div()
-                                        .flex()
-                                        .gap(px(6.0))
-                                        .flex_col()
-                                        .when(!collapsed, |el| el.flex_row())
-                                        .children(ThemePreference::all().iter().map(|candidate| {
-                                            let candidate = *candidate;
-                                            let state = state_for_theme.clone();
-                                            sidebar_theme_button(
-                                                theme_icon_asset(candidate),
-                                                theme_preference == candidate,
-                                                collapsed,
-                                                move |_, window, cx| {
-                                                    update_theme_preference(
-                                                        &state, candidate, window, cx,
-                                                    );
-                                                },
-                                            )
-                                        })),
-                                ),
+                                        .px(px(6.0))
+                                        .text_size(px(10.0))
+                                        .font_family(mono_font_family())
+                                        .text_color(fg_subtle())
+                                        .child("THEME"),
+                                )
+                                .child(div().flex().gap(px(6.0)).flex_row().children(
+                                    ThemePreference::all().iter().map(|candidate| {
+                                        let candidate = *candidate;
+                                        let state = state_for_theme.clone();
+                                        sidebar_theme_button(
+                                            theme_icon(candidate),
+                                            theme_preference == candidate,
+                                            false,
+                                            move |_, window, cx| {
+                                                update_theme_preference(
+                                                    &state, candidate, window, cx,
+                                                );
+                                            },
+                                        )
+                                    }),
+                                )),
                         )
                         .child(sidebar_action_button(
-                            SIDEBAR_SYNC_ASSET,
+                            LucideIcon::RefreshCw,
                             sync_label,
-                            collapsed,
+                            false,
                             sync_color,
                             move |_, window, cx| {
                                 trigger_sync_workspace(&state_for_sync, window, cx)
@@ -499,69 +424,290 @@ fn render_app_sidebar(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                         )),
                 ),
         )
+        .with_animation(
+            animation_key,
+            Animation::new(Duration::from_millis(APP_SIDEBAR_ANIMATION_MS))
+                .with_easing(ease_in_out),
+            move |el, delta| {
+                let progress = sidebar_hidden_progress(hidden, delta);
+                el.w(lerp_px(
+                    APP_SIDEBAR_EXPANDED_WIDTH,
+                    APP_SIDEBAR_HIDDEN_WIDTH,
+                    progress,
+                ))
+            },
+        )
 }
 
 fn render_main_column(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
-    let has_tabs = !state.read(cx).open_tabs.is_empty();
-
     div()
         .flex_grow()
         .min_w_0()
         .min_h_0()
         .flex()
         .flex_col()
-        .when(has_tabs, |el| {
-            el.child(render_workspace_tabs_strip(state, cx))
-        })
+        .child(render_workspace_chrome(state, cx))
         .child(render_workspace_body(state, cx))
 }
 
-fn render_workspace_tabs_strip(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
-    let s = state.read(cx);
-    let active_pr_key = s.active_pr_key.clone();
-    let tabs: Vec<_> = s.open_tabs.clone();
-    let state_for_tabs = state.clone();
+fn render_titlebar_sidebar_toggle(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
+    let hidden = state.read(cx).app_sidebar_collapsed;
+    let state = state.clone();
+    let tooltip = if hidden {
+        "Show sidebar"
+    } else {
+        "Hide sidebar"
+    };
 
     div()
-        .bg(bg_surface())
-        .border_b(px(1.0))
-        .border_color(border_muted())
-        .flex_shrink_0()
+        .absolute()
+        .left(px(APP_TITLEBAR_TOGGLE_LEFT))
+        .top(px(APP_TITLEBAR_TOGGLE_TOP))
         .child(
             div()
-                .px(px(12.0))
-                .py(px(8.0))
+                .id("titlebar-sidebar-toggle")
+                .w(px(APP_TITLEBAR_TOGGLE_SIZE))
+                .h(px(APP_TITLEBAR_TOGGLE_SIZE))
+                .rounded(px(6.0))
+                .bg(transparent())
                 .flex()
                 .items_center()
-                .gap(px(6.0))
-                .id("workspace-tabs-scroll")
-                .overflow_x_scroll()
-                .min_w_0()
-                .children(tabs.into_iter().map(|tab| {
-                    let key = pr_key(&tab.repository, tab.number);
-                    let is_active = active_pr_key.as_deref() == Some(&key);
-                    let state = state_for_tabs.clone();
-                    pr_tab(
-                        &tab.repository,
-                        tab.number,
-                        &tab.title,
-                        tab.additions,
-                        tab.deletions,
-                        &tab.state,
-                        tab.is_draft,
-                        is_active,
-                        move |_, _, cx| {
-                            state.update(cx, |s, cx| {
-                                s.active_pr_key = Some(key.clone());
-                                s.set_active_section(SectionId::Pulls);
-                                s.palette_open = false;
-                                s.palette_selected_index = 0;
-                                cx.notify();
-                            });
-                        },
-                    )
-                })),
+                .justify_center()
+                .cursor_pointer()
+                .hover(|style| style.bg(hover_bg()))
+                .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    state.update(cx, |state, cx| {
+                        state.app_sidebar_collapsed = !hidden;
+                        cx.notify();
+                    });
+                })
+                .child(lucide_icon(
+                    LucideIcon::PanelLeft,
+                    APP_TITLEBAR_TOGGLE_ICON_SIZE,
+                    fg_subtle(),
+                )),
         )
+}
+
+fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
+    let s = state.read(cx);
+    let active_pr_key = s.active_pr_key.clone();
+    let active_surface = s.active_surface;
+    let active_center_mode = s
+        .active_review_session()
+        .map(|session| session.center_mode)
+        .unwrap_or(ReviewCenterMode::SemanticDiff);
+    let active_code_lens = s.active_code_lens_mode();
+    let has_active_pr = active_pr_key.is_some();
+    let unread_count = s
+        .active_detail()
+        .map(|detail| s.unread_review_comment_ids_for_detail(detail).len())
+        .unwrap_or(0);
+    let drawer_open = s.notification_drawer_open;
+    let sidebar_hidden = s.app_sidebar_collapsed;
+    let tabs: Vec<_> = s.open_tabs.clone();
+    let state_for_tabs = state.clone();
+    let state_for_notifications = state.clone();
+    let state_for_briefing = state.clone();
+    let state_for_review = state.clone();
+    let state_for_code = state.clone();
+    let state_for_ai_tour = state.clone();
+    let state_for_diff_lens = state.clone();
+    let state_for_source_lens = state.clone();
+
+    div()
+        .h(px(64.0))
+        .flex_shrink_0()
+        .bg(bg_canvas())
+        .border_b(px(1.0))
+        .border_color(border_muted())
+        .pl(if sidebar_hidden {
+            px(APP_CHROME_HIDDEN_LEFT_INSET)
+        } else {
+            px(14.0)
+        })
+        .pr(px(14.0))
+        .py(px(10.0))
+        .flex()
+        .items_center()
+        .gap(px(12.0))
+        .child(render_workspace_tabs(state_for_tabs, active_pr_key, tabs))
+        .when(has_active_pr, |el| {
+            el.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .flex_shrink_0()
+                    .child(chrome_segmented_control(vec![
+                        chrome_segment(
+                            "Briefing",
+                            active_surface == PullRequestSurface::Overview,
+                            false,
+                            move |_, _, cx| {
+                                state_for_briefing.update(cx, |state, cx| {
+                                    state.active_surface = PullRequestSurface::Overview;
+                                    state.pr_header_compact = false;
+                                    state.persist_active_review_session();
+                                    cx.notify();
+                                });
+                            },
+                        ),
+                        chrome_segment(
+                            "Review",
+                            active_surface == PullRequestSurface::Files,
+                            false,
+                            move |_, window, cx| {
+                                enter_files_surface(&state_for_review, window, cx);
+                            },
+                        ),
+                    ]))
+                    .child(chrome_segmented_control(vec![
+                        chrome_segment(
+                            "Code",
+                            active_center_mode != ReviewCenterMode::AiTour,
+                            active_surface != PullRequestSurface::Files,
+                            move |_, window, cx| {
+                                state_for_code.update(cx, |state, cx| {
+                                    state.active_surface = PullRequestSurface::Files;
+                                    state.enter_code_review_mode();
+                                    state.persist_active_review_session();
+                                    cx.notify();
+                                });
+                                ensure_active_review_focus_loaded(&state_for_code, window, cx);
+                            },
+                        ),
+                        chrome_segment(
+                            "AI Tour + Stack",
+                            active_center_mode == ReviewCenterMode::AiTour,
+                            active_surface != PullRequestSurface::Files,
+                            move |_, window, cx| {
+                                state_for_ai_tour.update(cx, |state, cx| {
+                                    state.active_surface = PullRequestSurface::Files;
+                                    state.set_review_center_mode(ReviewCenterMode::AiTour);
+                                    state.persist_active_review_session();
+                                    cx.notify();
+                                });
+                                refresh_active_tour(&state_for_ai_tour, window, cx, true);
+                            },
+                        ),
+                    ])),
+            )
+            .when(
+                active_surface == PullRequestSurface::Files
+                    && active_center_mode != ReviewCenterMode::AiTour,
+                |el| {
+                    el.child(chrome_segmented_control(vec![
+                        chrome_segment(
+                            "Diff",
+                            active_code_lens == ReviewCenterMode::SemanticDiff,
+                            false,
+                            move |_, _, cx| {
+                                state_for_diff_lens.update(cx, |state, cx| {
+                                    state.set_review_center_mode(ReviewCenterMode::SemanticDiff);
+                                    state.persist_active_review_session();
+                                    cx.notify();
+                                });
+                            },
+                        ),
+                        chrome_segment(
+                            "Source",
+                            active_code_lens == ReviewCenterMode::SourceBrowser,
+                            false,
+                            move |_, window, cx| {
+                                state_for_source_lens.update(cx, |state, cx| {
+                                    state.set_review_center_mode(ReviewCenterMode::SourceBrowser);
+                                    state.persist_active_review_session();
+                                    cx.notify();
+                                });
+                                ensure_active_review_focus_loaded(
+                                    &state_for_source_lens,
+                                    window,
+                                    cx,
+                                );
+                            },
+                        ),
+                    ]))
+                },
+            )
+        })
+        .child(
+            div()
+                .relative()
+                .child(chrome_icon_button(
+                    "workspace-notification-drawer",
+                    LucideIcon::Bell,
+                    "Notifications",
+                    drawer_open,
+                    move |_, _, cx| {
+                        state_for_notifications.update(cx, |state, cx| {
+                            state.notification_drawer_open = !drawer_open;
+                            cx.notify();
+                        });
+                    },
+                ))
+                .when(unread_count > 0, |el| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .top(px(-3.0))
+                            .right(px(-3.0))
+                            .min_w(px(14.0))
+                            .h(px(14.0))
+                            .px(px(3.0))
+                            .rounded(px(999.0))
+                            .bg(danger())
+                            .text_size(px(9.0))
+                            .font_family(mono_font_family())
+                            .text_color(bg_canvas())
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(unread_count.min(99).to_string()),
+                    )
+                })
+                .into_any_element(),
+        )
+}
+
+fn render_workspace_tabs(
+    state: Entity<AppState>,
+    active_pr_key: Option<String>,
+    tabs: Vec<github::PullRequestSummary>,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .id("workspace-tabs-scroll")
+        .overflow_x_scroll()
+        .min_w_0()
+        .flex_grow()
+        .children(tabs.into_iter().map(|tab| {
+            let key = pr_key(&tab.repository, tab.number);
+            let is_active = active_pr_key.as_deref() == Some(&key);
+            let state = state.clone();
+            pr_tab(
+                &tab.repository,
+                tab.number,
+                &tab.title,
+                tab.additions,
+                tab.deletions,
+                &tab.state,
+                tab.is_draft,
+                is_active,
+                move |_, _, cx| {
+                    state.update(cx, |s, cx| {
+                        s.active_pr_key = Some(key.clone());
+                        s.set_active_section(SectionId::Pulls);
+                        s.palette_open = false;
+                        s.palette_selected_index = 0;
+                        cx.notify();
+                    });
+                },
+            )
+        }))
 }
 
 fn render_workspace_body(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
@@ -580,27 +726,373 @@ fn render_workspace_body(state: &Entity<AppState>, cx: &App) -> impl IntoElement
         })
 }
 
-fn sidebar_icon_for_section(section: SectionId) -> &'static str {
-    match section {
-        SectionId::Overview => SIDEBAR_OVERVIEW_ASSET,
-        SectionId::Pulls => SIDEBAR_PULLS_ASSET,
-        SectionId::Reviews => SIDEBAR_REVIEWS_ASSET,
-        SectionId::Settings => SIDEBAR_SETTINGS_ASSET,
-        SectionId::Issues => SIDEBAR_OVERVIEW_ASSET,
+fn chrome_icon_button(
+    id: &'static str,
+    icon: LucideIcon,
+    tooltip: &'static str,
+    active: bool,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .relative()
+        .w(px(34.0))
+        .h(px(34.0))
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(if active {
+            focus_border()
+        } else {
+            border_muted()
+        })
+        .bg(if active { bg_selected() } else { bg_overlay() })
+        .shadow_sm()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .hover(|style| {
+            style
+                .bg(hover_bg())
+                .border_color(focus_border())
+                .text_color(fg_emphasis())
+        })
+        .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
+        .on_mouse_down(MouseButton::Left, on_click)
+        .child(lucide_icon(
+            icon,
+            16.0,
+            if active { fg_emphasis() } else { fg_muted() },
+        ))
+}
+
+fn chrome_segmented_control(children: Vec<AnyElement>) -> impl IntoElement {
+    div()
+        .h(px(34.0))
+        .p(px(3.0))
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(border_muted())
+        .bg(bg_overlay())
+        .shadow_sm()
+        .flex()
+        .items_center()
+        .gap(px(2.0))
+        .children(children)
+}
+
+fn chrome_segment(
+    label: &'static str,
+    active: bool,
+    disabled: bool,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .h(px(26.0))
+        .px(px(10.0))
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(if active {
+            focus_border()
+        } else {
+            transparent()
+        })
+        .bg(if active { bg_selected() } else { transparent() })
+        .text_size(px(12.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(if active { fg_emphasis() } else { fg_muted() })
+        .flex()
+        .items_center()
+        .justify_center()
+        .opacity(if disabled { 0.5 } else { 1.0 })
+        .cursor_pointer()
+        .hover(|style| {
+            style
+                .bg(hover_bg())
+                .border_color(focus_border())
+                .text_color(fg_emphasis())
+        })
+        .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+            if !disabled {
+                on_click(event, window, cx);
+            }
+        })
+        .child(label)
+        .into_any_element()
+}
+
+fn render_notification_drawer(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
+    let s = state.read(cx);
+    let active_detail = s.active_detail();
+    let unread_ids = active_detail
+        .map(|detail| s.unread_review_comment_ids_for_detail(detail))
+        .unwrap_or_default();
+    let unread_id_set = unread_ids
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let unread_items = active_detail
+        .map(|detail| {
+            detail
+                .review_threads
+                .iter()
+                .flat_map(|thread| {
+                    thread.comments.iter().filter_map(|comment| {
+                        unread_id_set.contains(&comment.id).then(|| {
+                            (
+                                comment.id.clone(),
+                                comment.author_login.clone(),
+                                comment.path.clone(),
+                                comment.line.or(comment.original_line),
+                                truncate_drawer_text(&comment.body, 96),
+                            )
+                        })
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let state_for_close = state.clone();
+    let state_for_mark_read = state.clone();
+
+    div()
+        .absolute()
+        .top(px(64.0))
+        .right(px(16.0))
+        .w(px(360.0))
+        .max_h(px(520.0))
+        .rounded(radius())
+        .border_1()
+        .border_color(border_default())
+        .bg(bg_overlay())
+        .shadow_md()
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .child(
+            div()
+                .px(px(16.0))
+                .py(px(12.0))
+                .border_b(px(1.0))
+                .border_color(border_muted())
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(fg_emphasis())
+                                .child("Unread review activity"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(fg_muted())
+                                .child(format!(
+                                    "{} unread comment{}",
+                                    unread_items.len(),
+                                    if unread_items.len() == 1 { "" } else { "s" }
+                                )),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .when(!unread_ids.is_empty(), |el| {
+                            let unread_ids = unread_ids.clone();
+                            el.child(
+                                div()
+                                    .px(px(8.0))
+                                    .py(px(5.0))
+                                    .rounded(radius_sm())
+                                    .text_size(px(11.0))
+                                    .text_color(fg_muted())
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(hover_bg()).text_color(fg_emphasis()))
+                                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                        state_for_mark_read.update(cx, |state, cx| {
+                                            state.mark_review_comments_read(unread_ids.clone());
+                                            state.notification_drawer_open = false;
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child("Mark read"),
+                            )
+                        })
+                        .child(chrome_icon_button(
+                            "notification-drawer-close",
+                            LucideIcon::X,
+                            "Close notifications",
+                            false,
+                            move |_, _, cx| {
+                                state_for_close.update(cx, |state, cx| {
+                                    state.notification_drawer_open = false;
+                                    cx.notify();
+                                });
+                            },
+                        )),
+                ),
+        )
+        .child(
+            div()
+                .id("notification-drawer-scroll")
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .p(px(10.0))
+                .gap(px(8.0))
+                .when(unread_items.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .px(px(10.0))
+                            .py(px(18.0))
+                            .rounded(radius_sm())
+                            .border_1()
+                            .border_color(border_muted())
+                            .bg(bg_surface())
+                            .text_size(px(12.0))
+                            .text_color(fg_muted())
+                            .child("No unread review comments."),
+                    )
+                })
+                .children(
+                    unread_items
+                        .into_iter()
+                        .map(|(_id, author, path, line, body)| {
+                            div()
+                                .rounded(radius_sm())
+                                .border_1()
+                                .border_color(border_muted())
+                                .bg(bg_surface())
+                                .px(px(10.0))
+                                .py(px(9.0))
+                                .flex()
+                                .flex_col()
+                                .gap(px(6.0))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap(px(8.0))
+                                        .child(
+                                            div()
+                                                .text_size(px(12.0))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(fg_emphasis())
+                                                .child(author),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(10.0))
+                                                .font_family(mono_font_family())
+                                                .text_color(fg_muted())
+                                                .child(
+                                                    line.map(|line| format!("L{line}"))
+                                                        .unwrap_or_default(),
+                                                ),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .font_family(mono_font_family())
+                                        .text_color(fg_muted())
+                                        .overflow_x_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .child(path),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .line_height(px(17.0))
+                                        .text_color(fg_default())
+                                        .child(body),
+                                )
+                        }),
+                ),
+        )
+}
+
+fn truncate_drawer_text(text: &str, limit: usize) -> String {
+    let trimmed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if trimmed.chars().count() <= limit {
+        trimmed
+    } else {
+        let mut out = trimmed.chars().take(limit).collect::<String>();
+        out.push('…');
+        out
     }
 }
 
-fn theme_icon_asset(preference: ThemePreference) -> &'static str {
+fn sidebar_hidden_progress(hidden: bool, delta: f32) -> f32 {
+    if hidden {
+        delta
+    } else {
+        1.0 - delta
+    }
+}
+
+fn lerp_px(from: f32, to: f32, progress: f32) -> Pixels {
+    px(from + (to - from) * progress)
+}
+
+fn build_static_tooltip(text: &'static str, cx: &mut App) -> AnyView {
+    AnyView::from(cx.new(|_| ChromeTooltipView {
+        text: SharedString::from(text),
+    }))
+}
+
+struct ChromeTooltipView {
+    text: SharedString,
+}
+
+impl Render for ChromeTooltipView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded(radius_sm())
+            .border_1()
+            .border_color(border_muted())
+            .bg(bg_overlay())
+            .text_size(px(11.0))
+            .text_color(fg_default())
+            .child(self.text.clone())
+    }
+}
+
+fn sidebar_icon_for_section(section: SectionId) -> LucideIcon {
+    match section {
+        SectionId::Overview => LucideIcon::LayoutDashboard,
+        SectionId::Pulls => LucideIcon::GitPullRequest,
+        SectionId::Reviews => LucideIcon::MessagesSquare,
+        SectionId::Settings => LucideIcon::Settings,
+        SectionId::Issues => LucideIcon::Inbox,
+    }
+}
+
+fn theme_icon(preference: ThemePreference) -> LucideIcon {
     match preference {
-        ThemePreference::System => SIDEBAR_SYSTEM_ASSET,
-        ThemePreference::Light => SIDEBAR_LIGHT_ASSET,
-        ThemePreference::Dark => SIDEBAR_DARK_ASSET,
+        ThemePreference::System => LucideIcon::Monitor,
+        ThemePreference::Light => LucideIcon::Sun,
+        ThemePreference::Dark => LucideIcon::Moon,
     }
 }
 
 fn sidebar_nav_button(
     label: &str,
-    icon_asset: &str,
+    icon: LucideIcon,
     count: i64,
     active: bool,
     collapsed: bool,
@@ -639,12 +1131,11 @@ fn sidebar_nav_button(
                 .when(!collapsed, |el| el.justify_start())
                 .flex_grow()
                 .min_w_0()
-                .child(
-                    svg()
-                        .path(icon_asset.to_string())
-                        .size(px(18.0))
-                        .text_color(if active { fg_emphasis() } else { fg_muted() }),
-                )
+                .child(lucide_icon(
+                    icon,
+                    18.0,
+                    if active { fg_emphasis() } else { fg_muted() },
+                ))
                 .when(!collapsed, |el| {
                     el.child(
                         div()
@@ -669,7 +1160,7 @@ fn sidebar_nav_button(
 }
 
 fn sidebar_theme_button(
-    icon_asset: &str,
+    icon: LucideIcon,
     active: bool,
     collapsed: bool,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
@@ -692,16 +1183,15 @@ fn sidebar_theme_button(
         .cursor_pointer()
         .hover(|style| style.bg(hover_bg()))
         .on_mouse_down(MouseButton::Left, on_click)
-        .child(
-            svg()
-                .path(icon_asset.to_string())
-                .size(px(16.0))
-                .text_color(if active { fg_emphasis() } else { fg_muted() }),
-        )
+        .child(lucide_icon(
+            icon,
+            16.0,
+            if active { fg_emphasis() } else { fg_muted() },
+        ))
 }
 
 fn sidebar_utility_button(
-    icon_asset: &str,
+    icon: LucideIcon,
     active: bool,
     bordered: bool,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
@@ -723,16 +1213,15 @@ fn sidebar_utility_button(
         .cursor_pointer()
         .hover(|style| style.bg(hover_bg()))
         .on_mouse_down(MouseButton::Left, on_click)
-        .child(
-            svg()
-                .path(icon_asset.to_string())
-                .size(px(16.0))
-                .text_color(if active { fg_emphasis() } else { fg_muted() }),
-        )
+        .child(lucide_icon(
+            icon,
+            16.0,
+            if active { fg_emphasis() } else { fg_muted() },
+        ))
 }
 
 fn sidebar_action_button(
-    icon_asset: &str,
+    icon: LucideIcon,
     label: &str,
     collapsed: bool,
     icon_color: Rgba,
@@ -753,12 +1242,7 @@ fn sidebar_action_button(
         .cursor_pointer()
         .hover(|style| style.bg(hover_bg()))
         .on_mouse_down(MouseButton::Left, on_click)
-        .child(
-            svg()
-                .path(icon_asset.to_string())
-                .size(px(16.0))
-                .text_color(icon_color),
-        )
+        .child(lucide_icon(icon, 16.0, icon_color))
         .when(!collapsed, |el| {
             el.child(
                 div()

@@ -9,12 +9,6 @@ use std::{
 use gpui::prelude::*;
 use gpui::*;
 
-use crate::app_assets::{
-    SIDEBAR_COLLAPSE_ASSET, SIDEBAR_EXPAND_ASSET, TOUR_API_IO_ASSET, TOUR_AUTH_SECURITY_ASSET,
-    TOUR_CONFIG_ASSET, TOUR_DATA_STATE_ASSET, TOUR_DOCS_ASSET, TOUR_INFRA_ASSET, TOUR_OTHER_ASSET,
-    TOUR_PERFORMANCE_ASSET, TOUR_REFACTOR_ASSET, TOUR_RELIABILITY_ASSET, TOUR_TESTS_ASSET,
-    TOUR_UI_UX_ASSET,
-};
 use crate::code_display::{
     build_interactive_code_tokens, build_lsp_hover_tooltip_view, code_text_runs,
     render_highlighted_code_block, render_highlighted_code_content, InteractiveCodeToken,
@@ -31,23 +25,13 @@ use crate::github::{
     PullRequestDetail, PullRequestFile, PullRequestReviewComment, PullRequestReviewThread,
     RepositoryFileContent, REPOSITORY_FILE_SOURCE_LOCAL_CHECKOUT,
 };
+use crate::icons::{lucide_icon, LucideIcon};
 use crate::local_documents;
 use crate::local_repo;
 use crate::lsp;
 use crate::markdown::render_markdown;
-use crate::review_context::ReviewContextData;
-use crate::review_graph::{
-    build_review_symbol_graph, load_symbol_evolution_timeline, ReviewGraphEdgeKind,
-    ReviewGraphNodeState, ReviewSymbolGraph, ReviewSymbolGraphNode,
-};
 use crate::review_queue::{build_review_queue, ReviewQueue, ReviewQueueBucket};
-use crate::review_routes::{
-    build_callsite_route, build_changed_touch_route, build_section_symbol_focus,
-    collect_section_focus_terms, ReviewSymbolFocus,
-};
-use crate::review_session::{
-    ReviewCenterMode, ReviewInspectorMode, ReviewLocation, ReviewSourceTarget,
-};
+use crate::review_session::{ReviewCenterMode, ReviewLocation, ReviewSourceTarget};
 use crate::selectable_text::{AppTextFieldKind, AppTextInput, SelectableText};
 use crate::semantic_diff::{build_semantic_diff_file, SemanticDiffFile, SemanticDiffSection};
 use crate::source_browser::render_source_browser;
@@ -71,6 +55,7 @@ pub fn enter_files_surface(state: &Entity<AppState>, window: &mut Window, cx: &m
     state.update(cx, |s, cx| {
         s.active_surface = PullRequestSurface::Files;
         s.pr_header_compact = false;
+        s.set_review_file_tree_visible(true);
 
         if s.selected_file_path.is_none() {
             s.selected_file_path = s.active_detail().and_then(|detail| {
@@ -79,6 +64,7 @@ pub fn enter_files_surface(state: &Entity<AppState>, window: &mut Window, cx: &m
             });
         }
 
+        s.persist_active_review_session();
         cx.notify();
     });
 
@@ -233,20 +219,6 @@ pub fn close_review_line_action(state: &Entity<AppState>, cx: &mut App) {
         state.review_line_action_mode = ReviewLineActionMode::Menu;
         state.inline_comment_draft.clear();
         state.inline_comment_error = None;
-        cx.notify();
-    });
-}
-
-pub fn close_review_graph_overlay(state: &Entity<AppState>, cx: &mut App) {
-    state.update(cx, |state, cx| {
-        if !state.review_graph_expanded {
-            return;
-        }
-
-        state.review_graph_expanded = false;
-        state.review_graph_selected_node_id = None;
-        state.review_graph_panning = false;
-        state.review_graph_last_pan_position = None;
         cx.notify();
     });
 }
@@ -753,8 +725,11 @@ pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement
     let line_action_position = s.active_review_line_action_position;
     let line_action_mode = s.review_line_action_mode.clone();
     let review_stack = prepare_review_stack(&s, detail);
+    let review_queue = prepare_review_queue(&s, detail);
+    let review_session = s.active_review_session().cloned().unwrap_or_default();
+    let show_file_tree = review_session.show_file_tree;
 
-    let default_path = prepare_review_queue(&s, detail)
+    let default_path = review_queue
         .default_item()
         .map(|item| item.file_path.clone())
         .or_else(|| detail.parsed_diff.first().map(|file| file.path.clone()));
@@ -773,13 +748,19 @@ pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement
         .flex()
         .flex_grow()
         .min_h_0()
-        .child(render_review_file_tree_pane(
-            state,
-            detail,
-            selected_path,
-            review_stack.as_ref(),
-            cx,
-        ))
+        .bg(diff_editor_bg())
+        .when(show_file_tree, |el| {
+            el.child(render_review_file_tree_pane(
+                state,
+                detail,
+                review_queue.as_ref(),
+                selected_path,
+                semantic_file.as_deref(),
+                &review_session,
+                review_stack.as_ref(),
+                cx,
+            ))
+        })
         .child(
             div()
                 .flex()
@@ -798,6 +779,11 @@ pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement
                     cx,
                 )),
         )
+        .child(render_review_panel_toggle(
+            state,
+            ReviewPanelToggleSide::FileTree,
+            show_file_tree,
+        ))
         .when(waypoint_spotlight_open, |el| {
             el.child(render_waypoint_spotlight(state, cx))
         })
@@ -819,7 +805,6 @@ pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement
         .into_any_element()
 }
 
-const REVIEW_INSPECTOR_PANE_WIDTH: f32 = 300.0;
 const REVIEW_PANEL_TOGGLE_SIZE: f32 = 22.0;
 const REVIEW_PANEL_TOGGLE_HIDDEN_INSET: f32 = 10.0;
 const REVIEW_PANEL_TOGGLE_OVERLAP: f32 = REVIEW_PANEL_TOGGLE_SIZE / 2.0;
@@ -828,7 +813,6 @@ const REVIEW_PANEL_TOGGLE_TOP: f32 = 10.0;
 #[derive(Clone, Copy)]
 enum ReviewPanelToggleSide {
     FileTree,
-    Inspector,
 }
 
 fn render_review_panel_toggle(
@@ -836,15 +820,16 @@ fn render_review_panel_toggle(
     side: ReviewPanelToggleSide,
     visible: bool,
 ) -> AnyElement {
-    let (icon_asset, tooltip) = match (side, visible) {
-        (ReviewPanelToggleSide::FileTree, true) => (SIDEBAR_COLLAPSE_ASSET, "Hide file tree"),
-        (ReviewPanelToggleSide::FileTree, false) => (SIDEBAR_EXPAND_ASSET, "Show file tree"),
-        (ReviewPanelToggleSide::Inspector, true) => (SIDEBAR_EXPAND_ASSET, "Hide inspector"),
-        (ReviewPanelToggleSide::Inspector, false) => (SIDEBAR_COLLAPSE_ASSET, "Show inspector"),
+    let (icon, tooltip) = match (side, visible) {
+        (ReviewPanelToggleSide::FileTree, true) => {
+            (LucideIcon::PanelLeftClose, "Hide review sidebar")
+        }
+        (ReviewPanelToggleSide::FileTree, false) => {
+            (LucideIcon::PanelLeftOpen, "Show review sidebar")
+        }
     };
     let button_id = match side {
         ReviewPanelToggleSide::FileTree => "review-file-tree-toggle",
-        ReviewPanelToggleSide::Inspector => "review-inspector-toggle",
     };
     let state = state.clone();
     let button = div()
@@ -854,17 +839,21 @@ fn render_review_panel_toggle(
         .rounded(radius_sm())
         .border_1()
         .border_color(if visible {
-            border_default()
+            diff_annotation_border()
         } else {
             border_muted()
         })
-        .bg(if visible { bg_surface() } else { bg_overlay() })
+        .bg(if visible {
+            diff_editor_chrome()
+        } else {
+            diff_editor_surface()
+        })
         .shadow_sm()
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .hover(|style| style.bg(hover_bg()))
+        .hover(|style| style.bg(diff_line_hover_bg()))
         .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
             state.update(cx, |state, cx| {
@@ -872,43 +861,27 @@ fn render_review_panel_toggle(
                     ReviewPanelToggleSide::FileTree => {
                         state.set_review_file_tree_visible(!visible);
                     }
-                    ReviewPanelToggleSide::Inspector => {
-                        state.set_review_inspector_visible(!visible);
-                    }
                 }
                 state.persist_active_review_session();
                 cx.notify();
             });
         })
-        .child(
-            svg()
-                .path(icon_asset.to_string())
-                .size(px(12.0))
-                .text_color(if visible { fg_emphasis() } else { fg_muted() }),
-        );
+        .child(lucide_icon(
+            icon,
+            12.0,
+            if visible { fg_emphasis() } else { fg_muted() },
+        ));
 
-    match side {
-        ReviewPanelToggleSide::FileTree => div()
-            .absolute()
-            .top(px(REVIEW_PANEL_TOGGLE_TOP))
-            .left(if visible {
-                file_tree_width() - px(REVIEW_PANEL_TOGGLE_OVERLAP)
-            } else {
-                px(REVIEW_PANEL_TOGGLE_HIDDEN_INSET)
-            })
-            .child(button)
-            .into_any_element(),
-        ReviewPanelToggleSide::Inspector => div()
-            .absolute()
-            .top(px(REVIEW_PANEL_TOGGLE_TOP))
-            .right(if visible {
-                px(REVIEW_INSPECTOR_PANE_WIDTH - REVIEW_PANEL_TOGGLE_OVERLAP)
-            } else {
-                px(REVIEW_PANEL_TOGGLE_HIDDEN_INSET)
-            })
-            .child(button)
-            .into_any_element(),
-    }
+    div()
+        .absolute()
+        .top(px(REVIEW_PANEL_TOGGLE_TOP))
+        .left(if visible {
+            file_tree_width() - px(REVIEW_PANEL_TOGGLE_OVERLAP)
+        } else {
+            px(REVIEW_PANEL_TOGGLE_HIDDEN_INSET)
+        })
+        .child(button)
+        .into_any_element()
 }
 
 fn review_cache_key(active_pr_key: Option<&str>, scope: &str) -> String {
@@ -1087,240 +1060,32 @@ fn prepare_semantic_diff_file(
 fn render_review_file_tree_pane(
     state: &Entity<AppState>,
     detail: &PullRequestDetail,
+    review_queue: &ReviewQueue,
     selected_path: Option<&str>,
+    semantic_file: Option<&SemanticDiffFile>,
+    review_session: &crate::review_session::ReviewSessionState,
     review_stack: &ReviewStack,
     cx: &App,
 ) -> impl IntoElement {
-    render_file_tree(state, detail, selected_path, review_stack, cx)
-}
-
-fn render_review_inspector_pane(
-    state: &Entity<AppState>,
-    detail: &PullRequestDetail,
-    _review_queue: &ReviewQueue,
-    _selected_path: Option<&str>,
-    selected_file: Option<&PullRequestFile>,
-    selected_parsed: Option<&ParsedDiffFile>,
-    semantic_file: Option<&SemanticDiffFile>,
-    prepared_file: Option<&PreparedFileContent>,
-    review_context: Option<&ReviewContextData>,
-    review_session: &crate::review_session::ReviewSessionState,
-    cx: &App,
-) -> impl IntoElement {
-    let inspector_mode = review_session.inspector_mode;
-    let selected_anchor = state.read(cx).selected_diff_anchor.clone();
-    let selected_section = review_context.and_then(|context| context.selected_section.as_ref());
-    let line_focus_term = prepared_file
-        .and_then(|prepared_file| {
-            build_anchor_symbol_focus(selected_anchor.as_ref(), prepared_file)
-        })
-        .or_else(|| build_diff_anchor_symbol_focus(selected_anchor.as_ref(), selected_parsed))
-        .map(|focus| focus.term);
-    let selected_file_label = selected_file
-        .map(|file| file.path.clone())
-        .unwrap_or_else(|| "No file selected".to_string());
-    let current_location_label = state
-        .read(cx)
-        .current_review_location()
-        .map(|location| location.label.clone())
-        .unwrap_or_else(|| "Select a file or section to focus the review.".to_string());
-    let inspector_title = selected_section
-        .map(|section| section.title.clone())
-        .or_else(|| line_focus_term.clone())
-        .unwrap_or_else(|| selected_file_label.clone());
-    let inspector_summary = selected_file
-        .map(|file| {
-            let mut parts = vec![file.path.clone()];
-            if let Some(section) = selected_section {
-                parts.push(format!(
-                    "{} section • +{} / -{}",
-                    section.kind.label(),
-                    section.additions,
-                    section.deletions
-                ));
-                if section.thread_count > 0 {
-                    parts.push(format!(
-                        "{} open thread{}",
-                        section.thread_count,
-                        if section.thread_count == 1 { "" } else { "s" }
-                    ));
-                }
-            } else {
-                parts.push(format!(
-                    "{} file • +{} / -{}",
-                    label_for_change_type(&file.change_type),
-                    file.additions,
-                    file.deletions
-                ));
-            }
-            parts.join(" • ")
-        })
-        .unwrap_or_else(|| current_location_label.clone());
-    let symbol_query = selected_file.and_then(|file| {
-        review_context
-            .and_then(|context| context.selected_section.as_ref())
-            .and_then(|_| {
-                build_review_symbol_route_query(
-                    state,
-                    file.path.as_str(),
-                    selected_anchor.as_ref(),
-                    review_context.and_then(|context| context.selected_section.as_ref()),
-                    selected_parsed,
-                    prepared_file,
-                    cx,
-                )
-            })
-    });
-    let evolution_query = selected_file.map(|file| {
-        build_review_symbol_evolution_query(
-            state,
-            detail,
-            file.path.as_str(),
-            symbol_query.as_ref().map(|query| query.focus.term.as_str()),
-            cx,
-        )
-    });
-
     div()
-        .w(px(REVIEW_INSPECTOR_PANE_WIDTH))
+        .w(file_tree_width())
         .flex_shrink_0()
         .min_h_0()
+        .bg(diff_editor_chrome())
+        .border_r(px(1.0))
+        .border_color(diff_annotation_border())
         .flex()
         .flex_col()
-        .bg(bg_surface())
-        .border_l(px(1.0))
-        .border_color(border_default())
-        .child(
-            div()
-                .p(px(12.0))
-                .pb(px(10.0))
-                .border_b(px(1.0))
-                .border_color(border_default())
-                .flex()
-                .flex_col()
-                .gap(px(10.0))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.0))
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .font_family(mono_font_family())
-                                .text_color(fg_subtle())
-                                .child("CONTEXT"),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(14.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(fg_emphasis())
-                                .min_w_0()
-                                .whitespace_nowrap()
-                                .overflow_x_hidden()
-                                .text_ellipsis()
-                                .child(inspector_title),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(fg_muted())
-                                .child(inspector_summary),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(workspace_mode_button(
-                            ReviewInspectorMode::Graph.label(),
-                            inspector_mode == ReviewInspectorMode::Graph,
-                            {
-                                let state = state.clone();
-                                let symbol_query = symbol_query.clone();
-                                move |_, window, cx| {
-                                    state.update(cx, |state, cx| {
-                                        state.set_review_inspector_mode(ReviewInspectorMode::Graph);
-                                        state.persist_active_review_session();
-                                        cx.notify();
-                                    });
-                                    if let Some(query) = symbol_query.clone() {
-                                        request_review_symbol_details(query, false, window, cx);
-                                    }
-                                }
-                            },
-                        ))
-                        .child(workspace_mode_button(
-                            ReviewInspectorMode::Context.label(),
-                            inspector_mode == ReviewInspectorMode::Context,
-                            {
-                                let state = state.clone();
-                                move |_, _, cx| {
-                                    state.update(cx, |state, cx| {
-                                        state.set_review_inspector_mode(
-                                            ReviewInspectorMode::Context,
-                                        );
-                                        state.persist_active_review_session();
-                                        cx.notify();
-                                    });
-                                }
-                            },
-                        ))
-                        .child(workspace_mode_button(
-                            ReviewInspectorMode::Evolution.label(),
-                            inspector_mode == ReviewInspectorMode::Evolution,
-                            {
-                                let state = state.clone();
-                                let evolution_query = evolution_query.clone().flatten();
-                                move |_, window, cx| {
-                                    state.update(cx, |state, cx| {
-                                        state.set_review_inspector_mode(
-                                            ReviewInspectorMode::Evolution,
-                                        );
-                                        state.persist_active_review_session();
-                                        cx.notify();
-                                    });
-                                    if let Some(query) = evolution_query.clone() {
-                                        request_symbol_evolution_timeline(query, false, window, cx);
-                                    }
-                                }
-                            },
-                        )),
-                ),
-        )
-        .child(match inspector_mode {
-            ReviewInspectorMode::Graph => render_review_graph_content(
-                state,
-                detail,
-                selected_file,
-                review_context,
-                line_focus_term.as_deref(),
-                symbol_query.as_ref(),
-                cx,
-            )
-            .into_any_element(),
-            ReviewInspectorMode::Context => render_review_context_content(
-                state,
-                detail,
-                selected_file,
-                selected_parsed,
-                semantic_file,
-                prepared_file,
-                review_context,
-                cx,
-            )
-            .into_any_element(),
-            ReviewInspectorMode::Evolution => render_review_evolution_content(
-                state,
-                detail,
-                selected_file,
-                evolution_query.flatten().as_ref(),
-                cx,
-            )
-            .into_any_element(),
-        })
+        .child(render_stack_rail(state, detail, review_stack, cx))
+        .child(render_review_navigation_content(
+            state,
+            detail,
+            review_queue,
+            selected_path,
+            semantic_file,
+            review_session,
+            cx,
+        ))
 }
 
 fn render_review_navigation_content(
@@ -1386,6 +1151,10 @@ enum ReviewNavListItem {
         count: usize,
     },
     QueueRow(crate::review_queue::ReviewQueueItem),
+    ChangedFilesHeader {
+        count: usize,
+    },
+    ChangedFile(PullRequestFile),
     SemanticHeader {
         count: usize,
     },
@@ -1445,6 +1214,20 @@ fn build_review_nav_items(
         ReviewQueueBucket::QuickPass,
         &review_queue.quick_pass,
     );
+
+    if !detail.files.is_empty() {
+        items.push(ReviewNavListItem::Spacer);
+        items.push(ReviewNavListItem::ChangedFilesHeader {
+            count: detail.files.len(),
+        });
+        items.extend(
+            detail
+                .files
+                .iter()
+                .cloned()
+                .map(ReviewNavListItem::ChangedFile),
+        );
+    }
 
     if let Some(semantic_file) = semantic_file {
         items.push(ReviewNavListItem::Spacer);
@@ -1562,6 +1345,32 @@ fn render_review_nav_list_item(
                 state,
                 queue_item,
                 selected_path == Some(queue_item.file_path.as_str()),
+            ))
+            .into_any_element(),
+        ReviewNavListItem::ChangedFilesHeader { count } => div()
+            .px(px(14.0))
+            .pt(px(14.0))
+            .child(render_review_nav_panel_header(
+                "CHANGED FILES",
+                "Whole PR",
+                count.to_string(),
+            ))
+            .into_any_element(),
+        ReviewNavListItem::ChangedFile(file) => div()
+            .px(px(8.0))
+            .pt(px(4.0))
+            .child(render_file_tree_file_row(
+                state.clone(),
+                file.path.clone(),
+                file.path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(file.path.as_str())
+                    .to_string(),
+                file.additions,
+                file.deletions,
+                0,
+                selected_path,
             ))
             .into_any_element(),
         ReviewNavListItem::SemanticHeader { count } => div()
@@ -2273,32 +2082,24 @@ fn render_stack_rail(
 }
 
 fn render_stack_rail_toggle(state: Entity<AppState>, expanded: bool) -> impl IntoElement {
-    let label = if expanded { "Hide" } else { "Open" };
-
-    div()
-        .px(px(6.0))
-        .py(px(2.0))
-        .rounded(px(999.0))
-        .bg(if expanded {
-            accent_muted()
+    toolbar_icon_button(
+        "stack-rail-toggle",
+        if expanded {
+            "Hide stack tree"
         } else {
-            bg_subtle()
-        })
-        .border_1()
-        .border_color(if expanded { accent() } else { border_muted() })
-        .text_size(px(9.0))
-        .font_family(mono_font_family())
-        .text_color(if expanded { accent() } else { fg_muted() })
-        .cursor_pointer()
-        .hover(|style| style.bg(hover_bg()).border_color(border_default()))
-        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            "Show stack tree"
+        },
+        expanded,
+        false,
+        render_stack_tree_toggle_icon(expanded),
+        move |_, _, cx| {
             state.update(cx, |state, cx| {
                 state.set_stack_rail_expanded(!expanded);
                 state.persist_active_review_session();
                 cx.notify();
             });
-        })
-        .child(label)
+        },
+    )
 }
 
 fn render_stack_layer_summary_row(
@@ -2630,9 +2431,9 @@ fn render_file_tree(
         .w(file_tree_width())
         .flex_shrink_0()
         .min_h_0()
-        .bg(bg_overlay())
+        .bg(diff_editor_chrome())
         .border_r(px(1.0))
-        .border_color(border_muted())
+        .border_color(diff_annotation_border())
         .flex()
         .flex_col()
         .child(render_stack_rail(state, detail, review_stack, cx))
@@ -2641,7 +2442,7 @@ fn render_file_tree(
                 .px(px(12.0))
                 .py(px(10.0))
                 .border_b(px(1.0))
-                .border_color(border_muted())
+                .border_color(diff_annotation_border())
                 .flex()
                 .items_center()
                 .justify_between()
@@ -2948,31 +2749,7 @@ fn render_file_tree_diff_summary(additions: i64, deletions: i64) -> impl IntoEle
 }
 
 fn render_file_tree_directory_icon() -> impl IntoElement {
-    div()
-        .relative()
-        .w(px(12.0))
-        .h(px(10.0))
-        .flex_shrink_0()
-        .child(
-            div()
-                .absolute()
-                .left(px(1.0))
-                .top(px(1.0))
-                .w(px(4.0))
-                .h(px(2.0))
-                .rounded_t(px(1.5))
-                .bg(fg_subtle()),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(px(0.0))
-                .top(px(3.0))
-                .w(px(12.0))
-                .h(px(7.0))
-                .rounded(px(1.5))
-                .bg(fg_subtle()),
-        )
+    lucide_icon(LucideIcon::Folder, 12.0, fg_subtle())
 }
 
 fn render_file_tree_directory_row(name: String, depth: usize) -> impl IntoElement {
@@ -3040,17 +2817,17 @@ fn render_file_tree_file_row(
         .rounded(radius_sm())
         .border_1()
         .border_color(if is_active {
-            focus_border()
+            diff_selected_edge()
         } else {
             transparent()
         })
         .bg(if is_active {
-            bg_selected()
+            diff_line_hover_bg()
         } else {
             transparent()
         })
         .cursor_pointer()
-        .hover(|style| style.bg(hover_bg()))
+        .hover(|style| style.bg(diff_line_hover_bg()))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             state_for_open.update(cx, |state, cx| {
                 state.selected_file_path = Some(path.clone());
@@ -3848,14 +3625,6 @@ fn render_diff_panel(
         review_session.selected_stack_layer_id.as_deref(),
         &review_session.reviewed_stack_atom_ids,
     );
-    let selected_stack_layer = review_stack
-        .selected_layer(review_session.selected_stack_layer_id.as_deref())
-        .cloned();
-    let selected_stack_layer_id = selected_stack_layer.as_ref().map(|layer| layer.id.clone());
-    let selected_stack_layer_reviewed = selected_stack_layer
-        .as_ref()
-        .map(|layer| review_session.reviewed_stack_layer_ids.contains(&layer.id))
-        .unwrap_or(false);
     let center_mode = review_session.center_mode;
     let source_target = review_session.source_target.clone().or_else(|| {
         selected_file.map(|file| ReviewSourceTarget {
@@ -3870,9 +3639,6 @@ fn render_diff_panel(
     let source_parsed = source_target
         .as_ref()
         .and_then(|target| find_parsed_diff_file(&detail.parsed_diff, &target.path));
-    let has_waymark = app_state.current_waymark().is_some();
-    let can_go_back = !review_session.history_back.is_empty();
-    let can_go_forward = !review_session.history_forward.is_empty();
 
     div()
         .flex_grow()
@@ -3880,8 +3646,8 @@ fn render_diff_panel(
         .min_w_0()
         .flex()
         .flex_col()
+        .bg(diff_editor_bg())
         .child(render_diff_toolbar(
-            state,
             files.len(),
             selected_file,
             selected_parsed,
@@ -3893,21 +3659,13 @@ fn render_diff_panel(
             local_repo_error,
             lsp_status,
             lsp_loading,
-            center_mode,
-            can_go_back,
-            can_go_forward,
-            has_waymark,
             selected_anchor,
-            review_stack.clone(),
-            review_session.stack_diff_mode,
-            selected_stack_layer_id,
-            selected_stack_layer_reviewed,
         ))
         .child(
             div()
                 .flex_grow()
                 .min_h_0()
-                .bg(bg_inset())
+                .bg(diff_editor_bg())
                 .flex()
                 .flex_col()
                 .child(if center_mode == ReviewCenterMode::SourceBrowser {
@@ -3946,7 +3704,6 @@ fn render_diff_panel(
 }
 
 fn render_diff_toolbar(
-    state: &Entity<AppState>,
     total_files: usize,
     selected_file: Option<&PullRequestFile>,
     selected_parsed: Option<&ParsedDiffFile>,
@@ -3958,15 +3715,7 @@ fn render_diff_toolbar(
     _local_repo_error: Option<&str>,
     lsp_status: Option<&lsp::LspServerStatus>,
     lsp_loading: bool,
-    center_mode: ReviewCenterMode,
-    can_go_back: bool,
-    can_go_forward: bool,
-    has_waymark: bool,
     selected_anchor: Option<&DiffAnchor>,
-    review_stack: Arc<ReviewStack>,
-    stack_diff_mode: StackDiffMode,
-    selected_stack_layer_id: Option<String>,
-    selected_stack_layer_reviewed: bool,
 ) -> impl IntoElement {
     let selected_section =
         semantic_file.and_then(|semantic| semantic.section_for_anchor(selected_anchor));
@@ -4023,220 +3772,44 @@ fn render_diff_toolbar(
         focus_meta.push(status.badge_label().to_string());
     }
     let focus_summary = focus_meta.join(" / ");
-    let state_for_back = state.clone();
-    let state_for_forward = state.clone();
-    let state_for_waymark = state.clone();
-    let state_for_semantic = state.clone();
-    let state_for_ai_tour = state.clone();
-    let state_for_source = state.clone();
-    let state_for_stack_whole = state.clone();
-    let state_for_stack_current = state.clone();
-    let state_for_stack_upto = state.clone();
-    let state_for_stack_reviewed = state.clone();
-    let mark_available = has_waymark || selected_anchor.is_some() || selected_file.is_some();
-    let waymark_name = default_waymark_name(
-        selected_file.map(|file| file.path.as_str()),
-        semantic_file.and_then(|semantic| semantic.section_for_anchor(selected_anchor)),
-        selected_anchor,
-    );
 
     div()
         .flex()
         .items_center()
-        .justify_between()
         .gap(px(12.0))
-        .px(px(14.0))
-        .py(px(8.0))
-        .bg(bg_overlay())
+        .px(px(20.0))
+        .py(px(12.0))
+        .bg(diff_editor_surface())
         .border_b(px(1.0))
-        .border_color(border_muted())
-        .child(
-            div().flex().items_start().flex_grow().min_w_0().child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .min_w_0()
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .font_family(mono_font_family())
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(fg_emphasis())
-                            .whitespace_nowrap()
-                            .overflow_x_hidden()
-                            .text_ellipsis()
-                            .child(focus_title),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .font_family(mono_font_family())
-                            .text_color(fg_muted())
-                            .min_w_0()
-                            .whitespace_nowrap()
-                            .overflow_x_hidden()
-                            .text_ellipsis()
-                            .child(focus_summary),
-                    ),
-            ),
-        )
+        .border_color(diff_annotation_border())
         .child(
             div()
                 .flex()
-                .items_center()
-                .gap(px(6.0))
-                .flex_shrink_0()
-                .child(workspace_mode_button(
-                    "Diff",
-                    center_mode == ReviewCenterMode::SemanticDiff,
-                    {
-                        let state = state_for_semantic.clone();
-                        move |_, _, cx| {
-                            state.update(cx, |state, cx| {
-                                state.set_review_center_mode(ReviewCenterMode::SemanticDiff);
-                                state.persist_active_review_session();
-                                cx.notify();
-                            });
-                        }
-                    },
-                ))
-                .child(workspace_mode_button(
-                    "AI Tour",
-                    center_mode == ReviewCenterMode::AiTour,
-                    {
-                        let state = state_for_ai_tour.clone();
-                        move |_, window, cx| {
-                            state.update(cx, |state, cx| {
-                                state.set_review_center_mode(ReviewCenterMode::AiTour);
-                                state.persist_active_review_session();
-                                cx.notify();
-                            });
-                            refresh_active_tour(&state, window, cx, true);
-                        }
-                    },
-                ))
-                .child(workspace_mode_button(
-                    "File",
-                    center_mode == ReviewCenterMode::SourceBrowser,
-                    {
-                        let state = state_for_source.clone();
-                        move |_, window, cx| {
-                            state.update(cx, |state, cx| {
-                                state.set_review_center_mode(ReviewCenterMode::SourceBrowser);
-                                state.persist_active_review_session();
-                                cx.notify();
-                            });
-                            ensure_active_review_focus_loaded(&state, window, cx);
-                        }
-                    },
-                ))
-                .child(div().w(px(1.0)).h(px(18.0)).bg(border_muted()))
-                .child(workspace_mode_button(
-                    StackDiffMode::WholePr.label(),
-                    stack_diff_mode == StackDiffMode::WholePr,
-                    move |_, _, cx| {
-                        state_for_stack_whole.update(cx, |state, cx| {
-                            state.set_stack_diff_mode(StackDiffMode::WholePr);
-                            state.persist_active_review_session();
-                            cx.notify();
-                        });
-                    },
-                ))
-                .child(workspace_mode_button(
-                    StackDiffMode::CurrentLayerOnly.label(),
-                    stack_diff_mode == StackDiffMode::CurrentLayerOnly,
-                    move |_, _, cx| {
-                        state_for_stack_current.update(cx, |state, cx| {
-                            state.set_stack_diff_mode(StackDiffMode::CurrentLayerOnly);
-                            state.persist_active_review_session();
-                            cx.notify();
-                        });
-                    },
-                ))
-                .child(workspace_mode_button(
-                    StackDiffMode::UpToCurrentLayer.label(),
-                    stack_diff_mode == StackDiffMode::UpToCurrentLayer,
-                    move |_, _, cx| {
-                        state_for_stack_upto.update(cx, |state, cx| {
-                            state.set_stack_diff_mode(StackDiffMode::UpToCurrentLayer);
-                            state.persist_active_review_session();
-                            cx.notify();
-                        });
-                    },
-                ))
-                .when_some(selected_stack_layer_id, |el, layer_id| {
-                    el.child(workspace_mode_button(
-                        if selected_stack_layer_reviewed {
-                            "Reviewed"
-                        } else {
-                            "Mark layer"
-                        },
-                        selected_stack_layer_reviewed,
-                        {
-                            let stack = review_stack.clone();
-                            let state = state_for_stack_reviewed.clone();
-                            move |_, _, cx| {
-                                state.update(cx, |state, cx| {
-                                    state.set_stack_layer_reviewed(
-                                        stack.as_ref(),
-                                        &layer_id,
-                                        !selected_stack_layer_reviewed,
-                                    );
-                                    state.persist_active_review_session();
-                                    cx.notify();
-                                });
-                            }
-                        },
-                    ))
-                })
-                .when(can_go_back, |el| {
-                    el.child(workspace_mode_button("Back", false, {
-                        let state = state_for_back.clone();
-                        move |_, window, cx| {
-                            state.update(cx, |state, cx| {
-                                if state.navigate_review_back() {
-                                    state.persist_active_review_session();
-                                    cx.notify();
-                                }
-                            });
-                            ensure_active_review_focus_loaded(&state, window, cx);
-                        }
-                    }))
-                })
-                .when(can_go_forward, |el| {
-                    el.child(workspace_mode_button("Forward", false, {
-                        let state = state_for_forward.clone();
-                        move |_, window, cx| {
-                            state.update(cx, |state, cx| {
-                                if state.navigate_review_forward() {
-                                    state.persist_active_review_session();
-                                    cx.notify();
-                                }
-                            });
-                            ensure_active_review_focus_loaded(&state, window, cx);
-                        }
-                    }))
-                })
-                .when(mark_available, |el| {
-                    el.child(workspace_mode_button(
-                        if has_waymark { "Marked" } else { "Mark" },
-                        has_waymark,
-                        {
-                            let state = state_for_waymark.clone();
-                            let waymark_name = waymark_name.clone();
-                            move |_, _, cx| {
-                                state.update(cx, |state, cx| {
-                                    state.add_waymark_for_current_review_location(
-                                        waymark_name.clone(),
-                                    );
-                                    state.persist_active_review_session();
-                                    cx.notify();
-                                });
-                            }
-                        },
-                    ))
-                }),
+                .flex_col()
+                .gap(px(3.0))
+                .min_w_0()
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .font_family(mono_font_family())
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg_emphasis())
+                        .whitespace_nowrap()
+                        .overflow_x_hidden()
+                        .text_ellipsis()
+                        .child(focus_title),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_family(mono_font_family())
+                        .text_color(fg_muted())
+                        .min_w_0()
+                        .whitespace_nowrap()
+                        .overflow_x_hidden()
+                        .text_ellipsis()
+                        .child(focus_summary),
+                ),
         )
 }
 
@@ -4927,12 +4500,11 @@ fn render_ai_tour_category_icon(
         .items_center()
         .justify_center()
         .flex_shrink_0()
-        .child(
-            svg()
-                .path(ai_tour_category_icon_asset(category).to_string())
-                .size(px(icon_size))
-                .text_color(ai_tour_category_fg(category)),
-        )
+        .child(lucide_icon(
+            ai_tour_category_lucide_icon(category),
+            icon_size,
+            ai_tour_category_fg(category),
+        ))
 }
 
 fn render_ai_tour_priority_chip(priority: TourSectionPriority) -> impl IntoElement {
@@ -4992,20 +4564,20 @@ fn ai_tour_section_metrics(
     metrics
 }
 
-fn ai_tour_category_icon_asset(category: TourSectionCategory) -> &'static str {
+fn ai_tour_category_lucide_icon(category: TourSectionCategory) -> LucideIcon {
     match category {
-        TourSectionCategory::AuthSecurity => TOUR_AUTH_SECURITY_ASSET,
-        TourSectionCategory::DataState => TOUR_DATA_STATE_ASSET,
-        TourSectionCategory::ApiIo => TOUR_API_IO_ASSET,
-        TourSectionCategory::UiUx => TOUR_UI_UX_ASSET,
-        TourSectionCategory::Tests => TOUR_TESTS_ASSET,
-        TourSectionCategory::Docs => TOUR_DOCS_ASSET,
-        TourSectionCategory::Config => TOUR_CONFIG_ASSET,
-        TourSectionCategory::Infra => TOUR_INFRA_ASSET,
-        TourSectionCategory::Refactor => TOUR_REFACTOR_ASSET,
-        TourSectionCategory::Performance => TOUR_PERFORMANCE_ASSET,
-        TourSectionCategory::Reliability => TOUR_RELIABILITY_ASSET,
-        TourSectionCategory::Other => TOUR_OTHER_ASSET,
+        TourSectionCategory::AuthSecurity => LucideIcon::ShieldCheck,
+        TourSectionCategory::DataState => LucideIcon::Database,
+        TourSectionCategory::ApiIo => LucideIcon::Plug,
+        TourSectionCategory::UiUx => LucideIcon::Palette,
+        TourSectionCategory::Tests => LucideIcon::FlaskConical,
+        TourSectionCategory::Docs => LucideIcon::BookOpenText,
+        TourSectionCategory::Config => LucideIcon::SlidersHorizontal,
+        TourSectionCategory::Infra => LucideIcon::ServerCog,
+        TourSectionCategory::Refactor => LucideIcon::GitCompareArrows,
+        TourSectionCategory::Performance => LucideIcon::Gauge,
+        TourSectionCategory::Reliability => LucideIcon::BadgeCheck,
+        TourSectionCategory::Other => LucideIcon::CircleHelp,
     }
 }
 
@@ -5290,6 +4862,68 @@ fn render_ai_tour_step_diff(
         ))
 }
 
+fn toolbar_icon_button(
+    id: &'static str,
+    tooltip: &'static str,
+    active: bool,
+    disabled: bool,
+    icon: AnyElement,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .w(px(22.0))
+        .h(px(22.0))
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(if active {
+            diff_selected_edge()
+        } else {
+            transparent()
+        })
+        .bg(if active {
+            diff_line_hover_bg()
+        } else {
+            transparent()
+        })
+        .opacity(if disabled { 0.42 } else { 1.0 })
+        .flex()
+        .items_center()
+        .justify_center()
+        .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
+        .when(!disabled, move |el| {
+            el.cursor_pointer()
+                .hover(|style| {
+                    style
+                        .bg(diff_line_hover_bg())
+                        .border_color(diff_annotation_border())
+                })
+                .on_mouse_down(MouseButton::Left, on_click)
+        })
+        .child(icon)
+}
+
+fn render_file_tree_toggle_icon(active: bool) -> AnyElement {
+    let color = if active { accent() } else { fg_muted() };
+
+    lucide_icon(
+        if active {
+            LucideIcon::PanelLeftClose
+        } else {
+            LucideIcon::PanelLeftOpen
+        },
+        14.0,
+        color,
+    )
+    .into_any_element()
+}
+
+fn render_stack_tree_toggle_icon(active: bool) -> AnyElement {
+    let color = if active { accent() } else { fg_muted() };
+
+    lucide_icon(LucideIcon::ListTree, 14.0, color).into_any_element()
+}
+
 fn workspace_mode_button(
     label: &str,
     active: bool,
@@ -5305,2902 +4939,23 @@ fn workspace_mode_button(
         } else {
             transparent()
         })
-        .bg(if active { bg_selected() } else { transparent() })
+        .bg(if active {
+            diff_line_hover_bg()
+        } else {
+            transparent()
+        })
         .text_size(px(11.0))
         .font_weight(FontWeight::MEDIUM)
         .text_color(if active { fg_emphasis() } else { fg_muted() })
         .cursor_pointer()
         .hover(|style| {
             style
-                .bg(hover_bg())
+                .bg(diff_line_hover_bg())
                 .border_color(focus_border())
                 .text_color(fg_emphasis())
         })
         .on_mouse_down(MouseButton::Left, on_click)
         .child(label.to_string())
-}
-
-fn render_review_graph_content(
-    state: &Entity<AppState>,
-    detail: &PullRequestDetail,
-    selected_file: Option<&PullRequestFile>,
-    review_context: Option<&ReviewContextData>,
-    focus_override: Option<&str>,
-    symbol_query: Option<&ReviewSymbolRouteQuery>,
-    cx: &App,
-) -> impl IntoElement {
-    let graph_data = prepare_review_graph_render_data(
-        state,
-        detail,
-        selected_file,
-        review_context,
-        focus_override,
-        symbol_query,
-        cx,
-    );
-
-    div()
-        .flex_grow()
-        .min_h_0()
-        .id("review-graph-scroll")
-        .overflow_y_scroll()
-        .child(
-            div()
-                .p(px(14.0))
-                .flex()
-                .flex_col()
-                .gap(px(14.0))
-                .when_some(graph_data.graph.as_ref(), |el, graph| {
-                    el.child(render_review_graph_preview_panel(
-                        state,
-                        detail,
-                        graph,
-                        symbol_query,
-                        graph_data.current_location.clone(),
-                        graph_data.loading,
-                        graph_data.error.clone(),
-                        graph_data.has_lsp_details,
-                    ))
-                })
-                .when(selected_file.is_none(), |el| {
-                    el.child(panel_state_text("Select a file to open the review graph."))
-                }),
-        )
-}
-
-#[derive(Clone)]
-struct ReviewGraphRenderData {
-    graph: Option<ReviewSymbolGraph>,
-    loading: bool,
-    error: Option<String>,
-    has_lsp_details: bool,
-    current_location: Option<ReviewLocation>,
-}
-
-fn prepare_review_graph_render_data(
-    state: &Entity<AppState>,
-    detail: &PullRequestDetail,
-    selected_file: Option<&PullRequestFile>,
-    review_context: Option<&ReviewContextData>,
-    focus_override: Option<&str>,
-    symbol_query: Option<&ReviewSymbolRouteQuery>,
-    cx: &App,
-) -> ReviewGraphRenderData {
-    let selected_section = review_context.and_then(|context| context.selected_section.as_ref());
-    let current_location = state.read(cx).current_review_location();
-    let (loading, error, lsp_details) = symbol_query
-        .and_then(|query| {
-            state
-                .read(cx)
-                .detail_states
-                .get(&query.detail_key)
-                .and_then(|detail_state| detail_state.lsp_symbol_states.get(&query.query_key))
-                .map(|symbol_state| {
-                    (
-                        symbol_state.loading,
-                        symbol_state.error.clone(),
-                        symbol_state.details.clone(),
-                    )
-                })
-        })
-        .unwrap_or((false, None, None));
-    let has_lsp_details = lsp_details.is_some();
-    let selected_file_text = selected_file.and_then(|file| {
-        state
-            .read(cx)
-            .active_detail_state()
-            .and_then(|detail_state| detail_state.file_content_states.get(&file.path))
-            .and_then(|file_state| file_state.prepared.as_ref())
-            .map(|prepared| prepared.text.to_string())
-    });
-    let graph = selected_file.map(|file| {
-        build_review_symbol_graph(
-            detail,
-            file.path.as_str(),
-            selected_file_text.as_deref(),
-            selected_section,
-            focus_override.or(symbol_query.map(|query| query.focus.term.as_str())),
-            lsp_details.as_ref(),
-        )
-    });
-
-    ReviewGraphRenderData {
-        graph,
-        loading,
-        error,
-        has_lsp_details,
-        current_location,
-    }
-}
-
-fn render_review_graph_preview_panel(
-    state: &Entity<AppState>,
-    detail: &PullRequestDetail,
-    graph: &ReviewSymbolGraph,
-    symbol_query: Option<&ReviewSymbolRouteQuery>,
-    current_location: Option<ReviewLocation>,
-    loading: bool,
-    error: Option<String>,
-    has_lsp_details: bool,
-) -> impl IntoElement {
-    let state_for_expand = state.clone();
-    let selected_node_id = graph
-        .focus_node_id
-        .clone()
-        .or_else(|| graph.nodes.first().map(|node| node.id.clone()));
-
-    nested_panel()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(10.0))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.0))
-                        .min_w_0()
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .font_family(mono_font_family())
-                                .text_color(fg_subtle())
-                                .child("SYMBOL GRAPH"),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(13.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(fg_emphasis())
-                                .whitespace_nowrap()
-                                .overflow_x_hidden()
-                                .text_ellipsis()
-                                .child(graph.headline.clone()),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(review_button("Expand", {
-                            let state = state.clone();
-                            let selected_node_id = selected_node_id.clone();
-                            move |_, _, cx| {
-                                state.update(cx, |state, cx| {
-                                    state.review_graph_expanded = true;
-                                    state.review_graph_selected_node_id = selected_node_id.clone();
-                                    state.review_graph_pan_offset = point(px(0.0), px(0.0));
-                                    state.review_graph_zoom = 1.0;
-                                    state.review_graph_panning = false;
-                                    state.review_graph_last_pan_position = None;
-                                    state.set_review_inspector_mode(ReviewInspectorMode::Graph);
-                                    state.persist_active_review_session();
-                                    cx.notify();
-                                });
-                            }
-                        }))
-                        .when_some(symbol_query, |el, query| {
-                            el.child(ghost_button(
-                                if has_lsp_details { "Refresh" } else { "Trace" },
-                                {
-                                    let state = state.clone();
-                                    let query = query.clone();
-                                    move |_, window, cx| {
-                                        request_review_symbol_details(
-                                            query.clone(),
-                                            true,
-                                            window,
-                                            cx,
-                                        );
-                                        state.update(cx, |state, cx| {
-                                            state.set_review_inspector_mode(
-                                                ReviewInspectorMode::Graph,
-                                            );
-                                            state.persist_active_review_session();
-                                            cx.notify();
-                                        });
-                                    }
-                                },
-                            ))
-                        }),
-                ),
-        )
-        .child(
-            div()
-                .mt(px(10.0))
-                .flex()
-                .gap(px(6.0))
-                .flex_wrap()
-                .child(metric_pill(
-                    format!("{} nodes", graph.nodes.len()),
-                    fg_emphasis(),
-                    bg_emphasis(),
-                ))
-                .child(metric_pill(
-                    format!("{} edges", graph.edges.len()),
-                    accent(),
-                    accent_muted(),
-                ))
-                .child(metric_pill(
-                    format!("{} changed", graph.modified_count),
-                    success(),
-                    success_muted(),
-                )),
-        )
-        .child(
-            div()
-                .id("review-graph-preview-open")
-                .mt(px(12.0))
-                .cursor_pointer()
-                .tooltip(|_, cx| build_static_tooltip("Open file graph", cx))
-                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                    state_for_expand.update(cx, |state, cx| {
-                        state.review_graph_expanded = true;
-                        state.review_graph_selected_node_id = selected_node_id.clone();
-                        state.review_graph_pan_offset = point(px(0.0), px(0.0));
-                        state.review_graph_zoom = 1.0;
-                        state.review_graph_panning = false;
-                        state.review_graph_last_pan_position = None;
-                        state.set_review_inspector_mode(ReviewInspectorMode::Graph);
-                        state.persist_active_review_session();
-                        cx.notify();
-                    });
-                })
-                .child(render_review_graph_canvas(
-                    state,
-                    graph,
-                    ReviewGraphCanvasMode::Preview,
-                )),
-        )
-        .when(loading, |el| {
-            el.child(
-                div()
-                    .mt(px(10.0))
-                    .text_size(px(12.0))
-                    .text_color(fg_muted())
-                    .child("Tracing call sites and dependencies..."),
-            )
-        })
-        .when_some(error, |el, error| {
-            el.child(div().mt(px(10.0)).child(error_text(&error)))
-        })
-        .when_some(
-            symbol_query
-                .zip(current_location)
-                .map(|(query, current_location)| (query.clone(), current_location)),
-            |el, (query, current_location)| {
-                let state = state.clone();
-                let detail = detail.clone();
-                el.child(div().mt(px(10.0)).child(ghost_button(
-                    "Call path",
-                    move |_, window, cx| {
-                        activate_callsite_review_route(
-                            &state,
-                            detail.clone(),
-                            current_location.clone(),
-                            query.clone(),
-                            window,
-                            cx,
-                        );
-                    },
-                )))
-            },
-        )
-}
-
-fn render_review_graph_overlay(
-    state: &Entity<AppState>,
-    detail: &PullRequestDetail,
-    selected_file: Option<&PullRequestFile>,
-    review_context: Option<&ReviewContextData>,
-    focus_override: Option<&str>,
-    symbol_query: Option<&ReviewSymbolRouteQuery>,
-    show_file_tree: bool,
-    show_inspector: bool,
-    cx: &App,
-) -> impl IntoElement {
-    let graph_data = prepare_review_graph_render_data(
-        state,
-        detail,
-        selected_file,
-        review_context,
-        focus_override,
-        symbol_query,
-        cx,
-    );
-    let left_offset = if show_file_tree {
-        file_tree_width()
-    } else {
-        px(0.0)
-    };
-    let right_offset = if show_inspector {
-        px(REVIEW_INSPECTOR_PANE_WIDTH)
-    } else {
-        px(0.0)
-    };
-    let state_for_backdrop = state.clone();
-
-    div()
-        .absolute()
-        .top(px(0.0))
-        .bottom(px(0.0))
-        .left(left_offset)
-        .right(right_offset)
-        .p(px(12.0))
-        .flex()
-        .justify_end()
-        .child(
-            div()
-                .absolute()
-                .inset_0()
-                .bg(palette_backdrop())
-                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                    close_review_graph_overlay(&state_for_backdrop, cx);
-                }),
-        )
-        .child(
-            div()
-                .relative()
-                .w(relative(0.88))
-                .min_w(px(640.0))
-                .h_full()
-                .rounded(radius())
-                .border_1()
-                .border_color(border_default())
-                .bg(bg_surface())
-                .shadow_sm()
-                .overflow_hidden()
-                .occlude()
-                .on_any_mouse_down(|_, _, cx| {
-                    cx.stop_propagation();
-                })
-                .child(match graph_data.graph.as_ref() {
-                    Some(graph) => render_review_graph_expanded_panel(
-                        state,
-                        detail,
-                        graph,
-                        symbol_query,
-                        graph_data.current_location.clone(),
-                        graph_data.loading,
-                        graph_data.error.clone(),
-                        graph_data.has_lsp_details,
-                        cx,
-                    )
-                    .into_any_element(),
-                    None => div()
-                        .p(px(16.0))
-                        .child(panel_state_text("Select a file to open the graph."))
-                        .into_any_element(),
-                })
-                .with_animation(
-                    "review-graph-overlay",
-                    Animation::new(Duration::from_millis(180)).with_easing(ease_in_out),
-                    move |el, delta| {
-                        el.mr(lerp_px(-42.0, 0.0, delta))
-                            .opacity(delta.clamp(0.0, 1.0))
-                            .border_color(lerp_rgba(transparent(), border_default(), delta))
-                            .bg(lerp_rgba(bg_canvas(), bg_surface(), delta))
-                    },
-                ),
-        )
-}
-
-fn render_review_graph_expanded_panel(
-    state: &Entity<AppState>,
-    detail: &PullRequestDetail,
-    graph: &ReviewSymbolGraph,
-    symbol_query: Option<&ReviewSymbolRouteQuery>,
-    current_location: Option<ReviewLocation>,
-    loading: bool,
-    error: Option<String>,
-    has_lsp_details: bool,
-    cx: &App,
-) -> impl IntoElement {
-    let selected_node_id = state
-        .read(cx)
-        .review_graph_selected_node_id
-        .clone()
-        .or_else(|| graph.focus_node_id.clone())
-        .or_else(|| graph.nodes.first().map(|node| node.id.clone()));
-    let (pan_offset, zoom, panning) = {
-        let app_state = state.read(cx);
-        (
-            app_state.review_graph_pan_offset,
-            app_state.review_graph_zoom,
-            app_state.review_graph_panning,
-        )
-    };
-    let state_for_close = state.clone();
-    let state_for_reset_pan = state.clone();
-
-    div()
-        .h_full()
-        .flex()
-        .flex_col()
-        .child(
-            div()
-                .px(px(16.0))
-                .py(px(14.0))
-                .border_b(px(1.0))
-                .border_color(border_default())
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(14.0))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.0))
-                        .min_w_0()
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .font_family(mono_font_family())
-                                .text_color(fg_subtle())
-                                .child("FUNCTION / VARIABLE GRAPH"),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(15.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(fg_emphasis())
-                                .whitespace_nowrap()
-                                .overflow_x_hidden()
-                                .text_ellipsis()
-                                .child(graph.headline.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(fg_muted())
-                                .line_clamp(2)
-                                .child(graph.summary.clone()),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(metric_pill(
-                            format!("{} nodes", graph.nodes.len()),
-                            fg_emphasis(),
-                            bg_emphasis(),
-                        ))
-                        .child(metric_pill(
-                            format!("{} edges", graph.edges.len()),
-                            accent(),
-                            accent_muted(),
-                        ))
-                        .child(ghost_button("Reset view", move |_, _, cx| {
-                            state_for_reset_pan.update(cx, |state, cx| {
-                                state.review_graph_pan_offset = point(px(0.0), px(0.0));
-                                state.review_graph_zoom = 1.0;
-                                state.review_graph_panning = false;
-                                state.review_graph_last_pan_position = None;
-                                cx.notify();
-                            });
-                        }))
-                        .when_some(symbol_query, |el, query| {
-                            el.child(review_button(
-                                if has_lsp_details { "Refresh" } else { "Trace" },
-                                {
-                                    let state = state.clone();
-                                    let query = query.clone();
-                                    move |_, window, cx| {
-                                        request_review_symbol_details(
-                                            query.clone(),
-                                            true,
-                                            window,
-                                            cx,
-                                        );
-                                        state.update(cx, |state, cx| {
-                                            state.set_review_inspector_mode(
-                                                ReviewInspectorMode::Graph,
-                                            );
-                                            state.persist_active_review_session();
-                                            cx.notify();
-                                        });
-                                    }
-                                },
-                            ))
-                        })
-                        .child(ghost_button("Close", move |_, _, cx| {
-                            close_review_graph_overlay(&state_for_close, cx);
-                        })),
-                ),
-        )
-        .child(
-            div()
-                .flex_grow()
-                .min_h_0()
-                .p(px(16.0))
-                .flex()
-                .gap(px(16.0))
-                .child(
-                    div()
-                        .flex_grow()
-                        .min_w_0()
-                        .h_full()
-                        .child(render_review_graph_canvas(
-                            state,
-                            graph,
-                            ReviewGraphCanvasMode::Expanded {
-                                selected_node_id: selected_node_id.clone(),
-                                pan_offset,
-                                zoom,
-                                panning,
-                            },
-                        )),
-                )
-                .child(render_review_graph_detail_rail(
-                    state,
-                    detail,
-                    graph,
-                    selected_node_id.as_deref(),
-                    symbol_query,
-                    current_location,
-                    loading,
-                    error,
-                    has_lsp_details,
-                )),
-        )
-}
-
-fn render_review_graph_zoom_controls(state: &Entity<AppState>, zoom: f32) -> impl IntoElement {
-    div()
-        .absolute()
-        .right(px(12.0))
-        .bottom(px(12.0))
-        .px(px(6.0))
-        .py(px(6.0))
-        .rounded(radius_sm())
-        .border_1()
-        .border_color(border_muted())
-        .bg(bg_overlay())
-        .shadow_sm()
-        .flex()
-        .items_center()
-        .gap(px(4.0))
-        .child(review_graph_zoom_button("-", "Zoom out", {
-            let state = state.clone();
-            move |_, _, cx| {
-                state.update(cx, |state, cx| {
-                    state.review_graph_zoom =
-                        clamp_review_graph_zoom(state.review_graph_zoom / 1.15);
-                    state.review_graph_pan_offset = clamp_review_graph_pan_offset(
-                        state.review_graph_pan_offset,
-                        state.review_graph_zoom,
-                    );
-                    cx.notify();
-                });
-            }
-        }))
-        .child(
-            div()
-                .w(px(50.0))
-                .h(px(28.0))
-                .rounded(radius_sm())
-                .bg(bg_subtle())
-                .flex()
-                .items_center()
-                .justify_center()
-                .font_family(mono_font_family())
-                .text_size(px(11.0))
-                .text_color(fg_muted())
-                .child(format!("{:.0}%", clamp_review_graph_zoom(zoom) * 100.0)),
-        )
-        .child(review_graph_zoom_button("+", "Zoom in", {
-            let state = state.clone();
-            move |_, _, cx| {
-                state.update(cx, |state, cx| {
-                    state.review_graph_zoom =
-                        clamp_review_graph_zoom(state.review_graph_zoom * 1.15);
-                    cx.notify();
-                });
-            }
-        }))
-}
-
-fn review_graph_zoom_button(
-    label: &'static str,
-    tooltip: &'static str,
-    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    let button_id = if label == "+" { 1usize } else { 0usize };
-    div()
-        .id(("review-graph-zoom-button", button_id))
-        .w(px(28.0))
-        .h(px(28.0))
-        .rounded(radius_sm())
-        .bg(bg_subtle())
-        .text_color(fg_muted())
-        .text_size(px(15.0))
-        .font_weight(FontWeight::SEMIBOLD)
-        .cursor_pointer()
-        .flex()
-        .items_center()
-        .justify_center()
-        .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
-        .hover(|style| style.bg(hover_bg()).text_color(fg_emphasis()))
-        .on_mouse_down(MouseButton::Left, on_click)
-        .child(label)
-}
-
-#[derive(Clone)]
-enum ReviewGraphCanvasMode {
-    Preview,
-    Expanded {
-        selected_node_id: Option<String>,
-        pan_offset: Point<Pixels>,
-        zoom: f32,
-        panning: bool,
-    },
-}
-
-impl ReviewGraphCanvasMode {
-    fn is_preview(&self) -> bool {
-        matches!(self, Self::Preview)
-    }
-
-    fn selected_node_id(&self) -> Option<&str> {
-        match self {
-            Self::Preview => None,
-            Self::Expanded {
-                selected_node_id, ..
-            } => selected_node_id.as_deref(),
-        }
-    }
-
-    fn pan_offset(&self) -> Point<Pixels> {
-        match self {
-            Self::Preview => point(px(0.0), px(0.0)),
-            Self::Expanded { pan_offset, .. } => *pan_offset,
-        }
-    }
-
-    fn zoom(&self) -> f32 {
-        match self {
-            Self::Preview => 1.0,
-            Self::Expanded { zoom, .. } => clamp_review_graph_zoom(*zoom),
-        }
-    }
-
-    fn node_scale(&self) -> f32 {
-        if self.is_preview() {
-            1.0
-        } else {
-            self.zoom().clamp(0.72, 1.28)
-        }
-    }
-
-    fn is_panning(&self) -> bool {
-        matches!(self, Self::Expanded { panning: true, .. })
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ReviewGraphLayoutLane {
-    Primary,
-    Incoming,
-    Outgoing,
-    Related,
-}
-
-#[derive(Clone)]
-struct ReviewGraphLayoutNode {
-    node: ReviewSymbolGraphNode,
-    x: f32,
-    y: f32,
-    lane: ReviewGraphLayoutLane,
-}
-
-#[derive(Clone)]
-struct ReviewGraphLayoutEdge {
-    from_x: f32,
-    from_y: f32,
-    to_x: f32,
-    to_y: f32,
-    kind: ReviewGraphEdgeKind,
-}
-
-#[derive(Clone, Default)]
-struct ReviewGraphLayout {
-    nodes: Vec<ReviewGraphLayoutNode>,
-    edges: Vec<ReviewGraphLayoutEdge>,
-    hidden_node_count: usize,
-}
-
-fn render_review_graph_canvas(
-    state: &Entity<AppState>,
-    graph: &ReviewSymbolGraph,
-    mode: ReviewGraphCanvasMode,
-) -> impl IntoElement {
-    let layout = build_interactive_review_graph_layout(graph);
-    let pan_offset = mode.pan_offset();
-    let zoom = mode.zoom();
-    let lane_counts = review_graph_lane_counts(&layout);
-    let edge_segments = layout.edges.clone();
-    let hidden_node_count = layout.hidden_node_count;
-    let layout_nodes = layout.nodes;
-    let mut canvas_root = div()
-        .relative()
-        .w_full()
-        .overflow_hidden()
-        .rounded(radius_sm())
-        .border_1()
-        .border_color(border_default())
-        .bg(bg_inset());
-
-    if mode.is_preview() {
-        canvas_root = canvas_root.h(px(240.0));
-    } else {
-        let state_for_pan_start = state.clone();
-        let state_for_pan_move = state.clone();
-        let state_for_pan_end = state.clone();
-        let state_for_wheel = state.clone();
-        canvas_root = canvas_root
-            .h_full()
-            .min_h(px(520.0))
-            .cursor(if mode.is_panning() {
-                CursorStyle::ClosedHand
-            } else {
-                CursorStyle::OpenHand
-            })
-            .on_mouse_down(MouseButton::Left, move |event, _, cx| {
-                state_for_pan_start.update(cx, |state, cx| {
-                    state.review_graph_panning = true;
-                    state.review_graph_last_pan_position = Some(event.position);
-                    cx.notify();
-                });
-                cx.stop_propagation();
-            })
-            .on_mouse_move(move |event, _, cx| {
-                state_for_pan_move.update(cx, |state, cx| {
-                    if !state.review_graph_panning {
-                        return;
-                    }
-                    if !event.dragging() {
-                        state.review_graph_panning = false;
-                        state.review_graph_last_pan_position = None;
-                        cx.notify();
-                        return;
-                    }
-                    let Some(last_position) = state.review_graph_last_pan_position else {
-                        state.review_graph_last_pan_position = Some(event.position);
-                        cx.notify();
-                        return;
-                    };
-                    let delta = point(
-                        event.position.x - last_position.x,
-                        event.position.y - last_position.y,
-                    );
-                    state.review_graph_pan_offset = clamp_review_graph_pan_offset(
-                        point(
-                            state.review_graph_pan_offset.x + delta.x,
-                            state.review_graph_pan_offset.y + delta.y,
-                        ),
-                        state.review_graph_zoom,
-                    );
-                    state.review_graph_last_pan_position = Some(event.position);
-                    cx.notify();
-                });
-                cx.stop_propagation();
-            })
-            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
-                state_for_pan_end.update(cx, |state, cx| {
-                    if !state.review_graph_panning && state.review_graph_last_pan_position.is_none()
-                    {
-                        return;
-                    }
-                    state.review_graph_panning = false;
-                    state.review_graph_last_pan_position = None;
-                    cx.notify();
-                });
-                cx.stop_propagation();
-            })
-            .on_scroll_wheel(move |event, _, cx| {
-                let delta = event.delta.pixel_delta(px(16.0));
-                state_for_wheel.update(cx, |state, cx| {
-                    if event.modifiers.shift {
-                        state.review_graph_pan_offset = clamp_review_graph_pan_offset(
-                            point(
-                                state.review_graph_pan_offset.x - delta.x,
-                                state.review_graph_pan_offset.y - delta.y,
-                            ),
-                            state.review_graph_zoom,
-                        );
-                    } else {
-                        let zoom_delta = (-f32::from(delta.y) / 420.0).clamp(-0.18, 0.18);
-                        state.review_graph_zoom =
-                            clamp_review_graph_zoom(state.review_graph_zoom * (1.0 + zoom_delta));
-                        state.review_graph_pan_offset = clamp_review_graph_pan_offset(
-                            state.review_graph_pan_offset,
-                            state.review_graph_zoom,
-                        );
-                    }
-                    state.review_graph_panning = false;
-                    state.review_graph_last_pan_position = None;
-                    cx.notify();
-                });
-                cx.stop_propagation();
-            });
-    }
-
-    if layout_nodes.is_empty() {
-        return canvas_root
-            .flex()
-            .items_center()
-            .justify_center()
-            .p(px(18.0))
-            .child(panel_state_text(&graph.summary));
-    }
-
-    canvas_root
-        .child(
-            canvas(
-                move |_, _, _| edge_segments,
-                move |bounds, edges, window, _| {
-                    for edge in edges {
-                        let from = point(
-                            bounds.left()
-                                + pan_offset.x
-                                + bounds.size.width * review_graph_scaled_coord(edge.from_x, zoom),
-                            bounds.top()
-                                + pan_offset.y
-                                + bounds.size.height * review_graph_scaled_coord(edge.from_y, zoom),
-                        );
-                        let to = point(
-                            bounds.left()
-                                + pan_offset.x
-                                + bounds.size.width * review_graph_scaled_coord(edge.to_x, zoom),
-                            bounds.top()
-                                + pan_offset.y
-                                + bounds.size.height * review_graph_scaled_coord(edge.to_y, zoom),
-                        );
-                        let mut builder = PathBuilder::stroke(px(1.35));
-                        if edge.kind == ReviewGraphEdgeKind::Touches {
-                            builder = builder.dash_array(&[px(4.0), px(3.0)]);
-                        }
-                        builder.move_to(from);
-                        builder.line_to(to);
-                        if let Ok(path) = builder.build() {
-                            let color = review_graph_edge_color(edge.kind);
-                            window.paint_path(path, color);
-                            paint_review_graph_arrow_head(window, from, to, color);
-                        }
-                    }
-                },
-            )
-            .absolute()
-            .inset_0()
-            .size_full(),
-        )
-        .when(!mode.is_preview(), |el| {
-            el.child(render_review_graph_canvas_lane_headers(lane_counts))
-                .child(render_review_graph_zoom_controls(state, zoom))
-        })
-        .children(layout_nodes.into_iter().map(|layout_node| {
-            render_review_graph_canvas_node(state, layout_node, mode.clone(), pan_offset)
-        }))
-        .when(hidden_node_count > 0, |el| {
-            el.child(
-                div()
-                    .absolute()
-                    .bottom(px(12.0))
-                    .left(px(10.0))
-                    .flex()
-                    .items_center()
-                    .child(metric_pill(
-                        format!("+{} hidden", hidden_node_count),
-                        fg_default(),
-                        bg_overlay(),
-                    )),
-            )
-        })
-}
-
-#[derive(Clone, Copy, Default)]
-struct ReviewGraphLaneCounts {
-    primary: usize,
-    incoming: usize,
-    outgoing: usize,
-}
-
-fn review_graph_lane_counts(layout: &ReviewGraphLayout) -> ReviewGraphLaneCounts {
-    let mut counts = ReviewGraphLaneCounts::default();
-    for node in &layout.nodes {
-        match node.lane {
-            ReviewGraphLayoutLane::Primary => counts.primary += 1,
-            ReviewGraphLayoutLane::Incoming => counts.incoming += 1,
-            ReviewGraphLayoutLane::Outgoing => counts.outgoing += 1,
-            ReviewGraphLayoutLane::Related => {}
-        }
-    }
-    counts
-}
-
-fn render_review_graph_canvas_lane_headers(counts: ReviewGraphLaneCounts) -> impl IntoElement {
-    div()
-        .absolute()
-        .top(px(8.0))
-        .left(px(8.0))
-        .right(px(8.0))
-        .h(px(20.0))
-        .child(render_review_graph_lane_header(
-            "Calls",
-            counts.incoming,
-            0.18,
-            fg_default(),
-        ))
-        .child(render_review_graph_lane_header(
-            "File",
-            counts.primary,
-            0.50,
-            fg_emphasis(),
-        ))
-        .child(render_review_graph_lane_header(
-            "Deps",
-            counts.outgoing,
-            0.82,
-            accent(),
-        ))
-}
-
-fn render_review_graph_lane_header(
-    label: &'static str,
-    count: usize,
-    x: f32,
-    fg: gpui::Rgba,
-) -> impl IntoElement {
-    div()
-        .absolute()
-        .left(relative(x))
-        .ml(px(-38.0))
-        .w(px(76.0))
-        .h(px(20.0))
-        .rounded(px(999.0))
-        .bg(bg_overlay())
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_size(px(9.0))
-        .font_family(mono_font_family())
-        .text_color(fg)
-        .child(format!("{label} {count}"))
-}
-
-fn review_graph_scaled_coord(coord: f32, zoom: f32) -> f32 {
-    0.5 + (coord - 0.5) * clamp_review_graph_zoom(zoom)
-}
-
-fn clamp_review_graph_zoom(zoom: f32) -> f32 {
-    zoom.clamp(0.65, 1.65)
-}
-
-fn clamp_review_graph_pan_offset(offset: Point<Pixels>, zoom: f32) -> Point<Pixels> {
-    let extra = (clamp_review_graph_zoom(zoom) - 1.0).max(0.0);
-    point(
-        px(f32::from(offset.x).clamp(-900.0 - 360.0 * extra, 900.0 + 360.0 * extra)),
-        px(f32::from(offset.y).clamp(-700.0 - 260.0 * extra, 700.0 + 260.0 * extra)),
-    )
-}
-
-fn paint_review_graph_arrow_head(
-    window: &mut Window,
-    from: Point<Pixels>,
-    to: Point<Pixels>,
-    color: Rgba,
-) {
-    let dx = f32::from(to.x - from.x);
-    let dy = f32::from(to.y - from.y);
-    let len = (dx * dx + dy * dy).sqrt();
-    if len < 1.0 {
-        return;
-    }
-
-    let ux = dx / len;
-    let uy = dy / len;
-    let nx = -uy;
-    let ny = ux;
-    let arrow = 10.0;
-    let wing = 5.5;
-    let left = point(
-        to.x - px(ux * arrow) + px(nx * wing),
-        to.y - px(uy * arrow) + px(ny * wing),
-    );
-    let right = point(
-        to.x - px(ux * arrow) - px(nx * wing),
-        to.y - px(uy * arrow) - px(ny * wing),
-    );
-
-    let mut builder = PathBuilder::stroke(px(1.35));
-    builder.move_to(left);
-    builder.line_to(to);
-    builder.line_to(right);
-    if let Ok(path) = builder.build() {
-        window.paint_path(path, color);
-    }
-}
-
-fn render_review_graph_canvas_node(
-    state: &Entity<AppState>,
-    layout_node: ReviewGraphLayoutNode,
-    mode: ReviewGraphCanvasMode,
-    pan_offset: Point<Pixels>,
-) -> AnyElement {
-    let node = layout_node.node;
-    let is_selected = mode.selected_node_id() == Some(node.id.as_str());
-    let is_focus = node.state == ReviewGraphNodeState::Focus;
-    let zoom = mode.zoom();
-    let node_scale = mode.node_scale();
-    let marker_color = review_graph_status_color(&node);
-    let border = if is_selected {
-        info()
-    } else {
-        review_graph_border_color(&node)
-    };
-    let node_id = node.id.clone();
-    let node_element_id = review_graph_node_element_id(&node.id);
-    let tooltip_text = SharedString::from(format!(
-        "{}\n{}",
-        node.label,
-        review_graph_location_summary(&node)
-    ));
-
-    if mode.is_preview() {
-        let size = if is_focus { 18.0 } else { 11.0 };
-        return div()
-            .id(("review-graph-preview-node", node_element_id))
-            .absolute()
-            .left(relative(review_graph_scaled_coord(layout_node.x, zoom)))
-            .top(relative(review_graph_scaled_coord(layout_node.y, zoom)))
-            .ml(pan_offset.x + px(-size / 2.0))
-            .mt(pan_offset.y + px(-size / 2.0))
-            .w(px(size))
-            .h(px(size))
-            .rounded(px(999.0))
-            .border_1()
-            .border_color(border)
-            .bg(marker_color)
-            .shadow_sm()
-            .tooltip(move |_, cx| build_text_tooltip(tooltip_text.clone(), cx))
-            .into_any_element();
-    }
-
-    let width = if mode.is_preview() {
-        112.0
-    } else if is_focus {
-        156.0
-    } else {
-        126.0
-    } * node_scale;
-    let height = if mode.is_preview() {
-        38.0
-    } else if is_focus {
-        46.0
-    } else {
-        40.0
-    } * node_scale;
-    let state_for_select = state.clone();
-    let mut card = div()
-        .id(("review-graph-canvas-node", node_element_id))
-        .absolute()
-        .left(relative(review_graph_scaled_coord(layout_node.x, zoom)))
-        .top(relative(review_graph_scaled_coord(layout_node.y, zoom)))
-        .ml(pan_offset.x + px(-width / 2.0))
-        .mt(pan_offset.y + px(-height / 2.0))
-        .w(px(width))
-        .h(px(height))
-        .px(px(10.0 * node_scale))
-        .py(px(8.0 * node_scale))
-        .rounded(radius_sm())
-        .border_1()
-        .border_color(border)
-        .bg(if is_focus {
-            bg_selected()
-        } else if node.in_diff {
-            bg_surface()
-        } else {
-            bg_overlay()
-        })
-        .shadow_sm()
-        .tooltip(move |_, cx| build_text_tooltip(tooltip_text.clone(), cx))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .min_w_0()
-                .child(
-                    div()
-                        .w(px(7.0))
-                        .h(px(7.0))
-                        .rounded(px(999.0))
-                        .bg(marker_color),
-                )
-                .child(
-                    div()
-                        .text_size(px(9.0))
-                        .font_family(mono_font_family())
-                        .text_color(fg_subtle())
-                        .child(review_graph_kind_marker(node.kind)),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .text_size(if mode.is_preview() {
-                            px(10.0)
-                        } else {
-                            px(12.0 * node_scale)
-                        })
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(fg_emphasis())
-                        .whitespace_nowrap()
-                        .overflow_x_hidden()
-                        .text_ellipsis()
-                        .child(node.label.clone()),
-                ),
-        );
-
-    if !mode.is_preview() {
-        card = card
-            .cursor_pointer()
-            .hover(|style| style.bg(hover_bg()))
-            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                state_for_select.update(cx, |state, cx| {
-                    state.review_graph_panning = false;
-                    state.review_graph_last_pan_position = None;
-                    state.review_graph_selected_node_id = Some(node_id.clone());
-                    cx.notify();
-                });
-                cx.stop_propagation();
-            });
-    }
-
-    card.into_any_element()
-}
-
-fn render_review_graph_detail_rail(
-    state: &Entity<AppState>,
-    detail: &PullRequestDetail,
-    graph: &ReviewSymbolGraph,
-    selected_node_id: Option<&str>,
-    symbol_query: Option<&ReviewSymbolRouteQuery>,
-    current_location: Option<ReviewLocation>,
-    loading: bool,
-    error: Option<String>,
-    has_lsp_details: bool,
-) -> impl IntoElement {
-    let selected_node = selected_node_id
-        .and_then(|id| graph.nodes.iter().find(|node| node.id == id))
-        .or_else(|| {
-            graph
-                .focus_node_id
-                .as_deref()
-                .and_then(|id| graph.nodes.iter().find(|node| node.id == id))
-        })
-        .or_else(|| graph.nodes.first());
-
-    div()
-        .id("review-graph-detail-rail")
-        .w(px(260.0))
-        .flex_shrink_0()
-        .h_full()
-        .overflow_y_scroll()
-        .border_l(px(1.0))
-        .border_color(border_muted())
-        .pl(px(14.0))
-        .child(
-            div()
-                .text_size(px(10.0))
-                .font_family(mono_font_family())
-                .text_color(fg_subtle())
-                .child("SELECTION"),
-        )
-        .when_some(selected_node.cloned(), |el, node| {
-            let location = node.location.clone();
-            let state_for_open = state.clone();
-            el.child(
-                div()
-                    .mt(px(10.0))
-                    .px(px(12.0))
-                    .py(px(10.0))
-                    .rounded(radius_sm())
-                    .border_1()
-                    .border_color(review_graph_border_color(&node))
-                    .bg(if node.state == ReviewGraphNodeState::Focus {
-                        bg_selected()
-                    } else {
-                        bg_overlay()
-                    })
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(fg_emphasis())
-                            .line_clamp(2)
-                            .child(node.label.clone()),
-                    )
-                    .child(
-                        div()
-                            .mt(px(6.0))
-                            .text_size(px(11.0))
-                            .text_color(fg_muted())
-                            .line_clamp(3)
-                            .child(review_graph_location_summary(&node)),
-                    )
-                    .child(
-                        div()
-                            .mt(px(8.0))
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap(px(8.0))
-                            .child(render_review_graph_node_badges(&node))
-                            .child(review_button("Open", move |_, window, cx| {
-                                close_review_graph_overlay(&state_for_open, cx);
-                                open_review_location_card(&state_for_open, &location, window, cx);
-                            })),
-                    ),
-            )
-            .child(render_review_graph_neighbor_list(state, graph, &node))
-        })
-        .when_some(symbol_query, |el, query| {
-            el.child(
-                div()
-                    .mt(px(14.0))
-                    .pt(px(12.0))
-                    .border_t(px(1.0))
-                    .border_color(border_muted())
-                    .flex()
-                    .gap(px(6.0))
-                    .flex_wrap()
-                    .child(review_button(
-                        if has_lsp_details { "Refresh" } else { "Trace" },
-                        {
-                            let state = state.clone();
-                            let query = query.clone();
-                            move |_, window, cx| {
-                                request_review_symbol_details(query.clone(), true, window, cx);
-                                state.update(cx, |state, cx| {
-                                    state.set_review_inspector_mode(ReviewInspectorMode::Graph);
-                                    state.persist_active_review_session();
-                                    cx.notify();
-                                });
-                            }
-                        },
-                    ))
-                    .when_some(
-                        current_location.map(|current_location| (query.clone(), current_location)),
-                        |el, (query, current_location)| {
-                            let state = state.clone();
-                            let detail = detail.clone();
-                            el.child(ghost_button("Call path", move |_, window, cx| {
-                                activate_callsite_review_route(
-                                    &state,
-                                    detail.clone(),
-                                    current_location.clone(),
-                                    query.clone(),
-                                    window,
-                                    cx,
-                                );
-                            }))
-                        },
-                    ),
-            )
-        })
-        .when(loading, |el| {
-            el.child(
-                div()
-                    .mt(px(10.0))
-                    .text_size(px(12.0))
-                    .text_color(fg_muted())
-                    .child("Tracing call sites and dependencies..."),
-            )
-        })
-        .when_some(error, |el, error| {
-            el.child(div().mt(px(10.0)).child(error_text(&error)))
-        })
-}
-
-fn render_review_graph_neighbor_list(
-    state: &Entity<AppState>,
-    graph: &ReviewSymbolGraph,
-    selected_node: &ReviewSymbolGraphNode,
-) -> impl IntoElement {
-    let node_index = graph
-        .nodes
-        .iter()
-        .map(|node| (node.id.clone(), node.clone()))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let mut rows = graph
-        .edges
-        .iter()
-        .filter_map(|edge| {
-            if edge.from == selected_node.id {
-                node_index
-                    .get(&edge.to)
-                    .cloned()
-                    .map(|node| (false, edge.kind, node))
-            } else if edge.to == selected_node.id {
-                node_index
-                    .get(&edge.from)
-                    .cloned()
-                    .map(|node| (true, edge.kind, node))
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
-    rows.sort_by(|left, right| {
-        left.1
-            .cmp(&right.1)
-            .then_with(|| compare_review_graph_nodes(&left.2, &right.2))
-    });
-
-    div()
-        .mt(px(14.0))
-        .pt(px(12.0))
-        .border_t(px(1.0))
-        .border_color(border_muted())
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .font_family(mono_font_family())
-                        .text_color(fg_subtle())
-                        .child("CALL SITES / DEPENDENCIES"),
-                )
-                .child(badge(&rows.len().to_string())),
-        )
-        .when(rows.is_empty(), |el| {
-            el.child(div().mt(px(10.0)).child(panel_state_text(
-                "No direct call sites or dependencies in this graph slice.",
-            )))
-        })
-        .child(
-            div()
-                .mt(px(10.0))
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .children(rows.into_iter().map(|(incoming, kind, node)| {
-                    render_review_graph_neighbor_row(state, incoming, kind, node)
-                })),
-        )
-}
-
-fn render_review_graph_neighbor_row(
-    state: &Entity<AppState>,
-    incoming: bool,
-    kind: ReviewGraphEdgeKind,
-    node: ReviewSymbolGraphNode,
-) -> impl IntoElement {
-    let node_id = node.id.clone();
-    let state = state.clone();
-    let direction_label = if incoming { "call site" } else { "target" };
-    let relation_label = if incoming {
-        format!("{} here", kind.label())
-    } else {
-        kind.label().to_string()
-    };
-
-    div()
-        .px(px(10.0))
-        .py(px(8.0))
-        .rounded(radius_sm())
-        .border_1()
-        .border_color(border_default())
-        .bg(bg_overlay())
-        .cursor_pointer()
-        .hover(|style| style.bg(hover_bg()))
-        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-            state.update(cx, |state, cx| {
-                state.review_graph_selected_node_id = Some(node_id.clone());
-                cx.notify();
-            });
-        })
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .child(metric_pill(
-                    direction_label.to_string(),
-                    fg_default(),
-                    bg_emphasis(),
-                ))
-                .child(metric_pill(relation_label, accent(), accent_muted())),
-        )
-        .child(
-            div()
-                .mt(px(6.0))
-                .text_size(px(12.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(fg_emphasis())
-                .whitespace_nowrap()
-                .overflow_x_hidden()
-                .text_ellipsis()
-                .child(node.label),
-        )
-        .child(
-            div()
-                .mt(px(3.0))
-                .text_size(px(10.0))
-                .text_color(fg_muted())
-                .whitespace_nowrap()
-                .overflow_x_hidden()
-                .text_ellipsis()
-                .child(node.location.label),
-        )
-}
-
-fn build_interactive_review_graph_layout(graph: &ReviewSymbolGraph) -> ReviewGraphLayout {
-    const MAX_PRIMARY_NODES: usize = 8;
-    const MAX_INCOMING_NODES: usize = 6;
-    const MAX_OUTGOING_NODES: usize = 6;
-    const MAX_RELATED_NODES: usize = 0;
-
-    if graph.nodes.is_empty() {
-        return ReviewGraphLayout::default();
-    }
-
-    let node_index = graph
-        .nodes
-        .iter()
-        .map(|node| (node.id.clone(), node.clone()))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let focus_id = graph
-        .focus_node_id
-        .as_deref()
-        .filter(|id| node_index.contains_key(*id))
-        .or_else(|| graph.nodes.first().map(|node| node.id.as_str()));
-
-    let Some(focus_id) = focus_id else {
-        return ReviewGraphLayout::default();
-    };
-
-    let mut layout_nodes = Vec::new();
-
-    let primary_path = node_index
-        .get(focus_id)
-        .map(|node| node.subtitle.clone())
-        .or_else(|| {
-            graph
-                .nodes
-                .iter()
-                .find(|node| node.in_diff)
-                .map(|node| node.subtitle.clone())
-        })
-        .unwrap_or_default();
-    let mut primary = graph
-        .nodes
-        .iter()
-        .filter(|node| node.subtitle == primary_path && review_graph_is_reusable_node(node))
-        .cloned()
-        .collect::<Vec<_>>();
-    primary.sort_by(|left, right| {
-        (left.id != focus_id)
-            .cmp(&(right.id != focus_id))
-            .then_with(|| compare_review_graph_nodes(left, right))
-    });
-
-    append_review_graph_primary_nodes(
-        &mut layout_nodes,
-        primary.into_iter().take(MAX_PRIMARY_NODES).collect(),
-        0.50,
-        0.16,
-        0.84,
-    );
-
-    let visible_ids = layout_nodes
-        .iter()
-        .map(|layout_node| layout_node.node.id.clone())
-        .collect::<std::collections::BTreeSet<_>>();
-    let primary_ids = visible_ids.clone();
-
-    let mut incoming = collect_review_graph_boundary_nodes(graph, &node_index, &primary_ids, true);
-    let mut outgoing = collect_review_graph_boundary_nodes(graph, &node_index, &primary_ids, false);
-    incoming.retain(|node| !visible_ids.contains(&node.id));
-    outgoing.retain(|node| !visible_ids.contains(&node.id));
-    let outgoing_ids = outgoing
-        .iter()
-        .map(|node| node.id.clone())
-        .collect::<std::collections::BTreeSet<_>>();
-    incoming.retain(|node| !outgoing_ids.contains(&node.id));
-
-    append_review_graph_lane_nodes(
-        &mut layout_nodes,
-        incoming.into_iter().take(MAX_INCOMING_NODES).collect(),
-        ReviewGraphLayoutLane::Incoming,
-        0.20,
-        0.20,
-        0.22,
-        0.78,
-    );
-    append_review_graph_lane_nodes(
-        &mut layout_nodes,
-        outgoing.into_iter().take(MAX_OUTGOING_NODES).collect(),
-        ReviewGraphLayoutLane::Outgoing,
-        0.80,
-        0.80,
-        0.22,
-        0.78,
-    );
-
-    let visible_ids = layout_nodes
-        .iter()
-        .map(|layout_node| layout_node.node.id.clone())
-        .collect::<std::collections::BTreeSet<_>>();
-    let mut related = graph
-        .nodes
-        .iter()
-        .filter(|node| !visible_ids.contains(&node.id))
-        .cloned()
-        .collect::<Vec<_>>();
-    related.sort_by(compare_review_graph_nodes);
-
-    append_review_graph_lane_nodes(
-        &mut layout_nodes,
-        related.into_iter().take(MAX_RELATED_NODES).collect(),
-        ReviewGraphLayoutLane::Related,
-        0.34,
-        0.66,
-        0.92,
-        0.92,
-    );
-
-    let hidden_node_count = graph.nodes.len().saturating_sub(layout_nodes.len());
-
-    let position_by_id = layout_nodes
-        .iter()
-        .map(|layout_node| {
-            (
-                layout_node.node.id.clone(),
-                (layout_node.x, layout_node.y, layout_node.lane),
-            )
-        })
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let mut layout_edges = graph
-        .edges
-        .iter()
-        .filter_map(|edge| {
-            let (from_x, from_y, _) = *position_by_id.get(&edge.from)?;
-            let (to_x, to_y, _) = *position_by_id.get(&edge.to)?;
-            Some(ReviewGraphLayoutEdge {
-                from_x,
-                from_y,
-                to_x,
-                to_y,
-                kind: edge.kind,
-            })
-        })
-        .collect::<Vec<_>>();
-    layout_edges.sort_by(|left, right| {
-        left.kind
-            .cmp(&right.kind)
-            .then_with(|| left.from_y.total_cmp(&right.from_y))
-            .then_with(|| left.to_y.total_cmp(&right.to_y))
-    });
-
-    ReviewGraphLayout {
-        nodes: layout_nodes,
-        edges: layout_edges,
-        hidden_node_count,
-    }
-}
-
-fn append_review_graph_lane_nodes(
-    layout_nodes: &mut Vec<ReviewGraphLayoutNode>,
-    nodes: Vec<ReviewSymbolGraphNode>,
-    lane: ReviewGraphLayoutLane,
-    start_x: f32,
-    end_x: f32,
-    start_y: f32,
-    end_y: f32,
-) {
-    let total = nodes.len();
-    for (index, node) in nodes.into_iter().enumerate() {
-        let position = review_graph_lane_position(index, total);
-        let x = start_x + (end_x - start_x) * position;
-        let y = start_y + (end_y - start_y) * position;
-        layout_nodes.push(ReviewGraphLayoutNode { node, x, y, lane });
-    }
-}
-
-fn append_review_graph_primary_nodes(
-    layout_nodes: &mut Vec<ReviewGraphLayoutNode>,
-    nodes: Vec<ReviewSymbolGraphNode>,
-    x: f32,
-    min_y: f32,
-    max_y: f32,
-) {
-    let center_y = (min_y + max_y) / 2.0;
-    let spread = (max_y - min_y) / 2.0;
-    let total = nodes.len();
-
-    for (index, node) in nodes.into_iter().enumerate() {
-        let y = if index == 0 {
-            center_y
-        } else {
-            let side = if index % 2 == 1 { -1.0 } else { 1.0 };
-            let ring = ((index + 1) / 2) as f32;
-            let slots = ((total + 1) / 2).max(1) as f32;
-            center_y + side * spread * (ring / slots)
-        }
-        .clamp(min_y, max_y);
-
-        layout_nodes.push(ReviewGraphLayoutNode {
-            node,
-            x,
-            y,
-            lane: ReviewGraphLayoutLane::Primary,
-        });
-    }
-}
-
-fn review_graph_lane_position(index: usize, total: usize) -> f32 {
-    if total <= 1 {
-        0.5
-    } else {
-        index as f32 / (total - 1) as f32
-    }
-}
-
-fn review_graph_edge_color(kind: ReviewGraphEdgeKind) -> Rgba {
-    match kind {
-        ReviewGraphEdgeKind::Calls => accent(),
-        ReviewGraphEdgeKind::Uses => fg_muted(),
-        ReviewGraphEdgeKind::Defines => success(),
-        ReviewGraphEdgeKind::Inherits => waypoint_fg(),
-        ReviewGraphEdgeKind::Composes => fg_default(),
-        ReviewGraphEdgeKind::DataFlow => info(),
-        ReviewGraphEdgeKind::Touches => border_default(),
-    }
-}
-
-fn review_graph_node_element_id(id: &str) -> usize {
-    id.bytes().fold(0usize, |acc, byte| {
-        acc.wrapping_mul(33).wrapping_add(byte as usize)
-    })
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum ReviewGraphEntityStatus {
-    Modified,
-    Impacted,
-}
-
-fn collect_review_graph_boundary_nodes(
-    graph: &crate::review_graph::ReviewSymbolGraph,
-    node_index: &std::collections::BTreeMap<String, crate::review_graph::ReviewSymbolGraphNode>,
-    primary_ids: &std::collections::BTreeSet<String>,
-    incoming: bool,
-) -> Vec<crate::review_graph::ReviewSymbolGraphNode> {
-    let mut grouped =
-        std::collections::BTreeMap::<String, crate::review_graph::ReviewSymbolGraphNode>::new();
-
-    for edge in graph.edges.iter().filter(|edge| {
-        if incoming {
-            primary_ids.contains(&edge.to) && !primary_ids.contains(&edge.from)
-        } else {
-            primary_ids.contains(&edge.from) && !primary_ids.contains(&edge.to)
-        }
-    }) {
-        let node_id = if incoming { &edge.from } else { &edge.to };
-        let Some(node) = node_index.get(node_id).cloned() else {
-            continue;
-        };
-        grouped.entry(node_id.clone()).or_insert(node);
-    }
-
-    let mut nodes = grouped.into_values().collect::<Vec<_>>();
-    nodes.sort_by(compare_review_graph_nodes);
-    nodes
-}
-
-fn compare_review_graph_nodes(
-    left: &crate::review_graph::ReviewSymbolGraphNode,
-    right: &crate::review_graph::ReviewSymbolGraphNode,
-) -> std::cmp::Ordering {
-    review_graph_entity_status(left)
-        .cmp(&review_graph_entity_status(right))
-        .then_with(|| left.in_diff.cmp(&right.in_diff).reverse())
-        .then_with(|| left.label.cmp(&right.label))
-        .then_with(|| left.location.label.cmp(&right.location.label))
-}
-
-fn review_graph_is_reusable_node(node: &crate::review_graph::ReviewSymbolGraphNode) -> bool {
-    matches!(
-        node.kind,
-        crate::review_graph::ReviewGraphNodeKind::Function
-            | crate::review_graph::ReviewGraphNodeKind::Method
-            | crate::review_graph::ReviewGraphNodeKind::Data
-    )
-}
-
-fn review_graph_kind_marker(kind: crate::review_graph::ReviewGraphNodeKind) -> &'static str {
-    match kind {
-        crate::review_graph::ReviewGraphNodeKind::File => "F",
-        crate::review_graph::ReviewGraphNodeKind::Function => "FN",
-        crate::review_graph::ReviewGraphNodeKind::Method => "M",
-        crate::review_graph::ReviewGraphNodeKind::Type => "T",
-        crate::review_graph::ReviewGraphNodeKind::Module => "MO",
-        crate::review_graph::ReviewGraphNodeKind::Data => "VAR",
-        crate::review_graph::ReviewGraphNodeKind::Branch => "B",
-        crate::review_graph::ReviewGraphNodeKind::Unknown => "?",
-    }
-}
-
-fn review_graph_entity_status(
-    node: &crate::review_graph::ReviewSymbolGraphNode,
-) -> ReviewGraphEntityStatus {
-    if node.in_diff {
-        ReviewGraphEntityStatus::Modified
-    } else {
-        ReviewGraphEntityStatus::Impacted
-    }
-}
-
-fn review_graph_status_color(node: &crate::review_graph::ReviewSymbolGraphNode) -> gpui::Rgba {
-    match review_graph_entity_status(node) {
-        ReviewGraphEntityStatus::Modified => success(),
-        ReviewGraphEntityStatus::Impacted => accent(),
-    }
-}
-
-fn review_graph_border_color(node: &crate::review_graph::ReviewSymbolGraphNode) -> gpui::Rgba {
-    if node.state == ReviewGraphNodeState::Focus {
-        accent()
-    } else {
-        match review_graph_entity_status(node) {
-            ReviewGraphEntityStatus::Modified => success(),
-            ReviewGraphEntityStatus::Impacted => border_default(),
-        }
-    }
-}
-
-fn review_graph_location_summary(node: &crate::review_graph::ReviewSymbolGraphNode) -> String {
-    format!(
-        "{} • {} • {}",
-        node.kind.label(),
-        if node.in_diff {
-            "changed symbol"
-        } else {
-            "source context"
-        },
-        node.location.label.as_str()
-    )
-}
-
-fn render_review_graph_node_badges(
-    node: &crate::review_graph::ReviewSymbolGraphNode,
-) -> impl IntoElement {
-    let mut badges = div().flex().items_center().gap(px(6.0));
-    if node.state == ReviewGraphNodeState::Focus {
-        badges = badges.child(metric_pill("focus", accent(), bg_selected()));
-    }
-
-    badges.child(match review_graph_entity_status(node) {
-        ReviewGraphEntityStatus::Modified => {
-            metric_pill("modified", success(), success_muted()).into_any_element()
-        }
-        ReviewGraphEntityStatus::Impacted => {
-            metric_pill("context", accent(), accent_muted()).into_any_element()
-        }
-    })
-}
-
-fn render_review_evolution_content(
-    state: &Entity<AppState>,
-    detail: &PullRequestDetail,
-    selected_file: Option<&PullRequestFile>,
-    query: Option<&ReviewSymbolEvolutionQuery>,
-    cx: &App,
-) -> impl IntoElement {
-    let timeline_state = query.and_then(|query| {
-        state
-            .read(cx)
-            .detail_states
-            .get(&query.detail_key)
-            .and_then(|detail_state| detail_state.review_evolution_states.get(&query.query_key))
-            .cloned()
-    });
-    let loading = timeline_state
-        .as_ref()
-        .map(|state| state.loading)
-        .unwrap_or(false);
-    let error = timeline_state
-        .as_ref()
-        .and_then(|state| state.error.clone());
-    let timeline = timeline_state.and_then(|state| state.timeline);
-
-    div()
-        .flex_grow()
-        .min_h_0()
-        .id("review-evolution-scroll")
-        .overflow_y_scroll()
-        .child(
-            div()
-                .p(px(14.0))
-                .flex()
-                .flex_col()
-                .gap(px(14.0))
-                .child(
-                    nested_panel()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap(px(10.0))
-                                .child(
-                                    div()
-                                        .text_size(px(10.0))
-                                        .font_family(mono_font_family())
-                                        .text_color(fg_subtle())
-                                        .child("EVOLUTION"),
-                                )
-                                .when_some(query, |el, query| {
-                                    el.child(review_button(
-                                        if timeline.is_some() {
-                                            "Refresh"
-                                        } else {
-                                            "Trace timeline"
-                                        },
-                                        {
-                                            let query = query.clone();
-                                            move |_, window, cx| {
-                                                request_symbol_evolution_timeline(
-                                                    query.clone(),
-                                                    true,
-                                                    window,
-                                                    cx,
-                                                );
-                                            }
-                                        },
-                                    ))
-                                }),
-                        )
-                        .when_some(selected_file, |el, file| {
-                            el.child(
-                                div()
-                                    .mt(px(10.0))
-                                    .text_size(px(13.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(fg_emphasis())
-                                    .child(file.path.clone()),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(6.0))
-                                    .text_size(px(12.0))
-                                    .text_color(fg_muted())
-                                    .child(format!(
-                                        "{} commit{} in this PR.",
-                                        detail.commits_count,
-                                        if detail.commits_count == 1 { "" } else { "s" }
-                                    )),
-                            )
-                        })
-                        .when(detail.commits_count <= 1, |el| {
-                            el.child(
-                                div()
-                                    .mt(px(10.0))
-                                    .text_size(px(12.0))
-                                    .text_color(fg_muted())
-                                    .child("Evolution view becomes useful once the PR has multiple related commits."),
-                            )
-                        })
-                        .when(loading, |el| {
-                            el.child(
-                                div()
-                                    .mt(px(10.0))
-                                    .text_size(px(12.0))
-                                    .text_color(fg_muted())
-                                    .child("Tracing how this symbol moved through the stack…"),
-                            )
-                        })
-                        .when_some(error, |el, error| {
-                            el.child(div().mt(px(10.0)).child(error_text(&error)))
-                        })
-                        .when(query.is_none(), |el| {
-                            el.child(
-                                div()
-                                    .mt(px(10.0))
-                                    .text_size(px(12.0))
-                                    .text_color(fg_muted())
-                                    .child("Load the local checkout and pick a changed file to trace its stacked evolution."),
-                            )
-                        }),
-                )
-                .when_some(timeline, |el, timeline| {
-                    el.child(
-                        nested_panel()
-                            .child(
-                                div()
-                                    .text_size(px(10.0))
-                                    .font_family(mono_font_family())
-                                    .text_color(fg_subtle())
-                                    .child("TIMELINE"),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(8.0))
-                                    .text_size(px(13.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(fg_emphasis())
-                                    .child(timeline.headline),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(6.0))
-                                    .text_size(px(12.0))
-                                    .text_color(fg_muted())
-                                    .child(timeline.summary),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(12.0))
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(8.0))
-                                    .children(
-                                        timeline
-                                            .entries
-                                            .into_iter()
-                                            .map(render_review_evolution_entry),
-                                    ),
-                            ),
-                    )
-                }),
-        )
-}
-
-fn render_review_evolution_entry(
-    entry: crate::review_graph::ReviewSymbolEvolutionEntry,
-) -> impl IntoElement {
-    div()
-        .px(px(12.0))
-        .py(px(10.0))
-        .rounded(radius_sm())
-        .border_1()
-        .border_color(border_default())
-        .bg(bg_overlay())
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(metric_pill(
-                            entry.short_oid.clone(),
-                            fg_emphasis(),
-                            bg_emphasis(),
-                        ))
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(fg_emphasis())
-                                .child(entry.title.clone()),
-                        ),
-                )
-                .child(metric_pill(
-                    entry.status_label.clone(),
-                    if entry.touches_focus {
-                        accent()
-                    } else {
-                        fg_muted()
-                    },
-                    if entry.touches_focus {
-                        accent_muted()
-                    } else {
-                        bg_emphasis()
-                    },
-                )),
-        )
-        .child(
-            div()
-                .mt(px(6.0))
-                .flex()
-                .gap(px(6.0))
-                .flex_wrap()
-                .child(metric_pill(
-                    format!("+{}", entry.additions),
-                    success(),
-                    success_muted(),
-                ))
-                .child(metric_pill(
-                    format!("-{}", entry.deletions),
-                    danger(),
-                    danger_muted(),
-                ))
-                .child(metric_pill(
-                    entry.committed_at.clone(),
-                    fg_muted(),
-                    bg_emphasis(),
-                )),
-        )
-        .child(
-            div()
-                .mt(px(8.0))
-                .text_size(px(11.0))
-                .text_color(fg_muted())
-                .child(entry.preview),
-        )
-}
-
-fn render_review_context_content(
-    state: &Entity<AppState>,
-    detail: &PullRequestDetail,
-    selected_file: Option<&PullRequestFile>,
-    selected_parsed: Option<&ParsedDiffFile>,
-    semantic_file: Option<&SemanticDiffFile>,
-    prepared_file: Option<&PreparedFileContent>,
-    review_context: Option<&ReviewContextData>,
-    cx: &App,
-) -> impl IntoElement {
-    let (
-        current_location,
-        current_location_label,
-        active_task_route,
-        waymarks,
-        route_loading,
-        route_message,
-        route_error,
-    ) = {
-        let app_state = state.read(cx);
-        let current_location = app_state.current_review_location();
-        let current_location_label = current_location
-            .as_ref()
-            .map(|location| location.label.clone())
-            .unwrap_or_else(|| "No active focus".to_string());
-        let active_task_route = app_state.active_review_task_route().cloned();
-        let waymarks = app_state
-            .active_review_session()
-            .map(|session| session.waymarks.clone())
-            .unwrap_or_default();
-        let route_loading = app_state
-            .active_detail_state()
-            .map(|detail_state| detail_state.review_route_loading)
-            .unwrap_or(false);
-        let route_message = app_state
-            .active_detail_state()
-            .and_then(|detail_state| detail_state.review_route_message.clone());
-        let route_error = app_state
-            .active_detail_state()
-            .and_then(|detail_state| detail_state.review_route_error.clone());
-
-        (
-            current_location,
-            current_location_label,
-            active_task_route,
-            waymarks,
-            route_loading,
-            route_message,
-            route_error,
-        )
-    };
-
-    div()
-        .flex_grow()
-        .min_h_0()
-        .id("review-context-scroll")
-        .overflow_y_scroll()
-        .child(
-            div()
-                .p(px(14.0))
-                .flex()
-                .flex_col()
-                .gap(px(14.0))
-                .child(
-                    nested_panel()
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .font_family(mono_font_family())
-                                .text_color(fg_subtle())
-                                .child("REVIEW STATUS"),
-                        )
-                        .child(
-                            div()
-                                .mt(px(8.0))
-                                .text_size(px(13.0))
-                                .text_color(fg_default())
-                                .child(format!(
-                                    "{} files, {} comments, {} commits",
-                                    detail.changed_files,
-                                    detail.comments_count,
-                                    detail.commits_count
-                                )),
-                        )
-                        .child(
-                            div()
-                                .mt(px(8.0))
-                                .text_size(px(12.0))
-                                .text_color(fg_muted())
-                                .child(current_location_label),
-                        ),
-                )
-                .when_some(review_context, |el, review_context| {
-                    el.child(render_context_summary_panel(review_context))
-                        .child(render_context_waymarks_panel(
-                            state,
-                            current_location.as_ref(),
-                            review_context.selected_section.as_ref(),
-                            &waymarks,
-                            cx,
-                        ))
-                        .child(render_context_task_routes_panel(
-                            state,
-                            detail,
-                            selected_file,
-                            selected_parsed,
-                            semantic_file,
-                            prepared_file,
-                            review_context,
-                            active_task_route.as_ref(),
-                            route_loading,
-                            route_message.clone(),
-                            route_error.clone(),
-                            cx,
-                        ))
-                        .child(render_context_threads_panel(review_context))
-                        .child(render_context_related_panel(state, review_context))
-                })
-                .when_some(selected_file, |el, selected_file| {
-                    el.child(
-                        nested_panel()
-                            .child(
-                                div()
-                                    .text_size(px(10.0))
-                                    .font_family(mono_font_family())
-                                    .text_color(fg_subtle())
-                                    .child("FILE"),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(8.0))
-                                    .text_size(px(13.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(fg_emphasis())
-                                    .child(selected_file.path.clone()),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(8.0))
-                                    .flex()
-                                    .gap(px(6.0))
-                                    .flex_wrap()
-                                    .child(render_change_type_chip(&selected_file.change_type))
-                                    .child(queue_metric(
-                                        format!("+{}", selected_file.additions),
-                                        success(),
-                                        success_muted(),
-                                    ))
-                                    .child(queue_metric(
-                                        format!("-{}", selected_file.deletions),
-                                        danger(),
-                                        danger_muted(),
-                                    )),
-                            ),
-                    )
-                }),
-        )
-}
-
-fn render_context_summary_panel(review_context: &ReviewContextData) -> impl IntoElement {
-    nested_panel()
-        .child(
-            div()
-                .text_size(px(10.0))
-                .font_family(mono_font_family())
-                .text_color(fg_subtle())
-                .child("IMPACT"),
-        )
-        .when_some(review_context.queue_item.as_ref(), |el, item| {
-            el.child(
-                div()
-                    .mt(px(8.0))
-                    .text_size(px(13.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(fg_emphasis())
-                    .child(item.risk_label.clone()),
-            )
-            .child(
-                div()
-                    .mt(px(8.0))
-                    .text_size(px(12.0))
-                    .text_color(fg_muted())
-                    .child(item.reasons.join(" • ")),
-            )
-        })
-        .when_some(review_context.selected_section.as_ref(), |el, section| {
-            el.child(
-                div()
-                    .mt(px(12.0))
-                    .text_size(px(12.0))
-                    .text_color(fg_default())
-                    .child(format!(
-                        "{} section with +{} / -{}",
-                        section.kind.label(),
-                        section.additions,
-                        section.deletions
-                    )),
-            )
-            .child(
-                div()
-                    .mt(px(6.0))
-                    .text_size(px(11.0))
-                    .text_color(fg_muted())
-                    .child(section.title.clone()),
-            )
-        })
-        .child(
-            div()
-                .mt(px(12.0))
-                .flex()
-                .gap(px(6.0))
-                .flex_wrap()
-                .child(queue_metric(
-                    format!("{} approved", review_context.review_status.approved),
-                    success(),
-                    success_muted(),
-                ))
-                .child(queue_metric(
-                    format!("{} changes", review_context.review_status.changes_requested),
-                    danger(),
-                    danger_muted(),
-                ))
-                .child(queue_metric(
-                    format!("{} waiting", review_context.review_status.waiting),
-                    accent(),
-                    accent_muted(),
-                ))
-                .child(queue_metric(
-                    format!("{} commented", review_context.review_status.commented),
-                    fg_muted(),
-                    bg_emphasis(),
-                )),
-        )
-        .child(
-            div()
-                .mt(px(10.0))
-                .text_size(px(12.0))
-                .text_color(fg_muted())
-                .child(review_context.ownership_label.clone()),
-        )
-}
-
-fn render_context_waymarks_panel(
-    state: &Entity<AppState>,
-    current_location: Option<&ReviewLocation>,
-    selected_section: Option<&SemanticDiffSection>,
-    waymarks: &[crate::review_session::ReviewWaymark],
-    cx: &App,
-) -> impl IntoElement {
-    let draft = state.read(cx).waymark_draft.clone();
-    let default_name = default_waymark_name(
-        current_location.map(|location| location.file_path.as_str()),
-        selected_section,
-        current_location.and_then(|location| location.anchor.as_ref()),
-    );
-
-    nested_panel()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(10.0))
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .font_family(mono_font_family())
-                        .text_color(fg_subtle())
-                        .child("WAYPOINTS"),
-                )
-                .child(badge(&waymarks.len().to_string())),
-        )
-        .when_some(current_location, |el, _| {
-            el.child(
-                div()
-                    .mt(px(10.0))
-                    .px(px(10.0))
-                    .py(px(9.0))
-                    .rounded(radius_sm())
-                    .border_1()
-                    .border_color(border_default())
-                    .bg(bg_overlay())
-                    .text_size(px(12.0))
-                    .text_color(if draft.is_empty() {
-                        fg_subtle()
-                    } else {
-                        fg_emphasis()
-                    })
-                    .child(AppTextInput::new(
-                        "review-waymark-draft",
-                        state.clone(),
-                        AppTextFieldKind::WaymarkDraft,
-                        default_name.clone(),
-                    )),
-            )
-            .child(
-                div()
-                    .mt(px(10.0))
-                    .flex()
-                    .gap(px(8.0))
-                    .flex_wrap()
-                    .child(review_button("Add waypoint", {
-                        let state = state.clone();
-                        let default_name = default_name.clone();
-                        move |_, _, cx| {
-                            state.update(cx, |state, cx| {
-                                let name = if state.waymark_draft.trim().is_empty() {
-                                    default_name.clone()
-                                } else {
-                                    state.waymark_draft.clone()
-                                };
-                                state.add_waymark_for_current_review_location(name);
-                                state.waymark_draft.clear();
-                                state.persist_active_review_session();
-                                cx.notify();
-                            });
-                        }
-                    }))
-                    .child(ghost_button("Check later", {
-                        let state = state.clone();
-                        move |_, _, cx| {
-                            state.update(cx, |state, cx| {
-                                state.add_waymark_for_current_review_location("Check later");
-                                state.waymark_draft.clear();
-                                state.persist_active_review_session();
-                                cx.notify();
-                            });
-                        }
-                    }))
-                    .child(ghost_button("Security-sensitive", {
-                        let state = state.clone();
-                        move |_, _, cx| {
-                            state.update(cx, |state, cx| {
-                                state.add_waymark_for_current_review_location("Security-sensitive");
-                                state.waymark_draft.clear();
-                                state.persist_active_review_session();
-                                cx.notify();
-                            });
-                        }
-                    })),
-            )
-        })
-        .when(current_location.is_none(), |el| {
-            el.child(
-                div()
-                    .mt(px(8.0))
-                    .text_size(px(12.0))
-                    .text_color(fg_muted())
-                    .child("Open a diff line or source location to add a waypoint."),
-            )
-        })
-        .when(!waymarks.is_empty(), |el| {
-            el.child(
-                div().mt(px(12.0)).flex().flex_col().gap(px(8.0)).children(
-                    waymarks
-                        .iter()
-                        .rev()
-                        .map(|waymark| render_waymark_card(state, waymark)),
-                ),
-            )
-        })
-}
-
-fn render_context_task_routes_panel(
-    state: &Entity<AppState>,
-    detail: &PullRequestDetail,
-    selected_file: Option<&PullRequestFile>,
-    selected_parsed: Option<&ParsedDiffFile>,
-    _semantic_file: Option<&SemanticDiffFile>,
-    prepared_file: Option<&PreparedFileContent>,
-    review_context: &ReviewContextData,
-    active_task_route: Option<&crate::review_session::ReviewTaskRoute>,
-    route_loading: bool,
-    route_message: Option<String>,
-    route_error: Option<String>,
-    cx: &App,
-) -> impl IntoElement {
-    let selected_section = review_context.selected_section.as_ref();
-    let focus_terms = selected_section
-        .map(|section| collect_section_focus_terms(section, selected_parsed))
-        .unwrap_or_default();
-    let changed_route = selected_file.and_then(|file| {
-        build_changed_touch_route(detail, file.path.as_str(), selected_section, &focus_terms)
-    });
-    let selected_anchor = state.read(cx).selected_diff_anchor.clone();
-    let current_location = state.read(cx).current_review_location();
-    let callsite_query = selected_file.and_then(|file| {
-        build_review_symbol_route_query(
-            state,
-            file.path.as_str(),
-            selected_anchor.as_ref(),
-            selected_section,
-            selected_parsed,
-            prepared_file,
-            cx,
-        )
-    });
-    let action_count = usize::from(changed_route.is_some()) + usize::from(callsite_query.is_some());
-
-    nested_panel()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(10.0))
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .font_family(mono_font_family())
-                        .text_color(fg_subtle())
-                        .child("TASK PATHS"),
-                )
-                .child(badge(&action_count.to_string())),
-        )
-        .when_some(active_task_route, |el, route| {
-            el.child(
-                div()
-                    .mt(px(10.0))
-                    .px(px(10.0))
-                    .py(px(9.0))
-                    .rounded(radius_sm())
-                    .border_1()
-                    .border_color(border_default())
-                    .bg(bg_overlay())
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(fg_emphasis())
-                            .child(route.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .mt(px(6.0))
-                            .text_size(px(11.0))
-                            .text_color(fg_muted())
-                            .child(route.summary.clone()),
-                    )
-                    .child(
-                        div()
-                            .mt(px(8.0))
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap(px(8.0))
-                            .child(badge(&format!("{} stops", route.stops.len())))
-                            .child(ghost_button("Clear", {
-                                let state = state.clone();
-                                move |_, _, cx| {
-                                    state.update(cx, |state, cx| {
-                                        state.set_active_review_task_route(None);
-                                        state.persist_active_review_session();
-                                        cx.notify();
-                                    });
-                                }
-                            })),
-                    ),
-            )
-        })
-        .when(route_loading, |el| {
-            el.child(
-                div()
-                    .mt(px(10.0))
-                    .text_size(px(12.0))
-                    .text_color(fg_muted())
-                    .child("Tracing task route…"),
-            )
-        })
-        .when_some(route_error, |el, error| {
-            el.child(div().mt(px(10.0)).child(error_text(&error)))
-        })
-        .when_some(route_message, |el, message| {
-            el.child(
-                div()
-                    .mt(px(10.0))
-                    .text_size(px(12.0))
-                    .text_color(fg_muted())
-                    .child(message),
-            )
-        })
-        .when_some(changed_route, |el, route| {
-            el.child(render_task_route_action_card(
-                "Jump to related changed sections",
-                &route.title,
-                &route.summary,
-                Some(format!("{} stops", route.stops.len())),
-                {
-                    let state = state.clone();
-                    let route = route.clone();
-                    move |_, _, cx| {
-                        state.update(cx, |state, cx| {
-                            state.set_active_review_task_route(Some(route.clone()));
-                            state.persist_active_review_session();
-                            cx.notify();
-                        });
-                    }
-                },
-            ))
-        })
-        .when_some(
-            callsite_query
-                .zip(current_location)
-                .map(|(query, current_location)| (query, current_location)),
-            |el, (query, current_location)| {
-                el.child(render_task_route_action_card(
-                    "Symbol graph",
-                    &format!("Call sites of {}", query.focus.term),
-                    "Use LSP references to walk outward from this changed symbol.",
-                    Some("references".to_string()),
-                    {
-                        let state = state.clone();
-                        let detail = detail.clone();
-                        let query = query.clone();
-                        let current_location = current_location.clone();
-                        move |_, window, cx| {
-                            activate_callsite_review_route(
-                                &state,
-                                detail.clone(),
-                                current_location.clone(),
-                                query.clone(),
-                                window,
-                                cx,
-                            );
-                        }
-                    },
-                ))
-            },
-        )
-        .when(
-            action_count == 0 && active_task_route.is_none() && !route_loading,
-            |el| {
-                el.child(
-                    div()
-                        .mt(px(8.0))
-                        .text_size(px(12.0))
-                        .text_color(fg_muted())
-                        .child("No route suggestions are available for this focus yet."),
-                )
-            },
-        )
-}
-
-fn render_task_route_action_card(
-    eyebrow: &str,
-    title: &str,
-    summary: &str,
-    badge_text: Option<String>,
-    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    div()
-        .mt(px(10.0))
-        .px(px(10.0))
-        .py(px(9.0))
-        .rounded(radius_sm())
-        .border_1()
-        .border_color(border_muted())
-        .bg(bg_surface())
-        .cursor_pointer()
-        .hover(|style| style.bg(hover_bg()))
-        .on_mouse_down(MouseButton::Left, on_click)
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .font_family(mono_font_family())
-                        .text_color(accent())
-                        .child(eyebrow.to_ascii_uppercase()),
-                )
-                .when_some(badge_text, |el, badge_text| el.child(badge(&badge_text))),
-        )
-        .child(
-            div()
-                .mt(px(6.0))
-                .text_size(px(12.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(fg_emphasis())
-                .child(title.to_string()),
-        )
-        .child(
-            div()
-                .mt(px(4.0))
-                .text_size(px(11.0))
-                .text_color(fg_muted())
-                .child(summary.to_string()),
-        )
-}
-
-fn render_waymark_card(
-    state: &Entity<AppState>,
-    waymark: &crate::review_session::ReviewWaymark,
-) -> impl IntoElement {
-    let state_for_open = state.clone();
-    let state_for_remove = state.clone();
-    let location = waymark.location.clone();
-    let name = waymark.name.clone();
-    let remove_id = waymark.id.clone();
-
-    div()
-        .px(px(10.0))
-        .py(px(8.0))
-        .rounded(radius_sm())
-        .border_1()
-        .border_color(border_muted())
-        .bg(bg_surface())
-        .child(
-            div()
-                .flex()
-                .items_start()
-                .justify_between()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.0))
-                        .min_w_0()
-                        .cursor_pointer()
-                        .hover(|style| style.text_color(fg_emphasis()))
-                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                            open_review_location_card(&state_for_open, &location, window, cx);
-                        })
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(fg_emphasis())
-                                .child(name),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(fg_muted())
-                                .child(waymark.location.label.clone()),
-                        ),
-                )
-                .child(ghost_button("Remove", move |_, _, cx| {
-                    state_for_remove.update(cx, |state, cx| {
-                        if state.remove_review_waymark(&remove_id) {
-                            state.persist_active_review_session();
-                            cx.notify();
-                        }
-                    });
-                })),
-        )
-}
-
-fn render_context_threads_panel(review_context: &ReviewContextData) -> impl IntoElement {
-    nested_panel()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(10.0))
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .font_family(mono_font_family())
-                        .text_color(fg_subtle())
-                        .child("THREADS"),
-                )
-                .child(badge(&review_context.file_threads.len().to_string())),
-        )
-        .when(review_context.file_threads.is_empty(), |el| {
-            el.child(
-                div()
-                    .mt(px(8.0))
-                    .text_size(px(12.0))
-                    .text_color(fg_muted())
-                    .child("No file-local review threads."),
-            )
-        })
-        .when(!review_context.file_threads.is_empty(), |el| {
-            el.child(div().mt(px(10.0)).flex().flex_col().gap(px(10.0)).children(
-                review_context.file_threads.iter().take(4).map(|thread| {
-                    div()
-                        .pt(px(10.0))
-                        .border_t(px(1.0))
-                        .border_color(border_muted())
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .text_size(px(11.0))
-                                .font_family(mono_font_family())
-                                .text_color(fg_subtle())
-                                .child(user_avatar(
-                                    &thread.author_login,
-                                    thread.author_avatar_url.as_deref(),
-                                    16.0,
-                                    false,
-                                ))
-                                .child(
-                                    div()
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(fg_emphasis())
-                                        .child(thread.author_login.clone()),
-                                )
-                                .child(format!(
-                                    "• {}{}",
-                                    thread.location_label,
-                                    if thread.is_resolved {
-                                        " • resolved"
-                                    } else {
-                                        ""
-                                    }
-                                )),
-                        )
-                        .child(
-                            div()
-                                .mt(px(6.0))
-                                .text_size(px(12.0))
-                                .text_color(fg_default())
-                                .child(thread.preview.clone()),
-                        )
-                        .child(
-                            div()
-                                .mt(px(4.0))
-                                .text_size(px(11.0))
-                                .text_color(fg_muted())
-                                .child(thread.updated_at.clone()),
-                        )
-                }),
-            ))
-        })
-}
-
-fn render_context_related_panel(
-    state: &Entity<AppState>,
-    review_context: &ReviewContextData,
-) -> impl IntoElement {
-    nested_panel()
-        .child(
-            div()
-                .text_size(px(10.0))
-                .font_family(mono_font_family())
-                .text_color(fg_subtle())
-                .child("RELATED"),
-        )
-        .when(!review_context.related_files.is_empty(), |el| {
-            el.child(div().mt(px(10.0)).flex().flex_col().gap(px(8.0)).children(
-                review_context.related_files.iter().map(|item| {
-                    render_related_file_row(
-                        state,
-                        item.path.as_str(),
-                        item.reason.as_str(),
-                        item.changed,
-                        false,
-                    )
-                }),
-            ))
-        })
-        .when(!review_context.docs_and_tests.is_empty(), |el| {
-            el.child(
-                div()
-                    .mt(px(12.0))
-                    .pt(px(12.0))
-                    .border_t(px(1.0))
-                    .border_color(border_muted())
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .children(review_context.docs_and_tests.iter().map(|item| {
-                        render_related_file_row(
-                            state,
-                            item.path.as_str(),
-                            item.reason.as_str(),
-                            item.changed,
-                            true,
-                        )
-                    })),
-            )
-        })
-}
-
-fn render_related_file_row(
-    state: &Entity<AppState>,
-    path: &str,
-    reason: &str,
-    changed: bool,
-    prefer_source: bool,
-) -> impl IntoElement {
-    let state = state.clone();
-    let path = path.to_string();
-    let display_path = path.clone();
-    let reason_label = reason.to_string();
-
-    div()
-        .px(px(10.0))
-        .py(px(8.0))
-        .rounded(radius_sm())
-        .bg(bg_surface())
-        .border_1()
-        .border_color(border_muted())
-        .cursor_pointer()
-        .hover(|style| style.bg(hover_bg()))
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            if prefer_source {
-                open_review_source_location(
-                    &state,
-                    path.clone(),
-                    None,
-                    Some(reason_label.clone()),
-                    window,
-                    cx,
-                );
-            } else {
-                open_review_diff_location(&state, path.clone(), None, window, cx);
-            }
-        })
-        .child(
-            div()
-                .text_size(px(12.0))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(fg_emphasis())
-                .child(display_path),
-        )
-        .child(
-            div()
-                .mt(px(4.0))
-                .text_size(px(11.0))
-                .text_color(fg_muted())
-                .child(format!(
-                    "{}{}",
-                    reason,
-                    if changed { " • changed" } else { "" }
-                )),
-        )
 }
 
 fn render_file_diff(
@@ -8288,7 +5043,7 @@ fn render_file_diff(
         .flex_col()
         .flex_grow()
         .min_h_0()
-        .bg(bg_inset())
+        .bg(diff_editor_bg())
         .overflow_hidden()
         .child(
             div()
@@ -8296,7 +5051,7 @@ fn render_file_diff(
                 .flex_col()
                 .flex_grow()
                 .min_h_0()
-                .bg(bg_inset())
+                .bg(diff_editor_bg())
                 .when_some(stack_visibility.clone(), |el, visibility| {
                     el.child(render_stack_layer_diff_notice(
                         review_stack.as_ref(),
@@ -8529,75 +5284,6 @@ struct DiffFileLspContext {
     document_text: Arc<str>,
 }
 
-#[derive(Clone)]
-struct DiffLineLspContext {
-    file: DiffFileLspContext,
-    line_number: usize,
-}
-
-#[derive(Clone)]
-struct DiffLineLspQuery {
-    state: Entity<AppState>,
-    detail_key: String,
-    lsp_session_manager: Arc<lsp::LspSessionManager>,
-    repo_root: PathBuf,
-    query_key: String,
-    token_label: String,
-    request: lsp::LspTextDocumentRequest,
-}
-
-#[derive(Clone)]
-struct ReviewSymbolRouteQuery {
-    state: Entity<AppState>,
-    detail_key: String,
-    lsp_session_manager: Arc<lsp::LspSessionManager>,
-    repo_root: PathBuf,
-    query_key: String,
-    focus: ReviewSymbolFocus,
-    request: lsp::LspTextDocumentRequest,
-}
-
-#[derive(Clone)]
-struct ReviewSymbolEvolutionQuery {
-    state: Entity<AppState>,
-    detail_key: String,
-    query_key: String,
-    repo_root: PathBuf,
-    base_oid: String,
-    head_oid: String,
-    file_path: String,
-    focus_term: Option<String>,
-}
-
-impl DiffLineLspContext {
-    fn query_for_index(
-        &self,
-        index: usize,
-        tokens: &[InteractiveCodeToken],
-    ) -> Option<DiffLineLspQuery> {
-        let token = tokens
-            .iter()
-            .find(|token| token.byte_range.contains(&index))?;
-        Some(DiffLineLspQuery {
-            state: self.file.state.clone(),
-            detail_key: self.file.detail_key.clone(),
-            lsp_session_manager: self.file.lsp_session_manager.clone(),
-            repo_root: self.file.repo_root.clone(),
-            query_key: format!(
-                "{}:{}:{}:{}",
-                self.file.file_path, self.file.reference, self.line_number, token.column_start
-            ),
-            token_label: display_lsp_token_label(&token.text),
-            request: lsp::LspTextDocumentRequest {
-                file_path: self.file.file_path.clone(),
-                document_text: self.file.document_text.clone(),
-                line: self.line_number,
-                column: token.column_start,
-            },
-        })
-    }
-}
-
 fn build_diff_file_lsp_context(
     state: &Entity<AppState>,
     file_path: &str,
@@ -8621,7 +5307,8 @@ fn build_diff_file_lsp_context(
     let lsp_status = detail_state.lsp_statuses.get(file_path)?;
     if !lsp_status.is_ready()
         || (!lsp_status.capabilities.hover_supported
-            && !lsp_status.capabilities.signature_help_supported)
+            && !lsp_status.capabilities.signature_help_supported
+            && !lsp_status.capabilities.definition_supported)
     {
         return None;
     }
@@ -8637,374 +5324,21 @@ fn build_diff_file_lsp_context(
     })
 }
 
-fn build_review_symbol_route_query(
-    state: &Entity<AppState>,
-    file_path: &str,
-    selected_anchor: Option<&DiffAnchor>,
-    selected_section: Option<&SemanticDiffSection>,
-    selected_parsed: Option<&ParsedDiffFile>,
-    prepared_file: Option<&PreparedFileContent>,
-    cx: &App,
-) -> Option<ReviewSymbolRouteQuery> {
-    let selected_section = selected_section?;
-    let prepared_file = prepared_file?;
-    let focus = build_anchor_symbol_focus(selected_anchor, prepared_file).or_else(|| {
-        build_section_symbol_focus(selected_section, selected_parsed, Some(prepared_file))
-    })?;
-
-    let app_state = state.read(cx);
-    let detail_key = app_state.active_pr_key.clone()?;
-    let detail_state = app_state.detail_states.get(&detail_key)?;
-    let local_repo_status = detail_state.local_repository_status.as_ref()?;
-    if !local_repo_status.ready_for_snapshot_features() {
-        return None;
-    }
-
-    let lsp_status = detail_state.lsp_statuses.get(file_path)?;
-    if !lsp_status.is_ready() || !lsp_status.capabilities.references_supported {
-        return None;
-    }
-
-    let repo_root = PathBuf::from(local_repo_status.path.as_ref()?);
-
-    Some(ReviewSymbolRouteQuery {
-        state: state.clone(),
-        detail_key,
-        lsp_session_manager: app_state.lsp_session_manager.clone(),
-        repo_root,
-        query_key: format!(
-            "{}:{}:{}:{}:task-route",
-            file_path, prepared_file.reference, focus.line, focus.column
-        ),
-        request: lsp::LspTextDocumentRequest {
-            file_path: file_path.to_string(),
-            document_text: prepared_file.text.clone(),
-            line: focus.line,
-            column: focus.column,
-        },
-        focus,
-    })
+#[derive(Clone)]
+struct DiffLineLspContext {
+    file: DiffFileLspContext,
+    line_number: usize,
 }
 
-fn build_anchor_symbol_focus(
-    selected_anchor: Option<&DiffAnchor>,
-    prepared_file: &PreparedFileContent,
-) -> Option<ReviewSymbolFocus> {
-    let line = selected_anchor
-        .and_then(|anchor| anchor.line)
-        .and_then(|line| usize::try_from(line).ok())
-        .filter(|line| *line > 0)?;
-    let source_line = prepared_file.lines.get(line.saturating_sub(1))?;
-    let (term, column) = extract_symbol_focus_from_line(&source_line.text)?;
-
-    Some(ReviewSymbolFocus { term, line, column })
-}
-
-fn build_diff_anchor_symbol_focus(
-    selected_anchor: Option<&DiffAnchor>,
-    parsed_file: Option<&ParsedDiffFile>,
-) -> Option<ReviewSymbolFocus> {
-    let anchor = selected_anchor?;
-    let line = anchor
-        .line
-        .and_then(|line| usize::try_from(line).ok())
-        .filter(|line| *line > 0)?;
-    let side = anchor.side.as_deref();
-    let parsed_file = parsed_file?;
-
-    let diff_line = parsed_file
-        .hunks
-        .iter()
-        .flat_map(|hunk| hunk.lines.iter())
-        .find(|line_data| match side {
-            Some("LEFT") => line_data.left_line_number == Some(line as i64),
-            Some("RIGHT") => line_data.right_line_number == Some(line as i64),
-            _ => {
-                line_data.right_line_number == Some(line as i64)
-                    || line_data.left_line_number == Some(line as i64)
-            }
-        })?;
-    let (term, column) = extract_symbol_focus_from_line(diff_line.content.as_str())?;
-
-    Some(ReviewSymbolFocus { term, line, column })
-}
-
-fn extract_symbol_focus_from_line(line: &str) -> Option<(String, usize)> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    for prefix in [
-        "struct ",
-        "enum ",
-        "class ",
-        "trait ",
-        "protocol ",
-        "interface ",
-        "typealias ",
-        "type ",
-        "fn ",
-        "func ",
-        "let ",
-        "var ",
-        "const ",
-    ] {
-        if let Some(rest) = trimmed.strip_prefix(prefix) {
-            let token = rest
-                .chars()
-                .take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | ':'))
-                .collect::<String>();
-            if !token.is_empty() {
-                let column = line.find(&token).map(|index| index + 1)?;
-                return Some((token, column));
-            }
-        }
-    }
-
-    let keywords = [
-        "import",
-        "return",
-        "case",
-        "switch",
-        "if",
-        "else",
-        "for",
-        "while",
-        "guard",
-        "public",
-        "private",
-        "internal",
-        "fileprivate",
-        "static",
-    ];
-
-    line.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == ':'))
-        .filter(|token| token.len() >= 3)
-        .find(|token| !keywords.contains(token))
-        .and_then(|token| line.find(token).map(|index| (token.to_string(), index + 1)))
-}
-
-fn should_request_review_symbol_details(query: &ReviewSymbolRouteQuery, cx: &App) -> bool {
-    query
-        .state
-        .read(cx)
-        .detail_states
-        .get(&query.detail_key)
-        .and_then(|detail_state| detail_state.lsp_symbol_states.get(&query.query_key))
-        .map(|symbol_state| !symbol_state.loading && symbol_state.details.is_none())
-        .unwrap_or(true)
-}
-
-fn request_review_symbol_details(
-    query: ReviewSymbolRouteQuery,
-    force: bool,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    if !force && !should_request_review_symbol_details(&query, cx) {
-        return;
-    }
-
-    let query_key = query.query_key.clone();
-    let detail_key = query.detail_key.clone();
-    let state = query.state.clone();
-
-    state.update(cx, |state, cx| {
-        let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
-            return;
-        };
-        let symbol_state = detail_state
-            .lsp_symbol_states
-            .entry(query_key.clone())
-            .or_default();
-        if symbol_state.loading {
-            return;
-        }
-        if !force && symbol_state.details.is_some() {
-            return;
-        }
-        symbol_state.loading = true;
-        if force {
-            symbol_state.details = None;
-            symbol_state.error = None;
-        }
-        cx.notify();
-    });
-
-    window
-        .spawn(cx, {
-            let state = state.clone();
-            let detail_key = detail_key.clone();
-            let query_key = query_key.clone();
-            let lsp_session_manager = query.lsp_session_manager.clone();
-            let repo_root = query.repo_root.clone();
-            let request = query.request.clone();
-            async move |cx: &mut AsyncWindowContext| {
-                let result = cx
-                    .background_executor()
-                    .spawn(async move { lsp_session_manager.symbol_details(&repo_root, &request) })
-                    .await;
-
-                state
-                    .update(cx, |state, cx| {
-                        let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
-                            return;
-                        };
-                        let symbol_state = detail_state
-                            .lsp_symbol_states
-                            .entry(query_key.clone())
-                            .or_default();
-                        symbol_state.loading = false;
-                        match result {
-                            Ok(details) => {
-                                symbol_state.details = Some(details);
-                                symbol_state.error = None;
-                            }
-                            Err(error) => {
-                                symbol_state.details = None;
-                                symbol_state.error = Some(error);
-                            }
-                        }
-                        cx.notify();
-                    })
-                    .ok();
-            }
-        })
-        .detach();
-}
-
-fn build_review_symbol_evolution_query(
-    state: &Entity<AppState>,
-    detail: &PullRequestDetail,
-    file_path: &str,
-    focus_term: Option<&str>,
-    cx: &App,
-) -> Option<ReviewSymbolEvolutionQuery> {
-    let app_state = state.read(cx);
-    let detail_key = app_state.active_pr_key.clone()?;
-    let detail_state = app_state.detail_states.get(&detail_key)?;
-    let local_repo_status = detail_state.local_repository_status.as_ref()?;
-    if !local_repo_status.ready_for_snapshot_features() {
-        return None;
-    }
-
-    Some(ReviewSymbolEvolutionQuery {
-        state: state.clone(),
-        detail_key,
-        query_key: format!(
-            "evolution:{}:{}:{}:{}",
-            file_path,
-            detail.base_ref_oid.as_deref().unwrap_or_default(),
-            detail.head_ref_oid.as_deref().unwrap_or_default(),
-            focus_term.unwrap_or("file")
-        ),
-        repo_root: PathBuf::from(local_repo_status.path.as_ref()?),
-        base_oid: detail.base_ref_oid.clone()?,
-        head_oid: detail.head_ref_oid.clone()?,
-        file_path: file_path.to_string(),
-        focus_term: focus_term.map(str::to_string),
-    })
-}
-
-fn should_request_symbol_evolution_timeline(query: &ReviewSymbolEvolutionQuery, cx: &App) -> bool {
-    query
-        .state
-        .read(cx)
-        .detail_states
-        .get(&query.detail_key)
-        .and_then(|detail_state| detail_state.review_evolution_states.get(&query.query_key))
-        .map(|timeline_state| !timeline_state.loading && timeline_state.timeline.is_none())
-        .unwrap_or(true)
-}
-
-fn request_symbol_evolution_timeline(
-    query: ReviewSymbolEvolutionQuery,
-    force: bool,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    if !force && !should_request_symbol_evolution_timeline(&query, cx) {
-        return;
-    }
-
-    let state = query.state.clone();
-    let detail_key = query.detail_key.clone();
-    let query_key = query.query_key.clone();
-
-    state.update(cx, |state, cx| {
-        let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
-            return;
-        };
-        let evolution_state = detail_state
-            .review_evolution_states
-            .entry(query_key.clone())
-            .or_default();
-        if evolution_state.loading {
-            return;
-        }
-        if !force && evolution_state.timeline.is_some() {
-            return;
-        }
-        evolution_state.loading = true;
-        if force {
-            evolution_state.timeline = None;
-            evolution_state.error = None;
-        }
-        cx.notify();
-    });
-
-    window
-        .spawn(cx, {
-            let state = state.clone();
-            let detail_key = detail_key.clone();
-            let query_key = query_key.clone();
-            let repo_root = query.repo_root.clone();
-            let base_oid = query.base_oid.clone();
-            let head_oid = query.head_oid.clone();
-            let file_path = query.file_path.clone();
-            let focus_term = query.focus_term.clone();
-            async move |cx: &mut AsyncWindowContext| {
-                let result = cx
-                    .background_executor()
-                    .spawn(async move {
-                        load_symbol_evolution_timeline(
-                            &repo_root,
-                            &base_oid,
-                            &head_oid,
-                            &file_path,
-                            focus_term.as_deref(),
-                            8,
-                        )
-                    })
-                    .await;
-
-                state
-                    .update(cx, |state, cx| {
-                        let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
-                            return;
-                        };
-                        let evolution_state = detail_state
-                            .review_evolution_states
-                            .entry(query_key.clone())
-                            .or_default();
-                        evolution_state.loading = false;
-                        match result {
-                            Ok(timeline) => {
-                                evolution_state.timeline = Some(timeline);
-                                evolution_state.error = None;
-                            }
-                            Err(error) => {
-                                evolution_state.timeline = None;
-                                evolution_state.error = Some(error);
-                            }
-                        }
-                        cx.notify();
-                    })
-                    .ok();
-            }
-        })
-        .detach();
+#[derive(Clone)]
+struct DiffLineLspQuery {
+    state: Entity<AppState>,
+    detail_key: String,
+    lsp_session_manager: Arc<lsp::LspSessionManager>,
+    repo_root: PathBuf,
+    query_key: String,
+    token_label: String,
+    request: lsp::LspTextDocumentRequest,
 }
 
 fn build_diff_line_lsp_context(
@@ -9020,6 +5354,36 @@ fn build_diff_line_lsp_context(
         file: file_context?.clone(),
         line_number,
     })
+}
+
+impl DiffLineLspContext {
+    fn query_for_index(
+        &self,
+        index: usize,
+        tokens: &[InteractiveCodeToken],
+    ) -> Option<DiffLineLspQuery> {
+        let token = tokens
+            .iter()
+            .find(|token| token.byte_range.contains(&index))?;
+
+        Some(DiffLineLspQuery {
+            state: self.file.state.clone(),
+            detail_key: self.file.detail_key.clone(),
+            lsp_session_manager: self.file.lsp_session_manager.clone(),
+            repo_root: self.file.repo_root.clone(),
+            query_key: format!(
+                "{}:{}:{}:{}",
+                self.file.file_path, self.file.reference, self.line_number, token.column_start
+            ),
+            token_label: display_lsp_token_label(&token.text),
+            request: lsp::LspTextDocumentRequest {
+                file_path: self.file.file_path.clone(),
+                document_text: self.file.document_text.clone(),
+                line: self.line_number,
+                column: token.column_start,
+            },
+        })
+    }
 }
 
 fn display_lsp_token_label(text: &str) -> String {
@@ -9101,148 +5465,6 @@ fn request_diff_line_lsp_details(query: DiffLineLspQuery, window: &mut Window, c
                                 symbol_state.details = None;
                                 symbol_state.error = Some(error);
                             }
-                        }
-                        cx.notify();
-                    })
-                    .ok();
-            }
-        })
-        .detach();
-}
-
-fn activate_callsite_review_route(
-    state: &Entity<AppState>,
-    detail: PullRequestDetail,
-    current_location: ReviewLocation,
-    query: ReviewSymbolRouteQuery,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let cached_route = state
-        .read(cx)
-        .detail_states
-        .get(&query.detail_key)
-        .and_then(|detail_state| detail_state.lsp_symbol_states.get(&query.query_key))
-        .and_then(|symbol_state| symbol_state.details.as_ref())
-        .and_then(|details| {
-            build_callsite_route(
-                &detail,
-                current_location.clone(),
-                &query.focus.term,
-                &details.reference_targets,
-            )
-        });
-
-    if let Some(route) = cached_route {
-        state.update(cx, |state, cx| {
-            if let Some(detail_state) = state.detail_states.get_mut(&query.detail_key) {
-                detail_state.review_route_loading = false;
-                detail_state.review_route_message =
-                    Some(format!("Loaded call sites of {}.", query.focus.term));
-                detail_state.review_route_error = None;
-            }
-            state.set_active_review_task_route(Some(route));
-            state.persist_active_review_session();
-            cx.notify();
-        });
-        return;
-    }
-
-    let query_key = query.query_key.clone();
-    let detail_key = query.detail_key.clone();
-    let focus_term = query.focus.term.clone();
-
-    state.update(cx, |state, cx| {
-        let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
-            return;
-        };
-        detail_state.review_route_loading = true;
-        detail_state.review_route_message = Some(format!("Tracing call sites of {focus_term}…"));
-        detail_state.review_route_error = None;
-
-        let symbol_state = detail_state
-            .lsp_symbol_states
-            .entry(query_key.clone())
-            .or_default();
-        if !symbol_state.loading {
-            symbol_state.loading = true;
-            symbol_state.error = None;
-        }
-
-        cx.notify();
-    });
-
-    window
-        .spawn(cx, {
-            let state = state.clone();
-            let detail_key = detail_key.clone();
-            let query_key = query_key.clone();
-            let lsp_session_manager = query.lsp_session_manager.clone();
-            let repo_root = query.repo_root.clone();
-            let request = query.request.clone();
-            let focus_term = focus_term.clone();
-            async move |cx: &mut AsyncWindowContext| {
-                let result = cx
-                    .background_executor()
-                    .spawn(async move { lsp_session_manager.symbol_details(&repo_root, &request) })
-                    .await;
-
-                state
-                    .update(cx, |state, cx| {
-                        let mut activated_route = None;
-                        let mut route_message = None;
-                        let mut route_error = None;
-
-                        {
-                            let Some(detail_state) = state.detail_states.get_mut(&detail_key)
-                            else {
-                                return;
-                            };
-                            let symbol_state = detail_state
-                                .lsp_symbol_states
-                                .entry(query_key.clone())
-                                .or_default();
-                            symbol_state.loading = false;
-
-                            detail_state.review_route_loading = false;
-                            match result {
-                                Ok(details) => {
-                                    symbol_state.details = Some(details.clone());
-                                    symbol_state.error = None;
-
-                                    if let Some(route) = build_callsite_route(
-                                        &detail,
-                                        current_location.clone(),
-                                        &focus_term,
-                                        &details.reference_targets,
-                                    ) {
-                                        route_message = Some(format!(
-                                            "Loaded {} route with {} stops.",
-                                            route.title,
-                                            route.stops.len()
-                                        ));
-                                        activated_route = Some(route);
-                                    } else {
-                                        route_error = Some(format!(
-                                            "No call sites found for {}.",
-                                            focus_term
-                                        ));
-                                    }
-                                }
-                                Err(error) => {
-                                    symbol_state.details = None;
-                                    symbol_state.error = Some(error.clone());
-                                    route_error = Some(error);
-                                }
-                            }
-
-                            detail_state.review_route_message = route_message.clone();
-                            detail_state.review_route_error = route_error.clone();
-                        }
-
-                        if let Some(route) = activated_route {
-                            state.set_active_review_task_route(Some(route));
-                            state.persist_active_review_session();
                         }
                         cx.notify();
                     })
@@ -9554,10 +5776,10 @@ fn render_diff_gap_row(
         .flex()
         .items_center()
         .w_full()
-        .min_h(px(30.0))
-        .bg(bg_surface())
+        .min_h(px(26.0))
+        .bg(diff_annotation_bg())
         .border_b(px(1.0))
-        .border_color(border_muted())
+        .border_color(diff_annotation_border())
         .font_family(mono_font_family())
         .text_size(px(11.0))
         .child(
@@ -9567,14 +5789,14 @@ fn render_diff_gap_row(
                 .h_full()
                 .bg(diff_context_gutter_bg())
                 .border_r(px(1.0))
-                .border_color(border_default()),
+                .border_color(diff_gutter_separator()),
         )
         .child(
             div()
                 .flex_grow()
                 .min_w_0()
                 .px(px(12.0))
-                .py(px(6.0))
+                .py(px(4.0))
                 .flex()
                 .items_center()
                 .gap(px(10.0))
@@ -9588,9 +5810,9 @@ fn render_diff_gap_row(
                                 .px(px(6.0))
                                 .py(px(1.0))
                                 .rounded(px(999.0))
-                                .bg(bg_overlay())
+                                .bg(diff_editor_chrome())
                                 .border_1()
-                                .border_color(border_default())
+                                .border_color(diff_annotation_border())
                                 .text_color(accent())
                                 .child(marker)
                         })),
@@ -9619,10 +5841,10 @@ fn render_stack_layer_diff_notice(
 
     div()
         .px(px(14.0))
-        .py(px(10.0))
-        .bg(bg_overlay())
+        .py(px(8.0))
+        .bg(diff_annotation_bg())
         .border_b(px(1.0))
-        .border_color(border_muted())
+        .border_color(diff_annotation_border())
         .flex()
         .items_start()
         .justify_between()
@@ -9783,12 +6005,16 @@ fn render_semantic_section_header(
     let collapsed = state.read(cx).is_review_section_collapsed(&section.id);
 
     div()
-        .px(px(12.0))
-        .py(px(6.0))
+        .px(px(14.0))
+        .py(px(5.0))
         .border_b(px(1.0))
-        .border_color(border_muted())
+        .border_color(if is_selected {
+            diff_selected_edge()
+        } else {
+            diff_annotation_border()
+        })
         .bg(if is_selected {
-            bg_selected()
+            diff_line_hover_bg()
         } else {
             diff_hunk_bg()
         })
@@ -9819,7 +6045,7 @@ fn render_semantic_section_header(
                             div()
                                 .text_size(px(10.0))
                                 .font_family(mono_font_family())
-                                .text_color(accent())
+                                .text_color(diff_hunk_fg())
                                 .flex_shrink_0()
                                 .child(section.kind.label().to_ascii_uppercase()),
                         )
@@ -9956,7 +6182,7 @@ fn render_virtualized_diff_row(
                     .px(px(16.0))
                     .py(px(10.0))
                     .border_b(px(1.0))
-                    .border_color(border_muted())
+                    .border_color(diff_annotation_border())
                     .child(render_review_thread(
                         thread,
                         selected_anchor,
@@ -9974,8 +6200,8 @@ fn render_virtualized_diff_row(
                     .pr(px(16.0))
                     .py(px(10.0))
                     .border_b(px(1.0))
-                    .border_color(border_muted())
-                    .bg(bg_inset())
+                    .border_color(diff_annotation_border())
+                    .bg(diff_annotation_bg())
                     .child(render_review_thread(
                         thread,
                         selected_anchor,
@@ -9992,8 +6218,8 @@ fn render_virtualized_diff_row(
                     .px(px(16.0))
                     .py(px(10.0))
                     .border_b(px(1.0))
-                    .border_color(border_muted())
-                    .bg(bg_inset())
+                    .border_color(diff_annotation_border())
+                    .bg(diff_annotation_bg())
                     .child(render_review_thread(
                         thread,
                         selected_anchor,
@@ -10059,11 +6285,11 @@ fn render_virtualized_diff_row(
 
 fn render_diff_section_header(label: &str, count: usize) -> impl IntoElement {
     div()
-        .px(px(16.0))
-        .py(px(8.0))
+        .px(px(14.0))
+        .py(px(6.0))
         .border_b(px(1.0))
-        .border_color(border_default())
-        .bg(bg_overlay())
+        .border_color(diff_annotation_border())
+        .bg(diff_annotation_bg())
         .flex()
         .items_center()
         .justify_between()
@@ -10088,8 +6314,8 @@ fn render_diff_state_row(message: &str) -> impl IntoElement {
         .px(px(16.0))
         .py(px(18.0))
         .border_b(px(1.0))
-        .border_color(border_muted())
-        .bg(bg_inset())
+        .border_color(diff_annotation_border())
+        .bg(diff_editor_bg())
         .child(
             div()
                 .text_size(px(12.0))
@@ -10103,8 +6329,8 @@ fn render_raw_diff_fallback(raw_diff: &str) -> impl IntoElement {
         .px(px(16.0))
         .py(px(16.0))
         .border_b(px(1.0))
-        .border_color(border_muted())
-        .bg(bg_inset())
+        .border_color(diff_annotation_border())
+        .bg(diff_editor_bg())
         .child(if raw_diff.is_empty() {
             div()
                 .text_size(px(12.0))
@@ -10235,6 +6461,7 @@ fn render_reviewable_diff_line(
         lsp_context,
         line_action_target.map(|target| (state.clone(), target)),
         has_waypoint,
+        popup_open,
     )
 }
 
@@ -10611,6 +6838,7 @@ fn render_diff_line_with_threads(
             None,
             None,
             false,
+            false,
         ))
         .when(!threads.is_empty(), |el| {
             el.child(
@@ -10619,8 +6847,8 @@ fn render_diff_line_with_threads(
                     .pr(px(16.0))
                     .py(px(8.0))
                     .border_b(px(1.0))
-                    .border_color(border_muted())
-                    .bg(bg_inset())
+                    .border_color(diff_annotation_border())
+                    .bg(diff_annotation_bg())
                     .flex()
                     .flex_col()
                     .gap(px(6.0))
@@ -10641,6 +6869,7 @@ fn render_diff_line(
     lsp_context: Option<&DiffLineLspContext>,
     line_action: Option<(Entity<AppState>, ReviewLineActionTarget)>,
     has_waypoint: bool,
+    force_marker_visible: bool,
 ) -> impl IntoElement {
     let is_selected = line_matches_diff_anchor(line, selected_anchor);
     let row_action = line_action.clone();
@@ -10660,47 +6889,33 @@ fn render_diff_line(
         line.prefix.clone()
     };
 
-    // Subtle backgrounds with syntax-highlighted text — only gutter markers stay green/red
-    let (row_bg, gutter_bg, row_border, marker_color, fallback_text_color) = if is_selected {
-        (
-            accent_muted(),
-            bg_selected(),
-            accent(),
-            fg_emphasis(),
-            fg_emphasis(),
-        )
-    } else {
-        match line.kind {
-            DiffLineKind::Addition => (
-                diff_add_bg(),
-                diff_add_gutter_bg(),
-                diff_add_border(),
-                success(),
-                fg_default(),
-            ),
-            DiffLineKind::Deletion => (
-                diff_remove_bg(),
-                diff_remove_gutter_bg(),
-                diff_remove_border(),
-                danger(),
-                fg_default(),
-            ),
-            DiffLineKind::Meta => (
-                diff_meta_bg(),
-                diff_context_gutter_bg(),
-                border_muted(),
-                fg_subtle(),
-                fg_muted(),
-            ),
-            DiffLineKind::Context => (
-                diff_context_bg(),
-                diff_context_gutter_bg(),
-                border_muted(),
-                fg_subtle(),
-                fg_default(),
-            ),
-        }
+    let (row_bg, gutter_bg, marker_color, fallback_text_color) = match line.kind {
+        DiffLineKind::Addition => (diff_add_bg(), diff_add_gutter_bg(), success(), fg_default()),
+        DiffLineKind::Deletion => (
+            diff_remove_bg(),
+            diff_remove_gutter_bg(),
+            danger(),
+            fg_default(),
+        ),
+        DiffLineKind::Meta => (
+            diff_meta_bg(),
+            diff_context_gutter_bg(),
+            fg_subtle(),
+            fg_muted(),
+        ),
+        DiffLineKind::Context => (
+            diff_context_bg(),
+            diff_context_gutter_bg(),
+            fg_subtle(),
+            fg_default(),
+        ),
     };
+    let row_border = if is_selected {
+        diff_selected_edge()
+    } else {
+        transparent()
+    };
+    let marker_visible = is_selected || force_marker_visible;
     let number_color = if is_selected {
         fg_default()
     } else {
@@ -10718,8 +6933,14 @@ fn render_diff_line(
         .border_color(row_border)
         .font_family(mono_font_family())
         .text_size(px(12.0))
+        .text_color(if marker_visible {
+            marker_color
+        } else {
+            transparent()
+        })
+        .hover(move |style| style.bg(diff_line_hover_bg()).text_color(marker_color))
         .when(is_selected, |el| {
-            el.border_l(px(2.0)).border_color(transparent())
+            el.border_l(px(2.0)).border_color(diff_selected_edge())
         })
         .when_some(row_action, |el, (state, target)| {
             el.cursor_pointer()
@@ -10734,7 +6955,7 @@ fn render_diff_line(
                 .w(px(gutter_layout.gutter_width()))
                 .bg(gutter_bg)
                 .border_r(px(1.0))
-                .border_color(border_default())
+                .border_color(diff_gutter_separator())
                 .when(gutter_layout.reserve_waypoint_slot, |el| {
                     el.child(
                         div()
@@ -10792,7 +7013,6 @@ fn render_diff_line(
                 .w(px(DIFF_MARKER_COLUMN_WIDTH))
                 .flex_shrink_0()
                 .py(px(1.0))
-                .text_color(marker_color)
                 .child(marker),
         )
         .child(render_syntax_content(
@@ -11487,18 +7707,18 @@ fn render_review_thread(
     let state_for_mark_read = state.clone();
     let thread_border = transparent();
     let header_bg = if is_selected {
-        accent_muted()
+        diff_line_hover_bg()
     } else if thread.is_resolved {
         success_muted()
     } else {
-        bg_emphasis()
+        diff_annotation_bg()
     };
 
     div()
-        .rounded(radius())
+        .rounded(radius_sm())
         .border_1()
         .border_color(thread_border)
-        .bg(bg_overlay())
+        .bg(diff_editor_chrome())
         .overflow_hidden()
         .flex()
         .flex_col()
@@ -11507,7 +7727,7 @@ fn render_review_thread(
                 .px(px(12.0))
                 .py(px(8.0))
                 .border_b(px(1.0))
-                .border_color(border_muted())
+                .border_color(diff_annotation_border())
                 .bg(header_bg)
                 .flex()
                 .items_center()
@@ -11551,11 +7771,15 @@ fn render_thread_comment(comment: &PullRequestReviewComment, is_unread: bool) ->
         .p(px(12.0))
         .rounded(radius_sm())
         .border_1()
-        .border_color(if is_unread { accent() } else { border_muted() })
-        .bg(if is_unread {
-            accent_muted()
+        .border_color(if is_unread {
+            diff_selected_edge()
         } else {
-            bg_surface()
+            diff_annotation_border()
+        })
+        .bg(if is_unread {
+            diff_line_hover_bg()
+        } else {
+            diff_editor_surface()
         })
         .flex()
         .flex_col()
@@ -11612,16 +7836,16 @@ fn render_hunk_header(
         && selected_anchor.and_then(|anchor| anchor.line).is_none();
 
     div()
-        .px(px(16.0))
-        .py(px(7.0))
+        .px(px(14.0))
+        .py(px(5.0))
         .border_b(px(1.0))
         .border_color(if hunk_is_selected {
-            accent()
+            diff_selected_edge()
         } else {
-            border_default()
+            diff_annotation_border()
         })
         .bg(if hunk_is_selected {
-            accent_muted()
+            diff_line_hover_bg()
         } else {
             diff_hunk_bg()
         })
@@ -11884,8 +8108,8 @@ fn render_tour_diff_preview(
         .flex_col()
         .rounded(radius())
         .border_1()
-        .border_color(border_default())
-        .bg(bg_surface())
+        .border_color(diff_annotation_border())
+        .bg(diff_editor_bg())
         .overflow_hidden()
         .when(preview_items.focused_excerpt, |el| {
             el.child(
@@ -11893,8 +8117,8 @@ fn render_tour_diff_preview(
                     .px(px(14.0))
                     .py(px(10.0))
                     .border_b(px(1.0))
-                    .border_color(border_muted())
-                    .bg(bg_overlay())
+                    .border_color(diff_annotation_border())
+                    .bg(diff_annotation_bg())
                     .flex()
                     .items_center()
                     .gap(px(8.0))
@@ -11910,7 +8134,7 @@ fn render_tour_diff_preview(
                     ),
             )
         })
-        .child(div().flex().flex_col().bg(bg_inset()).children(elements))
+        .child(div().flex().flex_col().bg(diff_editor_bg()).children(elements))
 }
 
 fn render_full_tour_diff_preview(
@@ -11944,6 +8168,7 @@ fn render_full_tour_diff_preview(
                     anchor,
                     line_lsp_context.as_ref(),
                     None,
+                    false,
                     false,
                 )
                 .into_any_element(),

@@ -275,63 +275,22 @@ pub fn render_pr_workspace(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
     let detail_state = s.active_detail_state();
     let surface = s.active_surface;
 
-    let Some(pr) = pr else {
+    let Some(_pr) = pr else {
         return div()
             .child(panel_state_text("No pull request selected."))
             .into_any_element();
     };
 
-    let pr_title = detail
-        .map(|d| d.title.clone())
-        .unwrap_or_else(|| pr.title.clone());
-    let pr_state = detail
-        .map(|d| d.state.clone())
-        .unwrap_or_else(|| pr.state.clone());
-    let is_draft = detail.map(|d| d.is_draft).unwrap_or(pr.is_draft);
-    let author = detail
-        .map(|d| d.author_login.clone())
-        .unwrap_or_else(|| pr.author_login.clone());
-    let author_avatar_url = detail
-        .and_then(|d| d.author_avatar_url.clone())
-        .or_else(|| pr.author_avatar_url.clone());
-    let repository = pr.repository.clone();
-    let number = pr.number;
     let loading = detail_state.map(|d| d.loading).unwrap_or(false);
     let syncing = detail_state.map(|d| d.syncing).unwrap_or(false);
     let error = detail_state.and_then(|d| d.error.clone());
     let show_loading_state = detail.is_none() && (loading || syncing);
-    let header_compact = surface != PullRequestSurface::Overview || s.pr_header_compact;
-    let unread_review_comment_ids = detail
-        .map(|detail| s.unread_review_comment_ids_for_detail(detail))
-        .unwrap_or_default();
-    let unread_review_comment_count = unread_review_comment_ids.len();
-
-    let state_for_surface = state.clone();
-    let state_for_refresh = state.clone();
 
     div()
         .flex()
         .flex_col()
         .flex_grow()
         .min_h_0()
-        // Header (fixed, never scrolls)
-        .child(render_pr_header(
-            &repository,
-            number,
-            &pr_title,
-            &pr_state,
-            is_draft,
-            &author,
-            author_avatar_url.as_deref(),
-            detail.map(|d| (d.base_ref_name.clone(), d.head_ref_name.clone())),
-            syncing,
-            surface,
-            header_compact,
-            unread_review_comment_count,
-            unread_review_comment_ids,
-            state_for_refresh,
-            state_for_surface,
-        ))
         // Content area (scrollable or flex-fill depending on surface)
         .when(show_loading_state, |el| {
             el.child(
