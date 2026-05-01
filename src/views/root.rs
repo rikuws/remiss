@@ -54,6 +54,19 @@ impl RootView {
             }
         })
         .detach();
+        cx.observe_window_bounds(window, {
+            let state = state.clone();
+            move |_, window, cx| {
+                if window.is_fullscreen() || window.is_maximized() {
+                    return;
+                }
+
+                let cache = state.read(cx).cache.clone();
+                let _ =
+                    crate::window_settings::save_window_size(cache.as_ref(), window.bounds().size);
+            }
+        })
+        .detach();
 
         // Bootstrap: load workspace from cache, then sync in background.
         let model = state.clone();

@@ -22,6 +22,19 @@ use crate::views::diff_view::{load_local_source_file_content_flow, open_review_s
 
 static CODE_BLOCK_ID: AtomicUsize = AtomicUsize::new(0);
 
+const CODE_ROW_HEIGHT: f32 = 25.0;
+const CODE_FONT_SIZE: f32 = 14.0;
+const CODE_LINE_HEIGHT: f32 = 21.0;
+const CODE_LINE_NUMBER_FONT_SIZE: f32 = 12.5;
+const CODE_LINE_NUMBER_GUTTER_WIDTH: f32 = 56.0;
+const CODE_DIFF_MARKER_WIDTH: f32 = 16.0;
+
+pub fn mono_code_font() -> Font {
+    let mut code_font = font(mono_font_family());
+    code_font.weight = FontWeight::MEDIUM;
+    code_font
+}
+
 #[derive(Clone, Debug)]
 pub struct HighlightedCodeLine {
     pub text: String,
@@ -85,7 +98,7 @@ pub fn code_text_runs(spans: &[SyntaxSpan]) -> Option<Vec<TextRun>> {
 
         runs.push(TextRun {
             len: span.text.len(),
-            font: font(mono_font_family()),
+            font: mono_code_font(),
             color: span.color,
             background_color: None,
             underline: None,
@@ -292,7 +305,9 @@ fn render_highlighted_code_lines(lines: Vec<HighlightedCodeLine>) -> impl IntoEl
                 .min_w_0()
                 .whitespace_nowrap()
                 .font_family(mono_font_family())
-                .text_size(px(12.0))
+                .text_size(px(CODE_FONT_SIZE))
+                .line_height(px(CODE_LINE_HEIGHT))
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(fg_default())
                 .flex()
                 .flex_col()
@@ -382,7 +397,9 @@ fn render_prepared_code_lines(
                 .min_w_0()
                 .whitespace_nowrap()
                 .font_family(mono_font_family())
-                .text_size(px(12.0))
+                .text_size(px(CODE_FONT_SIZE))
+                .line_height(px(CODE_LINE_HEIGHT))
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(fg_default())
                 .flex()
                 .flex_col()
@@ -427,7 +444,9 @@ fn render_virtualized_prepared_code_lines(
         ))
         .whitespace_nowrap()
         .font_family(mono_font_family())
-        .text_size(px(12.0))
+        .text_size(px(CODE_FONT_SIZE))
+        .line_height(px(CODE_LINE_HEIGHT))
+        .font_weight(FontWeight::MEDIUM)
         .text_color(fg_default())
         .overflow_x_scroll()
         .child(
@@ -473,6 +492,8 @@ fn render_code_line(
         .w_full()
         .min_w_0()
         .font_family(mono_font_family())
+        .line_height(px(CODE_LINE_HEIGHT))
+        .font_weight(FontWeight::MEDIUM)
         .flex()
         .items_start();
     let line_number = line.line_number;
@@ -482,10 +503,13 @@ fn render_code_line(
         line_div
             .child(
                 div()
-                    .w(px(56.0))
+                    .w(px(CODE_LINE_NUMBER_GUTTER_WIDTH))
                     .flex_shrink_0()
                     .pr(px(12.0))
                     .text_align(TextAlign::Right)
+                    .text_size(px(CODE_LINE_NUMBER_FONT_SIZE))
+                    .line_height(px(CODE_LINE_HEIGHT))
+                    .font_weight(FontWeight::SEMIBOLD)
                     .text_color(fg_subtle())
                     .child(
                         line_number
@@ -505,7 +529,13 @@ fn render_code_line_content(
     line: String,
     spans: Vec<SyntaxSpan>,
 ) -> Div {
-    let code_div = div().w_full().min_w_0().font_family(mono_font_family());
+    let code_div = div()
+        .w_full()
+        .min_w_0()
+        .font_family(mono_font_family())
+        .text_size(px(CODE_FONT_SIZE))
+        .line_height(px(CODE_LINE_HEIGHT))
+        .font_weight(FontWeight::MEDIUM);
 
     if let Some(runs) = code_text_runs(&spans) {
         code_div.child(
@@ -529,18 +559,13 @@ fn render_prepared_code_line_with_diff(
     diff_kind: Option<PreparedFileLineDiffKind>,
     show_diff_markers: bool,
 ) -> Div {
-    let (row_bg, gutter_bg, row_border, marker, marker_color) = match diff_kind {
-        Some(PreparedFileLineDiffKind::Addition) => (
-            diff_add_bg(),
-            diff_add_gutter_bg(),
-            transparent(),
-            "+",
-            success(),
-        ),
+    let (row_bg, gutter_bg, marker, marker_color) = match diff_kind {
+        Some(PreparedFileLineDiffKind::Addition) => {
+            (diff_add_bg(), diff_add_gutter_bg(), "+", success())
+        }
         None => (
             diff_context_bg(),
             diff_context_gutter_bg(),
-            transparent(),
             " ",
             fg_subtle(),
         ),
@@ -549,30 +574,35 @@ fn render_prepared_code_line_with_diff(
     div()
         .w_full()
         .min_w_0()
-        .min_h(px(22.0))
+        .min_h(px(CODE_ROW_HEIGHT))
         .font_family(mono_font_family())
+        .text_size(px(CODE_FONT_SIZE))
+        .line_height(px(CODE_LINE_HEIGHT))
+        .font_weight(FontWeight::MEDIUM)
         .flex()
-        .items_start()
         .bg(row_bg)
-        .border_b(px(1.0))
-        .border_color(row_border)
         .text_color(transparent())
         .hover(move |style| style.bg(diff_line_hover_bg()).text_color(marker_color))
         .child(
             div()
-                .w(px(56.0))
+                .w(px(CODE_LINE_NUMBER_GUTTER_WIDTH))
                 .flex_shrink_0()
+                .min_h(px(CODE_ROW_HEIGHT))
                 .pr(px(12.0))
                 .bg(gutter_bg)
                 .text_align(TextAlign::Right)
+                .text_size(px(CODE_LINE_NUMBER_FONT_SIZE))
+                .line_height(px(CODE_LINE_HEIGHT))
+                .font_weight(FontWeight::SEMIBOLD)
                 .text_color(fg_subtle())
                 .child(line.line_number.to_string()),
         )
         .when(show_diff_markers, |el| {
             el.child(
                 div()
-                    .w(px(16.0))
+                    .w(px(CODE_DIFF_MARKER_WIDTH))
                     .flex_shrink_0()
+                    .min_h(px(CODE_ROW_HEIGHT))
                     .py(px(1.0))
                     .child(marker.to_string()),
             )
@@ -589,7 +619,13 @@ fn render_prepared_code_line_content(
     line: PreparedFileLine,
     lsp_context: Option<PreparedFileLineLspContext>,
 ) -> Div {
-    let code_div = div().w_full().min_w_0().font_family(mono_font_family());
+    let code_div = div()
+        .w_full()
+        .min_w_0()
+        .font_family(mono_font_family())
+        .text_size(px(CODE_FONT_SIZE))
+        .line_height(px(CODE_LINE_HEIGHT))
+        .font_weight(FontWeight::MEDIUM);
 
     if line.text.is_empty() {
         return code_div.child("\u{00a0}".to_string());
@@ -632,14 +668,17 @@ fn render_prepared_code_line_content(
             };
             request_prepared_file_lsp_details(query, window, cx);
         })
-        .tooltip(move |index, _window, cx| {
+        .tooltip_with_key(move |index, _window, cx| {
             let query = tooltip_context.query_for_index(index, tooltip_tokens.as_ref())?;
-            Some(build_lsp_hover_tooltip_view(
-                query.state.clone(),
-                query.detail_key.clone(),
+            Some((
                 query.query_key.clone(),
-                query.token_label.clone(),
-                cx,
+                build_lsp_hover_tooltip_view(
+                    query.state.clone(),
+                    query.detail_key.clone(),
+                    query.query_key.clone(),
+                    query.token_label.clone(),
+                    cx,
+                ),
             ))
         });
 

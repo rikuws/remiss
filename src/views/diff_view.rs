@@ -10,7 +10,7 @@ use gpui::prelude::*;
 use gpui::*;
 
 use crate::code_display::{
-    build_interactive_code_tokens, build_lsp_hover_tooltip_view, code_text_runs,
+    build_interactive_code_tokens, build_lsp_hover_tooltip_view, code_text_runs, mono_code_font,
     render_highlighted_code_block, render_highlighted_code_content, InteractiveCodeToken,
 };
 use crate::code_tour::{
@@ -188,22 +188,52 @@ pub fn ensure_active_review_focus_loaded(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let source_target = state.read(cx).active_review_session().and_then(|session| {
-        (session.center_mode == ReviewCenterMode::SourceBrowser)
-            .then(|| session.source_target.clone())
-            .flatten()
-    });
+    let (source_mode_active, source_path) = {
+        let app_state = state.read(cx);
+        let Some(session) = app_state.active_review_session() else {
+            return;
+        };
+        if session.center_mode != ReviewCenterMode::SourceBrowser {
+            (false, None)
+        } else {
+            let source_path = session
+                .source_target
+                .as_ref()
+                .map(|target| target.path.clone())
+                .or_else(|| app_state.selected_file_path.clone())
+                .or_else(|| {
+                    app_state
+                        .active_detail()
+                        .and_then(|detail| detail.files.first().map(|file| file.path.clone()))
+                });
 
-    if let Some(source_target) = source_target {
+            (true, source_path)
+        }
+    };
+
+    if source_mode_active {
+        ensure_source_file_tree_loaded(state, window, cx);
+    }
+
+    if let Some(source_path) = source_path {
         let model = state.clone();
         window
             .spawn(cx, async move |cx: &mut AsyncWindowContext| {
-                load_local_source_file_content_flow(model, source_target.path, cx).await;
+                load_local_source_file_content_flow(model, source_path, cx).await;
             })
             .detach();
     } else {
         ensure_selected_file_content_loaded(state, window, cx);
     }
+}
+
+pub fn ensure_source_file_tree_loaded(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
+    let model = state.clone();
+    window
+        .spawn(cx, async move |cx: &mut AsyncWindowContext| {
+            load_source_file_tree_flow(model, cx).await;
+        })
+        .detach();
 }
 
 pub fn ensure_active_stack_refs_loaded(
@@ -803,6 +833,15 @@ pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement
         .cloned()
         .or(default_path);
     let selected_path = selected_path.as_deref();
+    let sidebar_selected_path = if review_session.center_mode == ReviewCenterMode::SourceBrowser {
+        review_session
+            .source_target
+            .as_ref()
+            .map(|target| target.path.as_str())
+            .or(selected_path)
+    } else {
+        selected_path
+    };
     let selected_file = selected_path.and_then(|path| files.iter().find(|file| file.path == path));
     let semantic_file = selected_file.map(|file| prepare_semantic_diff_file(&s, detail, file));
 
@@ -817,7 +856,7 @@ pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement
                 state,
                 detail,
                 review_queue.as_ref(),
-                selected_path,
+                sidebar_selected_path,
                 semantic_file.as_deref(),
                 &review_session,
                 review_stack.clone(),
@@ -1294,7 +1333,7 @@ fn render_review_sidebar_pane(
             render_changed_files_pane(state, detail, selected_path, cx).into_any_element()
         }
         ReviewCenterMode::SourceBrowser => {
-            render_file_tree(state, detail, selected_path, cx).into_any_element()
+            render_source_file_tree(state, detail, selected_path, cx).into_any_element()
         }
         ReviewCenterMode::AiTour => render_ai_tour_navigation_pane(state, cx).into_any_element(),
         ReviewCenterMode::Stack => {
@@ -1309,21 +1348,23 @@ fn render_changed_files_pane(
     selected_path: Option<&str>,
     cx: &App,
 ) -> impl IntoElement {
+    let (tree_rows, file_count, additions, deletions) = {
+        let app_state = state.read(cx);
+        let (file_count, additions, deletions) = review_file_tree_totals(detail, None);
+        (
+            prepare_review_file_tree_rows(&app_state, detail, None),
+            file_count,
+            additions,
+            deletions,
+        )
+    };
     let list_state = {
         let app_state = state.read(cx);
-        prepare_review_nav_list_state(&app_state)
+        prepare_review_file_tree_list_state_for_scope(&app_state, "changed-file-tree")
     };
-    let files = Arc::new(detail.files.clone());
-    if list_state.item_count() != files.len() {
-        list_state.reset(files.len());
+    if list_state.item_count() != tree_rows.len() {
+        list_state.reset(tree_rows.len());
     }
-
-    let (additions, deletions) = detail
-        .files
-        .iter()
-        .fold((0i64, 0i64), |(additions, deletions), file| {
-            (additions + file.additions, deletions + file.deletions)
-        });
     let selected_path = selected_path.map(str::to_string);
 
     div()
@@ -1335,37 +1376,11 @@ fn render_changed_files_pane(
         .border_color(diff_annotation_border())
         .flex()
         .flex_col()
-        .child(
-            div()
-                .px(px(12.0))
-                .py(px(10.0))
-                .border_b(px(1.0))
-                .border_color(diff_annotation_border())
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(10.0))
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(fg_emphasis())
-                        .child("Changed Files"),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .font_family(mono_font_family())
-                        .flex()
-                        .gap(px(6.0))
-                        .items_center()
-                        .child(div().text_color(fg_muted()).child(files.len().to_string()))
-                        .child(div().text_color(fg_subtle()).child("/"))
-                        .child(div().text_color(success()).child(format!("+{additions}")))
-                        .child(div().text_color(fg_subtle()).child("/"))
-                        .child(div().text_color(danger()).child(format!("-{deletions}"))),
-                ),
-        )
+        .child(render_file_tree_header(
+            "Changed Files",
+            file_count,
+            Some((additions, deletions)),
+        ))
         .child(
             div()
                 .id("changed-files-scroll")
@@ -1378,21 +1393,29 @@ fn render_changed_files_pane(
                 .child(
                     list(list_state, {
                         let state = state.clone();
-                        let files = files.clone();
+                        let tree_rows = tree_rows.clone();
                         let selected_path = selected_path.clone();
-                        move |ix, _window, _cx| {
-                            let file = files[ix].clone();
-                            render_file_tree_file_row(
+                        move |ix, _window, _cx| match tree_rows[ix].clone() {
+                            ReviewFileTreeRow::Directory { name, depth } => {
+                                render_file_tree_directory_row(name, depth).into_any_element()
+                            }
+                            ReviewFileTreeRow::File {
+                                path,
+                                name,
+                                depth,
+                                additions,
+                                deletions,
+                            } => render_file_tree_file_row(
                                 state.clone(),
-                                file.path.clone(),
-                                file.path,
-                                file.additions,
-                                file.deletions,
-                                0,
+                                path,
+                                name,
+                                additions,
+                                deletions,
+                                depth,
                                 selected_path.as_deref(),
                                 ReviewFileRowOpenMode::Diff,
                             )
-                            .into_any_element()
+                            .into_any_element(),
                         }
                     })
                     .with_sizing_behavior(ListSizingBehavior::Auto)
@@ -1649,21 +1672,58 @@ fn render_stack_navigation_pane(
     let selected_layer_id = review_stack
         .selected_layer(session.selected_stack_layer_id.as_deref())
         .map(|layer| layer.id.clone());
-    let reviewed_layer_ids = session.reviewed_stack_layer_ids.clone();
+    let selected_layer_index = review_stack.selected_layer_index(selected_layer_id.as_deref());
+    let progress_label = match (selected_layer_index, review_stack.layers.len()) {
+        (Some(index), total) if total > 0 => format!("{} of {total}", index + 1),
+        (_, total) => format!("0 of {total}"),
+    };
+    let trunk_branch = review_stack
+        .trunk_branch
+        .clone()
+        .unwrap_or_else(|| detail.base_ref_name.clone());
     let list_state = {
         let app_state = state.read(cx);
-        prepare_review_nav_list_state(&app_state)
+        prepare_stack_timeline_list_state(&app_state)
     };
-    if list_state.item_count() != review_stack.layers.len() {
-        list_state.reset(review_stack.layers.len());
-    }
+    let stack_filter = build_layer_diff_filter(
+        review_stack.as_ref(),
+        session.stack_diff_mode,
+        selected_layer_id.as_deref(),
+        &session.reviewed_stack_atom_ids,
+    );
+    let visible_paths = stack_filter
+        .as_ref()
+        .map(|filter| stack_file_paths_for_filter(review_stack.as_ref(), filter));
+    let file_tree_label = stack_filter
+        .as_ref()
+        .map(|filter| review_file_tree_label(filter.mode))
+        .unwrap_or_else(|| review_file_tree_label(StackDiffMode::WholePr));
+    let (tree_rows, visible_file_count, visible_additions, visible_deletions) = {
+        let app_state = state.read(cx);
+        let (file_count, additions, deletions) =
+            review_file_tree_totals(detail, visible_paths.as_ref());
 
-    let stack_kind = match review_stack.kind {
-        StackKind::Real => "Real stack",
-        StackKind::Virtual => "Virtual stack",
+        (
+            prepare_review_file_tree_rows(&app_state, detail, visible_paths.as_ref()),
+            file_count,
+            additions,
+            deletions,
+        )
     };
-    let source_label = review_stack.source.label();
-    let is_ai_generated = review_stack.source == StackSource::VirtualAi;
+    let file_tree_list_state = {
+        let app_state = state.read(cx);
+        prepare_review_file_tree_list_state_for_scope(&app_state, "stack-file-tree")
+    };
+    if file_tree_list_state.item_count() != tree_rows.len() {
+        file_tree_list_state.reset(tree_rows.len());
+    }
+    let selected_path = state.read(cx).selected_file_path.clone();
+    let stack_nav_item_count = review_stack.layers.len() + 1;
+    if list_state.item_count() != stack_nav_item_count {
+        list_state.reset(stack_nav_item_count);
+    }
+    let stack_timeline_height = px(((review_stack.layers.len() as f32 * 36.0) + 26.0).min(220.0));
+
     let stack_warning = review_stack
         .warnings
         .first()
@@ -1678,72 +1738,46 @@ fn render_stack_navigation_pane(
         .border_color(diff_annotation_border())
         .flex()
         .flex_col()
-        .child(render_sidebar_header(
-            "Stack",
-            stack_kind,
-            review_stack.layers.len().to_string(),
-        ))
-        .child(
-            div()
-                .px(px(12.0))
-                .py(px(8.0))
-                .border_b(px(1.0))
-                .border_color(diff_annotation_border())
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .flex_wrap()
-                        .child(badge(source_label))
-                        .child(badge(session.stack_diff_mode.label()))
-                        .when(is_ai_generated, |el| el.child(badge("AI generated"))),
-                )
-                .when_some(stack_warning, |el, warning_message| {
-                    el.child(
-                        div()
-                            .text_size(px(11.0))
-                            .line_height(px(16.0))
-                            .text_color(if is_ai_generated {
-                                fg_muted()
-                            } else {
-                                warning()
-                            })
-                            .line_clamp(2)
-                            .child(warning_message),
-                    )
-                }),
-        )
+        .child(render_stack_view_header(progress_label))
+        .when_some(stack_warning, |el, warning_message| {
+            el.child(render_stack_view_warning(warning_message))
+        })
         .child(
             div()
                 .id("stack-nav-scroll")
-                .flex_grow()
+                .h(stack_timeline_height)
+                .max_h(px(220.0))
+                .flex_shrink_0()
                 .min_h_0()
                 .flex()
                 .flex_col()
-                .px(px(8.0))
-                .py(px(8.0))
+                .px(px(14.0))
+                .pb(px(8.0))
                 .child(
                     list(list_state, {
                         let state = state.clone();
                         let detail = Arc::new(detail.clone());
                         let review_stack = review_stack.clone();
                         let selected_layer_id = selected_layer_id.clone();
-                        let reviewed_layer_ids = reviewed_layer_ids.clone();
+                        let trunk_branch = trunk_branch.clone();
                         move |ix, _window, _cx| {
-                            let layer = &review_stack.layers[ix];
-                            render_stack_layer_row(
-                                &state,
-                                detail.as_ref(),
-                                review_stack.as_ref(),
-                                layer,
-                                selected_layer_id.as_deref() == Some(layer.id.as_str()),
-                                reviewed_layer_ids.contains(&layer.id),
-                            )
-                            .into_any_element()
+                            let layer_count = review_stack.layers.len();
+                            if ix < layer_count {
+                                let layer = &review_stack.layers[layer_count - ix - 1];
+                                render_stack_view_layer_card(
+                                    &state,
+                                    detail.as_ref(),
+                                    review_stack.as_ref(),
+                                    layer,
+                                    selected_layer_id.as_deref() == Some(layer.id.as_str()),
+                                    ix > 0,
+                                    true,
+                                )
+                                .into_any_element()
+                            } else {
+                                render_stack_base_branch_row(&trunk_branch, layer_count > 0)
+                                    .into_any_element()
+                            }
                         }
                     })
                     .with_sizing_behavior(ListSizingBehavior::Auto)
@@ -1751,6 +1785,311 @@ fn render_stack_navigation_pane(
                     .min_h_0(),
                 ),
         )
+        .child(render_stack_file_tree_section(
+            state,
+            tree_rows,
+            file_tree_list_state,
+            selected_path.as_deref(),
+            file_tree_label,
+            visible_file_count,
+            visible_additions,
+            visible_deletions,
+        ))
+}
+
+fn render_stack_file_tree_section(
+    state: &Entity<AppState>,
+    tree_rows: Arc<Vec<ReviewFileTreeRow>>,
+    list_state: ListState,
+    selected_path: Option<&str>,
+    file_tree_label: &str,
+    visible_file_count: usize,
+    visible_additions: i64,
+    visible_deletions: i64,
+) -> impl IntoElement {
+    let selected_path = selected_path.map(str::to_string);
+
+    div()
+        .flex_grow()
+        .min_h_0()
+        .flex()
+        .flex_col()
+        .border_t(px(1.0))
+        .border_color(diff_annotation_border())
+        .child(render_file_tree_header(
+            file_tree_label,
+            visible_file_count,
+            Some((visible_additions, visible_deletions)),
+        ))
+        .child(
+            div()
+                .id("stack-file-tree-scroll")
+                .flex_grow()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .px(px(6.0))
+                .py(px(6.0))
+                .child(if tree_rows.is_empty() {
+                    div()
+                        .px(px(8.0))
+                        .py(px(8.0))
+                        .text_size(px(11.0))
+                        .line_height(px(16.0))
+                        .text_color(fg_muted())
+                        .child("No files in this stack slice.")
+                        .into_any_element()
+                } else {
+                    list(list_state, {
+                        let state = state.clone();
+                        let tree_rows = tree_rows.clone();
+                        let selected_path = selected_path.clone();
+                        move |ix, _window, _cx| match tree_rows[ix].clone() {
+                            ReviewFileTreeRow::Directory { name, depth } => {
+                                render_file_tree_directory_row(name, depth).into_any_element()
+                            }
+                            ReviewFileTreeRow::File {
+                                path,
+                                name,
+                                depth,
+                                additions,
+                                deletions,
+                            } => render_file_tree_file_row(
+                                state.clone(),
+                                path,
+                                name,
+                                additions,
+                                deletions,
+                                depth,
+                                selected_path.as_deref(),
+                                ReviewFileRowOpenMode::Stack,
+                            )
+                            .into_any_element(),
+                        }
+                    })
+                    .with_sizing_behavior(ListSizingBehavior::Auto)
+                    .flex_grow()
+                    .min_h_0()
+                    .into_any_element()
+                }),
+        )
+}
+
+fn render_stack_view_header(progress_label: String) -> impl IntoElement {
+    div()
+        .px(px(14.0))
+        .pt(px(20.0))
+        .pb(px(12.0))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(10.0))
+        .child(
+            div()
+                .text_size(px(11.0))
+                .font_family(mono_font_family())
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_muted())
+                .child("STACK"),
+        )
+        .child(
+            div()
+                .text_size(px(12.0))
+                .font_family(mono_font_family())
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(fg_muted())
+                .child(progress_label),
+        )
+}
+
+fn render_stack_view_warning(warning_message: String) -> impl IntoElement {
+    div()
+        .mx(px(14.0))
+        .mb(px(8.0))
+        .px(px(8.0))
+        .py(px(6.0))
+        .rounded(px(5.0))
+        .bg(warning_muted())
+        .text_size(px(11.0))
+        .line_height(px(16.0))
+        .text_color(fg_emphasis())
+        .line_clamp(2)
+        .child(warning_message)
+}
+
+fn render_stack_view_layer_card(
+    state: &Entity<AppState>,
+    detail: &PullRequestDetail,
+    stack: &ReviewStack,
+    layer: &ReviewStackLayer,
+    is_active: bool,
+    connector_above: bool,
+    connector_below: bool,
+) -> impl IntoElement {
+    let state_for_open = state.clone();
+    let layer_id = layer.id.clone();
+    let first_file = stack.first_file_for_layer(layer);
+    let is_current_pr_layer = layer
+        .pr
+        .as_ref()
+        .map(|pr| pr.number == detail.number)
+        .unwrap_or(true);
+    let (number_label, title_label) = stack_view_layer_title_parts(layer);
+    let row_bg = if is_active {
+        bg_selected()
+    } else {
+        transparent()
+    };
+    let hover_bg = if is_active {
+        bg_emphasis()
+    } else {
+        with_alpha(fg_emphasis(), 0.045)
+    };
+
+    div()
+        .w_full()
+        .h(px(36.0))
+        .relative()
+        .child(
+            div()
+                .w_full()
+                .h(px(32.0))
+                .px(px(8.0))
+                .rounded(px(4.0))
+                .bg(row_bg)
+                .cursor_pointer()
+                .hover(move |style| style.bg(hover_bg))
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    state_for_open.update(cx, |state, cx| {
+                        state.set_selected_stack_layer(Some(layer_id.clone()));
+                        state.set_stack_diff_mode(StackDiffMode::CurrentLayerOnly);
+                        state.set_review_center_mode(ReviewCenterMode::Stack);
+                        if is_current_pr_layer {
+                            if let Some(path) = first_file.clone() {
+                                state.selected_file_path = Some(path);
+                                state.selected_diff_anchor = None;
+                            }
+                        }
+                        state.persist_active_review_session();
+                        cx.notify();
+                    });
+                    if is_current_pr_layer {
+                        ensure_selected_file_content_loaded(&state_for_open, window, cx);
+                    }
+                })
+                .child(
+                    div()
+                        .h_full()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(lucide_icon(LucideIcon::GitBranch, 13.0, success()))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex()
+                                .items_center()
+                                .gap(px(5.0))
+                                .when_some(number_label, |el, label| {
+                                    el.child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_size(px(12.0))
+                                            .font_family(mono_font_family())
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(if is_active {
+                                                fg_default()
+                                            } else {
+                                                fg_muted()
+                                            })
+                                            .child(label),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .text_size(px(12.0))
+                                        .font_weight(if is_active {
+                                            FontWeight::SEMIBOLD
+                                        } else {
+                                            FontWeight::MEDIUM
+                                        })
+                                        .text_color(if is_active {
+                                            fg_emphasis()
+                                        } else {
+                                            fg_muted()
+                                        })
+                                        .whitespace_nowrap()
+                                        .overflow_x_hidden()
+                                        .text_ellipsis()
+                                        .child(title_label),
+                                ),
+                        ),
+                ),
+        )
+        .when(connector_above, |el| {
+            el.child(render_stack_timeline_segment(0.0, 8.0))
+        })
+        .when(connector_below, |el| {
+            el.child(render_stack_timeline_segment(24.0, 12.0))
+        })
+}
+
+fn stack_view_layer_title_parts(layer: &ReviewStackLayer) -> (Option<String>, String) {
+    if let Some(pr) = layer.pr.as_ref() {
+        let number = format!("#{}", pr.number);
+        let title = layer
+            .title
+            .strip_prefix(number.as_str())
+            .map(str::trim_start)
+            .filter(|title| !title.is_empty())
+            .unwrap_or(layer.title.as_str())
+            .to_string();
+        return (Some(number), title);
+    }
+
+    (None, layer.title.clone())
+}
+
+fn render_stack_base_branch_row(branch_name: &str, connector_above: bool) -> impl IntoElement {
+    div()
+        .w_full()
+        .h(px(26.0))
+        .relative()
+        .when(connector_above, |el| {
+            el.child(render_stack_timeline_segment(0.0, 6.0))
+        })
+        .child(
+            div()
+                .h_full()
+                .px(px(8.0))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(lucide_icon(LucideIcon::Circle, 13.0, fg_subtle()))
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(fg_muted())
+                        .whitespace_nowrap()
+                        .overflow_x_hidden()
+                        .text_ellipsis()
+                        .child(branch_name.to_string()),
+                ),
+        )
+}
+
+fn render_stack_timeline_segment(top: f32, height: f32) -> impl IntoElement {
+    div()
+        .absolute()
+        .left(px(14.0))
+        .top(px(top))
+        .w(px(2.0))
+        .h(px(height))
+        .bg(bg_selected())
 }
 
 fn render_sidebar_header(title: &str, subtitle: &str, count: String) -> impl IntoElement {
@@ -1926,6 +2265,18 @@ fn prepare_review_nav_list_state(app_state: &AppState) -> ListState {
     list_states
         .entry(state_key)
         .or_insert_with(|| ListState::new(0, ListAlignment::Top, px(96.0)))
+        .clone()
+}
+
+fn prepare_stack_timeline_list_state(app_state: &AppState) -> ListState {
+    let state_key = format!(
+        "{}:stack-timeline",
+        app_state.active_pr_key.as_deref().unwrap_or("detached"),
+    );
+    let mut list_states = app_state.review_nav_list_states.borrow_mut();
+    list_states
+        .entry(state_key)
+        .or_insert_with(|| ListState::new(0, ListAlignment::Top, px(36.0)))
         .clone()
 }
 
@@ -3133,73 +3484,41 @@ fn subtle_stack_chip(label: &str) -> impl IntoElement {
         .child(label.to_string())
 }
 
-fn render_file_tree(
-    state: &Entity<AppState>,
-    detail: &PullRequestDetail,
-    selected_path: Option<&str>,
-    cx: &App,
+fn render_file_tree_header(
+    file_tree_label: &str,
+    visible_file_count: usize,
+    diff_totals: Option<(i64, i64)>,
 ) -> impl IntoElement {
-    let (tree_rows, file_tree_label, visible_file_count, visible_additions, visible_deletions) = {
-        let app_state = state.read(cx);
-        let (file_count, additions, deletions) = review_file_tree_totals(detail, None);
-        let label = "Files".to_string();
-
-        (
-            prepare_review_file_tree_rows(&app_state, detail, None),
-            label,
-            file_count,
-            additions,
-            deletions,
-        )
-    };
-    let list_state = {
-        let app_state = state.read(cx);
-        prepare_review_file_tree_list_state(&app_state)
-    };
-    if list_state.item_count() != tree_rows.len() {
-        list_state.reset(tree_rows.len());
-    }
-    let selected_path = selected_path.map(str::to_string);
-
     div()
-        .w(file_tree_width())
-        .flex_shrink_0()
-        .min_h_0()
-        .bg(diff_editor_chrome())
-        .border_r(px(1.0))
+        .px(px(12.0))
+        .py(px(10.0))
+        .border_b(px(1.0))
         .border_color(diff_annotation_border())
         .flex()
-        .flex_col()
+        .items_center()
+        .justify_between()
+        .gap(px(10.0))
         .child(
             div()
-                .px(px(12.0))
-                .py(px(10.0))
-                .border_b(px(1.0))
-                .border_color(diff_annotation_border())
+                .text_size(px(12.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_emphasis())
+                .child(file_tree_label.to_string()),
+        )
+        .child(
+            div()
+                .text_size(px(12.0))
+                .font_family(mono_font_family())
                 .flex()
+                .gap(px(6.0))
                 .items_center()
-                .justify_between()
-                .gap(px(10.0))
                 .child(
                     div()
-                        .text_size(px(12.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(fg_emphasis())
-                        .child(file_tree_label),
+                        .text_color(fg_muted())
+                        .child(visible_file_count.to_string()),
                 )
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .font_family(mono_font_family())
-                        .flex()
-                        .gap(px(6.0))
-                        .items_center()
-                        .child(
-                            div()
-                                .text_color(fg_muted())
-                                .child(visible_file_count.to_string()),
-                        )
-                        .child(div().text_color(fg_subtle()).child("\u{2022}"))
+                .when_some(diff_totals, |el, (visible_additions, visible_deletions)| {
+                    el.child(div().text_color(fg_subtle()).child("\u{2022}"))
                         .child(
                             div()
                                 .text_color(success())
@@ -3210,9 +3529,80 @@ fn render_file_tree(
                             div()
                                 .text_color(danger())
                                 .child(format!("-{visible_deletions}")),
-                        ),
-                ),
+                        )
+                }),
         )
+}
+
+fn render_source_file_tree(
+    state: &Entity<AppState>,
+    detail: &PullRequestDetail,
+    selected_path: Option<&str>,
+    cx: &App,
+) -> impl IntoElement {
+    let (tree_rows, visible_file_count, loading, error, visible_additions, visible_deletions) = {
+        let app_state = state.read(cx);
+        let (changed_file_count, additions, deletions) = review_file_tree_totals(detail, None);
+        let source_tree = app_state
+            .active_detail_state()
+            .map(|detail_state| detail_state.source_file_tree.clone())
+            .unwrap_or_default();
+
+        (
+            source_tree.rows,
+            if source_tree.file_count > 0 {
+                source_tree.file_count
+            } else {
+                changed_file_count
+            },
+            source_tree.loading,
+            source_tree.error,
+            additions,
+            deletions,
+        )
+    };
+    let list_state = {
+        let app_state = state.read(cx);
+        prepare_review_file_tree_list_state_for_scope(&app_state, "source-file-tree")
+    };
+    let tree_row_count = tree_rows.as_ref().map(|rows| rows.len()).unwrap_or(0);
+    if list_state.item_count() != tree_row_count {
+        list_state.reset(tree_row_count);
+    }
+    let selected_path = selected_path.map(str::to_string);
+    let diff_totals = (visible_additions != 0 || visible_deletions != 0)
+        .then_some((visible_additions, visible_deletions));
+    let status_message = error
+        .as_ref()
+        .map(|error| (error.clone(), true))
+        .unwrap_or_else(|| {
+            if loading {
+                (
+                    "Loading repository files from the local checkout...".to_string(),
+                    false,
+                )
+            } else {
+                (
+                    "Repository files will appear after the local checkout is ready.".to_string(),
+                    false,
+                )
+            }
+        });
+
+    div()
+        .w(file_tree_width())
+        .flex_shrink_0()
+        .min_h_0()
+        .bg(diff_editor_chrome())
+        .border_r(px(1.0))
+        .border_color(diff_annotation_border())
+        .flex()
+        .flex_col()
+        .child(render_file_tree_header(
+            "Repository",
+            visible_file_count,
+            diff_totals,
+        ))
         .child(
             div()
                 .id("file-tree-scroll")
@@ -3222,7 +3612,7 @@ fn render_file_tree(
                 .flex_col()
                 .px(px(6.0))
                 .py(px(6.0))
-                .child(
+                .child(if let Some(tree_rows) = tree_rows {
                     list(list_state, {
                         let state = state.clone();
                         let tree_rows = tree_rows.clone();
@@ -3252,15 +3642,29 @@ fn render_file_tree(
                     })
                     .with_sizing_behavior(ListSizingBehavior::Auto)
                     .flex_grow()
-                    .min_h_0(),
-                ),
+                    .min_h_0()
+                    .into_any_element()
+                } else {
+                    render_file_tree_state_message(status_message.0, status_message.1)
+                        .into_any_element()
+                }),
         )
+}
+
+fn render_file_tree_state_message(message: String, is_error: bool) -> impl IntoElement {
+    div()
+        .px(px(8.0))
+        .py(px(8.0))
+        .text_size(px(11.0))
+        .line_height(px(16.0))
+        .text_color(if is_error { danger() } else { fg_muted() })
+        .child(message)
 }
 
 const REVIEW_FILE_TREE_ROW_HEIGHT: f32 = 30.0;
 
-fn prepare_review_file_tree_list_state(app_state: &AppState) -> ListState {
-    let key = review_cache_key(app_state.active_pr_key.as_deref(), "review-file-tree");
+fn prepare_review_file_tree_list_state_for_scope(app_state: &AppState, scope: &str) -> ListState {
+    let key = review_cache_key(app_state.active_pr_key.as_deref(), scope);
     let mut list_states = app_state.review_file_tree_list_states.borrow_mut();
     list_states
         .entry(key)
@@ -3369,19 +3773,64 @@ struct ReviewFileTreeNode {
     files: Vec<ReviewFileTreeRow>,
 }
 
+#[derive(Clone)]
+struct ReviewFileTreeEntry {
+    path: String,
+    additions: i64,
+    deletions: i64,
+}
+
 fn build_review_file_tree_rows(
     detail: &PullRequestDetail,
     visible_paths: Option<&BTreeSet<String>>,
 ) -> Vec<ReviewFileTreeRow> {
-    let mut root = ReviewFileTreeNode::default();
-    for file in &detail.files {
-        if visible_paths
-            .map(|paths| !paths.contains(&file.path))
-            .unwrap_or(false)
-        {
-            continue;
-        }
+    let entries = detail
+        .files
+        .iter()
+        .filter(|file| {
+            visible_paths
+                .map(|paths| paths.contains(&file.path))
+                .unwrap_or(true)
+        })
+        .map(|file| ReviewFileTreeEntry {
+            path: file.path.clone(),
+            additions: file.additions,
+            deletions: file.deletions,
+        })
+        .collect::<Vec<_>>();
 
+    build_file_tree_rows(entries)
+}
+
+fn build_repository_file_tree_rows(
+    paths: &[String],
+    changed_files: &[PullRequestFile],
+) -> Vec<ReviewFileTreeRow> {
+    let changed_metrics = changed_files
+        .iter()
+        .map(|file| (file.path.as_str(), (file.additions, file.deletions)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let entries = paths
+        .iter()
+        .map(|path| {
+            let (additions, deletions) = changed_metrics
+                .get(path.as_str())
+                .copied()
+                .unwrap_or((0, 0));
+            ReviewFileTreeEntry {
+                path: path.clone(),
+                additions,
+                deletions,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    build_file_tree_rows(entries)
+}
+
+fn build_file_tree_rows(entries: Vec<ReviewFileTreeEntry>) -> Vec<ReviewFileTreeRow> {
+    let mut root = ReviewFileTreeNode::default();
+    for file in entries {
         let mut cursor = &mut root;
         let mut segments = file.path.split('/').peekable();
         while let Some(segment) = segments.next() {
@@ -3528,6 +3977,7 @@ fn render_file_tree_directory_row(name: String, depth: usize) -> impl IntoElemen
 #[derive(Clone, Copy)]
 enum ReviewFileRowOpenMode {
     Diff,
+    Stack,
     Source,
 }
 
@@ -3577,6 +4027,9 @@ fn render_file_tree_file_row(
                     ReviewFileRowOpenMode::Diff => {
                         state.set_review_center_mode(ReviewCenterMode::SemanticDiff);
                     }
+                    ReviewFileRowOpenMode::Stack => {
+                        state.set_review_center_mode(ReviewCenterMode::Stack);
+                    }
                     ReviewFileRowOpenMode::Source => {
                         state.set_review_source_target(ReviewSourceTarget {
                             path: path.clone(),
@@ -3589,7 +4042,7 @@ fn render_file_tree_file_row(
                 cx.notify();
             });
             match open_mode {
-                ReviewFileRowOpenMode::Diff => {
+                ReviewFileRowOpenMode::Diff | ReviewFileRowOpenMode::Stack => {
                     ensure_selected_file_content_loaded(&state_for_open, window, cx);
                 }
                 ReviewFileRowOpenMode::Source => {
@@ -3632,7 +4085,9 @@ fn render_file_tree_file_row(
                                 .child(file_name),
                         ),
                 )
-                .child(render_file_tree_diff_summary(additions, deletions)),
+                .when(additions != 0 || deletions != 0, |el| {
+                    el.child(render_file_tree_diff_summary(additions, deletions))
+                }),
         )
 }
 
@@ -3905,6 +4360,190 @@ pub async fn load_pull_request_file_content_flow(
             cx.notify();
         })
         .ok();
+}
+
+pub async fn load_source_file_tree_flow(model: Entity<AppState>, cx: &mut AsyncWindowContext) {
+    let request = model
+        .read_with(cx, |state, _| {
+            let cache = state.cache.clone();
+            let detail = state.active_detail()?.clone();
+            let detail_key = state.active_pr_key.clone()?;
+            let reference = detail
+                .head_ref_oid
+                .clone()
+                .unwrap_or_else(|| detail.head_ref_name.clone());
+            if reference.is_empty() {
+                return None;
+            }
+
+            let existing_local_repo_status = state
+                .detail_states
+                .get(&detail_key)
+                .and_then(|detail_state| detail_state.local_repository_status.clone());
+            let request_key = source_file_tree_request_key(&detail, &reference);
+            let already_loaded = state
+                .detail_states
+                .get(&detail_key)
+                .map(|detail_state| {
+                    detail_state.source_file_tree.request_key.as_deref()
+                        == Some(request_key.as_str())
+                        && (detail_state.source_file_tree.loading
+                            || detail_state.source_file_tree.rows.is_some())
+                })
+                .unwrap_or(false);
+
+            Some((
+                cache,
+                detail_key,
+                detail,
+                reference,
+                request_key,
+                already_loaded,
+                existing_local_repo_status,
+            ))
+        })
+        .ok()
+        .flatten();
+
+    let Some((
+        cache,
+        detail_key,
+        detail,
+        reference,
+        request_key,
+        already_loaded,
+        existing_local_repo_status,
+    )) = request
+    else {
+        return;
+    };
+
+    if already_loaded {
+        return;
+    }
+
+    model
+        .update(cx, |state, cx| {
+            if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
+                detail_state.source_file_tree.request_key = Some(request_key.clone());
+                detail_state.source_file_tree.rows = None;
+                detail_state.source_file_tree.file_count = 0;
+                detail_state.source_file_tree.loading = true;
+                detail_state.source_file_tree.error = None;
+                detail_state.local_repository_loading = existing_local_repo_status
+                    .as_ref()
+                    .map(|status| !status.ready_for_snapshot_features())
+                    .unwrap_or(true);
+                detail_state.local_repository_error = None;
+            }
+
+            cx.notify();
+        })
+        .ok();
+
+    let local_repo_result = if let Some(status) = existing_local_repo_status
+        .clone()
+        .filter(|status| status.ready_for_snapshot_features())
+    {
+        Ok(status)
+    } else {
+        cx.background_executor()
+            .spawn({
+                let cache = cache.clone();
+                let repository = detail.repository.clone();
+                let pull_request_number = detail.number;
+                let head_ref_oid = detail.head_ref_oid.clone();
+                async move {
+                    local_repo::load_or_prepare_local_repository_for_pull_request(
+                        &cache,
+                        &repository,
+                        pull_request_number,
+                        head_ref_oid.as_deref(),
+                    )
+                }
+            })
+            .await
+    };
+
+    let local_repo_status = local_repo_result.as_ref().ok().cloned();
+    let local_repo_error = local_repo_result
+        .as_ref()
+        .ok()
+        .and_then(|status| {
+            if status.ready_for_snapshot_features() {
+                None
+            } else {
+                Some(status.message.clone())
+            }
+        })
+        .or_else(|| local_repo_result.as_ref().err().cloned());
+
+    let tree_result = if let Some(status) = local_repo_status.as_ref() {
+        if status.ready_for_snapshot_features() {
+            if let Some(root) = status.path.as_deref() {
+                cx.background_executor()
+                    .spawn({
+                        let root = std::path::PathBuf::from(root);
+                        let reference = reference.clone();
+                        async move { local_documents::list_local_repository_files(&root, &reference) }
+                    })
+                    .await
+            } else {
+                Err(status.message.clone())
+            }
+        } else {
+            Err(local_repo_error
+                .clone()
+                .unwrap_or_else(|| "Local checkout is not ready yet.".to_string()))
+        }
+    } else {
+        Err(local_repo_error
+            .clone()
+            .unwrap_or_else(|| "Local checkout is not ready yet.".to_string()))
+    };
+
+    let tree_result = tree_result.map(|paths| {
+        let file_count = paths.len();
+        let rows = Arc::new(build_repository_file_tree_rows(&paths, &detail.files));
+        (rows, file_count)
+    });
+
+    model
+        .update(cx, |state, cx| {
+            let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
+                return;
+            };
+            if detail_state.source_file_tree.request_key.as_deref() != Some(request_key.as_str()) {
+                return;
+            }
+
+            detail_state.source_file_tree.loading = false;
+            detail_state.local_repository_loading = false;
+            detail_state.local_repository_status = local_repo_status.clone();
+            detail_state.local_repository_error = local_repo_error.clone();
+            match tree_result {
+                Ok((rows, file_count)) => {
+                    detail_state.source_file_tree.rows = Some(rows);
+                    detail_state.source_file_tree.file_count = file_count;
+                    detail_state.source_file_tree.error = None;
+                }
+                Err(error) => {
+                    detail_state.source_file_tree.rows = None;
+                    detail_state.source_file_tree.file_count = 0;
+                    detail_state.source_file_tree.error = Some(error);
+                }
+            }
+
+            cx.notify();
+        })
+        .ok();
+}
+
+fn source_file_tree_request_key(detail: &PullRequestDetail, reference: &str) -> String {
+    format!(
+        "{}:{}:{reference}:source-file-tree",
+        detail.updated_at, detail.repository
+    )
 }
 
 pub async fn load_local_source_file_content_flow(
@@ -4449,7 +5088,6 @@ fn render_diff_panel(
                         state,
                         file,
                         selected_parsed,
-                        semantic_file,
                         file_content_state
                             .as_ref()
                             .and_then(|state| state.prepared.as_ref()),
@@ -5758,7 +6396,6 @@ fn render_file_diff(
     state: &Entity<AppState>,
     file: &PullRequestFile,
     parsed: Option<&ParsedDiffFile>,
-    semantic_file: Option<&SemanticDiffFile>,
     prepared_file: Option<&PreparedFileContent>,
     selected_anchor: Option<&DiffAnchor>,
     diff_view_state: DiffFileViewState,
@@ -5785,21 +6422,16 @@ fn render_file_diff(
     let prepared_file = prepared_file.cloned();
     let file_lsp_context =
         build_diff_file_lsp_context(state, file.path.as_str(), prepared_file.as_ref(), cx);
-    let semantic_sections =
-        semantic_file.map(|semantic_file| Arc::new(semantic_file.sections.clone()));
     let stack_visibility = stack_filter
         .as_ref()
-        .map(|filter| stack_file_visibility(review_stack.as_ref(), filter, &file.path, parsed));
+        .map(|filter| stack_file_visibility(review_stack.as_ref(), filter, &file.path));
 
     let items = build_diff_view_items(
-        state,
         file,
         parsed,
-        semantic_file,
         prepared_file.as_ref(),
         &rows,
         stack_visibility.as_ref(),
-        cx,
     );
 
     if list_state.item_count() != items.len() {
@@ -5849,16 +6481,12 @@ fn render_file_diff(
                 .min_h_0()
                 .bg(diff_editor_bg())
                 .when_some(stack_visibility.clone(), |el, visibility| {
-                    el.child(render_stack_layer_diff_notice(
-                        review_stack.as_ref(),
-                        &visibility,
-                    ))
+                    el.child(render_stack_layer_diff_notice(&visibility))
                 })
                 .child(
                     render_virtualized_diff_rows(
                         &state,
                         rows,
-                        semantic_sections,
                         gutter_layout,
                         parsed_file_index,
                         highlighted_hunks,
@@ -5877,7 +6505,6 @@ fn render_file_diff(
 fn render_virtualized_diff_rows(
     state: &Entity<AppState>,
     rows: Arc<Vec<DiffRenderRow>>,
-    semantic_sections: Option<Arc<Vec<SemanticDiffSection>>>,
     gutter_layout: DiffGutterLayout,
     parsed_file_index: Option<usize>,
     highlighted_hunks: Option<Arc<Vec<Vec<DiffLineHighlight>>>>,
@@ -5889,14 +6516,6 @@ fn render_virtualized_diff_rows(
     let state = state.clone();
 
     list(list_state, move |ix, _window, cx| match items[ix] {
-        DiffViewItem::SemanticSection(section_ix) => semantic_sections
-            .as_ref()
-            .and_then(|sections| sections.get(section_ix))
-            .map(|section| {
-                render_semantic_section_header(&state, section, selected_anchor.as_ref(), cx)
-                    .into_any_element()
-            })
-            .unwrap_or_else(|| div().into_any_element()),
         DiffViewItem::Gap(gap) => render_diff_gap_row(gap, gutter_layout).into_any_element(),
         DiffViewItem::StackLayerEmpty => render_diff_state_row(
             "No changed hunks in this file belong to the selected stack layer.",
@@ -5920,23 +6539,17 @@ fn render_virtualized_diff_rows(
 enum DiffViewItem {
     Row(usize),
     Gap(DiffGapSummary),
-    SemanticSection(usize),
     StackLayerEmpty,
 }
 
 #[derive(Clone)]
 struct StackFileVisibility {
-    mode: StackDiffMode,
     layer_id: Option<String>,
     layer_title: String,
     layer_rationale: String,
     layer_warnings: Vec<crate::stacks::model::StackWarning>,
-    confidence: Confidence,
     ai_assisted: bool,
     visible_hunk_indices: Option<BTreeSet<usize>>,
-    visible_atom_count: usize,
-    total_hunk_count: usize,
-    hidden_hunk_count: usize,
     file_has_visible_atoms: bool,
 }
 
@@ -5991,7 +6604,6 @@ fn stack_file_visibility(
     stack: &ReviewStack,
     filter: &LayerDiffFilter,
     file_path: &str,
-    parsed: Option<&ParsedDiffFile>,
 ) -> StackFileVisibility {
     let selected_layer = stack.selected_layer(filter.selected_layer_id.as_deref());
     let mut visible_hunks = BTreeSet::<usize>::new();
@@ -6013,25 +6625,14 @@ fn stack_file_visibility(
         }
     }
 
-    let total_hunk_count = parsed.map(|parsed| parsed.hunks.len()).unwrap_or(0);
     let file_has_visible_atoms = visible_atom_count > 0;
     let visible_hunk_indices = if show_whole_file {
         None
     } else {
         Some(visible_hunks)
     };
-    let visible_hunk_count = visible_hunk_indices
-        .as_ref()
-        .map(|hunks| hunks.len())
-        .unwrap_or(total_hunk_count);
-    let hidden_hunk_count = if file_has_visible_atoms {
-        total_hunk_count.saturating_sub(visible_hunk_count)
-    } else {
-        total_hunk_count
-    };
 
     StackFileVisibility {
-        mode: filter.mode,
         layer_id: selected_layer.map(|layer| layer.id.clone()),
         layer_title: selected_layer
             .map(|layer| layer.title.clone())
@@ -6042,14 +6643,8 @@ fn stack_file_visibility(
         layer_warnings: selected_layer
             .map(|layer| layer.warnings.clone())
             .unwrap_or_default(),
-        confidence: selected_layer
-            .map(|layer| layer.confidence)
-            .unwrap_or(stack.confidence),
         ai_assisted: stack.source == crate::stacks::model::StackSource::VirtualAi,
         visible_hunk_indices,
-        visible_atom_count,
-        total_hunk_count,
-        hidden_hunk_count,
         file_has_visible_atoms,
     }
 }
@@ -6342,29 +6937,20 @@ fn navigate_to_definition_target(
 }
 
 fn build_diff_view_items(
-    state: &Entity<AppState>,
     file: &PullRequestFile,
     parsed: Option<&ParsedDiffFile>,
-    semantic_file: Option<&SemanticDiffFile>,
     prepared_file: Option<&PreparedFileContent>,
     rows: &[DiffRenderRow],
     stack_visibility: Option<&StackFileVisibility>,
-    cx: &App,
 ) -> Vec<DiffViewItem> {
     let mut items = Vec::with_capacity(rows.len() + 4);
     let mut last_hunk_index = None;
-    let mut current_section_ix = None;
     let last_hunk_row_index = rows.iter().rposition(|row| {
         matches!(
             row,
             DiffRenderRow::HunkHeader { .. } | DiffRenderRow::Line { .. }
         )
     });
-    let collapsed_sections = state
-        .read(cx)
-        .active_review_session()
-        .map(|session| session.collapsed_sections.clone())
-        .unwrap_or_default();
     let mut current_hunk_visible = true;
     let mut emitted_visible_stack_hunk = false;
 
@@ -6379,16 +6965,6 @@ fn build_diff_view_items(
                         .unwrap_or(visibility.file_has_visible_atoms)
                 })
                 .unwrap_or(true);
-            if let Some(section_ix) = semantic_file
-                .and_then(|semantic_file| semantic_file.section_index_for_hunk(*hunk_index))
-            {
-                if current_hunk_visible && current_section_ix != Some(section_ix) {
-                    items.push(DiffViewItem::SemanticSection(section_ix));
-                    current_section_ix = Some(section_ix);
-                }
-            } else {
-                current_section_ix = None;
-            }
 
             if current_hunk_visible {
                 if let Some(gap) =
@@ -6401,27 +6977,13 @@ fn build_diff_view_items(
             }
         }
 
-        let is_collapsed = current_section_ix
-            .and_then(|section_ix| {
-                semantic_file.and_then(|semantic_file| semantic_file.sections.get(section_ix))
-            })
-            .map(|section| collapsed_sections.contains(&section.id))
-            .unwrap_or(false);
-        let should_skip = is_collapsed
+        let should_skip = !current_hunk_visible
             && matches!(
                 row,
                 DiffRenderRow::HunkHeader { .. }
                     | DiffRenderRow::Line { .. }
                     | DiffRenderRow::InlineThread { .. }
             );
-        let should_skip = should_skip
-            || (!current_hunk_visible
-                && matches!(
-                    row,
-                    DiffRenderRow::HunkHeader { .. }
-                        | DiffRenderRow::Line { .. }
-                        | DiffRenderRow::InlineThread { .. }
-                ));
 
         if !should_skip {
             items.push(DiffViewItem::Row(row_index));
@@ -6621,20 +7183,7 @@ fn render_diff_gap_row(
         )
 }
 
-fn render_stack_layer_diff_notice(
-    stack: &ReviewStack,
-    visibility: &StackFileVisibility,
-) -> impl IntoElement {
-    let stack_kind = match stack.kind {
-        crate::stacks::model::StackKind::Real => "Real stack",
-        crate::stacks::model::StackKind::Virtual => "Virtual stack",
-    };
-    let hidden = visibility.hidden_hunk_count;
-    let visible = visibility
-        .total_hunk_count
-        .saturating_sub(visibility.hidden_hunk_count);
-    let mode_label = visibility.mode.label();
-
+fn render_stack_layer_diff_notice(visibility: &StackFileVisibility) -> impl IntoElement {
     div()
         .px(px(14.0))
         .py(px(8.0))
@@ -6643,21 +7192,12 @@ fn render_stack_layer_diff_notice(
         .border_color(diff_annotation_border())
         .flex()
         .items_start()
-        .justify_between()
-        .gap(px(12.0))
         .child(
             div()
                 .flex()
                 .flex_col()
                 .gap(px(4.0))
                 .min_w_0()
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .font_family(mono_font_family())
-                        .text_color(accent())
-                        .child(format!("{stack_kind} / {mode_label}").to_uppercase()),
-                )
                 .child(
                     div()
                         .text_size(px(13.0))
@@ -6682,22 +7222,6 @@ fn render_stack_layer_diff_notice(
                             }),
                     )
                 })
-                .when(visibility.ai_assisted, |el| {
-                    el.child(
-                        div()
-                            .text_size(px(11.0))
-                            .font_family(mono_font_family())
-                            .text_color(fg_subtle())
-                            .child(format!(
-                                "Confidence: {}",
-                                match visibility.confidence {
-                                    Confidence::High => "High",
-                                    Confidence::Medium => "Medium",
-                                    Confidence::Low => "Low",
-                                }
-                            )),
-                    )
-                })
                 .when_some(
                     visibility
                         .layer_warnings
@@ -6714,41 +7238,6 @@ fn render_stack_layer_diff_notice(
                         )
                     },
                 ),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_end()
-                .gap(px(6.0))
-                .flex_wrap()
-                .flex_shrink_0()
-                .child(badge(visibility.confidence.label()))
-                .child(badge(&format!(
-                    "{} atom{}",
-                    visibility.visible_atom_count,
-                    if visibility.visible_atom_count == 1 {
-                        ""
-                    } else {
-                        "s"
-                    }
-                )))
-                .child(badge(&format!(
-                    "{} of {} hunk{}",
-                    visible,
-                    visibility.total_hunk_count,
-                    if visibility.total_hunk_count == 1 {
-                        ""
-                    } else {
-                        "s"
-                    }
-                )))
-                .when(hidden > 0, |el| {
-                    el.child(badge(&format!(
-                        "{hidden} hidden from other layer{}",
-                        if hidden == 1 { "" } else { "s" }
-                    )))
-                }),
         )
 }
 
@@ -7721,11 +8210,6 @@ fn render_diff_line(
             fg_default(),
         ),
     };
-    let row_border = if is_selected {
-        diff_selected_edge()
-    } else {
-        transparent()
-    };
     let marker_visible = is_selected || force_marker_visible;
     let number_color = if is_selected {
         fg_default()
@@ -7735,15 +8219,14 @@ fn render_diff_line(
 
     div()
         .flex()
-        .items_start()
         .w_full()
         .min_w_0()
         .min_h(px(DIFF_ROW_HEIGHT))
         .bg(row_bg)
-        .border_b(px(1.0))
-        .border_color(row_border)
         .font_family(mono_font_family())
-        .text_size(px(12.0))
+        .text_size(px(DIFF_CODE_FONT_SIZE))
+        .line_height(px(DIFF_CODE_LINE_HEIGHT))
+        .font_weight(FontWeight::MEDIUM)
         .text_color(if marker_visible {
             marker_color
         } else {
@@ -7764,6 +8247,7 @@ fn render_diff_line(
                 .flex()
                 .flex_shrink_0()
                 .w(px(gutter_layout.gutter_width()))
+                .min_h(px(DIFF_ROW_HEIGHT))
                 .bg(gutter_bg)
                 .border_r(px(1.0))
                 .border_color(diff_gutter_separator())
@@ -7801,7 +8285,9 @@ fn render_diff_line(
                             .px(px(DIFF_LINE_NUMBER_CELL_PADDING_X))
                             .flex()
                             .justify_end()
-                            .text_size(px(11.0))
+                            .text_size(px(DIFF_LINE_NUMBER_FONT_SIZE))
+                            .line_height(px(DIFF_CODE_LINE_HEIGHT))
+                            .font_weight(FontWeight::SEMIBOLD)
                             .text_color(number_color)
                             .child(left_num),
                     )
@@ -7813,7 +8299,9 @@ fn render_diff_line(
                             .px(px(DIFF_LINE_NUMBER_CELL_PADDING_X))
                             .flex()
                             .justify_end()
-                            .text_size(px(11.0))
+                            .text_size(px(DIFF_LINE_NUMBER_FONT_SIZE))
+                            .line_height(px(DIFF_CODE_LINE_HEIGHT))
+                            .font_weight(FontWeight::SEMIBOLD)
                             .text_color(number_color)
                             .child(right_num),
                     )
@@ -7823,6 +8311,7 @@ fn render_diff_line(
             div()
                 .w(px(DIFF_MARKER_COLUMN_WIDTH))
                 .flex_shrink_0()
+                .min_h(px(DIFF_ROW_HEIGHT))
                 .py(px(1.0))
                 .child(marker),
         )
@@ -7853,7 +8342,9 @@ fn render_syntax_content(
         .px(px(8.0))
         .py(px(1.0))
         .whitespace_nowrap()
-        .text_size(px(12.0))
+        .text_size(px(DIFF_CODE_FONT_SIZE))
+        .line_height(px(DIFF_CODE_LINE_HEIGHT))
+        .font_weight(FontWeight::MEDIUM)
         .font_family(mono_font_family());
 
     if content.is_empty() {
@@ -7947,14 +8438,17 @@ fn render_syntax_content(
             };
             request_diff_line_lsp_details(query, window, cx);
         })
-        .tooltip(move |index, _window, cx| {
+        .tooltip_with_key(move |index, _window, cx| {
             let query = tooltip_context.query_for_index(index, tooltip_tokens.as_ref())?;
-            Some(build_lsp_hover_tooltip_view(
-                query.state.clone(),
-                query.detail_key.clone(),
+            Some((
                 query.query_key.clone(),
-                query.token_label.clone(),
-                cx,
+                build_lsp_hover_tooltip_view(
+                    query.state.clone(),
+                    query.detail_key.clone(),
+                    query.query_key.clone(),
+                    query.token_label.clone(),
+                    cx,
+                ),
             ))
         });
 
@@ -7984,9 +8478,12 @@ fn render_syntax_content(
     content_div.text_color(fallback_color).child(selectable)
 }
 
-const DIFF_ROW_HEIGHT: f32 = 22.0;
-const DIFF_LINE_NUMBER_COLUMN_WIDTH: f32 = 36.0;
-const DIFF_LINE_NUMBER_CELL_PADDING_X: f32 = 6.0;
+const DIFF_ROW_HEIGHT: f32 = 25.0;
+const DIFF_CODE_FONT_SIZE: f32 = 14.0;
+const DIFF_CODE_LINE_HEIGHT: f32 = 21.0;
+const DIFF_LINE_NUMBER_FONT_SIZE: f32 = 12.5;
+const DIFF_LINE_NUMBER_COLUMN_WIDTH: f32 = 40.0;
+const DIFF_LINE_NUMBER_CELL_PADDING_X: f32 = 8.0;
 const DIFF_MARKER_COLUMN_WIDTH: f32 = 16.0;
 const DIFF_WAYPOINT_SLOT_WIDTH: f32 = DIFF_ROW_HEIGHT;
 
@@ -8448,7 +8945,7 @@ fn decorated_diff_text_runs(
         if index > 0 && (colors[index] != current_color || emphasized[index] != current_emphasis) {
             runs.push(TextRun {
                 len: segment.len(),
-                font: font(mono_font_family()),
+                font: mono_code_font(),
                 color: current_color,
                 background_color: current_emphasis.then_some(emphasis_background),
                 underline: None,
@@ -8465,7 +8962,7 @@ fn decorated_diff_text_runs(
     if !segment.is_empty() {
         runs.push(TextRun {
             len: segment.len(),
-            font: font(mono_font_family()),
+            font: mono_code_font(),
             color: current_color,
             background_color: current_emphasis.then_some(emphasis_background),
             underline: None,
@@ -8882,14 +9379,12 @@ fn render_tour_diff_preview(
     let preview_items = {
         let app_state = state.read(cx);
         build_tour_diff_preview_items(
-            state,
             app_state.active_detail(),
             file,
             parsed_file,
             prepared_file,
             &rows,
             selected_anchor,
-            cx,
         )
     };
 
@@ -8897,7 +9392,6 @@ fn render_tour_diff_preview(
         .items
         .iter()
         .map(|item| match item {
-            DiffViewItem::SemanticSection(_) => div().into_any_element(),
             DiffViewItem::Gap(gap) => render_diff_gap_row(*gap, gutter_layout).into_any_element(),
             DiffViewItem::StackLayerEmpty => div().into_any_element(),
             DiffViewItem::Row(row_ix) => render_virtualized_diff_row(
@@ -8999,25 +9493,14 @@ struct TourDiffPreviewItems {
 }
 
 fn build_tour_diff_preview_items(
-    state: &Entity<AppState>,
     detail: Option<&PullRequestDetail>,
     file: &PullRequestFile,
     parsed_file: &ParsedDiffFile,
     prepared_file: Option<&PreparedFileContent>,
     rows: &[DiffRenderRow],
     selected_anchor: Option<&DiffAnchor>,
-    cx: &App,
 ) -> TourDiffPreviewItems {
-    let full_items = build_diff_view_items(
-        state,
-        file,
-        Some(parsed_file),
-        None,
-        prepared_file,
-        rows,
-        None,
-        cx,
-    );
+    let full_items = build_diff_view_items(file, Some(parsed_file), prepared_file, rows, None);
     if full_items.len() <= TOUR_PREVIEW_MAX_ITEMS {
         return TourDiffPreviewItems {
             items: full_items,

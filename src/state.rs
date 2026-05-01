@@ -101,6 +101,7 @@ pub struct DetailState {
     pub local_repository_status: Option<LocalRepositoryStatus>,
     pub local_repository_loading: bool,
     pub local_repository_error: Option<String>,
+    pub source_file_tree: SourceFileTreeState,
     pub review_intelligence_request_key: Option<String>,
     pub review_intelligence_loading: bool,
     pub ai_stack_state: AiStackState,
@@ -128,6 +129,7 @@ impl Default for DetailState {
             local_repository_status: None,
             local_repository_loading: false,
             local_repository_error: None,
+            source_file_tree: SourceFileTreeState::default(),
             review_intelligence_request_key: None,
             review_intelligence_loading: false,
             ai_stack_state: AiStackState::default(),
@@ -145,6 +147,15 @@ impl Default for DetailState {
             stack_open_pull_requests_error: None,
         }
     }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SourceFileTreeState {
+    pub request_key: Option<String>,
+    pub rows: Option<Arc<Vec<ReviewFileTreeRow>>>,
+    pub file_count: usize,
+    pub loading: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug)]

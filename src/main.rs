@@ -52,6 +52,7 @@ mod state;
 mod syntax;
 mod theme;
 mod views;
+mod window_settings;
 
 use std::sync::Arc;
 
@@ -97,13 +98,14 @@ fn start_app(cx: &mut App) -> Result<(), String> {
 
     let cache = CacheStore::new(cache_path())
         .map_err(|error| format!("Failed to initialize cache: {error}"))?;
+    let initial_window_size = window_settings::load_window_size(&cache);
     let app_state = cx.new(|_| AppState::new(cache));
     let initial_window_appearance = cx.window_appearance();
     app_state.update(cx, |state, _| {
         state.set_window_appearance(initial_window_appearance);
     });
 
-    let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
+    let bounds = Bounds::centered(None, initial_window_size, cx);
     cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),

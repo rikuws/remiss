@@ -32,6 +32,51 @@ pub fn load_local_repository_file_content(
     load_git_file_cached(cache, repository, checkout_root, reference, path)
 }
 
+pub fn list_local_repository_files(
+    checkout_root: &Path,
+    reference: &str,
+) -> Result<Vec<String>, String> {
+    let output = CommandRunner::new("git")
+        .args([
+            "-C".to_string(),
+            checkout_root.display().to_string(),
+            "ls-tree".to_string(),
+            "-r".to_string(),
+            "--name-only".to_string(),
+            "-z".to_string(),
+            reference.to_string(),
+            "--".to_string(),
+        ])
+        .run()?;
+
+    if output.timed_out {
+        return Err("Timed out listing repository files.".to_string());
+    }
+    if output.exit_code != Some(0) {
+        return Err(format!(
+            "Failed to list repository files from {} at {}: {}",
+            checkout_root.display(),
+            reference,
+            output.stderr
+        ));
+    }
+
+    output
+        .stdout_bytes
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| {
+            String::from_utf8(path.to_vec()).map_err(|_| {
+                format!(
+                    "Git returned a non-UTF-8 repository path from {} at {}.",
+                    checkout_root.display(),
+                    reference
+                )
+            })
+        })
+        .collect()
+}
+
 fn load_git_file_cached(
     cache: &CacheStore,
     repository: &str,
@@ -208,7 +253,7 @@ mod tests {
 
     use crate::{cache::CacheStore, github::REPOSITORY_FILE_SOURCE_LOCAL_CHECKOUT};
 
-    use super::load_local_repository_file_content;
+    use super::{list_local_repository_files, load_local_repository_file_content};
 
     static NEXT_TEST_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -392,5 +437,20 @@ mod tests {
             Some("pub fn value() -> i32 { 1 }\n")
         );
         assert_eq!(document.reference, initial_head);
+    }
+
+    #[test]
+    fn lists_tracked_repository_files_at_reference() {
+        let repository = GitTestRepository::new();
+        repository.write_file("README.md", "# Example\n");
+        repository.write_file("src/lib.rs", "pub fn value() -> i32 { 1 }\n");
+        let initial_head = repository.commit_all("initial");
+        repository.write_file("src/next.rs", "pub fn next() {}\n");
+        let _current_head = repository.commit_all("second");
+
+        let files = list_local_repository_files(&repository.root, &initial_head)
+            .expect("failed to list repository files");
+
+        assert_eq!(files, vec!["README.md", "src/lib.rs"]);
     }
 }
