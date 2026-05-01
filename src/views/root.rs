@@ -26,12 +26,14 @@ pub struct RootView {
 const APP_SIDEBAR_EXPANDED_WIDTH: f32 = 216.0;
 const APP_SIDEBAR_HIDDEN_WIDTH: f32 = 0.0;
 const APP_SIDEBAR_TRAFFIC_LIGHT_CLEARANCE: f32 = 74.0;
+pub(crate) const APP_CHROME_HEIGHT: f32 = 64.0;
 const APP_TITLEBAR_TOGGLE_LEFT: f32 = 88.0;
-const APP_TITLEBAR_TOGGLE_TOP: f32 = 13.0;
 const APP_TITLEBAR_TOGGLE_SIZE: f32 = 24.0;
+const APP_TITLEBAR_TOGGLE_TOP: f32 = (APP_CHROME_HEIGHT - APP_TITLEBAR_TOGGLE_SIZE) / 2.0;
 const APP_TITLEBAR_TOGGLE_ICON_SIZE: f32 = 13.0;
 const APP_CHROME_HIDDEN_LEFT_INSET: f32 = 206.0;
 const APP_SIDEBAR_ANIMATION_MS: u64 = 220;
+const NOTIFICATION_DRAWER_ANIMATION_MS: u64 = 160;
 
 impl RootView {
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -463,31 +465,18 @@ fn render_titlebar_sidebar_toggle(state: &Entity<AppState>, cx: &App) -> impl In
         .absolute()
         .left(px(APP_TITLEBAR_TOGGLE_LEFT))
         .top(px(APP_TITLEBAR_TOGGLE_TOP))
-        .child(
-            div()
-                .id("titlebar-sidebar-toggle")
-                .w(px(APP_TITLEBAR_TOGGLE_SIZE))
-                .h(px(APP_TITLEBAR_TOGGLE_SIZE))
-                .rounded(px(6.0))
-                .bg(transparent())
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .hover(|style| style.bg(hover_bg()))
-                .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
-                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                    state.update(cx, |state, cx| {
-                        state.app_sidebar_collapsed = !hidden;
-                        cx.notify();
-                    });
-                })
-                .child(lucide_icon(
-                    LucideIcon::PanelLeft,
-                    APP_TITLEBAR_TOGGLE_ICON_SIZE,
-                    fg_subtle(),
-                )),
-        )
+        .child(titlebar_icon_button(
+            "titlebar-sidebar-toggle",
+            LucideIcon::PanelLeft,
+            tooltip,
+            false,
+            move |_, _, cx| {
+                state.update(cx, |state, cx| {
+                    state.app_sidebar_collapsed = !hidden;
+                    cx.notify();
+                });
+            },
+        ))
 }
 
 fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
@@ -517,7 +506,7 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
     let state_for_source_lens = state.clone();
 
     div()
-        .h(px(64.0))
+        .h(px(APP_CHROME_HEIGHT))
         .flex_shrink_0()
         .bg(bg_canvas())
         .border_b(px(1.0))
@@ -533,6 +522,40 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
         .items_center()
         .gap(px(12.0))
         .child(render_workspace_tabs(state_for_tabs, active_pr_key, tabs))
+        .when(
+            has_active_pr
+                && active_surface == PullRequestSurface::Files
+                && active_center_mode != ReviewCenterMode::AiTour,
+            |el| {
+                el.child(chrome_segmented_control(vec![
+                    chrome_segment(
+                        "Diff",
+                        active_code_lens == ReviewCenterMode::SemanticDiff,
+                        false,
+                        move |_, _, cx| {
+                            state_for_diff_lens.update(cx, |state, cx| {
+                                state.set_review_center_mode(ReviewCenterMode::SemanticDiff);
+                                state.persist_active_review_session();
+                                cx.notify();
+                            });
+                        },
+                    ),
+                    chrome_segment(
+                        "Source",
+                        active_code_lens == ReviewCenterMode::SourceBrowser,
+                        false,
+                        move |_, window, cx| {
+                            state_for_source_lens.update(cx, |state, cx| {
+                                state.set_review_center_mode(ReviewCenterMode::SourceBrowser);
+                                state.persist_active_review_session();
+                                cx.notify();
+                            });
+                            ensure_active_review_focus_loaded(&state_for_source_lens, window, cx);
+                        },
+                    ),
+                ]))
+            },
+        )
         .when(has_active_pr, |el| {
             el.child(
                 div()
@@ -594,48 +617,11 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                         ),
                     ])),
             )
-            .when(
-                active_surface == PullRequestSurface::Files
-                    && active_center_mode != ReviewCenterMode::AiTour,
-                |el| {
-                    el.child(chrome_segmented_control(vec![
-                        chrome_segment(
-                            "Diff",
-                            active_code_lens == ReviewCenterMode::SemanticDiff,
-                            false,
-                            move |_, _, cx| {
-                                state_for_diff_lens.update(cx, |state, cx| {
-                                    state.set_review_center_mode(ReviewCenterMode::SemanticDiff);
-                                    state.persist_active_review_session();
-                                    cx.notify();
-                                });
-                            },
-                        ),
-                        chrome_segment(
-                            "Source",
-                            active_code_lens == ReviewCenterMode::SourceBrowser,
-                            false,
-                            move |_, window, cx| {
-                                state_for_source_lens.update(cx, |state, cx| {
-                                    state.set_review_center_mode(ReviewCenterMode::SourceBrowser);
-                                    state.persist_active_review_session();
-                                    cx.notify();
-                                });
-                                ensure_active_review_focus_loaded(
-                                    &state_for_source_lens,
-                                    window,
-                                    cx,
-                                );
-                            },
-                        ),
-                    ]))
-                },
-            )
         })
         .child(
             div()
                 .relative()
-                .child(chrome_icon_button(
+                .child(titlebar_icon_button(
                     "workspace-notification-drawer",
                     LucideIcon::Bell,
                     "Notifications",
@@ -651,8 +637,8 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                     el.child(
                         div()
                             .absolute()
-                            .top(px(-3.0))
-                            .right(px(-3.0))
+                            .top(px(-5.0))
+                            .right(px(-5.0))
                             .min_w(px(14.0))
                             .h(px(14.0))
                             .px(px(3.0))
@@ -669,6 +655,33 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                 })
                 .into_any_element(),
         )
+}
+
+fn titlebar_icon_button(
+    id: &'static str,
+    icon: LucideIcon,
+    tooltip: &'static str,
+    active: bool,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .w(px(APP_TITLEBAR_TOGGLE_SIZE))
+        .h(px(APP_TITLEBAR_TOGGLE_SIZE))
+        .rounded(px(6.0))
+        .bg(if active { bg_selected() } else { transparent() })
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .hover(|style| style.bg(hover_bg()).text_color(fg_emphasis()))
+        .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
+        .on_mouse_down(MouseButton::Left, on_click)
+        .child(lucide_icon(
+            icon,
+            APP_TITLEBAR_TOGGLE_ICON_SIZE,
+            if active { fg_emphasis() } else { fg_subtle() },
+        ))
 }
 
 fn render_workspace_tabs(
@@ -1021,6 +1034,15 @@ fn render_notification_drawer(state: &Entity<AppState>, cx: &App) -> impl IntoEl
                                 )
                         }),
                 ),
+        )
+        .with_animation(
+            "notification-drawer-open",
+            Animation::new(Duration::from_millis(NOTIFICATION_DRAWER_ANIMATION_MS))
+                .with_easing(ease_in_out),
+            move |el, delta| {
+                el.mt(lerp_px(-8.0, 0.0, delta))
+                    .opacity(delta.clamp(0.0, 1.0))
+            },
         )
 }
 

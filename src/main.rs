@@ -69,7 +69,12 @@ use views::{
     execute_palette_selection, execute_waypoint_spotlight_selection, move_palette_selection,
     move_waypoint_spotlight_selection, toggle_palette, toggle_waypoint_spotlight,
     trigger_add_waypoint_shortcut, trigger_submit_inline_comment, trigger_submit_review, RootView,
+    APP_CHROME_HEIGHT,
 };
+
+const MACOS_TRAFFIC_LIGHT_LEFT: f32 = 18.0;
+const MACOS_TRAFFIC_LIGHT_SIZE: f32 = 14.0;
+const MACOS_TRAFFIC_LIGHT_TOP: f32 = (APP_CHROME_HEIGHT - MACOS_TRAFFIC_LIGHT_SIZE) / 2.0;
 
 fn main() {
     Application::new()
@@ -105,7 +110,10 @@ fn start_app(cx: &mut App) -> Result<(), String> {
             titlebar: Some(TitlebarOptions {
                 title: Some(APP_NAME.into()),
                 appears_transparent: true,
-                traffic_light_position: Some(point(px(18.0), px(18.0))),
+                traffic_light_position: Some(point(
+                    px(MACOS_TRAFFIC_LIGHT_LEFT),
+                    px(MACOS_TRAFFIC_LIGHT_TOP),
+                )),
                 ..Default::default()
             }),
             ..Default::default()
