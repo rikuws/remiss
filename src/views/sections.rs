@@ -14,7 +14,7 @@ use crate::{github, notifications};
 
 use super::settings::render_settings_view;
 use super::workspace_sync::trigger_sync_workspace;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 const DETAIL_AUTO_REFRESH_TTL_MS: i64 = 5 * 60 * 1000;
 
@@ -1511,6 +1511,9 @@ fn filter_pill(
     active: bool,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let animation_id = SharedString::from(format!("filter-pill-{label}-{}", usize::from(active)));
+    let focus_border_transparent = with_alpha(focus_border(), 0.0);
+
     div()
         .flex()
         .justify_between()
@@ -1543,6 +1546,16 @@ fn filter_pill(
                 .font_family(mono_font_family())
                 .text_size(px(12.0))
                 .child(count.to_string()),
+        )
+        .with_animation(
+            animation_id,
+            Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
+            move |el, delta| {
+                let progress = selected_reveal_progress(active, delta);
+                el.bg(mix_rgba(transparent(), bg_selected(), progress))
+                    .border_color(mix_rgba(focus_border_transparent, focus_border(), progress))
+                    .text_color(mix_rgba(fg_muted(), fg_emphasis(), progress))
+            },
         )
 }
 

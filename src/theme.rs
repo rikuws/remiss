@@ -10,6 +10,7 @@ const THEME_SETTINGS_CACHE_KEY: &str = "theme-settings-v1";
 const UI_FONT_FAMILY: &str = ".AppleSystemUIFont";
 const MONO_FONT_FAMILY: &str = "Fira Code";
 const DISPLAY_SERIF_FONT_FAMILY: &str = "Instrument Serif";
+pub const TOGGLE_ANIMATION_MS: u64 = 140;
 
 const LIGHT_CANVAS: u32 = 0xf6f8fb;
 const LIGHT_SURFACE: u32 = 0xffffff;
@@ -109,6 +110,36 @@ fn color(r: f32, g: f32, b: f32, a: f32) -> Rgba {
 
 pub fn transparent() -> Rgba {
     color(0.0, 0.0, 0.0, 0.0)
+}
+
+pub fn with_alpha(mut color: Rgba, alpha: f32) -> Rgba {
+    color.a = alpha;
+    color
+}
+
+pub fn mix_rgba(from: Rgba, to: Rgba, progress: f32) -> Rgba {
+    Rgba {
+        r: from.r + (to.r - from.r) * progress,
+        g: from.g + (to.g - from.g) * progress,
+        b: from.b + (to.b - from.b) * progress,
+        a: from.a + (to.a - from.a) * progress,
+    }
+}
+
+pub fn selected_transition_progress(selected: bool, delta: f32) -> f32 {
+    if selected {
+        delta
+    } else {
+        1.0 - delta
+    }
+}
+
+pub fn selected_reveal_progress(selected: bool, delta: f32) -> f32 {
+    if selected {
+        delta
+    } else {
+        0.0
+    }
 }
 
 fn hex(hex: u32) -> Rgba {

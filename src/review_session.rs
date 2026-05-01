@@ -17,6 +17,7 @@ pub enum ReviewCenterMode {
     SemanticDiff,
     SourceBrowser,
     AiTour,
+    Stack,
 }
 
 impl ReviewCenterMode {
@@ -25,6 +26,7 @@ impl ReviewCenterMode {
             Self::SemanticDiff => "Diff",
             Self::SourceBrowser => "Source",
             Self::AiTour => "AI Tour",
+            Self::Stack => "Stack",
         }
     }
 }
@@ -105,22 +107,24 @@ impl ReviewLocation {
 
     pub fn stable_key(&self) -> String {
         match self.mode {
-            ReviewCenterMode::SemanticDiff | ReviewCenterMode::AiTour => format!(
-                "diff:{}:{}:{}:{}",
-                self.file_path,
-                self.anchor
-                    .as_ref()
-                    .and_then(|anchor| anchor.hunk_header.as_deref())
-                    .unwrap_or(""),
-                self.anchor
-                    .as_ref()
-                    .and_then(|anchor| anchor.line)
-                    .unwrap_or_default(),
-                self.anchor
-                    .as_ref()
-                    .and_then(|anchor| anchor.thread_id.as_deref())
-                    .unwrap_or(""),
-            ),
+            ReviewCenterMode::SemanticDiff | ReviewCenterMode::AiTour | ReviewCenterMode::Stack => {
+                format!(
+                    "diff:{}:{}:{}:{}",
+                    self.file_path,
+                    self.anchor
+                        .as_ref()
+                        .and_then(|anchor| anchor.hunk_header.as_deref())
+                        .unwrap_or(""),
+                    self.anchor
+                        .as_ref()
+                        .and_then(|anchor| anchor.line)
+                        .unwrap_or_default(),
+                    self.anchor
+                        .as_ref()
+                        .and_then(|anchor| anchor.thread_id.as_deref())
+                        .unwrap_or(""),
+                )
+            }
             ReviewCenterMode::SourceBrowser => format!(
                 "source:{}:{}",
                 self.file_path,
@@ -245,8 +249,17 @@ impl ReviewSessionState {
         let code_lens_mode = sanitize_code_lens_mode(document.code_lens_mode);
         let center_mode = match document.center_mode {
             ReviewCenterMode::AiTour => ReviewCenterMode::AiTour,
+            ReviewCenterMode::Stack => ReviewCenterMode::Stack,
             ReviewCenterMode::SourceBrowser => ReviewCenterMode::SourceBrowser,
             ReviewCenterMode::SemanticDiff => ReviewCenterMode::SemanticDiff,
+        };
+        let stack_diff_mode = if center_mode == ReviewCenterMode::Stack
+            && document.stack_diff_mode == StackDiffMode::WholePr
+            && document.selected_stack_layer_id.is_none()
+        {
+            StackDiffMode::CurrentLayerOnly
+        } else {
+            document.stack_diff_mode
         };
         Self {
             loaded: true,
@@ -264,7 +277,7 @@ impl ReviewSessionState {
             collapsed_sections: document.collapsed_sections.into_iter().collect(),
             stack_rail_expanded: document.stack_rail_expanded,
             selected_stack_layer_id: document.selected_stack_layer_id,
-            stack_diff_mode: document.stack_diff_mode,
+            stack_diff_mode,
             reviewed_stack_layer_ids: document.reviewed_stack_layer_ids.into_iter().collect(),
             reviewed_stack_atom_ids: document.reviewed_stack_atom_ids.into_iter().collect(),
         }
@@ -319,7 +332,7 @@ fn default_false() -> bool {
 pub fn sanitize_code_lens_mode(mode: ReviewCenterMode) -> ReviewCenterMode {
     match mode {
         ReviewCenterMode::SemanticDiff | ReviewCenterMode::SourceBrowser => mode,
-        ReviewCenterMode::AiTour => ReviewCenterMode::SemanticDiff,
+        ReviewCenterMode::AiTour | ReviewCenterMode::Stack => ReviewCenterMode::SemanticDiff,
     }
 }
 
@@ -446,6 +459,8 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use crate::stacks::model::StackDiffMode;
+
     use super::{
         add_waymark, location_label, push_history_location, push_route_location,
         sanitize_code_lens_mode, ReviewCenterMode, ReviewLocation, ReviewSessionState,
@@ -521,6 +536,44 @@ mod tests {
         state.code_lens_mode = ReviewCenterMode::AiTour;
         assert_eq!(
             sanitize_code_lens_mode(state.code_lens_mode),
+            ReviewCenterMode::SemanticDiff
+        );
+    }
+
+    #[test]
+    fn review_session_restores_stack_center_mode_without_promoting_code_lens() {
+        let document: super::ReviewSessionDocument = serde_json::from_str(
+            r#"{
+                "centerMode": "stack",
+                "codeLensMode": "stack"
+            }"#,
+        )
+        .expect("stack review session should deserialize");
+
+        let restored = ReviewSessionState::from_document(document);
+
+        assert_eq!(restored.center_mode, ReviewCenterMode::Stack);
+        assert_eq!(
+            restored.active_code_lens_mode(),
+            ReviewCenterMode::SemanticDiff
+        );
+        assert_eq!(restored.stack_diff_mode, StackDiffMode::CurrentLayerOnly);
+
+        let persisted = restored.to_document(None, None);
+        assert_eq!(persisted.center_mode, ReviewCenterMode::Stack);
+        assert_eq!(persisted.code_lens_mode, ReviewCenterMode::SemanticDiff);
+    }
+
+    #[test]
+    fn review_session_restores_legacy_sessions_with_code_lens_defaults() {
+        let document: super::ReviewSessionDocument =
+            serde_json::from_str(r#"{}"#).expect("legacy review session should deserialize");
+
+        let restored = ReviewSessionState::from_document(document);
+
+        assert_eq!(restored.center_mode, ReviewCenterMode::SemanticDiff);
+        assert_eq!(
+            restored.active_code_lens_mode(),
             ReviewCenterMode::SemanticDiff
         );
     }

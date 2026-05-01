@@ -35,10 +35,13 @@ use crate::review_session::{ReviewCenterMode, ReviewLocation, ReviewSourceTarget
 use crate::selectable_text::{AppTextFieldKind, AppTextInput, SelectableText};
 use crate::semantic_diff::{build_semantic_diff_file, SemanticDiffFile, SemanticDiffSection};
 use crate::source_browser::render_source_browser;
-use crate::stacks::model::{
-    ChangeAtomId, Confidence, LayerDiffFilter, LayerMetrics, LayerReviewStatus, ReviewStack,
-    ReviewStackLayer, StackDiffMode, StackKind, StackSource, StackWarning, VirtualLayerRef,
-    STACK_GENERATOR_VERSION,
+use crate::stacks::{
+    discover_review_stack,
+    model::{
+        ChangeAtomId, Confidence, LayerDiffFilter, LayerMetrics, LayerReviewStatus, RepoContext,
+        ReviewStack, ReviewStackLayer, StackDiffMode, StackDiscoveryOptions, StackKind,
+        StackSource, StackWarning, VirtualLayerRef, STACK_GENERATOR_VERSION,
+    },
 };
 use crate::state::*;
 use crate::syntax::{self, SyntaxSpan};
@@ -75,6 +78,66 @@ pub fn enter_files_surface(state: &Entity<AppState>, window: &mut Window, cx: &m
         window,
         cx,
         review_intelligence::ReviewIntelligenceScope::All,
+        false,
+    );
+}
+
+pub fn enter_stack_review_mode(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
+    let stack_defaults = {
+        let app_state = state.read(cx);
+        app_state.active_detail().map(|detail| {
+            let stack = prepare_review_stack(&app_state, detail);
+            let layer = default_stack_layer(stack.as_ref(), detail);
+            let layer_id = layer.map(|layer| layer.id.clone());
+            let layer_file = layer.and_then(|layer| {
+                let belongs_to_current_pr = layer
+                    .pr
+                    .as_ref()
+                    .map(|pr| pr.repository == detail.repository && pr.number == detail.number)
+                    .unwrap_or(true);
+
+                belongs_to_current_pr
+                    .then(|| stack.first_file_for_layer(layer))
+                    .flatten()
+            });
+
+            (layer_id, layer_file)
+        })
+    };
+
+    state.update(cx, |state, cx| {
+        state.active_surface = PullRequestSurface::Files;
+        state.pr_header_compact = false;
+        state.set_review_file_tree_visible(true);
+        state.set_review_center_mode(ReviewCenterMode::Stack);
+
+        if let Some((layer_id, layer_file)) = stack_defaults.clone() {
+            if let Some(session) = state.active_review_session_mut() {
+                let has_existing_stack_choice = session.selected_stack_layer_id.is_some()
+                    || session.stack_diff_mode != StackDiffMode::WholePr;
+
+                if !has_existing_stack_choice {
+                    session.selected_stack_layer_id = layer_id;
+                    session.stack_diff_mode = StackDiffMode::CurrentLayerOnly;
+                }
+            }
+
+            if state.selected_file_path.is_none() {
+                state.selected_file_path = layer_file;
+            }
+        }
+
+        state.persist_active_review_session();
+        cx.notify();
+    });
+
+    ensure_active_review_focus_loaded(state, window, cx);
+    ensure_active_stack_refs_loaded(state, window, cx);
+    review_intelligence::trigger_review_intelligence(
+        state,
+        window,
+        cx,
+        review_intelligence::ReviewIntelligenceScope::StackOnly,
         false,
     );
 }
@@ -750,14 +813,14 @@ pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement
         .min_h_0()
         .bg(diff_editor_bg())
         .when(show_file_tree, |el| {
-            el.child(render_review_file_tree_pane(
+            el.child(render_review_sidebar_pane(
                 state,
                 detail,
                 review_queue.as_ref(),
                 selected_path,
                 semantic_file.as_deref(),
                 &review_session,
-                review_stack.as_ref(),
+                review_stack.clone(),
                 cx,
             ))
         })
@@ -831,6 +894,10 @@ fn render_review_panel_toggle(
     let button_id = match side {
         ReviewPanelToggleSide::FileTree => "review-file-tree-toggle",
     };
+    let button_animation_id =
+        SharedString::from(format!("{button_id}-button-{}", usize::from(visible)));
+    let position_animation_id =
+        SharedString::from(format!("{button_id}-position-{}", usize::from(visible)));
     let state = state.clone();
     let button = div()
         .id(button_id)
@@ -870,7 +937,24 @@ fn render_review_panel_toggle(
             icon,
             12.0,
             if visible { fg_emphasis() } else { fg_muted() },
-        ));
+        ))
+        .with_animation(
+            button_animation_id,
+            Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
+            move |el, delta| {
+                let progress = selected_reveal_progress(visible, delta);
+                el.bg(mix_rgba(
+                    diff_editor_surface(),
+                    diff_editor_chrome(),
+                    progress,
+                ))
+                .border_color(mix_rgba(
+                    border_muted(),
+                    diff_annotation_border(),
+                    progress,
+                ))
+            },
+        );
 
     div()
         .absolute()
@@ -881,6 +965,16 @@ fn render_review_panel_toggle(
             px(REVIEW_PANEL_TOGGLE_HIDDEN_INSET)
         })
         .child(button)
+        .with_animation(
+            position_animation_id,
+            Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
+            move |el, delta| {
+                let progress = selected_transition_progress(visible, delta);
+                let hidden_left = px(REVIEW_PANEL_TOGGLE_HIDDEN_INSET);
+                let visible_left = file_tree_width() - px(REVIEW_PANEL_TOGGLE_OVERLAP);
+                el.left(hidden_left + (visible_left - hidden_left) * progress)
+            },
+        )
         .into_any_element()
 }
 
@@ -889,10 +983,17 @@ fn review_cache_key(active_pr_key: Option<&str>, scope: &str) -> String {
 }
 
 fn prepare_review_stack(app_state: &AppState, detail: &PullRequestDetail) -> Arc<ReviewStack> {
-    if let Some(stack) = app_state
-        .active_detail_state()
-        .and_then(|detail_state| detail_state.ai_stack_state.stack.clone())
-    {
+    if let Some(stack) = prepare_discovered_review_stack(
+        app_state,
+        detail,
+        "review-stack:real",
+        StackDiscoveryOptions {
+            enable_ai_virtual: false,
+            enable_virtual_commits: false,
+            enable_virtual_semantic: false,
+            ..StackDiscoveryOptions::default()
+        },
+    ) {
         return stack;
     }
 
@@ -900,6 +1001,27 @@ fn prepare_review_stack(app_state: &AppState, detail: &PullRequestDetail) -> Arc
         .active_detail_state()
         .map(|detail_state| detail_state.ai_stack_state.clone())
         .unwrap_or_default();
+
+    if let Some(stack) = ai_stack_state.stack.clone() {
+        return stack;
+    }
+
+    if let Some(stack) = prepare_discovered_review_stack(
+        app_state,
+        detail,
+        "review-stack:virtual",
+        StackDiscoveryOptions {
+            enable_github_native: false,
+            enable_branch_topology: false,
+            enable_local_metadata: false,
+            enable_ai_virtual: false,
+            enable_virtual_commits: true,
+            enable_virtual_semantic: true,
+            ..StackDiscoveryOptions::default()
+        },
+    ) {
+        return stack;
+    }
 
     if ai_stack_state.generating {
         return Arc::new(ai_stack_placeholder(
@@ -937,6 +1059,106 @@ fn prepare_review_stack(app_state: &AppState, detail: &PullRequestDetail) -> Arc
         "Entering Review will prepare the checkout and generate the AI stack.",
         None,
     ))
+}
+
+fn prepare_discovered_review_stack(
+    app_state: &AppState,
+    detail: &PullRequestDetail,
+    scope: &str,
+    options: StackDiscoveryOptions,
+) -> Option<Arc<ReviewStack>> {
+    let cache_key = review_cache_key(app_state.active_pr_key.as_deref(), scope);
+    let revision = detail.updated_at.clone();
+    let open_pr_revision = review_stack_context_revision(app_state.active_detail_state());
+
+    if let Some(cached) = app_state
+        .review_stack_cache
+        .borrow()
+        .get(&cache_key)
+        .filter(|cached| cached.revision == revision && cached.open_pr_revision == open_pr_revision)
+        .cloned()
+    {
+        return Some(cached.stack);
+    }
+
+    let repo_context = review_stack_repo_context(app_state);
+    let stack = discover_review_stack(detail, &repo_context, options).ok()?;
+    let stack = Arc::new(stack);
+    app_state.review_stack_cache.borrow_mut().insert(
+        cache_key,
+        CachedReviewStack {
+            revision,
+            open_pr_revision,
+            stack: stack.clone(),
+        },
+    );
+
+    Some(stack)
+}
+
+fn review_stack_repo_context(app_state: &AppState) -> RepoContext {
+    let detail_state = app_state.active_detail_state();
+    RepoContext {
+        open_pull_requests: detail_state
+            .and_then(|detail_state| detail_state.stack_open_pull_requests.clone())
+            .unwrap_or_default(),
+        local_repo_path: detail_state
+            .and_then(|detail_state| detail_state.local_repository_status.as_ref())
+            .and_then(|status| status.path.as_ref())
+            .map(PathBuf::from),
+        trunk_branch: None,
+    }
+}
+
+fn review_stack_context_revision(detail_state: Option<&DetailState>) -> usize {
+    let mut hasher = DefaultHasher::new();
+
+    if let Some(detail_state) = detail_state {
+        detail_state
+            .stack_open_pull_requests_loading
+            .hash(&mut hasher);
+        detail_state
+            .stack_open_pull_requests_error
+            .hash(&mut hasher);
+        if let Some(open_pull_requests) = detail_state.stack_open_pull_requests.as_ref() {
+            open_pull_requests.len().hash(&mut hasher);
+            for pull_request in open_pull_requests {
+                pull_request.repository.hash(&mut hasher);
+                pull_request.number.hash(&mut hasher);
+                pull_request.base_ref_name.hash(&mut hasher);
+                pull_request.head_ref_name.hash(&mut hasher);
+                pull_request.base_ref_oid.hash(&mut hasher);
+                pull_request.head_ref_oid.hash(&mut hasher);
+                pull_request.state.hash(&mut hasher);
+            }
+        }
+        if let Some(path) = detail_state
+            .local_repository_status
+            .as_ref()
+            .and_then(|status| status.path.as_ref())
+        {
+            path.hash(&mut hasher);
+        }
+    }
+
+    hasher.finish() as usize
+}
+
+fn default_stack_layer<'a>(
+    stack: &'a ReviewStack,
+    detail: &PullRequestDetail,
+) -> Option<&'a ReviewStackLayer> {
+    stack
+        .layers
+        .iter()
+        .find(|layer| {
+            layer
+                .pr
+                .as_ref()
+                .map(|pr| pr.repository == detail.repository && pr.number == detail.number)
+                .unwrap_or(false)
+        })
+        .or_else(|| stack.layers.first())
 }
 
 fn ai_stack_placeholder(
@@ -1057,14 +1279,530 @@ fn prepare_semantic_diff_file(
     semantic
 }
 
-fn render_review_file_tree_pane(
+fn render_review_sidebar_pane(
+    state: &Entity<AppState>,
+    detail: &PullRequestDetail,
+    _review_queue: &ReviewQueue,
+    selected_path: Option<&str>,
+    _semantic_file: Option<&SemanticDiffFile>,
+    review_session: &crate::review_session::ReviewSessionState,
+    review_stack: Arc<ReviewStack>,
+    cx: &App,
+) -> AnyElement {
+    match review_session.center_mode {
+        ReviewCenterMode::SemanticDiff => {
+            render_changed_files_pane(state, detail, selected_path, cx).into_any_element()
+        }
+        ReviewCenterMode::SourceBrowser => {
+            render_file_tree(state, detail, selected_path, cx).into_any_element()
+        }
+        ReviewCenterMode::AiTour => render_ai_tour_navigation_pane(state, cx).into_any_element(),
+        ReviewCenterMode::Stack => {
+            render_stack_navigation_pane(state, detail, review_stack, cx).into_any_element()
+        }
+    }
+}
+
+fn render_changed_files_pane(
+    state: &Entity<AppState>,
+    detail: &PullRequestDetail,
+    selected_path: Option<&str>,
+    cx: &App,
+) -> impl IntoElement {
+    let list_state = {
+        let app_state = state.read(cx);
+        prepare_review_nav_list_state(&app_state)
+    };
+    let files = Arc::new(detail.files.clone());
+    if list_state.item_count() != files.len() {
+        list_state.reset(files.len());
+    }
+
+    let (additions, deletions) = detail
+        .files
+        .iter()
+        .fold((0i64, 0i64), |(additions, deletions), file| {
+            (additions + file.additions, deletions + file.deletions)
+        });
+    let selected_path = selected_path.map(str::to_string);
+
+    div()
+        .w(file_tree_width())
+        .flex_shrink_0()
+        .min_h_0()
+        .bg(diff_editor_chrome())
+        .border_r(px(1.0))
+        .border_color(diff_annotation_border())
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .px(px(12.0))
+                .py(px(10.0))
+                .border_b(px(1.0))
+                .border_color(diff_annotation_border())
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg_emphasis())
+                        .child("Changed Files"),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .font_family(mono_font_family())
+                        .flex()
+                        .gap(px(6.0))
+                        .items_center()
+                        .child(div().text_color(fg_muted()).child(files.len().to_string()))
+                        .child(div().text_color(fg_subtle()).child("/"))
+                        .child(div().text_color(success()).child(format!("+{additions}")))
+                        .child(div().text_color(fg_subtle()).child("/"))
+                        .child(div().text_color(danger()).child(format!("-{deletions}"))),
+                ),
+        )
+        .child(
+            div()
+                .id("changed-files-scroll")
+                .flex_grow()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .px(px(6.0))
+                .py(px(6.0))
+                .child(
+                    list(list_state, {
+                        let state = state.clone();
+                        let files = files.clone();
+                        let selected_path = selected_path.clone();
+                        move |ix, _window, _cx| {
+                            let file = files[ix].clone();
+                            render_file_tree_file_row(
+                                state.clone(),
+                                file.path.clone(),
+                                file.path,
+                                file.additions,
+                                file.deletions,
+                                0,
+                                selected_path.as_deref(),
+                                ReviewFileRowOpenMode::Diff,
+                            )
+                            .into_any_element()
+                        }
+                    })
+                    .with_sizing_behavior(ListSizingBehavior::Auto)
+                    .flex_grow()
+                    .min_h_0(),
+                ),
+        )
+}
+
+fn render_ai_tour_navigation_pane(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
+    let (
+        generated_tour,
+        provider_loading,
+        tour_loading,
+        tour_generating,
+        has_status_messages,
+        center_list_state,
+    ) = {
+        let app_state = state.read(cx);
+        let detail_state = app_state.active_detail_state();
+        let tour_state = app_state.active_tour_state();
+
+        (
+            tour_state.and_then(|state| state.document.clone()),
+            app_state.code_tour_provider_loading,
+            tour_state.map(|state| state.loading).unwrap_or(false),
+            tour_state.map(|state| state.generating).unwrap_or(false),
+            app_state.code_tour_provider_error.is_some()
+                || detail_state
+                    .and_then(|state| state.local_repository_error.as_ref())
+                    .is_some()
+                || tour_state.and_then(|state| state.error.as_ref()).is_some()
+                || tour_state
+                    .and_then(|state| state.message.as_ref())
+                    .is_some(),
+            app_state.ai_tour_section_list_state.clone(),
+        )
+    };
+    let nav_list_state = {
+        let app_state = state.read(cx);
+        prepare_review_nav_list_state(&app_state)
+    };
+
+    match generated_tour {
+        Some(tour) => {
+            let tour = Arc::new(tour);
+            if nav_list_state.item_count() != tour.sections.len() {
+                nav_list_state.reset(tour.sections.len());
+            }
+
+            let has_progress = provider_loading || tour_loading || tour_generating;
+            let section_count = tour.sections.len();
+
+            div()
+                .w(file_tree_width())
+                .flex_shrink_0()
+                .min_h_0()
+                .bg(diff_editor_chrome())
+                .border_r(px(1.0))
+                .border_color(diff_annotation_border())
+                .flex()
+                .flex_col()
+                .child(render_sidebar_header(
+                    "AI Tour",
+                    "Semantic groups",
+                    tour.sections.len().to_string(),
+                ))
+                .child(
+                    div()
+                        .id("ai-tour-nav-scroll")
+                        .flex_grow()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .px(px(8.0))
+                        .py(px(8.0))
+                        .child(
+                            list(nav_list_state, {
+                                let tour = tour.clone();
+                                let center_list_state = center_list_state.clone();
+                                move |ix, _window, _cx| {
+                                    let section = &tour.sections[ix];
+                                    let target_index = ai_tour_section_content_index(
+                                        section_count,
+                                        has_progress,
+                                        has_status_messages,
+                                        ix,
+                                    );
+                                    render_ai_tour_nav_row(
+                                        tour.as_ref(),
+                                        section,
+                                        ix,
+                                        target_index,
+                                        center_list_state.clone(),
+                                    )
+                                    .into_any_element()
+                                }
+                            })
+                            .with_sizing_behavior(ListSizingBehavior::Auto)
+                            .flex_grow()
+                            .min_h_0(),
+                        ),
+                )
+        }
+        None => div()
+            .w(file_tree_width())
+            .flex_shrink_0()
+            .min_h_0()
+            .bg(diff_editor_chrome())
+            .border_r(px(1.0))
+            .border_color(diff_annotation_border())
+            .flex()
+            .flex_col()
+            .child(render_sidebar_header(
+                "AI Tour",
+                "Semantic groups",
+                "0".to_string(),
+            ))
+            .child(
+                div()
+                    .px(px(14.0))
+                    .py(px(12.0))
+                    .text_size(px(12.0))
+                    .line_height(px(18.0))
+                    .text_color(fg_muted())
+                    .child("Generate an AI tour to navigate semantic groups here."),
+            ),
+    }
+}
+
+fn ai_tour_section_content_index(
+    section_count: usize,
+    has_progress: bool,
+    has_status_messages: bool,
+    section_ix: usize,
+) -> usize {
+    let mut item_ix = 0usize;
+    if section_count > 0 {
+        item_ix += 1;
+    }
+    if has_progress {
+        item_ix += 1;
+    }
+    if has_status_messages {
+        item_ix += 1;
+    }
+    item_ix + section_ix
+}
+
+fn render_ai_tour_nav_row(
+    tour: &GeneratedCodeTour,
+    section: &TourSection,
+    section_ix: usize,
+    target_index: usize,
+    list_state: ListState,
+) -> impl IntoElement {
+    let metrics = ai_tour_section_metrics(tour, section);
+
+    div()
+        .mb(px(6.0))
+        .px(px(8.0))
+        .py(px(8.0))
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(border_muted())
+        .bg(bg_surface())
+        .cursor_pointer()
+        .hover(|style| style.bg(hover_bg()).border_color(border_default()))
+        .on_mouse_down(MouseButton::Left, move |_, _, _| {
+            list_state.scroll_to(ListOffset {
+                item_ix: target_index,
+                offset_in_item: px(0.0),
+            });
+        })
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .gap(px(8.0))
+                .min_w_0()
+                .child(render_ai_tour_category_icon(section.category, 24.0, 13.0))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_grow()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.0))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .font_family(mono_font_family())
+                                        .text_color(fg_subtle())
+                                        .child(format!("{:02}", section_ix + 1)),
+                                )
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .text_size(px(12.0))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(fg_emphasis())
+                                        .whitespace_nowrap()
+                                        .overflow_x_hidden()
+                                        .text_ellipsis()
+                                        .child(section.title.clone()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .line_height(px(16.0))
+                                .text_color(fg_muted())
+                                .line_clamp(2)
+                                .child(section.summary.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.0))
+                                .flex_wrap()
+                                .child(ai_tour_metric_chip(&format!(
+                                    "{} file{}",
+                                    metrics.file_count,
+                                    if metrics.file_count == 1 { "" } else { "s" }
+                                )))
+                                .child(ai_tour_metric_chip(&format!(
+                                    "+{} / -{}",
+                                    metrics.additions, metrics.deletions
+                                )))
+                                .child(render_ai_tour_priority_chip(section.priority)),
+                        ),
+                ),
+        )
+}
+
+fn render_stack_navigation_pane(
+    state: &Entity<AppState>,
+    detail: &PullRequestDetail,
+    review_stack: Arc<ReviewStack>,
+    cx: &App,
+) -> impl IntoElement {
+    let session = state
+        .read(cx)
+        .active_review_session()
+        .cloned()
+        .unwrap_or_default();
+    let selected_layer_id = review_stack
+        .selected_layer(session.selected_stack_layer_id.as_deref())
+        .map(|layer| layer.id.clone());
+    let reviewed_layer_ids = session.reviewed_stack_layer_ids.clone();
+    let list_state = {
+        let app_state = state.read(cx);
+        prepare_review_nav_list_state(&app_state)
+    };
+    if list_state.item_count() != review_stack.layers.len() {
+        list_state.reset(review_stack.layers.len());
+    }
+
+    let stack_kind = match review_stack.kind {
+        StackKind::Real => "Real stack",
+        StackKind::Virtual => "Virtual stack",
+    };
+    let source_label = review_stack.source.label();
+    let is_ai_generated = review_stack.source == StackSource::VirtualAi;
+    let stack_warning = review_stack
+        .warnings
+        .first()
+        .map(|warning| warning.message.clone());
+
+    div()
+        .w(file_tree_width())
+        .flex_shrink_0()
+        .min_h_0()
+        .bg(diff_editor_chrome())
+        .border_r(px(1.0))
+        .border_color(diff_annotation_border())
+        .flex()
+        .flex_col()
+        .child(render_sidebar_header(
+            "Stack",
+            stack_kind,
+            review_stack.layers.len().to_string(),
+        ))
+        .child(
+            div()
+                .px(px(12.0))
+                .py(px(8.0))
+                .border_b(px(1.0))
+                .border_color(diff_annotation_border())
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .flex_wrap()
+                        .child(badge(source_label))
+                        .child(badge(session.stack_diff_mode.label()))
+                        .when(is_ai_generated, |el| el.child(badge("AI generated"))),
+                )
+                .when_some(stack_warning, |el, warning_message| {
+                    el.child(
+                        div()
+                            .text_size(px(11.0))
+                            .line_height(px(16.0))
+                            .text_color(if is_ai_generated {
+                                fg_muted()
+                            } else {
+                                warning()
+                            })
+                            .line_clamp(2)
+                            .child(warning_message),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .id("stack-nav-scroll")
+                .flex_grow()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .px(px(8.0))
+                .py(px(8.0))
+                .child(
+                    list(list_state, {
+                        let state = state.clone();
+                        let detail = Arc::new(detail.clone());
+                        let review_stack = review_stack.clone();
+                        let selected_layer_id = selected_layer_id.clone();
+                        let reviewed_layer_ids = reviewed_layer_ids.clone();
+                        move |ix, _window, _cx| {
+                            let layer = &review_stack.layers[ix];
+                            render_stack_layer_row(
+                                &state,
+                                detail.as_ref(),
+                                review_stack.as_ref(),
+                                layer,
+                                selected_layer_id.as_deref() == Some(layer.id.as_str()),
+                                reviewed_layer_ids.contains(&layer.id),
+                            )
+                            .into_any_element()
+                        }
+                    })
+                    .with_sizing_behavior(ListSizingBehavior::Auto)
+                    .flex_grow()
+                    .min_h_0(),
+                ),
+        )
+}
+
+fn render_sidebar_header(title: &str, subtitle: &str, count: String) -> impl IntoElement {
+    div()
+        .px(px(12.0))
+        .py(px(10.0))
+        .border_b(px(1.0))
+        .border_color(diff_annotation_border())
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(10.0))
+        .child(
+            div()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg_emphasis())
+                        .child(title.to_string()),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .font_family(mono_font_family())
+                        .text_color(fg_muted())
+                        .whitespace_nowrap()
+                        .overflow_x_hidden()
+                        .text_ellipsis()
+                        .child(subtitle.to_string()),
+                ),
+        )
+        .child(
+            div()
+                .text_size(px(12.0))
+                .font_family(mono_font_family())
+                .text_color(fg_muted())
+                .child(count),
+        )
+}
+
+fn render_legacy_review_navigation_pane(
     state: &Entity<AppState>,
     detail: &PullRequestDetail,
     review_queue: &ReviewQueue,
     selected_path: Option<&str>,
     semantic_file: Option<&SemanticDiffFile>,
     review_session: &crate::review_session::ReviewSessionState,
-    review_stack: &ReviewStack,
     cx: &App,
 ) -> impl IntoElement {
     div()
@@ -1076,7 +1814,6 @@ fn render_review_file_tree_pane(
         .border_color(diff_annotation_border())
         .flex()
         .flex_col()
-        .child(render_stack_rail(state, detail, review_stack, cx))
         .child(render_review_navigation_content(
             state,
             detail,
@@ -1177,9 +1914,13 @@ enum ReviewNavListItem {
 }
 
 fn prepare_review_nav_list_state(app_state: &AppState) -> ListState {
+    let mode_key = app_state
+        .active_review_session()
+        .map(|session| session.center_mode.label())
+        .unwrap_or("Diff");
     let state_key = format!(
-        "{}:review-nav",
-        app_state.active_pr_key.as_deref().unwrap_or("detached")
+        "{}:review-nav:{mode_key}",
+        app_state.active_pr_key.as_deref().unwrap_or("detached"),
     );
     let mut list_states = app_state.review_nav_list_states.borrow_mut();
     list_states
@@ -1371,6 +2112,7 @@ fn render_review_nav_list_item(
                 file.deletions,
                 0,
                 selected_path,
+                ReviewFileRowOpenMode::Diff,
             ))
             .into_any_element(),
         ReviewNavListItem::SemanticHeader { count } => div()
@@ -1808,6 +2550,14 @@ fn open_review_location_card(
             });
             ensure_active_review_focus_loaded(state, window, cx);
             refresh_active_tour(state, window, cx, true);
+        }
+        ReviewCenterMode::Stack => {
+            state.update(cx, |state, cx| {
+                state.navigate_to_review_location(location.clone(), true);
+                state.persist_active_review_session();
+                cx.notify();
+            });
+            ensure_active_review_focus_loaded(state, window, cx);
         }
         ReviewCenterMode::SourceBrowser => open_review_source_location(
             state,
@@ -2260,7 +3010,7 @@ fn render_stack_layer_row(
             state_for_open.update(cx, |state, cx| {
                 state.set_selected_stack_layer(Some(layer_id.clone()));
                 state.set_stack_diff_mode(StackDiffMode::CurrentLayerOnly);
-                state.set_review_center_mode(ReviewCenterMode::SemanticDiff);
+                state.set_review_center_mode(ReviewCenterMode::Stack);
                 if is_current_pr_layer {
                     if let Some(path) = first_file.clone() {
                         state.selected_file_path = Some(path);
@@ -2387,31 +3137,15 @@ fn render_file_tree(
     state: &Entity<AppState>,
     detail: &PullRequestDetail,
     selected_path: Option<&str>,
-    review_stack: &ReviewStack,
     cx: &App,
 ) -> impl IntoElement {
     let (tree_rows, file_tree_label, visible_file_count, visible_additions, visible_deletions) = {
         let app_state = state.read(cx);
-        let stack_filter = app_state.active_review_session().and_then(|session| {
-            build_layer_diff_filter(
-                review_stack,
-                session.stack_diff_mode,
-                session.selected_stack_layer_id.as_deref(),
-                &session.reviewed_stack_atom_ids,
-            )
-        });
-        let visible_paths = stack_filter
-            .as_ref()
-            .map(|filter| stack_file_paths_for_filter(review_stack, filter));
-        let (file_count, additions, deletions) =
-            review_file_tree_totals(detail, visible_paths.as_ref());
-        let label = stack_filter
-            .as_ref()
-            .map(|filter| review_file_tree_label(filter.mode).to_string())
-            .unwrap_or_else(|| "Files".to_string());
+        let (file_count, additions, deletions) = review_file_tree_totals(detail, None);
+        let label = "Files".to_string();
 
         (
-            prepare_review_file_tree_rows(&app_state, detail, visible_paths.as_ref()),
+            prepare_review_file_tree_rows(&app_state, detail, None),
             label,
             file_count,
             additions,
@@ -2436,7 +3170,6 @@ fn render_file_tree(
         .border_color(diff_annotation_border())
         .flex()
         .flex_col()
-        .child(render_stack_rail(state, detail, review_stack, cx))
         .child(
             div()
                 .px(px(12.0))
@@ -2512,6 +3245,7 @@ fn render_file_tree(
                                 deletions,
                                 depth,
                                 selected_path.as_deref(),
+                                ReviewFileRowOpenMode::Source,
                             )
                             .into_any_element(),
                         }
@@ -2791,6 +3525,12 @@ fn render_file_tree_directory_row(name: String, depth: usize) -> impl IntoElemen
         )
 }
 
+#[derive(Clone, Copy)]
+enum ReviewFileRowOpenMode {
+    Diff,
+    Source,
+}
+
 fn render_file_tree_file_row(
     state: Entity<AppState>,
     path: String,
@@ -2799,6 +3539,7 @@ fn render_file_tree_file_row(
     deletions: i64,
     depth: usize,
     selected_path: Option<&str>,
+    open_mode: ReviewFileRowOpenMode,
 ) -> impl IntoElement {
     let is_active = selected_path == Some(path.as_str());
     let file_name_for_tooltip = file_name.clone();
@@ -2832,11 +3573,29 @@ fn render_file_tree_file_row(
             state_for_open.update(cx, |state, cx| {
                 state.selected_file_path = Some(path.clone());
                 state.selected_diff_anchor = None;
-                state.set_review_center_mode(ReviewCenterMode::SemanticDiff);
+                match open_mode {
+                    ReviewFileRowOpenMode::Diff => {
+                        state.set_review_center_mode(ReviewCenterMode::SemanticDiff);
+                    }
+                    ReviewFileRowOpenMode::Source => {
+                        state.set_review_source_target(ReviewSourceTarget {
+                            path: path.clone(),
+                            line: None,
+                            reason: Some("Selected from file tree".to_string()),
+                        });
+                    }
+                }
                 state.persist_active_review_session();
                 cx.notify();
             });
-            ensure_selected_file_content_loaded(&state_for_open, window, cx);
+            match open_mode {
+                ReviewFileRowOpenMode::Diff => {
+                    ensure_selected_file_content_loaded(&state_for_open, window, cx);
+                }
+                ReviewFileRowOpenMode::Source => {
+                    ensure_active_review_focus_loaded(&state_for_open, window, cx);
+                }
+            }
         })
         .child(
             div()
@@ -3619,13 +4378,17 @@ fn render_diff_panel(
         .active_review_session()
         .cloned()
         .unwrap_or_default();
-    let stack_filter = build_layer_diff_filter(
-        review_stack.as_ref(),
-        review_session.stack_diff_mode,
-        review_session.selected_stack_layer_id.as_deref(),
-        &review_session.reviewed_stack_atom_ids,
-    );
     let center_mode = review_session.center_mode;
+    let stack_filter = (center_mode == ReviewCenterMode::Stack)
+        .then(|| {
+            build_layer_diff_filter(
+                review_stack.as_ref(),
+                review_session.stack_diff_mode,
+                review_session.selected_stack_layer_id.as_deref(),
+                &review_session.reviewed_stack_atom_ids,
+            )
+        })
+        .flatten();
     let source_target = review_session.source_target.clone().or_else(|| {
         selected_file.map(|file| ReviewSourceTarget {
             path: file.path.clone(),
@@ -4870,6 +5633,10 @@ fn toolbar_icon_button(
     icon: AnyElement,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let animation_id =
+        SharedString::from(format!("toolbar-icon-button-{id}-{}", usize::from(active)));
+    let selected_edge_transparent = with_alpha(diff_selected_edge(), 0.0);
+
     div()
         .id(id)
         .w(px(22.0))
@@ -4901,6 +5668,19 @@ fn toolbar_icon_button(
                 .on_mouse_down(MouseButton::Left, on_click)
         })
         .child(icon)
+        .with_animation(
+            animation_id,
+            Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
+            move |el, delta| {
+                let progress = selected_reveal_progress(active, delta);
+                el.bg(mix_rgba(transparent(), diff_line_hover_bg(), progress))
+                    .border_color(mix_rgba(
+                        selected_edge_transparent,
+                        diff_selected_edge(),
+                        progress,
+                    ))
+            },
+        )
 }
 
 fn render_file_tree_toggle_icon(active: bool) -> AnyElement {
@@ -4929,6 +5709,12 @@ fn workspace_mode_button(
     active: bool,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let animation_id = SharedString::from(format!(
+        "workspace-mode-button-{label}-{}",
+        usize::from(active)
+    ));
+    let focus_border_transparent = with_alpha(focus_border(), 0.0);
+
     div()
         .px(px(8.0))
         .py(px(4.0))
@@ -4956,6 +5742,16 @@ fn workspace_mode_button(
         })
         .on_mouse_down(MouseButton::Left, on_click)
         .child(label.to_string())
+        .with_animation(
+            animation_id,
+            Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
+            move |el, delta| {
+                let progress = selected_reveal_progress(active, delta);
+                el.bg(mix_rgba(transparent(), diff_line_hover_bg(), progress))
+                    .border_color(mix_rgba(focus_border_transparent, focus_border(), progress))
+                    .text_color(mix_rgba(fg_muted(), fg_emphasis(), progress))
+            },
+        )
 }
 
 fn render_file_diff(
@@ -6752,6 +7548,11 @@ fn line_action_button(
     active: bool,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let animation_id = SharedString::from(format!(
+        "line-action-button-{label}-{}",
+        usize::from(active)
+    ));
+
     div()
         .px(px(12.0))
         .py(px(8.0))
@@ -6769,6 +7570,16 @@ fn line_action_button(
             on_click(event, window, cx);
         })
         .child(label.to_string())
+        .with_animation(
+            animation_id,
+            Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
+            move |el, delta| {
+                let progress = selected_reveal_progress(active, delta);
+                el.bg(mix_rgba(bg_surface(), waypoint_bg(), progress))
+                    .border_color(mix_rgba(border_default(), warning(), progress))
+                    .text_color(mix_rgba(fg_emphasis(), waypoint_fg(), progress))
+            },
+        )
 }
 
 fn lerp_px(from: f32, to: f32, progress: f32) -> Pixels {

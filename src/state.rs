@@ -899,7 +899,7 @@ impl AppState {
             .unwrap_or(false);
 
         match location.mode {
-            ReviewCenterMode::SemanticDiff | ReviewCenterMode::AiTour => {
+            ReviewCenterMode::SemanticDiff | ReviewCenterMode::AiTour | ReviewCenterMode::Stack => {
                 self.selected_file_path = Some(location.file_path.clone());
                 self.selected_diff_anchor = location.anchor.clone();
             }

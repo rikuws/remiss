@@ -10,7 +10,9 @@ use crate::state::*;
 use crate::theme::*;
 
 use super::ai_tour::refresh_active_tour;
-use super::diff_view::{ensure_active_review_focus_loaded, enter_files_surface};
+use super::diff_view::{
+    ensure_active_review_focus_loaded, enter_files_surface, enter_stack_review_mode,
+};
 use super::palette::render_palette;
 use super::pr_detail::render_pr_workspace;
 use super::sections::render_section_workspace;
@@ -502,8 +504,13 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
     let state_for_review = state.clone();
     let state_for_code = state.clone();
     let state_for_ai_tour = state.clone();
+    let state_for_stack = state.clone();
     let state_for_diff_lens = state.clone();
     let state_for_source_lens = state.clone();
+    let code_mode_active = matches!(
+        active_center_mode,
+        ReviewCenterMode::SemanticDiff | ReviewCenterMode::SourceBrowser
+    );
 
     div()
         .h(px(APP_CHROME_HEIGHT))
@@ -523,9 +530,7 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
         .gap(px(12.0))
         .child(render_workspace_tabs(state_for_tabs, active_pr_key, tabs))
         .when(
-            has_active_pr
-                && active_surface == PullRequestSurface::Files
-                && active_center_mode != ReviewCenterMode::AiTour,
+            has_active_pr && active_surface == PullRequestSurface::Files && code_mode_active,
             |el| {
                 el.child(chrome_segmented_control(vec![
                     chrome_segment(
@@ -589,7 +594,7 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                     .child(chrome_segmented_control(vec![
                         chrome_segment(
                             "Code",
-                            active_center_mode != ReviewCenterMode::AiTour,
+                            code_mode_active,
                             active_surface != PullRequestSurface::Files,
                             move |_, window, cx| {
                                 state_for_code.update(cx, |state, cx| {
@@ -602,7 +607,7 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                             },
                         ),
                         chrome_segment(
-                            "AI Tour + Stack",
+                            "AI Tour",
                             active_center_mode == ReviewCenterMode::AiTour,
                             active_surface != PullRequestSurface::Files,
                             move |_, window, cx| {
@@ -613,6 +618,14 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                                     cx.notify();
                                 });
                                 refresh_active_tour(&state_for_ai_tour, window, cx, true);
+                            },
+                        ),
+                        chrome_segment(
+                            "Stack",
+                            active_center_mode == ReviewCenterMode::Stack,
+                            active_surface != PullRequestSurface::Files,
+                            move |_, window, cx| {
+                                enter_stack_review_mode(&state_for_stack, window, cx);
                             },
                         ),
                     ])),
@@ -664,6 +677,10 @@ fn titlebar_icon_button(
     active: bool,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let animation_id =
+        SharedString::from(format!("titlebar-icon-button-{id}-{}", usize::from(active)));
+    let focus_border_transparent = with_alpha(focus_border(), 0.0);
+
     div()
         .id(id)
         .w(px(APP_TITLEBAR_TOGGLE_SIZE))
@@ -682,6 +699,15 @@ fn titlebar_icon_button(
             APP_TITLEBAR_TOGGLE_ICON_SIZE,
             if active { fg_emphasis() } else { fg_subtle() },
         ))
+        .with_animation(
+            animation_id,
+            Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
+            move |el, delta| {
+                let progress = selected_reveal_progress(active, delta);
+                el.bg(mix_rgba(transparent(), bg_selected(), progress))
+                    .border_color(mix_rgba(focus_border_transparent, focus_border(), progress))
+            },
+        )
 }
 
 fn render_workspace_tabs(
@@ -800,6 +826,10 @@ fn chrome_segment(
     disabled: bool,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
+    let animation_id =
+        SharedString::from(format!("chrome-segment-{label}-{}", usize::from(active)));
+    let focus_border_transparent = with_alpha(focus_border(), 0.0);
+
     div()
         .h(px(26.0))
         .px(px(10.0))
@@ -831,6 +861,16 @@ fn chrome_segment(
             }
         })
         .child(label)
+        .with_animation(
+            animation_id,
+            Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
+            move |el, delta| {
+                let progress = selected_reveal_progress(active, delta);
+                el.bg(mix_rgba(transparent(), bg_selected(), progress))
+                    .border_color(mix_rgba(focus_border_transparent, focus_border(), progress))
+                    .text_color(mix_rgba(fg_muted(), fg_emphasis(), progress))
+            },
+        )
         .into_any_element()
 }
 
@@ -1120,6 +1160,12 @@ fn sidebar_nav_button(
     collapsed: bool,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let animation_id = SharedString::from(format!(
+        "sidebar-nav-button-{label}-{}",
+        usize::from(active)
+    ));
+    let focus_border_transparent = with_alpha(focus_border(), 0.0);
+
     div()
         .h(px(38.0))
         .px(px(10.0))
@@ -1179,6 +1225,15 @@ fn sidebar_nav_button(
             )
         })
         .when(collapsed, |el| el.justify_center())
+        .with_animation(
+            animation_id,
+            Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
+            move |el, delta| {
+                let progress = selected_reveal_progress(active, delta);
+                el.bg(mix_rgba(transparent(), bg_selected(), progress))
+                    .border_color(mix_rgba(focus_border_transparent, focus_border(), progress))
+            },
+        )
 }
 
 fn sidebar_theme_button(
@@ -1187,6 +1242,12 @@ fn sidebar_theme_button(
     collapsed: bool,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let animation_id = SharedString::from(format!(
+        "sidebar-theme-button-{}-{}",
+        icon.unicode(),
+        usize::from(active)
+    ));
+
     div()
         .h(px(34.0))
         .when(collapsed, |el| el.w_full())
@@ -1210,6 +1271,15 @@ fn sidebar_theme_button(
             16.0,
             if active { fg_emphasis() } else { fg_muted() },
         ))
+        .with_animation(
+            animation_id,
+            Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
+            move |el, delta| {
+                let progress = selected_reveal_progress(active, delta);
+                el.bg(mix_rgba(bg_overlay(), bg_selected(), progress))
+                    .border_color(mix_rgba(border_muted(), focus_border(), progress))
+            },
+        )
 }
 
 fn sidebar_utility_button(
@@ -1287,6 +1357,10 @@ fn pr_tab(
     active: bool,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let animation_id = SharedString::from(format!(
+        "pr-tab-{repository}-{number}-{}",
+        usize::from(active)
+    ));
     let dot_color = pr_tab_state_dot(pr_state, is_draft);
     let state_badge = pr_tab_state_badge(pr_state, is_draft);
     let repo_short = repository
@@ -1360,6 +1434,15 @@ fn pr_tab(
                 ),
         )
         .when_some(state_badge, |el, badge| el.child(badge))
+        .with_animation(
+            animation_id,
+            Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
+            move |el, delta| {
+                let progress = selected_reveal_progress(active, delta);
+                el.bg(mix_rgba(bg_overlay(), bg_selected(), progress))
+                    .border_color(mix_rgba(border_muted(), focus_border(), progress))
+            },
+        )
 }
 
 fn pr_tab_state_dot(pr_state: &str, is_draft: bool) -> Rgba {

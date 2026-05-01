@@ -34,6 +34,15 @@ impl ReviewStack {
     pub fn selected_layer(&self, selected_layer_id: Option<&str>) -> Option<&ReviewStackLayer> {
         selected_layer_id
             .and_then(|id| self.layers.iter().find(|layer| layer.id == id))
+            .or_else(|| {
+                self.layers.iter().find(|layer| {
+                    layer
+                        .pr
+                        .as_ref()
+                        .map(|pr| pr.number == self.selected_pr_number)
+                        .unwrap_or(false)
+                })
+            })
             .or_else(|| self.layers.first())
     }
 

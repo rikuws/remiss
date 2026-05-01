@@ -2678,6 +2678,9 @@ pub fn surface_tab(
     active: bool,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let animation_id = SharedString::from(format!("surface-tab-{label}-{}", usize::from(active)));
+    let focus_border_transparent = with_alpha(focus_border(), 0.0);
+
     div()
         .px(px(14.0))
         .py(px(6.0))
@@ -2700,6 +2703,16 @@ pub fn surface_tab(
         })
         .on_mouse_down(MouseButton::Left, on_click)
         .child(label.to_string())
+        .with_animation(
+            animation_id,
+            Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
+            move |el, delta| {
+                let progress = selected_reveal_progress(active, delta);
+                el.bg(mix_rgba(transparent(), bg_selected(), progress))
+                    .border_color(mix_rgba(focus_border_transparent, focus_border(), progress))
+                    .text_color(mix_rgba(fg_muted(), fg_emphasis(), progress))
+            },
+        )
 }
 
 fn trigger_sync_pr(
