@@ -23,8 +23,8 @@ use crate::diff::{
     ParsedDiffLine,
 };
 use crate::difftastic::{
-    adapt_difftastic_file, build_adapted_diff_highlights, run_difftastic_json_for_texts,
-    DifftasticAdaptOptions, DifftasticSidecarOptions,
+    adapt_difftastic_file, build_adapted_diff_highlights, run_difftastic_for_texts,
+    DifftasticAdaptOptions,
 };
 use crate::github::{
     PullRequestDetail, PullRequestFile, PullRequestReviewComment, PullRequestReviewThread,
@@ -4493,17 +4493,12 @@ pub async fn load_structural_diff_flow(
                     repository.as_str(),
                     &request.new_side,
                 )?;
-                let files = run_difftastic_json_for_texts(
+                let file = run_difftastic_for_texts(
                     request.old_side.path.as_str(),
                     old_text.as_str(),
                     request.new_side.path.as_str(),
                     new_text.as_str(),
-                    &DifftasticSidecarOptions::default(),
                 )?;
-                let file = files
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| "difftastic did not return a file result.".to_string())?;
                 Ok::<_, String>(adapt_difftastic_file(
                     &file,
                     old_text.as_str(),

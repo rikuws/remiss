@@ -1,82 +1,18 @@
-use std::{
-    collections::HashMap,
-    fs,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+use std::{collections::HashMap, sync::Arc};
+
+#[cfg(test)]
+use ::difftastic::DifftasticChunk;
+use ::difftastic::{
+    diff_texts, DifftasticChange, DifftasticDiff, DifftasticLine,
+    DifftasticOptions as LibraryDifftasticOptions, DifftasticSide,
+    DifftasticStatus as LibraryDifftasticStatus,
 };
 
-use serde::{Deserialize, Serialize};
-
 use crate::{
-    command_runner::CommandRunner,
     diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk, ParsedDiffLine},
     state::{DiffInlineRange, DiffLineHighlight},
     syntax,
 };
-
-const DEFAULT_DIFFTASTIC_TIMEOUT: Duration = Duration::from_secs(20);
-const DEFAULT_DIFFTASTIC_OUTPUT_LIMIT_BYTES: usize = 8 * 1024 * 1024;
-
-#[derive(Clone, Debug)]
-pub struct DifftasticSidecarOptions {
-    pub binary: String,
-    pub timeout: Duration,
-    pub output_limit_bytes: usize,
-}
-
-impl Default for DifftasticSidecarOptions {
-    fn default() -> Self {
-        Self {
-            binary: "difft".to_string(),
-            timeout: DEFAULT_DIFFTASTIC_TIMEOUT,
-            output_limit_bytes: DEFAULT_DIFFTASTIC_OUTPUT_LIMIT_BYTES,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum DifftasticStatus {
-    Unchanged,
-    Changed,
-    Created,
-    Deleted,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct DifftasticJsonFile {
-    #[serde(default)]
-    pub aligned_lines: Vec<(Option<u32>, Option<u32>)>,
-    #[serde(default)]
-    pub chunks: Vec<Vec<DifftasticJsonLine>>,
-    pub language: String,
-    pub path: String,
-    pub status: DifftasticStatus,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct DifftasticJsonLine {
-    #[serde(default)]
-    pub lhs: Option<DifftasticJsonSide>,
-    #[serde(default)]
-    pub rhs: Option<DifftasticJsonSide>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct DifftasticJsonSide {
-    pub line_number: u32,
-    #[serde(default)]
-    pub changes: Vec<DifftasticJsonChange>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct DifftasticJsonChange {
-    pub start: u32,
-    pub end: u32,
-    pub content: String,
-    pub highlight: String,
-}
 
 #[derive(Clone, Debug, Default)]
 pub struct DifftasticAdaptOptions {
@@ -89,74 +25,22 @@ pub struct AdaptedDifftasticDiffFile {
     pub emphasis_hunks: Vec<Vec<Vec<DiffInlineRange>>>,
 }
 
-pub fn run_difftastic_json_for_paths(
-    old_path: &Path,
-    new_path: &Path,
-    options: &DifftasticSidecarOptions,
-) -> Result<Vec<DifftasticJsonFile>, String> {
-    let args = difftastic_json_args(old_path, new_path);
-    let output = CommandRunner::new(options.binary.clone())
-        .args(args)
-        .env("DFT_UNSTABLE", "yes")
-        .timeout(options.timeout)
-        .output_limit_bytes(options.output_limit_bytes)
-        .run()?;
-
-    if output.timed_out {
-        return Err(format!(
-            "{} timed out after {} seconds.",
-            options.binary,
-            options.timeout.as_secs()
-        ));
-    }
-
-    if output.stdout_truncated {
-        return Err(format!(
-            "{} JSON output exceeded {} bytes.",
-            options.binary, options.output_limit_bytes
-        ));
-    }
-
-    match parse_difftastic_json(output.stdout.as_str()) {
-        Ok(files) => Ok(files),
-        Err(parse_error) => {
-            if output.exit_code != Some(0) {
-                return Err(command_failure_message(
-                    options.binary.as_str(),
-                    output.exit_code,
-                    output.stderr.as_str(),
-                    output.stdout.as_str(),
-                ));
-            }
-            Err(parse_error)
-        }
-    }
-}
-
-pub fn run_difftastic_json_for_texts(
+pub fn run_difftastic_for_texts(
     old_name: &str,
     old_text: &str,
     new_name: &str,
     new_text: &str,
-    options: &DifftasticSidecarOptions,
-) -> Result<Vec<DifftasticJsonFile>, String> {
-    let temp = TempDifftasticInputs::write(old_name, old_text, new_name, new_text)?;
-    run_difftastic_json_for_paths(temp.old_path.as_path(), temp.new_path.as_path(), options)
-}
-
-pub fn parse_difftastic_json(json: &str) -> Result<Vec<DifftasticJsonFile>, String> {
-    let trimmed = json.trim();
-    if trimmed.is_empty() {
-        return Err("difftastic produced empty JSON output.".to_string());
-    }
-
-    serde_json::from_str::<Vec<DifftasticJsonFile>>(trimmed)
-        .or_else(|_| serde_json::from_str::<DifftasticJsonFile>(trimmed).map(|file| vec![file]))
-        .map_err(|error| format!("Failed to parse difftastic JSON output: {error}"))
+) -> Result<DifftasticDiff, String> {
+    let options = LibraryDifftasticOptions {
+        context_lines: 0,
+        ..LibraryDifftasticOptions::default()
+    };
+    diff_texts(old_name, old_text, new_name, new_text, &options)
+        .map_err(|error| format!("difftastic failed: {error}"))
 }
 
 pub fn adapt_difftastic_file(
-    file: &DifftasticJsonFile,
+    file: &DifftasticDiff,
     old_text: &str,
     new_text: &str,
     path: impl Into<String>,
@@ -168,10 +52,12 @@ pub fn adapt_difftastic_file(
     let path = path.into();
 
     let (hunks, emphasis_hunks) = match file.status {
-        DifftasticStatus::Unchanged => (Vec::new(), Vec::new()),
-        DifftasticStatus::Created => build_created_hunk(&new_lines),
-        DifftasticStatus::Deleted => build_deleted_hunk(&old_lines),
-        DifftasticStatus::Changed => build_changed_hunks(file, &old_lines, &new_lines, options),
+        LibraryDifftasticStatus::Unchanged => (Vec::new(), Vec::new()),
+        LibraryDifftasticStatus::Created => build_created_hunk(&new_lines),
+        LibraryDifftasticStatus::Deleted => build_deleted_hunk(&old_lines),
+        LibraryDifftasticStatus::Changed => {
+            build_changed_hunks(file, &old_lines, &new_lines, options)
+        }
     };
 
     AdaptedDifftasticDiffFile {
@@ -217,33 +103,8 @@ pub fn build_adapted_diff_highlights(
     )
 }
 
-fn difftastic_json_args(old_path: &Path, new_path: &Path) -> Vec<String> {
-    vec![
-        "--display".to_string(),
-        "json".to_string(),
-        old_path.display().to_string(),
-        new_path.display().to_string(),
-    ]
-}
-
-fn command_failure_message(
-    binary: &str,
-    exit_code: Option<i32>,
-    stderr: &str,
-    stdout: &str,
-) -> String {
-    let detail = if !stderr.trim().is_empty() {
-        stderr.trim()
-    } else if !stdout.trim().is_empty() {
-        stdout.trim()
-    } else {
-        "no output"
-    };
-    format!("{binary} failed with exit code {exit_code:?}: {detail}")
-}
-
 fn build_changed_hunks(
-    file: &DifftasticJsonFile,
+    file: &DifftasticDiff,
     old_lines: &[&str],
     new_lines: &[&str],
     options: &DifftasticAdaptOptions,
@@ -260,7 +121,7 @@ fn build_changed_hunks(
         .iter()
         .filter_map(|chunk| {
             let rows = expanded_chunk_rows(
-                chunk,
+                chunk.lines.as_slice(),
                 file.aligned_lines.as_slice(),
                 &aligned_index,
                 options,
@@ -271,14 +132,14 @@ fn build_changed_hunks(
 }
 
 fn expanded_chunk_rows(
-    chunk: &[DifftasticJsonLine],
+    chunk: &[DifftasticLine],
     aligned_lines: &[(Option<u32>, Option<u32>)],
     aligned_index: &HashMap<(Option<u32>, Option<u32>), usize>,
     options: &DifftasticAdaptOptions,
 ) -> Vec<AdaptRow> {
     let changed_rows = chunk
         .iter()
-        .map(|line| AdaptRow::from_json_line(line, true))
+        .map(|line| AdaptRow::from_difftastic_line(line, true))
         .collect::<Vec<_>>();
 
     if options.context_lines == 0 || aligned_lines.is_empty() {
@@ -473,7 +334,7 @@ fn push_adapted_line(
     left_line_number: Option<u32>,
     right_line_number: Option<u32>,
     source_lines: &[&str],
-    changes: &[DifftasticJsonChange],
+    changes: &[DifftasticChange],
 ) {
     let source_line_number = left_line_number.or(right_line_number).unwrap_or(0);
     let content = line_text(source_lines, source_line_number);
@@ -489,7 +350,7 @@ fn push_adapted_line(
     emphasis.push(ranges);
 }
 
-fn changes_to_ranges(line: &str, changes: &[DifftasticJsonChange]) -> Vec<DiffInlineRange> {
+fn changes_to_ranges(line: &str, changes: &[DifftasticChange]) -> Vec<DiffInlineRange> {
     let mut ranges = changes
         .iter()
         .filter_map(|change| byte_offsets_to_range(line, change.start, change.end))
@@ -589,13 +450,13 @@ fn ui_line_number(line_number: u32) -> i64 {
 
 #[derive(Clone, Debug)]
 struct AdaptRow {
-    lhs: Option<DifftasticJsonSide>,
-    rhs: Option<DifftasticJsonSide>,
+    lhs: Option<DifftasticSide>,
+    rhs: Option<DifftasticSide>,
     changed: bool,
 }
 
 impl AdaptRow {
-    fn from_json_line(line: &DifftasticJsonLine, changed: bool) -> Self {
+    fn from_difftastic_line(line: &DifftasticLine, changed: bool) -> Self {
         Self {
             lhs: line.lhs.clone(),
             rhs: line.rhs.clone(),
@@ -605,11 +466,11 @@ impl AdaptRow {
 
     fn from_pair(pair: (Option<u32>, Option<u32>), changed: bool) -> Self {
         Self {
-            lhs: pair.0.map(|line_number| DifftasticJsonSide {
+            lhs: pair.0.map(|line_number| DifftasticSide {
                 line_number,
                 changes: Vec::new(),
             }),
-            rhs: pair.1.map(|line_number| DifftasticJsonSide {
+            rhs: pair.1.map(|line_number| DifftasticSide {
                 line_number,
                 changes: Vec::new(),
             }),
@@ -625,121 +486,88 @@ impl AdaptRow {
     }
 }
 
-struct TempDifftasticInputs {
-    root: PathBuf,
-    old_path: PathBuf,
-    new_path: PathBuf,
-}
-
-impl TempDifftasticInputs {
-    fn write(
-        old_name: &str,
-        old_text: &str,
-        new_name: &str,
-        new_text: &str,
-    ) -> Result<Self, String> {
-        let root = std::env::temp_dir().join(format!(
-            "remiss-difftastic-{}-{}",
-            std::process::id(),
-            timestamp_nanos()
-        ));
-        fs::create_dir_all(root.as_path())
-            .map_err(|error| format!("Failed to create difftastic temp directory: {error}"))?;
-
-        let old_path = root.join(format!("old-{}", safe_file_name(old_name)));
-        let new_path = root.join(format!("new-{}", safe_file_name(new_name)));
-        fs::write(old_path.as_path(), old_text)
-            .map_err(|error| format!("Failed to write difftastic old input: {error}"))?;
-        fs::write(new_path.as_path(), new_text)
-            .map_err(|error| format!("Failed to write difftastic new input: {error}"))?;
-
-        Ok(Self {
-            root,
-            old_path,
-            new_path,
-        })
-    }
-}
-
-impl Drop for TempDifftasticInputs {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(self.root.as_path());
-    }
-}
-
-fn timestamp_nanos() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default()
-}
-
-fn safe_file_name(name: &str) -> String {
-    Path::new(name)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("input.txt")
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const DIFFTASTIC_JSON: &str = r#"{
-        "aligned_lines": [[0,0],[1,1]],
-        "chunks": [[{
-            "lhs": {
-                "line_number": 0,
-                "changes": [
-                    {"start": 5, "end": 9, "content": "gsub", "highlight": "normal"},
-                    {"start": 23, "end": 24, "content": ",", "highlight": "normal"},
-                    {"start": 25, "end": 26, "content": "x", "highlight": "normal"}
-                ]
-            },
-            "rhs": {
-                "line_number": 0,
-                "changes": [
-                    {"start": 5, "end": 12, "content": "stringr", "highlight": "normal"},
-                    {"start": 12, "end": 14, "content": "::", "highlight": "keyword"},
-                    {"start": 14, "end": 25, "content": "str_replace", "highlight": "normal"},
-                    {"start": 26, "end": 27, "content": "x", "highlight": "normal"},
-                    {"start": 27, "end": 28, "content": ",", "highlight": "normal"}
-                ]
-            }
-        }]],
-        "language": "R",
-        "path": "new.R",
-        "status": "changed"
-    }"#;
-
-    #[test]
-    fn parses_single_file_or_array_json() {
-        let single = parse_difftastic_json(DIFFTASTIC_JSON).expect("single file JSON parses");
-        assert_eq!(single.len(), 1);
-        assert_eq!(single[0].status, DifftasticStatus::Changed);
-        assert_eq!(single[0].chunks.len(), 1);
-
-        let array_json = format!("[{DIFFTASTIC_JSON}]");
-        let array = parse_difftastic_json(array_json.as_str()).expect("array JSON parses");
-        assert_eq!(array.len(), 1);
-        assert_eq!(array[0].path, "new.R");
+    fn changed_diff() -> DifftasticDiff {
+        DifftasticDiff {
+            aligned_lines: vec![(Some(0), Some(0)), (Some(1), Some(1))],
+            chunks: vec![DifftasticChunk {
+                lines: vec![DifftasticLine {
+                    lhs: Some(DifftasticSide {
+                        line_number: 0,
+                        changes: vec![
+                            DifftasticChange {
+                                start: 5,
+                                end: 9,
+                                content: "gsub".to_string(),
+                                highlight: Some("normal".to_string()),
+                            },
+                            DifftasticChange {
+                                start: 23,
+                                end: 24,
+                                content: ",".to_string(),
+                                highlight: Some("normal".to_string()),
+                            },
+                            DifftasticChange {
+                                start: 25,
+                                end: 26,
+                                content: "x".to_string(),
+                                highlight: Some("normal".to_string()),
+                            },
+                        ],
+                    }),
+                    rhs: Some(DifftasticSide {
+                        line_number: 0,
+                        changes: vec![
+                            DifftasticChange {
+                                start: 5,
+                                end: 12,
+                                content: "stringr".to_string(),
+                                highlight: Some("normal".to_string()),
+                            },
+                            DifftasticChange {
+                                start: 12,
+                                end: 14,
+                                content: "::".to_string(),
+                                highlight: Some("keyword".to_string()),
+                            },
+                            DifftasticChange {
+                                start: 14,
+                                end: 25,
+                                content: "str_replace".to_string(),
+                                highlight: Some("normal".to_string()),
+                            },
+                            DifftasticChange {
+                                start: 26,
+                                end: 27,
+                                content: "x".to_string(),
+                                highlight: Some("normal".to_string()),
+                            },
+                            DifftasticChange {
+                                start: 27,
+                                end: 28,
+                                content: ",".to_string(),
+                                highlight: Some("normal".to_string()),
+                            },
+                        ],
+                    }),
+                }],
+            }],
+            fallback: None,
+            language: Some("R".to_string()),
+            path: "new.R".to_string(),
+            previous_path: None,
+            status: LibraryDifftasticStatus::Changed,
+        }
     }
 
     #[test]
-    fn adapts_changed_json_to_parsed_diff_lines_and_emphasis() {
-        let files = parse_difftastic_json(DIFFTASTIC_JSON).expect("JSON parses");
+    fn adapts_changed_diff_to_parsed_diff_lines_and_emphasis() {
+        let file = changed_diff();
         let adapted = adapt_difftastic_file(
-            &files[0],
+            &file,
             "foo(gsub(\"bad\", \"good\", x))\nunchanged()\n",
             "foo(stringr::str_replace(\"bad\", \"good\", x,))\nunchanged()\n",
             "new.R",
@@ -798,12 +626,14 @@ mod tests {
 
     #[test]
     fn adapts_created_status_to_addition_hunk() {
-        let file = DifftasticJsonFile {
+        let file = DifftasticDiff {
             aligned_lines: Vec::new(),
             chunks: Vec::new(),
-            language: "Rust".to_string(),
+            fallback: None,
+            language: Some("Rust".to_string()),
             path: "src/lib.rs".to_string(),
-            status: DifftasticStatus::Created,
+            previous_path: None,
+            status: LibraryDifftasticStatus::Created,
         };
         let adapted = adapt_difftastic_file(
             &file,
@@ -826,23 +656,31 @@ mod tests {
     }
 
     #[test]
-    fn parses_and_adapts_one_sided_chunk_lines() {
-        let json = r#"{
-            "chunks": [[{
-                "rhs": {
-                    "line_number": 1,
-                    "changes": [
-                        {"start": 0, "end": 7, "content": "created", "highlight": "normal"}
-                    ]
-                }
-            }]],
-            "language": "Text",
-            "path": "notes.txt",
-            "status": "changed"
-        }"#;
-        let files = parse_difftastic_json(json).expect("one-sided JSON parses");
+    fn adapts_one_sided_chunk_lines() {
+        let file = DifftasticDiff {
+            aligned_lines: Vec::new(),
+            chunks: vec![DifftasticChunk {
+                lines: vec![DifftasticLine {
+                    lhs: None,
+                    rhs: Some(DifftasticSide {
+                        line_number: 1,
+                        changes: vec![DifftasticChange {
+                            start: 0,
+                            end: 7,
+                            content: "created".to_string(),
+                            highlight: Some("normal".to_string()),
+                        }],
+                    }),
+                }],
+            }],
+            fallback: None,
+            language: None,
+            path: "notes.txt".to_string(),
+            previous_path: None,
+            status: LibraryDifftasticStatus::Changed,
+        };
         let adapted = adapt_difftastic_file(
-            &files[0],
+            &file,
             "stable\n",
             "stable\ncreated\n",
             "notes.txt",
@@ -867,9 +705,9 @@ mod tests {
 
     #[test]
     fn context_lines_expand_from_aligned_lines() {
-        let files = parse_difftastic_json(DIFFTASTIC_JSON).expect("JSON parses");
+        let file = changed_diff();
         let adapted = adapt_difftastic_file(
-            &files[0],
+            &file,
             "foo(gsub(\"bad\", \"good\", x))\nunchanged()\n",
             "foo(stringr::str_replace(\"bad\", \"good\", x,))\nunchanged()\n",
             "new.R",
@@ -888,8 +726,16 @@ mod tests {
     }
 
     #[test]
-    fn sidecar_args_request_unstable_json_display() {
-        let args = difftastic_json_args(Path::new("old.rs"), Path::new("new.rs"));
-        assert_eq!(args, vec!["--display", "json", "old.rs", "new.rs"]);
+    fn runs_difftastic_library_directly() {
+        let diff = run_difftastic_for_texts(
+            "src/lib.rs",
+            "fn value() -> i32 {\n    1\n}\n",
+            "src/lib.rs",
+            "fn value() -> i32 {\n    2\n}\n",
+        )
+        .expect("library diff succeeds");
+
+        assert_eq!(diff.status, LibraryDifftasticStatus::Changed);
+        assert!(!diff.chunks.is_empty());
     }
 }
