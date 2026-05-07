@@ -8,6 +8,7 @@ use crate::code_tour::{
     DiffAnchor, GeneratedCodeTour,
 };
 use crate::diff::DiffRenderRow;
+use crate::difftastic::AdaptedDifftasticDiffFile;
 use crate::github::{
     PullRequestDetail, PullRequestDetailSnapshot, PullRequestQueue, PullRequestSummary,
     RepositoryFileContent, ReviewAction, WorkspaceSnapshot,
@@ -107,6 +108,7 @@ pub struct DetailState {
     pub ai_stack_state: AiStackState,
     pub tour_states: std::collections::HashMap<CodeTourProvider, CodeTourState>,
     pub file_content_states: std::collections::HashMap<String, FileContentState>,
+    pub structural_diff_states: std::collections::HashMap<String, StructuralDiffFileState>,
     pub lsp_statuses: std::collections::HashMap<String, LspServerStatus>,
     pub lsp_loading_paths: std::collections::HashSet<String>,
     pub lsp_symbol_states: std::collections::HashMap<String, LspSymbolState>,
@@ -135,6 +137,7 @@ impl Default for DetailState {
             ai_stack_state: AiStackState::default(),
             tour_states: std::collections::HashMap::new(),
             file_content_states: std::collections::HashMap::new(),
+            structural_diff_states: std::collections::HashMap::new(),
             lsp_statuses: std::collections::HashMap::new(),
             lsp_loading_paths: std::collections::HashSet::new(),
             lsp_symbol_states: std::collections::HashMap::new(),
@@ -235,6 +238,14 @@ impl Default for FileContentState {
             error: None,
         }
     }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct StructuralDiffFileState {
+    pub request_key: Option<String>,
+    pub diff: Option<Arc<AdaptedDifftasticDiffFile>>,
+    pub loading: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -832,13 +843,15 @@ impl AppState {
         }
 
         self.selected_file_path.clone().map(|file_path| {
-            if session
-                .map(|session| session.center_mode == ReviewCenterMode::AiTour)
-                .unwrap_or(false)
-            {
-                ReviewLocation::from_ai_tour(file_path, self.selected_diff_anchor.clone())
-            } else {
-                ReviewLocation::from_diff(file_path, self.selected_diff_anchor.clone())
+            match session.map(|session| session.center_mode) {
+                Some(ReviewCenterMode::AiTour) => {
+                    ReviewLocation::from_ai_tour(file_path, self.selected_diff_anchor.clone())
+                }
+                Some(ReviewCenterMode::StructuralDiff) => ReviewLocation::from_structural_diff(
+                    file_path,
+                    self.selected_diff_anchor.clone(),
+                ),
+                _ => ReviewLocation::from_diff(file_path, self.selected_diff_anchor.clone()),
             }
         })
     }
@@ -910,7 +923,10 @@ impl AppState {
             .unwrap_or(false);
 
         match location.mode {
-            ReviewCenterMode::SemanticDiff | ReviewCenterMode::AiTour | ReviewCenterMode::Stack => {
+            ReviewCenterMode::SemanticDiff
+            | ReviewCenterMode::StructuralDiff
+            | ReviewCenterMode::AiTour
+            | ReviewCenterMode::Stack => {
                 self.selected_file_path = Some(location.file_path.clone());
                 self.selected_diff_anchor = location.anchor.clone();
             }
@@ -935,7 +951,9 @@ impl AppState {
         session.center_mode = location.mode;
         if matches!(
             location.mode,
-            ReviewCenterMode::SemanticDiff | ReviewCenterMode::SourceBrowser
+            ReviewCenterMode::SemanticDiff
+                | ReviewCenterMode::StructuralDiff
+                | ReviewCenterMode::SourceBrowser
         ) {
             session.code_lens_mode = location.mode;
         }
@@ -1040,7 +1058,9 @@ impl AppState {
             session.center_mode = mode;
             if matches!(
                 mode,
-                ReviewCenterMode::SemanticDiff | ReviewCenterMode::SourceBrowser
+                ReviewCenterMode::SemanticDiff
+                    | ReviewCenterMode::StructuralDiff
+                    | ReviewCenterMode::SourceBrowser
             ) {
                 session.code_lens_mode = mode;
             }

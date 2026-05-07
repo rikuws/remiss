@@ -519,10 +519,13 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
     let state_for_ai_tour = state.clone();
     let state_for_stack = state.clone();
     let state_for_diff_lens = state.clone();
+    let state_for_structural_lens = state.clone();
     let state_for_source_lens = state.clone();
     let code_mode_active = matches!(
         active_center_mode,
-        ReviewCenterMode::SemanticDiff | ReviewCenterMode::SourceBrowser
+        ReviewCenterMode::SemanticDiff
+            | ReviewCenterMode::StructuralDiff
+            | ReviewCenterMode::SourceBrowser
     );
 
     div()
@@ -556,6 +559,23 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                                 state.persist_active_review_session();
                                 cx.notify();
                             });
+                        },
+                    ),
+                    chrome_segment(
+                        "Structural",
+                        active_code_lens == ReviewCenterMode::StructuralDiff,
+                        false,
+                        move |_, window, cx| {
+                            state_for_structural_lens.update(cx, |state, cx| {
+                                state.set_review_center_mode(ReviewCenterMode::StructuralDiff);
+                                state.persist_active_review_session();
+                                cx.notify();
+                            });
+                            ensure_active_review_focus_loaded(
+                                &state_for_structural_lens,
+                                window,
+                                cx,
+                            );
                         },
                     ),
                     chrome_segment(
@@ -793,20 +813,23 @@ fn chrome_icon_button(
         .rounded(radius_sm())
         .border_1()
         .border_color(if active {
-            focus_border()
+            border_default()
         } else {
             border_muted()
         })
-        .bg(if active { bg_selected() } else { bg_overlay() })
-        .shadow_sm()
+        .bg(if active {
+            control_selected_bg()
+        } else {
+            control_button_bg()
+        })
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
         .hover(|style| {
             style
-                .bg(hover_bg())
-                .border_color(focus_border())
+                .bg(control_button_hover_bg())
+                .border_color(border_default())
                 .text_color(fg_emphasis())
         })
         .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
@@ -825,11 +848,10 @@ fn chrome_segmented_control(children: Vec<AnyElement>) -> impl IntoElement {
         .rounded(radius_sm())
         .border_1()
         .border_color(border_muted())
-        .bg(bg_overlay())
-        .shadow_sm()
+        .bg(control_track_bg())
         .flex()
         .items_center()
-        .gap(px(2.0))
+        .gap(px(1.0))
         .children(children)
 }
 
@@ -841,7 +863,7 @@ fn chrome_segment(
 ) -> AnyElement {
     let animation_id =
         SharedString::from(format!("chrome-segment-{label}-{}", usize::from(active)));
-    let focus_border_transparent = with_alpha(focus_border(), 0.0);
+    let border_muted_transparent = with_alpha(border_muted(), 0.0);
 
     div()
         .h(px(26.0))
@@ -849,11 +871,15 @@ fn chrome_segment(
         .rounded(px(6.0))
         .border_1()
         .border_color(if active {
-            focus_border()
+            border_muted()
         } else {
             transparent()
         })
-        .bg(if active { bg_selected() } else { transparent() })
+        .bg(if active {
+            control_selected_bg()
+        } else {
+            transparent()
+        })
         .text_size(px(12.0))
         .font_weight(FontWeight::MEDIUM)
         .text_color(if active { fg_emphasis() } else { fg_muted() })
@@ -864,8 +890,8 @@ fn chrome_segment(
         .cursor_pointer()
         .hover(|style| {
             style
-                .bg(hover_bg())
-                .border_color(focus_border())
+                .bg(control_button_hover_bg())
+                .border_color(border_muted())
                 .text_color(fg_emphasis())
         })
         .on_mouse_down(MouseButton::Left, move |event, window, cx| {
@@ -879,8 +905,8 @@ fn chrome_segment(
             Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
             move |el, delta| {
                 let progress = selected_reveal_progress(active, delta);
-                el.bg(mix_rgba(transparent(), bg_selected(), progress))
-                    .border_color(mix_rgba(focus_border_transparent, focus_border(), progress))
+                el.bg(mix_rgba(transparent(), control_selected_bg(), progress))
+                    .border_color(mix_rgba(border_muted_transparent, border_muted(), progress))
                     .text_color(mix_rgba(fg_muted(), fg_emphasis(), progress))
             },
         )
@@ -1268,16 +1294,24 @@ fn sidebar_theme_button(
         .rounded(radius_sm())
         .border_1()
         .border_color(if active {
-            focus_border()
+            border_muted()
         } else {
             border_muted()
         })
-        .bg(if active { bg_selected() } else { bg_overlay() })
+        .bg(if active {
+            control_selected_bg()
+        } else {
+            control_button_bg()
+        })
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .hover(|style| style.bg(hover_bg()))
+        .hover(|style| {
+            style
+                .bg(control_button_hover_bg())
+                .border_color(border_default())
+        })
         .on_mouse_down(MouseButton::Left, on_click)
         .child(lucide_icon(
             icon,
@@ -1289,8 +1323,12 @@ fn sidebar_theme_button(
             Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
             move |el, delta| {
                 let progress = selected_reveal_progress(active, delta);
-                el.bg(mix_rgba(bg_overlay(), bg_selected(), progress))
-                    .border_color(mix_rgba(border_muted(), focus_border(), progress))
+                el.bg(mix_rgba(
+                    control_button_bg(),
+                    control_selected_bg(),
+                    progress,
+                ))
+                .border_color(border_muted())
             },
         )
 }
@@ -1311,12 +1349,16 @@ fn sidebar_utility_button(
         } else {
             transparent()
         })
-        .bg(if active { bg_selected() } else { bg_surface() })
+        .bg(if active {
+            control_selected_bg()
+        } else {
+            control_button_bg()
+        })
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .hover(|style| style.bg(hover_bg()))
+        .hover(|style| style.bg(control_button_hover_bg()))
         .on_mouse_down(MouseButton::Left, on_click)
         .child(lucide_icon(
             icon,
@@ -1337,7 +1379,7 @@ fn sidebar_action_button(
         .rounded(radius_sm())
         .border_1()
         .border_color(border_muted())
-        .bg(bg_surface())
+        .bg(control_button_bg())
         .flex()
         .items_center()
         .justify_center()
@@ -1345,7 +1387,7 @@ fn sidebar_action_button(
         .when(!collapsed, |el| el.px(px(10.0)).justify_start())
         .when(collapsed, |el| el.w_full())
         .cursor_pointer()
-        .hover(|style| style.bg(hover_bg()))
+        .hover(|style| style.bg(control_button_hover_bg()))
         .on_mouse_down(MouseButton::Left, on_click)
         .child(lucide_icon(icon, 16.0, icon_color))
         .when(!collapsed, |el| {

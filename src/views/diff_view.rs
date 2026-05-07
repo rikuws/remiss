@@ -18,8 +18,13 @@ use crate::code_tour::{
     DiffAnchor, GeneratedCodeTour, TourSection, TourSectionCategory, TourSectionPriority, TourStep,
 };
 use crate::diff::{
-    build_diff_render_rows, find_parsed_diff_file, find_parsed_diff_file_with_index, DiffLineKind,
-    DiffRenderRow, ParsedDiffFile, ParsedDiffHunk, ParsedDiffLine,
+    build_diff_render_rows, build_diff_render_rows_for_parsed_file, find_parsed_diff_file,
+    find_parsed_diff_file_with_index, DiffLineKind, DiffRenderRow, ParsedDiffFile, ParsedDiffHunk,
+    ParsedDiffLine,
+};
+use crate::difftastic::{
+    adapt_difftastic_file, build_adapted_diff_highlights, run_difftastic_json_for_texts,
+    DifftasticAdaptOptions, DifftasticSidecarOptions,
 };
 use crate::github::{
     PullRequestDetail, PullRequestFile, PullRequestReviewComment, PullRequestReviewThread,
@@ -50,8 +55,8 @@ use crate::{github, notifications, review_intelligence};
 
 use super::ai_tour::{refresh_active_tour, trigger_generate_tour};
 use super::sections::{
-    badge, badge_success, error_text, eyebrow, ghost_button, material_surface, nested_panel,
-    panel_state_text, review_button, success_text, user_avatar,
+    badge, badge_success, error_text, eyebrow, ghost_button, nested_panel, panel_state_text,
+    review_button, success_text, user_avatar,
 };
 
 pub fn enter_files_surface(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
@@ -188,14 +193,12 @@ pub fn ensure_active_review_focus_loaded(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let (source_mode_active, source_path) = {
+    let (center_mode, source_path) = {
         let app_state = state.read(cx);
         let Some(session) = app_state.active_review_session() else {
             return;
         };
-        if session.center_mode != ReviewCenterMode::SourceBrowser {
-            (false, None)
-        } else {
+        if session.center_mode == ReviewCenterMode::SourceBrowser {
             let source_path = session
                 .source_target
                 .as_ref()
@@ -207,11 +210,13 @@ pub fn ensure_active_review_focus_loaded(
                         .and_then(|detail| detail.files.first().map(|file| file.path.clone()))
                 });
 
-            (true, source_path)
+            (session.center_mode, source_path)
+        } else {
+            (session.center_mode, None)
         }
     };
 
-    if source_mode_active {
+    if center_mode == ReviewCenterMode::SourceBrowser {
         ensure_source_file_tree_loaded(state, window, cx);
     }
 
@@ -222,9 +227,24 @@ pub fn ensure_active_review_focus_loaded(
                 load_local_source_file_content_flow(model, source_path, cx).await;
             })
             .detach();
+    } else if center_mode == ReviewCenterMode::StructuralDiff {
+        ensure_selected_structural_diff_loaded(state, window, cx);
     } else {
         ensure_selected_file_content_loaded(state, window, cx);
     }
+}
+
+pub fn ensure_selected_structural_diff_loaded(
+    state: &Entity<AppState>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let model = state.clone();
+    window
+        .spawn(cx, async move |cx: &mut AsyncWindowContext| {
+            load_structural_diff_flow(model, None, cx).await;
+        })
+        .detach();
 }
 
 pub fn ensure_source_file_tree_loaded(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
@@ -954,7 +974,6 @@ fn render_review_panel_toggle(
         } else {
             diff_editor_surface()
         })
-        .shadow_sm()
         .flex()
         .items_center()
         .justify_center()
@@ -1329,9 +1348,22 @@ fn render_review_sidebar_pane(
     cx: &App,
 ) -> AnyElement {
     match review_session.center_mode {
-        ReviewCenterMode::SemanticDiff => {
-            render_changed_files_pane(state, detail, selected_path, cx).into_any_element()
-        }
+        ReviewCenterMode::SemanticDiff => render_changed_files_pane(
+            state,
+            detail,
+            selected_path,
+            ReviewFileRowOpenMode::Diff,
+            cx,
+        )
+        .into_any_element(),
+        ReviewCenterMode::StructuralDiff => render_changed_files_pane(
+            state,
+            detail,
+            selected_path,
+            ReviewFileRowOpenMode::Structural,
+            cx,
+        )
+        .into_any_element(),
         ReviewCenterMode::SourceBrowser => {
             render_source_file_tree(state, detail, selected_path, cx).into_any_element()
         }
@@ -1346,6 +1378,7 @@ fn render_changed_files_pane(
     state: &Entity<AppState>,
     detail: &PullRequestDetail,
     selected_path: Option<&str>,
+    open_mode: ReviewFileRowOpenMode,
     cx: &App,
 ) -> impl IntoElement {
     let (tree_rows, file_count, additions, deletions) = {
@@ -1413,7 +1446,7 @@ fn render_changed_files_pane(
                                 deletions,
                                 depth,
                                 selected_path.as_deref(),
-                                ReviewFileRowOpenMode::Diff,
+                                open_mode,
                             )
                             .into_any_element(),
                         }
@@ -2893,6 +2926,14 @@ fn open_review_location_card(
             window,
             cx,
         ),
+        ReviewCenterMode::StructuralDiff => {
+            state.update(cx, |state, cx| {
+                state.navigate_to_review_location(location.clone(), true);
+                state.persist_active_review_session();
+                cx.notify();
+            });
+            ensure_active_review_focus_loaded(state, window, cx);
+        }
         ReviewCenterMode::AiTour => {
             state.update(cx, |state, cx| {
                 state.navigate_to_review_location(location.clone(), true);
@@ -3977,6 +4018,7 @@ fn render_file_tree_directory_row(name: String, depth: usize) -> impl IntoElemen
 #[derive(Clone, Copy)]
 enum ReviewFileRowOpenMode {
     Diff,
+    Structural,
     Stack,
     Source,
 }
@@ -4027,6 +4069,9 @@ fn render_file_tree_file_row(
                     ReviewFileRowOpenMode::Diff => {
                         state.set_review_center_mode(ReviewCenterMode::SemanticDiff);
                     }
+                    ReviewFileRowOpenMode::Structural => {
+                        state.set_review_center_mode(ReviewCenterMode::StructuralDiff);
+                    }
                     ReviewFileRowOpenMode::Stack => {
                         state.set_review_center_mode(ReviewCenterMode::Stack);
                     }
@@ -4044,6 +4089,9 @@ fn render_file_tree_file_row(
             match open_mode {
                 ReviewFileRowOpenMode::Diff | ReviewFileRowOpenMode::Stack => {
                     ensure_selected_file_content_loaded(&state_for_open, window, cx);
+                }
+                ReviewFileRowOpenMode::Structural => {
+                    ensure_selected_structural_diff_loaded(&state_for_open, window, cx);
                 }
                 ReviewFileRowOpenMode::Source => {
                     ensure_active_review_focus_loaded(&state_for_open, window, cx);
@@ -4354,6 +4402,142 @@ pub async fn load_pull_request_file_content_flow(
                     file_state.document = None;
                     file_state.prepared = None;
                     file_state.error = Some(error);
+                }
+            }
+
+            cx.notify();
+        })
+        .ok();
+}
+
+pub async fn load_structural_diff_flow(
+    model: Entity<AppState>,
+    requested_path: Option<String>,
+    cx: &mut AsyncWindowContext,
+) {
+    let request = model
+        .read_with(cx, |state, _| {
+            let cache = state.cache.clone();
+            let detail = state.active_detail()?.clone();
+            let detail_key = state.active_pr_key.clone()?;
+            let selected_path = requested_path
+                .clone()
+                .or_else(|| state.selected_file_path.clone())
+                .or_else(|| detail.files.first().map(|file| file.path.clone()))?;
+            let selected_file = detail
+                .files
+                .iter()
+                .find(|file| file.path == selected_path)
+                .cloned()?;
+            let parsed = find_parsed_diff_file(&detail.parsed_diff, &selected_file.path).cloned();
+            let request = build_structural_diff_request(&detail, &selected_file, parsed.as_ref())?;
+            let already_loaded = state
+                .detail_states
+                .get(&detail_key)
+                .and_then(|detail_state| detail_state.structural_diff_states.get(&request.path))
+                .map(|state| {
+                    state.request_key.as_deref() == Some(request.request_key.as_str())
+                        && (state.loading || state.diff.is_some())
+                })
+                .unwrap_or(false);
+
+            Some((
+                cache,
+                detail_key,
+                detail.repository.clone(),
+                request,
+                already_loaded,
+            ))
+        })
+        .ok()
+        .flatten();
+
+    let Some((cache, detail_key, repository, request, already_loaded)) = request else {
+        return;
+    };
+
+    if already_loaded {
+        return;
+    }
+
+    model
+        .update(cx, |state, cx| {
+            if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
+                let structural_state = detail_state
+                    .structural_diff_states
+                    .entry(request.path.clone())
+                    .or_default();
+                structural_state.request_key = Some(request.request_key.clone());
+                structural_state.diff = None;
+                structural_state.loading = true;
+                structural_state.error = None;
+            }
+            cx.notify();
+        })
+        .ok();
+
+    let result = cx
+        .background_executor()
+        .spawn({
+            let cache = cache.clone();
+            let repository = repository.clone();
+            let request = request.clone();
+            async move {
+                let old_text = load_structural_side_text(
+                    cache.as_ref(),
+                    repository.as_str(),
+                    &request.old_side,
+                )?;
+                let new_text = load_structural_side_text(
+                    cache.as_ref(),
+                    repository.as_str(),
+                    &request.new_side,
+                )?;
+                let files = run_difftastic_json_for_texts(
+                    request.old_side.path.as_str(),
+                    old_text.as_str(),
+                    request.new_side.path.as_str(),
+                    new_text.as_str(),
+                    &DifftasticSidecarOptions::default(),
+                )?;
+                let file = files
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| "difftastic did not return a file result.".to_string())?;
+                Ok::<_, String>(adapt_difftastic_file(
+                    &file,
+                    old_text.as_str(),
+                    new_text.as_str(),
+                    request.path.clone(),
+                    request.previous_path.clone(),
+                    &DifftasticAdaptOptions { context_lines: 3 },
+                ))
+            }
+        })
+        .await;
+
+    model
+        .update(cx, |state, cx| {
+            let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
+                return;
+            };
+            let structural_state = detail_state
+                .structural_diff_states
+                .entry(request.path.clone())
+                .or_default();
+            if structural_state.request_key.as_deref() != Some(request.request_key.as_str()) {
+                return;
+            }
+
+            structural_state.loading = false;
+            match result {
+                Ok(diff) => {
+                    structural_state.diff = Some(Arc::new(diff));
+                    structural_state.error = None;
+                }
+                Err(error) => {
+                    structural_state.diff = None;
+                    structural_state.error = Some(error);
                 }
             }
 
@@ -4799,6 +4983,22 @@ struct FileContentRequest {
     request_key: String,
 }
 
+#[derive(Clone)]
+struct StructuralDiffRequest {
+    path: String,
+    previous_path: Option<String>,
+    old_side: StructuralDiffSideRequest,
+    new_side: StructuralDiffSideRequest,
+    request_key: String,
+}
+
+#[derive(Clone)]
+struct StructuralDiffSideRequest {
+    path: String,
+    reference: String,
+    fetch: bool,
+}
+
 fn build_file_content_request(
     detail: &PullRequestDetail,
     file: &PullRequestFile,
@@ -4848,6 +5048,80 @@ fn build_file_content_request(
         local_reference,
         prefer_worktree,
     })
+}
+
+fn build_structural_diff_request(
+    detail: &PullRequestDetail,
+    file: &PullRequestFile,
+    parsed: Option<&ParsedDiffFile>,
+) -> Option<StructuralDiffRequest> {
+    if file.path.is_empty() {
+        return None;
+    }
+
+    let base_reference = detail
+        .base_ref_oid
+        .clone()
+        .unwrap_or_else(|| detail.base_ref_name.clone());
+    let head_reference = detail
+        .head_ref_oid
+        .clone()
+        .unwrap_or_else(|| detail.head_ref_name.clone());
+    if base_reference.is_empty() || head_reference.is_empty() {
+        return None;
+    }
+
+    let previous_path = parsed
+        .and_then(|parsed| parsed.previous_path.clone())
+        .filter(|path| !path.is_empty());
+    let old_path = previous_path.clone().unwrap_or_else(|| file.path.clone());
+    let old_fetch = file.change_type != "ADDED";
+    let new_fetch = file.change_type != "DELETED";
+
+    Some(StructuralDiffRequest {
+        path: file.path.clone(),
+        previous_path,
+        old_side: StructuralDiffSideRequest {
+            path: old_path,
+            reference: base_reference.clone(),
+            fetch: old_fetch,
+        },
+        new_side: StructuralDiffSideRequest {
+            path: file.path.clone(),
+            reference: head_reference.clone(),
+            fetch: new_fetch,
+        },
+        request_key: format!(
+            "{}:{}:{}:{}:{}:{}",
+            detail.updated_at,
+            detail.repository,
+            base_reference,
+            head_reference,
+            file.change_type,
+            file.path
+        ),
+    })
+}
+
+fn load_structural_side_text(
+    cache: &crate::cache::CacheStore,
+    repository: &str,
+    side: &StructuralDiffSideRequest,
+) -> Result<String, String> {
+    if !side.fetch {
+        return Ok(String::new());
+    }
+
+    let document =
+        github::load_pull_request_file_content(cache, repository, &side.reference, &side.path)?;
+    if document.is_binary {
+        return Err(format!(
+            "Structural diff is not available for binary file {}.",
+            side.path
+        ));
+    }
+
+    Ok(document.content.unwrap_or_default())
 }
 
 fn build_head_file_content_request(
@@ -4981,6 +5255,12 @@ fn render_diff_panel(
         .unwrap_or(0);
     let diff_view_state =
         selected_file.map(|file| prepare_diff_view_state(app_state, detail, &file.path));
+    let structural_diff_state = selected_file.and_then(|file| {
+        app_state
+            .active_detail_state()
+            .and_then(|detail_state| detail_state.structural_diff_states.get(&file.path))
+            .cloned()
+    });
     let file_content_state = selected_file.and_then(|file| {
         app_state
             .active_detail_state()
@@ -5082,12 +5362,31 @@ fn render_diff_panel(
                         })
                 } else if center_mode == ReviewCenterMode::AiTour {
                     render_ai_tour_view(state, detail, cx)
+                } else if center_mode == ReviewCenterMode::StructuralDiff {
+                    selected_file
+                        .map(|file| {
+                            render_structural_file_diff(
+                                state,
+                                app_state,
+                                detail,
+                                file,
+                                structural_diff_state.as_ref(),
+                                selected_anchor,
+                                review_stack.clone(),
+                                cx,
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            panel_state_text("No files returned for this pull request.")
+                                .into_any_element()
+                        })
                 } else if let (Some(file), Some(diff_view_state)) = (selected_file, diff_view_state)
                 {
                     render_file_diff(
                         state,
                         file,
                         selected_parsed,
+                        None,
                         file_content_state
                             .as_ref()
                             .and_then(|state| state.prepared.as_ref()),
@@ -5682,16 +5981,15 @@ fn render_ai_tour_semantic_overview(
 ) -> impl IntoElement {
     div()
         .rounded(radius())
-        .bg(bg_overlay())
+        .bg(bg_surface())
         .border_1()
-        .border_color(transparent())
-        .shadow_sm()
-        .overflow_hidden()
-        .child(material_surface("review-map").h(px(50.0)).w_full())
+        .border_color(border_muted())
         .child(
             div()
-                .p(px(20.0))
-                .pb(px(12.0))
+                .px(px(18.0))
+                .py(px(14.0))
+                .border_b(px(1.0))
+                .border_color(border_muted())
                 .flex()
                 .items_start()
                 .justify_between()
@@ -5752,27 +6050,21 @@ fn render_ai_tour_semantic_overview(
                 ),
         )
         .child(
-            div()
-                .px(px(20.0))
-                .pb(px(20.0))
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .children(
-                    tour.sections
-                        .iter()
-                        .enumerate()
-                        .map(|(section_ix, section)| {
-                            render_ai_tour_semantic_overview_row(
-                                tour,
-                                section,
-                                section_ix,
-                                section_ix > 0,
-                                list_state.clone(),
-                                section_targets.clone(),
-                            )
-                        }),
-                ),
+            div().p(px(14.0)).flex().flex_col().gap(px(8.0)).children(
+                tour.sections
+                    .iter()
+                    .enumerate()
+                    .map(|(section_ix, section)| {
+                        render_ai_tour_semantic_overview_row(
+                            tour,
+                            section,
+                            section_ix,
+                            section_ix > 0,
+                            list_state.clone(),
+                            section_targets.clone(),
+                        )
+                    }),
+            ),
         )
 }
 
@@ -5785,7 +6077,6 @@ fn render_ai_tour_semantic_overview_row(
     section_targets: Arc<Vec<(usize, usize)>>,
 ) -> impl IntoElement {
     let metrics = ai_tour_section_metrics(tour, section);
-    let material_key = format!("tour-section-{}-{}", section_ix, section.title);
     let target_index = section_targets
         .iter()
         .find(|(candidate_ix, _)| *candidate_ix == section_ix)
@@ -5795,21 +6086,18 @@ fn render_ai_tour_semantic_overview_row(
     div()
         .min_h(px(72.0))
         .rounded(radius_sm())
-        .bg(bg_surface())
+        .bg(bg_overlay())
         .border_1()
         .border_color(border_muted())
-        .shadow_sm()
-        .overflow_hidden()
         .flex()
         .cursor_pointer()
-        .hover(|style| style.bg(bg_overlay()).border_color(border_default()))
+        .hover(|style| style.bg(bg_subtle()).border_color(border_default()))
         .on_mouse_down(MouseButton::Left, move |_, _, _| {
             list_state.scroll_to(ListOffset {
                 item_ix: target_index,
                 offset_in_item: px(0.0),
             });
         })
-        .child(material_surface(&material_key).w(px(10.0)).flex_shrink_0())
         .child(
             div()
                 .flex()
@@ -6351,7 +6639,7 @@ fn workspace_mode_button(
         "workspace-mode-button-{label}-{}",
         usize::from(active)
     ));
-    let focus_border_transparent = with_alpha(focus_border(), 0.0);
+    let border_muted_transparent = with_alpha(border_muted(), 0.0);
 
     div()
         .px(px(8.0))
@@ -6359,12 +6647,12 @@ fn workspace_mode_button(
         .rounded(radius_sm())
         .border_1()
         .border_color(if active {
-            focus_border()
+            border_muted()
         } else {
             transparent()
         })
         .bg(if active {
-            diff_line_hover_bg()
+            control_selected_bg()
         } else {
             transparent()
         })
@@ -6374,8 +6662,8 @@ fn workspace_mode_button(
         .cursor_pointer()
         .hover(|style| {
             style
-                .bg(diff_line_hover_bg())
-                .border_color(focus_border())
+                .bg(control_button_hover_bg())
+                .border_color(border_muted())
                 .text_color(fg_emphasis())
         })
         .on_mouse_down(MouseButton::Left, on_click)
@@ -6385,17 +6673,71 @@ fn workspace_mode_button(
             Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
             move |el, delta| {
                 let progress = selected_reveal_progress(active, delta);
-                el.bg(mix_rgba(transparent(), diff_line_hover_bg(), progress))
-                    .border_color(mix_rgba(focus_border_transparent, focus_border(), progress))
+                el.bg(mix_rgba(transparent(), control_selected_bg(), progress))
+                    .border_color(mix_rgba(border_muted_transparent, border_muted(), progress))
                     .text_color(mix_rgba(fg_muted(), fg_emphasis(), progress))
             },
         )
+}
+
+fn render_structural_file_diff(
+    state: &Entity<AppState>,
+    app_state: &AppState,
+    detail: &PullRequestDetail,
+    file: &PullRequestFile,
+    structural_state: Option<&StructuralDiffFileState>,
+    selected_anchor: Option<&DiffAnchor>,
+    review_stack: Arc<ReviewStack>,
+    cx: &App,
+) -> AnyElement {
+    let Some(structural_state) = structural_state else {
+        return render_diff_state_row("Preparing structural diff with difftastic...")
+            .into_any_element();
+    };
+
+    if structural_state.loading {
+        return render_diff_state_row("Building structural diff with difftastic...")
+            .into_any_element();
+    }
+
+    if let Some(error) = structural_state.error.as_deref() {
+        return render_diff_state_row(format!("Structural diff unavailable: {error}"))
+            .into_any_element();
+    }
+
+    let Some(structural) = structural_state.diff.as_ref() else {
+        return render_diff_state_row("Preparing structural diff with difftastic...")
+            .into_any_element();
+    };
+
+    let request_key = structural_state
+        .request_key
+        .as_deref()
+        .unwrap_or("structural");
+    let diff_view_state =
+        prepare_structural_diff_view_state(app_state, detail, &file.path, request_key, structural);
+    let parsed_override = Arc::new(structural.parsed_file.clone());
+
+    render_file_diff(
+        state,
+        file,
+        Some(&structural.parsed_file),
+        Some(parsed_override),
+        None,
+        selected_anchor,
+        diff_view_state,
+        review_stack,
+        None,
+        cx,
+    )
+    .into_any_element()
 }
 
 fn render_file_diff(
     state: &Entity<AppState>,
     file: &PullRequestFile,
     parsed: Option<&ParsedDiffFile>,
+    parsed_override: Option<Arc<ParsedDiffFile>>,
     prepared_file: Option<&PreparedFileContent>,
     selected_anchor: Option<&DiffAnchor>,
     diff_view_state: DiffFileViewState,
@@ -6411,8 +6753,10 @@ fn render_file_diff(
         .active_review_session()
         .map(|session| {
             session.waymarks.iter().any(|waymark| {
-                waymark.location.mode == ReviewCenterMode::SemanticDiff
-                    && waymark.location.file_path == file.path
+                matches!(
+                    waymark.location.mode,
+                    ReviewCenterMode::SemanticDiff | ReviewCenterMode::StructuralDiff
+                ) && waymark.location.file_path == file.path
             })
         })
         .unwrap_or(false);
@@ -6489,6 +6833,7 @@ fn render_file_diff(
                         rows,
                         gutter_layout,
                         parsed_file_index,
+                        parsed_override,
                         highlighted_hunks,
                         file_lsp_context,
                         selected_anchor,
@@ -6507,6 +6852,7 @@ fn render_virtualized_diff_rows(
     rows: Arc<Vec<DiffRenderRow>>,
     gutter_layout: DiffGutterLayout,
     parsed_file_index: Option<usize>,
+    parsed_file_override: Option<Arc<ParsedDiffFile>>,
     highlighted_hunks: Option<Arc<Vec<Vec<DiffLineHighlight>>>>,
     file_lsp_context: Option<DiffFileLspContext>,
     selected_anchor: Option<DiffAnchor>,
@@ -6525,6 +6871,7 @@ fn render_virtualized_diff_rows(
             &state,
             gutter_layout,
             parsed_file_index,
+            parsed_file_override.as_deref(),
             highlighted_hunks.as_deref(),
             file_lsp_context.as_ref(),
             &rows[row_ix],
@@ -7438,10 +7785,50 @@ fn prepare_diff_view_state_with_key(
     entry.clone()
 }
 
+fn prepare_structural_diff_view_state(
+    app_state: &AppState,
+    detail: &PullRequestDetail,
+    file_path: &str,
+    request_key: &str,
+    structural: &crate::difftastic::AdaptedDifftasticDiffFile,
+) -> DiffFileViewState {
+    let revision = request_key.to_string();
+    let state_key =
+        build_diff_view_state_key(app_state.active_pr_key.as_deref(), "structural", file_path);
+    let mut diff_view_states = app_state.diff_view_states.borrow_mut();
+    let entry = diff_view_states.entry(state_key).or_insert_with(|| {
+        DiffFileViewState::new(
+            Arc::new(build_diff_render_rows_for_parsed_file(
+                detail,
+                file_path,
+                Some(&structural.parsed_file),
+            )),
+            revision.clone(),
+            None,
+            Some(build_adapted_diff_highlights(structural)),
+        )
+    });
+
+    if entry.revision != revision || entry.highlighted_hunks.is_none() {
+        entry.rows = Arc::new(build_diff_render_rows_for_parsed_file(
+            detail,
+            file_path,
+            Some(&structural.parsed_file),
+        ));
+        entry.revision = revision;
+        entry.parsed_file_index = None;
+        entry.highlighted_hunks = Some(build_adapted_diff_highlights(structural));
+        entry.list_state.reset(0);
+    }
+
+    entry.clone()
+}
+
 fn render_virtualized_diff_row(
     state: &Entity<AppState>,
     gutter_layout: DiffGutterLayout,
     parsed_file_index: Option<usize>,
+    parsed_file_override: Option<&ParsedDiffFile>,
     highlighted_hunks: Option<&Vec<Vec<DiffLineHighlight>>>,
     file_lsp_context: Option<&DiffFileLspContext>,
     row: &DiffRenderRow,
@@ -7450,8 +7837,9 @@ fn render_virtualized_diff_row(
 ) -> impl IntoElement {
     let s = state.read(cx);
     let detail = s.active_detail();
-    let parsed_file =
-        parsed_file_index.and_then(|ix| detail.and_then(|detail| detail.parsed_diff.get(ix)));
+    let parsed_file = parsed_file_override.or_else(|| {
+        parsed_file_index.and_then(|ix| detail.and_then(|detail| detail.parsed_diff.get(ix)))
+    });
 
     match row {
         DiffRenderRow::FileCommentsHeader { count } => {
@@ -7594,7 +7982,8 @@ fn render_diff_section_header(label: &str, count: usize) -> impl IntoElement {
         )
 }
 
-fn render_diff_state_row(message: &str) -> impl IntoElement {
+fn render_diff_state_row(message: impl Into<String>) -> impl IntoElement {
+    let message = message.into();
     div()
         .px(px(16.0))
         .py(px(18.0))
@@ -7605,7 +7994,7 @@ fn render_diff_state_row(message: &str) -> impl IntoElement {
             div()
                 .text_size(px(12.0))
                 .text_color(fg_muted())
-                .child(message.to_string()),
+                .child(message),
         )
 }
 
@@ -9398,6 +9787,7 @@ fn render_tour_diff_preview(
                 state,
                 gutter_layout,
                 parsed_file_index,
+                None,
                 highlighted_hunks.as_deref(),
                 file_lsp_context.as_ref(),
                 &rows[*row_ix],

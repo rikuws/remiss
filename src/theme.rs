@@ -274,6 +274,28 @@ pub fn bg_selected() -> Rgba {
     theme_hex(LIGHT_SELECTED, DARK_SELECTED)
 }
 
+pub fn control_track_bg() -> Rgba {
+    match active_theme() {
+        ActiveTheme::Light => bg_inset(),
+        ActiveTheme::Dark => bg_overlay(),
+    }
+}
+
+pub fn control_selected_bg() -> Rgba {
+    match active_theme() {
+        ActiveTheme::Light => bg_surface(),
+        ActiveTheme::Dark => bg_inset(),
+    }
+}
+
+pub fn control_button_bg() -> Rgba {
+    bg_subtle()
+}
+
+pub fn control_button_hover_bg() -> Rgba {
+    bg_emphasis()
+}
+
 pub fn focus() -> Rgba {
     theme_hex(LIGHT_FOCUS, DARK_FOCUS)
 }

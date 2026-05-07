@@ -29,6 +29,7 @@ mod code_tour;
 mod code_tour_background;
 mod command_runner;
 mod diff;
+mod difftastic;
 mod gh;
 mod github;
 mod icons;

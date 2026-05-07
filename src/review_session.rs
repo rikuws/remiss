@@ -15,6 +15,7 @@ const MAX_HISTORY_LOCATIONS: usize = 48;
 pub enum ReviewCenterMode {
     #[default]
     SemanticDiff,
+    StructuralDiff,
     SourceBrowser,
     AiTour,
     Stack,
@@ -24,6 +25,7 @@ impl ReviewCenterMode {
     pub fn label(&self) -> &'static str {
         match self {
             Self::SemanticDiff => "Diff",
+            Self::StructuralDiff => "Structural",
             Self::SourceBrowser => "Source",
             Self::AiTour => "AI Tour",
             Self::Stack => "Stack",
@@ -73,6 +75,12 @@ impl ReviewLocation {
         }
     }
 
+    pub fn from_structural_diff(file_path: impl Into<String>, anchor: Option<DiffAnchor>) -> Self {
+        let mut location = Self::from_diff(file_path, anchor);
+        location.mode = ReviewCenterMode::StructuralDiff;
+        location
+    }
+
     pub fn from_source(
         file_path: impl Into<String>,
         line: Option<usize>,
@@ -107,24 +115,25 @@ impl ReviewLocation {
 
     pub fn stable_key(&self) -> String {
         match self.mode {
-            ReviewCenterMode::SemanticDiff | ReviewCenterMode::AiTour | ReviewCenterMode::Stack => {
-                format!(
-                    "diff:{}:{}:{}:{}",
-                    self.file_path,
-                    self.anchor
-                        .as_ref()
-                        .and_then(|anchor| anchor.hunk_header.as_deref())
-                        .unwrap_or(""),
-                    self.anchor
-                        .as_ref()
-                        .and_then(|anchor| anchor.line)
-                        .unwrap_or_default(),
-                    self.anchor
-                        .as_ref()
-                        .and_then(|anchor| anchor.thread_id.as_deref())
-                        .unwrap_or(""),
-                )
-            }
+            ReviewCenterMode::SemanticDiff
+            | ReviewCenterMode::StructuralDiff
+            | ReviewCenterMode::AiTour
+            | ReviewCenterMode::Stack => format!(
+                "diff:{}:{}:{}:{}",
+                self.file_path,
+                self.anchor
+                    .as_ref()
+                    .and_then(|anchor| anchor.hunk_header.as_deref())
+                    .unwrap_or(""),
+                self.anchor
+                    .as_ref()
+                    .and_then(|anchor| anchor.line)
+                    .unwrap_or_default(),
+                self.anchor
+                    .as_ref()
+                    .and_then(|anchor| anchor.thread_id.as_deref())
+                    .unwrap_or(""),
+            ),
             ReviewCenterMode::SourceBrowser => format!(
                 "source:{}:{}",
                 self.file_path,
@@ -251,6 +260,7 @@ impl ReviewSessionState {
             ReviewCenterMode::AiTour => ReviewCenterMode::AiTour,
             ReviewCenterMode::Stack => ReviewCenterMode::Stack,
             ReviewCenterMode::SourceBrowser => ReviewCenterMode::SourceBrowser,
+            ReviewCenterMode::StructuralDiff => ReviewCenterMode::StructuralDiff,
             ReviewCenterMode::SemanticDiff => ReviewCenterMode::SemanticDiff,
         };
         let stack_diff_mode = if center_mode == ReviewCenterMode::Stack
@@ -331,7 +341,9 @@ fn default_false() -> bool {
 
 pub fn sanitize_code_lens_mode(mode: ReviewCenterMode) -> ReviewCenterMode {
     match mode {
-        ReviewCenterMode::SemanticDiff | ReviewCenterMode::SourceBrowser => mode,
+        ReviewCenterMode::SemanticDiff
+        | ReviewCenterMode::StructuralDiff
+        | ReviewCenterMode::SourceBrowser => mode,
         ReviewCenterMode::AiTour | ReviewCenterMode::Stack => ReviewCenterMode::SemanticDiff,
     }
 }

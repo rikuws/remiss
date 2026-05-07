@@ -2679,7 +2679,7 @@ pub fn surface_tab(
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let animation_id = SharedString::from(format!("surface-tab-{label}-{}", usize::from(active)));
-    let focus_border_transparent = with_alpha(focus_border(), 0.0);
+    let border_muted_transparent = with_alpha(border_muted(), 0.0);
 
     div()
         .px(px(14.0))
@@ -2688,17 +2688,19 @@ pub fn surface_tab(
         .text_size(px(12.0))
         .border_1()
         .border_color(if active {
-            focus_border()
+            border_muted()
         } else {
             transparent()
         })
         .cursor_pointer()
-        .when(active, |el| el.bg(bg_selected()).text_color(fg_emphasis()))
+        .when(active, |el| {
+            el.bg(control_selected_bg()).text_color(fg_emphasis())
+        })
         .when(!active, |el| el.text_color(fg_muted()))
         .hover(|style| {
             style
-                .bg(hover_bg())
-                .border_color(focus_border())
+                .bg(control_button_hover_bg())
+                .border_color(border_muted())
                 .text_color(fg_emphasis())
         })
         .on_mouse_down(MouseButton::Left, on_click)
@@ -2708,8 +2710,8 @@ pub fn surface_tab(
             Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
             move |el, delta| {
                 let progress = selected_reveal_progress(active, delta);
-                el.bg(mix_rgba(transparent(), bg_selected(), progress))
-                    .border_color(mix_rgba(focus_border_transparent, focus_border(), progress))
+                el.bg(mix_rgba(transparent(), control_selected_bg(), progress))
+                    .border_color(mix_rgba(border_muted_transparent, border_muted(), progress))
                     .text_color(mix_rgba(fg_muted(), fg_emphasis(), progress))
             },
         )

@@ -161,6 +161,14 @@ pub fn find_parsed_diff_file_with_index<'a>(
 
 pub fn build_diff_render_rows(detail: &PullRequestDetail, file_path: &str) -> Vec<DiffRenderRow> {
     let parsed = find_parsed_diff_file(&detail.parsed_diff, file_path);
+    build_diff_render_rows_for_parsed_file(detail, file_path, parsed)
+}
+
+pub fn build_diff_render_rows_for_parsed_file(
+    detail: &PullRequestDetail,
+    file_path: &str,
+    parsed: Option<&ParsedDiffFile>,
+) -> Vec<DiffRenderRow> {
     let (file_comment_threads, inline_thread_map, outdated_threads) =
         index_review_threads(&detail.review_threads, file_path);
 
