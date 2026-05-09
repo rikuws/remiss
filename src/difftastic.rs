@@ -23,6 +23,31 @@ pub struct DifftasticAdaptOptions {
 pub struct AdaptedDifftasticDiffFile {
     pub parsed_file: ParsedDiffFile,
     pub emphasis_hunks: Vec<Vec<Vec<DiffInlineRange>>>,
+    pub side_by_side_hunks: Vec<AdaptedDifftasticSideBySideHunk>,
+    pub side_by_side_line_map: Vec<Vec<Option<AdaptedDifftasticSideBySideLineMap>>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AdaptedDifftasticSideBySideHunk {
+    pub rows: Vec<AdaptedDifftasticSideBySideRow>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AdaptedDifftasticSideBySideRow {
+    pub left: Option<AdaptedDifftasticSideBySideCell>,
+    pub right: Option<AdaptedDifftasticSideBySideCell>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AdaptedDifftasticSideBySideCell {
+    pub line: ParsedDiffLine,
+    pub emphasis_ranges: Vec<DiffInlineRange>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AdaptedDifftasticSideBySideLineMap {
+    pub row_index: usize,
+    pub primary: bool,
 }
 
 pub fn run_difftastic_for_texts(
@@ -51,8 +76,8 @@ pub fn adapt_difftastic_file(
     let new_lines = source_lines(new_text);
     let path = path.into();
 
-    let (hunks, emphasis_hunks) = match file.status {
-        LibraryDifftasticStatus::Unchanged => (Vec::new(), Vec::new()),
+    let adapted_hunks = match file.status {
+        LibraryDifftasticStatus::Unchanged => BuiltAdaptedHunks::default(),
         LibraryDifftasticStatus::Created => build_created_hunk(&new_lines),
         LibraryDifftasticStatus::Deleted => build_deleted_hunk(&old_lines),
         LibraryDifftasticStatus::Changed => {
@@ -64,10 +89,12 @@ pub fn adapt_difftastic_file(
         parsed_file: ParsedDiffFile {
             path,
             previous_path,
-            hunks,
+            hunks: adapted_hunks.hunks,
             is_binary: false,
         },
-        emphasis_hunks,
+        emphasis_hunks: adapted_hunks.emphasis_hunks,
+        side_by_side_hunks: adapted_hunks.side_by_side_hunks,
+        side_by_side_line_map: adapted_hunks.side_by_side_line_map,
     }
 }
 
@@ -108,7 +135,7 @@ fn build_changed_hunks(
     old_lines: &[&str],
     new_lines: &[&str],
     options: &DifftasticAdaptOptions,
-) -> (Vec<ParsedDiffHunk>, Vec<Vec<Vec<DiffInlineRange>>>) {
+) -> BuiltAdaptedHunks {
     let aligned_index = file
         .aligned_lines
         .iter()
@@ -117,9 +144,10 @@ fn build_changed_hunks(
         .map(|(ix, pair)| (pair, ix))
         .collect::<HashMap<_, _>>();
 
-    file.chunks
-        .iter()
-        .filter_map(|chunk| {
+    let mut built_hunks = BuiltAdaptedHunks::default();
+
+    for chunk in &file.chunks {
+        if let Some(built_hunk) = {
             let rows = expanded_chunk_rows(
                 chunk.lines.as_slice(),
                 file.aligned_lines.as_slice(),
@@ -127,8 +155,19 @@ fn build_changed_hunks(
                 options,
             );
             build_hunk_from_rows(rows.as_slice(), old_lines, new_lines)
-        })
-        .unzip()
+        } {
+            built_hunks.hunks.push(built_hunk.hunk);
+            built_hunks.emphasis_hunks.push(built_hunk.emphasis);
+            built_hunks
+                .side_by_side_hunks
+                .push(built_hunk.side_by_side_hunk);
+            built_hunks
+                .side_by_side_line_map
+                .push(built_hunk.side_by_side_line_map);
+        }
+    }
+
+    built_hunks
 }
 
 fn expanded_chunk_rows(
@@ -189,20 +228,21 @@ fn build_hunk_from_rows(
     rows: &[AdaptRow],
     old_lines: &[&str],
     new_lines: &[&str],
-) -> Option<(ParsedDiffHunk, Vec<Vec<DiffInlineRange>>)> {
+) -> Option<BuiltAdaptedHunk> {
     if rows.is_empty() {
         return None;
     }
 
     let mut lines = Vec::new();
     let mut emphasis = Vec::new();
+    let mut side_by_side_rows = Vec::new();
+    let mut side_by_side_line_map = Vec::new();
 
     for row in rows {
         match (&row.lhs, &row.rhs) {
             (Some(lhs), Some(rhs)) if row.changed => {
-                push_adapted_line(
-                    &mut lines,
-                    &mut emphasis,
+                let row_index = side_by_side_rows.len();
+                let (left_line, left_emphasis) = adapted_line(
                     DiffLineKind::Deletion,
                     "-",
                     Some(lhs.line_number),
@@ -210,9 +250,7 @@ fn build_hunk_from_rows(
                     old_lines,
                     &lhs.changes,
                 );
-                push_adapted_line(
-                    &mut lines,
-                    &mut emphasis,
+                let (right_line, right_emphasis) = adapted_line(
                     DiffLineKind::Addition,
                     "+",
                     None,
@@ -220,21 +258,75 @@ fn build_hunk_from_rows(
                     new_lines,
                     &rhs.changes,
                 );
+                lines.push(left_line.clone());
+                emphasis.push(left_emphasis.clone());
+                side_by_side_line_map.push(Some(AdaptedDifftasticSideBySideLineMap {
+                    row_index,
+                    primary: true,
+                }));
+
+                lines.push(right_line.clone());
+                emphasis.push(right_emphasis.clone());
+                side_by_side_line_map.push(Some(AdaptedDifftasticSideBySideLineMap {
+                    row_index,
+                    primary: false,
+                }));
+
+                side_by_side_rows.push(AdaptedDifftasticSideBySideRow {
+                    left: Some(AdaptedDifftasticSideBySideCell {
+                        line: left_line,
+                        emphasis_ranges: left_emphasis,
+                    }),
+                    right: Some(AdaptedDifftasticSideBySideCell {
+                        line: right_line,
+                        emphasis_ranges: right_emphasis,
+                    }),
+                });
             }
             (Some(lhs), Some(rhs)) => {
-                lines.push(ParsedDiffLine {
+                let row_index = side_by_side_rows.len();
+                let context_line = ParsedDiffLine {
                     kind: DiffLineKind::Context,
                     prefix: " ".to_string(),
                     left_line_number: Some(ui_line_number(lhs.line_number)),
                     right_line_number: Some(ui_line_number(rhs.line_number)),
                     content: line_text(old_lines, lhs.line_number),
-                });
+                };
+                let left_line = ParsedDiffLine {
+                    kind: DiffLineKind::Context,
+                    prefix: " ".to_string(),
+                    left_line_number: Some(ui_line_number(lhs.line_number)),
+                    right_line_number: None,
+                    content: line_text(old_lines, lhs.line_number),
+                };
+                let right_line = ParsedDiffLine {
+                    kind: DiffLineKind::Context,
+                    prefix: " ".to_string(),
+                    left_line_number: None,
+                    right_line_number: Some(ui_line_number(rhs.line_number)),
+                    content: line_text(new_lines, rhs.line_number),
+                };
+
+                lines.push(context_line);
                 emphasis.push(Vec::new());
+                side_by_side_line_map.push(Some(AdaptedDifftasticSideBySideLineMap {
+                    row_index,
+                    primary: true,
+                }));
+                side_by_side_rows.push(AdaptedDifftasticSideBySideRow {
+                    left: Some(AdaptedDifftasticSideBySideCell {
+                        line: left_line,
+                        emphasis_ranges: Vec::new(),
+                    }),
+                    right: Some(AdaptedDifftasticSideBySideCell {
+                        line: right_line,
+                        emphasis_ranges: Vec::new(),
+                    }),
+                });
             }
             (Some(lhs), None) => {
-                push_adapted_line(
-                    &mut lines,
-                    &mut emphasis,
+                let row_index = side_by_side_rows.len();
+                let (line, line_emphasis) = adapted_line(
                     DiffLineKind::Deletion,
                     "-",
                     Some(lhs.line_number),
@@ -242,11 +334,23 @@ fn build_hunk_from_rows(
                     old_lines,
                     &lhs.changes,
                 );
+                lines.push(line.clone());
+                emphasis.push(line_emphasis.clone());
+                side_by_side_line_map.push(Some(AdaptedDifftasticSideBySideLineMap {
+                    row_index,
+                    primary: true,
+                }));
+                side_by_side_rows.push(AdaptedDifftasticSideBySideRow {
+                    left: Some(AdaptedDifftasticSideBySideCell {
+                        line,
+                        emphasis_ranges: line_emphasis,
+                    }),
+                    right: None,
+                });
             }
             (None, Some(rhs)) => {
-                push_adapted_line(
-                    &mut lines,
-                    &mut emphasis,
+                let row_index = side_by_side_rows.len();
+                let (line, line_emphasis) = adapted_line(
                     DiffLineKind::Addition,
                     "+",
                     None,
@@ -254,6 +358,19 @@ fn build_hunk_from_rows(
                     new_lines,
                     &rhs.changes,
                 );
+                lines.push(line.clone());
+                emphasis.push(line_emphasis.clone());
+                side_by_side_line_map.push(Some(AdaptedDifftasticSideBySideLineMap {
+                    row_index,
+                    primary: true,
+                }));
+                side_by_side_rows.push(AdaptedDifftasticSideBySideRow {
+                    left: None,
+                    right: Some(AdaptedDifftasticSideBySideCell {
+                        line,
+                        emphasis_ranges: line_emphasis,
+                    }),
+                });
             }
             (None, None) => {}
         }
@@ -263,91 +380,154 @@ fn build_hunk_from_rows(
         return None;
     }
 
-    Some((
-        ParsedDiffHunk {
+    Some(BuiltAdaptedHunk {
+        hunk: ParsedDiffHunk {
             header: hunk_header(lines.as_slice()),
             lines,
         },
         emphasis,
-    ))
+        side_by_side_hunk: AdaptedDifftasticSideBySideHunk {
+            rows: side_by_side_rows,
+        },
+        side_by_side_line_map,
+    })
 }
 
-fn build_created_hunk(new_lines: &[&str]) -> (Vec<ParsedDiffHunk>, Vec<Vec<Vec<DiffInlineRange>>>) {
+#[derive(Default)]
+struct BuiltAdaptedHunks {
+    hunks: Vec<ParsedDiffHunk>,
+    emphasis_hunks: Vec<Vec<Vec<DiffInlineRange>>>,
+    side_by_side_hunks: Vec<AdaptedDifftasticSideBySideHunk>,
+    side_by_side_line_map: Vec<Vec<Option<AdaptedDifftasticSideBySideLineMap>>>,
+}
+
+struct BuiltAdaptedHunk {
+    hunk: ParsedDiffHunk,
+    emphasis: Vec<Vec<DiffInlineRange>>,
+    side_by_side_hunk: AdaptedDifftasticSideBySideHunk,
+    side_by_side_line_map: Vec<Option<AdaptedDifftasticSideBySideLineMap>>,
+}
+
+fn build_created_hunk(new_lines: &[&str]) -> BuiltAdaptedHunks {
     if new_lines.is_empty() {
-        return (Vec::new(), Vec::new());
+        return BuiltAdaptedHunks::default();
     }
 
-    let lines = new_lines
-        .iter()
-        .enumerate()
-        .map(|(ix, line)| ParsedDiffLine {
+    let mut lines = Vec::with_capacity(new_lines.len());
+    let mut side_by_side_rows = Vec::with_capacity(new_lines.len());
+    let mut side_by_side_line_map = Vec::with_capacity(new_lines.len());
+
+    for (ix, line) in new_lines.iter().enumerate() {
+        let row_index = side_by_side_rows.len();
+        let line = ParsedDiffLine {
             kind: DiffLineKind::Addition,
             prefix: "+".to_string(),
             left_line_number: None,
             right_line_number: Some((ix + 1) as i64),
             content: (*line).to_string(),
-        })
-        .collect::<Vec<_>>();
-    let emphasis = vec![Vec::new(); lines.len()];
+        };
 
-    (
-        vec![ParsedDiffHunk {
-            header: hunk_header(lines.as_slice()),
-            lines,
-        }],
-        vec![emphasis],
-    )
-}
-
-fn build_deleted_hunk(old_lines: &[&str]) -> (Vec<ParsedDiffHunk>, Vec<Vec<Vec<DiffInlineRange>>>) {
-    if old_lines.is_empty() {
-        return (Vec::new(), Vec::new());
+        lines.push(line.clone());
+        side_by_side_line_map.push(Some(AdaptedDifftasticSideBySideLineMap {
+            row_index,
+            primary: true,
+        }));
+        side_by_side_rows.push(AdaptedDifftasticSideBySideRow {
+            left: None,
+            right: Some(AdaptedDifftasticSideBySideCell {
+                line,
+                emphasis_ranges: Vec::new(),
+            }),
+        });
     }
 
-    let lines = old_lines
-        .iter()
-        .enumerate()
-        .map(|(ix, line)| ParsedDiffLine {
+    let emphasis = vec![Vec::new(); lines.len()];
+    let hunk = ParsedDiffHunk {
+        header: hunk_header(lines.as_slice()),
+        lines,
+    };
+
+    BuiltAdaptedHunks {
+        hunks: vec![hunk],
+        emphasis_hunks: vec![emphasis],
+        side_by_side_hunks: vec![AdaptedDifftasticSideBySideHunk {
+            rows: side_by_side_rows,
+        }],
+        side_by_side_line_map: vec![side_by_side_line_map],
+    }
+}
+
+fn build_deleted_hunk(old_lines: &[&str]) -> BuiltAdaptedHunks {
+    if old_lines.is_empty() {
+        return BuiltAdaptedHunks::default();
+    }
+
+    let mut lines = Vec::with_capacity(old_lines.len());
+    let mut side_by_side_rows = Vec::with_capacity(old_lines.len());
+    let mut side_by_side_line_map = Vec::with_capacity(old_lines.len());
+
+    for (ix, line) in old_lines.iter().enumerate() {
+        let row_index = side_by_side_rows.len();
+        let line = ParsedDiffLine {
             kind: DiffLineKind::Deletion,
             prefix: "-".to_string(),
             left_line_number: Some((ix + 1) as i64),
             right_line_number: None,
             content: (*line).to_string(),
-        })
-        .collect::<Vec<_>>();
-    let emphasis = vec![Vec::new(); lines.len()];
+        };
 
-    (
-        vec![ParsedDiffHunk {
-            header: hunk_header(lines.as_slice()),
-            lines,
+        lines.push(line.clone());
+        side_by_side_line_map.push(Some(AdaptedDifftasticSideBySideLineMap {
+            row_index,
+            primary: true,
+        }));
+        side_by_side_rows.push(AdaptedDifftasticSideBySideRow {
+            left: Some(AdaptedDifftasticSideBySideCell {
+                line,
+                emphasis_ranges: Vec::new(),
+            }),
+            right: None,
+        });
+    }
+
+    let emphasis = vec![Vec::new(); lines.len()];
+    let hunk = ParsedDiffHunk {
+        header: hunk_header(lines.as_slice()),
+        lines,
+    };
+
+    BuiltAdaptedHunks {
+        hunks: vec![hunk],
+        emphasis_hunks: vec![emphasis],
+        side_by_side_hunks: vec![AdaptedDifftasticSideBySideHunk {
+            rows: side_by_side_rows,
         }],
-        vec![emphasis],
-    )
+        side_by_side_line_map: vec![side_by_side_line_map],
+    }
 }
 
-fn push_adapted_line(
-    lines: &mut Vec<ParsedDiffLine>,
-    emphasis: &mut Vec<Vec<DiffInlineRange>>,
+fn adapted_line(
     kind: DiffLineKind,
     prefix: &str,
     left_line_number: Option<u32>,
     right_line_number: Option<u32>,
     source_lines: &[&str],
     changes: &[DifftasticChange],
-) {
+) -> (ParsedDiffLine, Vec<DiffInlineRange>) {
     let source_line_number = left_line_number.or(right_line_number).unwrap_or(0);
     let content = line_text(source_lines, source_line_number);
     let ranges = changes_to_ranges(content.as_str(), changes);
 
-    lines.push(ParsedDiffLine {
-        kind,
-        prefix: prefix.to_string(),
-        left_line_number: left_line_number.map(ui_line_number),
-        right_line_number: right_line_number.map(ui_line_number),
-        content,
-    });
-    emphasis.push(ranges);
+    (
+        ParsedDiffLine {
+            kind,
+            prefix: prefix.to_string(),
+            left_line_number: left_line_number.map(ui_line_number),
+            right_line_number: right_line_number.map(ui_line_number),
+            content,
+        },
+        ranges,
+    )
 }
 
 fn changes_to_ranges(line: &str, changes: &[DifftasticChange]) -> Vec<DiffInlineRange> {
@@ -622,6 +802,34 @@ mod tests {
                 }
             ]
         );
+
+        assert_eq!(adapted.side_by_side_hunks.len(), 1);
+        assert_eq!(adapted.side_by_side_hunks[0].rows.len(), 1);
+        let row = &adapted.side_by_side_hunks[0].rows[0];
+        let left = row.left.as_ref().expect("changed row has a left side");
+        let right = row.right.as_ref().expect("changed row has a right side");
+        assert_eq!(left.line.kind, DiffLineKind::Deletion);
+        assert_eq!(left.line.left_line_number, Some(1));
+        assert_eq!(left.line.content, "foo(gsub(\"bad\", \"good\", x))");
+        assert_eq!(right.line.kind, DiffLineKind::Addition);
+        assert_eq!(right.line.right_line_number, Some(1));
+        assert_eq!(
+            right.line.content,
+            "foo(stringr::str_replace(\"bad\", \"good\", x,))"
+        );
+        assert_eq!(
+            adapted.side_by_side_line_map[0],
+            vec![
+                Some(AdaptedDifftasticSideBySideLineMap {
+                    row_index: 0,
+                    primary: true
+                }),
+                Some(AdaptedDifftasticSideBySideLineMap {
+                    row_index: 0,
+                    primary: false
+                })
+            ]
+        );
     }
 
     #[test]
@@ -653,6 +861,15 @@ mod tests {
             .lines
             .iter()
             .all(|line| line.kind == DiffLineKind::Addition));
+        assert_eq!(adapted.side_by_side_hunks[0].rows.len(), 2);
+        assert!(adapted.side_by_side_hunks[0].rows[0].left.is_none());
+        assert_eq!(
+            adapted.side_by_side_hunks[0].rows[0]
+                .right
+                .as_ref()
+                .map(|cell| cell.line.content.as_str()),
+            Some("fn main() {}")
+        );
     }
 
     #[test]
@@ -701,6 +918,14 @@ mod tests {
                 column_end: 8
             }]
         );
+        assert!(adapted.side_by_side_hunks[0].rows[0].left.is_none());
+        assert_eq!(
+            adapted.side_by_side_hunks[0].rows[0]
+                .right
+                .as_ref()
+                .map(|cell| cell.line.right_line_number),
+            Some(Some(2))
+        );
     }
 
     #[test]
@@ -723,6 +948,23 @@ mod tests {
         assert_eq!(hunk.lines[2].right_line_number, Some(2));
         assert_eq!(hunk.lines[2].content, "unchanged()");
         assert!(adapted.emphasis_hunks[0][2].is_empty());
+
+        assert_eq!(adapted.side_by_side_hunks[0].rows.len(), 2);
+        let context_row = &adapted.side_by_side_hunks[0].rows[1];
+        assert_eq!(
+            context_row
+                .left
+                .as_ref()
+                .map(|cell| cell.line.content.as_str()),
+            Some("unchanged()")
+        );
+        assert_eq!(
+            context_row
+                .right
+                .as_ref()
+                .map(|cell| cell.line.content.as_str()),
+            Some("unchanged()")
+        );
     }
 
     #[test]

@@ -5382,6 +5382,7 @@ fn render_diff_panel(
                         file,
                         selected_parsed,
                         None,
+                        None,
                         file_content_state
                             .as_ref()
                             .and_then(|state| state.prepared.as_ref()),
@@ -6718,6 +6719,7 @@ fn render_structural_file_diff(
         file,
         Some(&structural.parsed_file),
         Some(parsed_override),
+        Some(structural.clone()),
         None,
         selected_anchor,
         diff_view_state,
@@ -6733,6 +6735,7 @@ fn render_file_diff(
     file: &PullRequestFile,
     parsed: Option<&ParsedDiffFile>,
     parsed_override: Option<Arc<ParsedDiffFile>>,
+    structural_side_by_side: Option<Arc<crate::difftastic::AdaptedDifftasticDiffFile>>,
     prepared_file: Option<&PreparedFileContent>,
     selected_anchor: Option<&DiffAnchor>,
     diff_view_state: DiffFileViewState,
@@ -6770,6 +6773,7 @@ fn render_file_diff(
         parsed,
         prepared_file.as_ref(),
         &rows,
+        structural_side_by_side.as_deref(),
         stack_visibility.as_ref(),
     );
 
@@ -6829,15 +6833,14 @@ fn render_file_diff(
                         gutter_layout,
                         parsed_file_index,
                         parsed_override,
+                        structural_side_by_side,
                         highlighted_hunks,
                         file_lsp_context,
                         selected_anchor,
                         list_state,
                         items,
                     )
-                    .with_sizing_behavior(ListSizingBehavior::Auto)
-                    .flex_grow()
-                    .min_h_0(),
+                    .into_any_element(),
                 ),
         )
 }
@@ -6848,15 +6851,17 @@ fn render_virtualized_diff_rows(
     gutter_layout: DiffGutterLayout,
     parsed_file_index: Option<usize>,
     parsed_file_override: Option<Arc<ParsedDiffFile>>,
+    structural_side_by_side: Option<Arc<crate::difftastic::AdaptedDifftasticDiffFile>>,
     highlighted_hunks: Option<Arc<Vec<Vec<DiffLineHighlight>>>>,
     file_lsp_context: Option<DiffFileLspContext>,
     selected_anchor: Option<DiffAnchor>,
     list_state: ListState,
     items: Arc<Vec<DiffViewItem>>,
-) -> List {
+) -> AnyElement {
     let state = state.clone();
+    let horizontally_scrollable = structural_side_by_side.is_some();
 
-    list(list_state, move |ix, _window, cx| match items[ix] {
+    let rows = list(list_state, move |ix, _window, cx| match items[ix] {
         DiffViewItem::Gap(gap) => render_diff_gap_row(gap, gutter_layout).into_any_element(),
         DiffViewItem::StackLayerEmpty => render_diff_state_row(
             "No changed hunks in this file belong to the selected stack layer.",
@@ -6867,6 +6872,7 @@ fn render_virtualized_diff_rows(
             gutter_layout,
             parsed_file_index,
             parsed_file_override.as_deref(),
+            structural_side_by_side.as_deref(),
             highlighted_hunks.as_deref(),
             file_lsp_context.as_ref(),
             &rows[row_ix],
@@ -6875,6 +6881,24 @@ fn render_virtualized_diff_rows(
         )
         .into_any_element(),
     })
+    .with_sizing_behavior(ListSizingBehavior::Auto)
+    .flex_grow()
+    .min_h_0();
+
+    if horizontally_scrollable {
+        div()
+            .flex()
+            .flex_col()
+            .flex_grow()
+            .min_h_0()
+            .min_w_0()
+            .id("structural-side-by-side-scroll")
+            .overflow_x_scroll()
+            .child(rows.min_w(px(STRUCTURAL_SIDE_BY_SIDE_MIN_WIDTH)))
+            .into_any_element()
+    } else {
+        rows.into_any_element()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -7283,6 +7307,7 @@ fn build_diff_view_items(
     parsed: Option<&ParsedDiffFile>,
     prepared_file: Option<&PreparedFileContent>,
     rows: &[DiffRenderRow],
+    structural_side_by_side: Option<&crate::difftastic::AdaptedDifftasticDiffFile>,
     stack_visibility: Option<&StackFileVisibility>,
 ) -> Vec<DiffViewItem> {
     let mut items = Vec::with_capacity(rows.len() + 4);
@@ -7319,13 +7344,31 @@ fn build_diff_view_items(
             }
         }
 
-        let should_skip = !current_hunk_visible
-            && matches!(
-                row,
-                DiffRenderRow::HunkHeader { .. }
-                    | DiffRenderRow::Line { .. }
-                    | DiffRenderRow::InlineThread { .. }
-            );
+        let non_primary_side_by_side_line = match row {
+            DiffRenderRow::Line {
+                hunk_index,
+                line_index,
+            } => structural_side_by_side
+                .and_then(|side_by_side| {
+                    side_by_side
+                        .side_by_side_line_map
+                        .get(*hunk_index)
+                        .and_then(|lines| lines.get(*line_index))
+                        .and_then(|entry| *entry)
+                })
+                .map(|entry| !entry.primary)
+                .unwrap_or(false),
+            _ => false,
+        };
+
+        let should_skip = non_primary_side_by_side_line
+            || !current_hunk_visible
+                && matches!(
+                    row,
+                    DiffRenderRow::HunkHeader { .. }
+                        | DiffRenderRow::Line { .. }
+                        | DiffRenderRow::InlineThread { .. }
+                );
 
         if !should_skip {
             items.push(DiffViewItem::Row(row_index));
@@ -7824,6 +7867,7 @@ fn render_virtualized_diff_row(
     gutter_layout: DiffGutterLayout,
     parsed_file_index: Option<usize>,
     parsed_file_override: Option<&ParsedDiffFile>,
+    structural_side_by_side: Option<&crate::difftastic::AdaptedDifftasticDiffFile>,
     highlighted_hunks: Option<&Vec<Vec<DiffLineHighlight>>>,
     file_lsp_context: Option<&DiffFileLspContext>,
     row: &DiffRenderRow,
@@ -7908,6 +7952,37 @@ fn render_virtualized_diff_row(
             .and_then(|parsed| {
                 let path = parsed.path.as_str();
                 parsed.hunks.get(*hunk_index).and_then(|hunk| {
+                    if let Some(side_by_side) = structural_side_by_side {
+                        let line_map = side_by_side
+                            .side_by_side_line_map
+                            .get(*hunk_index)
+                            .and_then(|lines| lines.get(*line_index))
+                            .and_then(|entry| *entry)?;
+                        if !line_map.primary {
+                            return Some(div().into_any_element());
+                        }
+
+                        return side_by_side
+                            .side_by_side_hunks
+                            .get(*hunk_index)
+                            .and_then(|side_by_side_hunk| {
+                                side_by_side_hunk.rows.get(line_map.row_index)
+                            })
+                            .map(|side_by_side_row| {
+                                render_structural_side_by_side_diff_row(
+                                    state,
+                                    gutter_layout,
+                                    path,
+                                    hunk.header.as_str(),
+                                    side_by_side_row,
+                                    selected_anchor,
+                                    file_lsp_context,
+                                    cx,
+                                )
+                                .into_any_element()
+                            });
+                    }
+
                     hunk.lines.get(*line_index).map(|line| {
                         let hunk_header = hunk.header.as_str();
                         let highlight = highlighted_hunks
@@ -7949,6 +8024,162 @@ fn render_virtualized_diff_row(
             render_diff_state_row("No parsed diff is available for this file.").into_any_element()
         }
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StructuralDiffSide {
+    Left,
+    Right,
+}
+
+fn render_structural_side_by_side_diff_row(
+    state: &Entity<AppState>,
+    gutter_layout: DiffGutterLayout,
+    file_path: &str,
+    hunk_header: &str,
+    row: &crate::difftastic::AdaptedDifftasticSideBySideRow,
+    selected_anchor: Option<&DiffAnchor>,
+    file_lsp_context: Option<&DiffFileLspContext>,
+    cx: &App,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .w_full()
+        .min_w_0()
+        .bg(diff_editor_bg())
+        .child(render_structural_side_by_side_cell(
+            state,
+            StructuralDiffSide::Left,
+            gutter_layout.reserve_waypoint_slot,
+            file_path,
+            hunk_header,
+            row.left.as_ref(),
+            selected_anchor,
+            None,
+            cx,
+        ))
+        .child(render_structural_side_by_side_cell(
+            state,
+            StructuralDiffSide::Right,
+            gutter_layout.reserve_waypoint_slot,
+            file_path,
+            hunk_header,
+            row.right.as_ref(),
+            selected_anchor,
+            file_lsp_context,
+            cx,
+        ))
+}
+
+fn render_structural_side_by_side_cell(
+    state: &Entity<AppState>,
+    side: StructuralDiffSide,
+    reserve_waypoint_slot: bool,
+    file_path: &str,
+    hunk_header: &str,
+    cell: Option<&crate::difftastic::AdaptedDifftasticSideBySideCell>,
+    selected_anchor: Option<&DiffAnchor>,
+    file_lsp_context: Option<&DiffFileLspContext>,
+    cx: &App,
+) -> AnyElement {
+    let gutter_layout = structural_side_by_side_gutter_layout(side, reserve_waypoint_slot);
+    let content = cell
+        .map(|cell| {
+            let line_lsp_context = (side == StructuralDiffSide::Right)
+                .then(|| build_diff_line_lsp_context(file_lsp_context, &cell.line))
+                .flatten();
+
+            render_reviewable_diff_line(
+                state,
+                gutter_layout,
+                file_path,
+                Some(hunk_header),
+                &cell.line,
+                None,
+                Some(cell.emphasis_ranges.as_slice()),
+                selected_anchor,
+                line_lsp_context.as_ref(),
+                cx,
+            )
+            .into_any_element()
+        })
+        .unwrap_or_else(|| {
+            render_empty_structural_side_by_side_cell(gutter_layout).into_any_element()
+        });
+
+    div()
+        .flex_1()
+        .min_w_0()
+        .when(side == StructuralDiffSide::Left, |el| {
+            el.border_r(px(1.0)).border_color(diff_gutter_separator())
+        })
+        .child(content)
+        .into_any_element()
+}
+
+fn structural_side_by_side_gutter_layout(
+    side: StructuralDiffSide,
+    reserve_waypoint_slot: bool,
+) -> DiffGutterLayout {
+    DiffGutterLayout {
+        show_left_numbers: side == StructuralDiffSide::Left,
+        show_right_numbers: side == StructuralDiffSide::Right,
+        reserve_waypoint_slot,
+    }
+}
+
+fn render_empty_structural_side_by_side_cell(gutter_layout: DiffGutterLayout) -> impl IntoElement {
+    div()
+        .flex()
+        .w_full()
+        .min_w_0()
+        .min_h(px(DIFF_ROW_HEIGHT))
+        .bg(diff_context_bg())
+        .font_family(mono_font_family())
+        .text_size(px(DIFF_CODE_FONT_SIZE))
+        .line_height(px(DIFF_CODE_LINE_HEIGHT))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(transparent())
+        .child(
+            div()
+                .flex()
+                .flex_shrink_0()
+                .w(px(gutter_layout.gutter_width()))
+                .min_h(px(DIFF_ROW_HEIGHT))
+                .bg(diff_context_gutter_bg())
+                .border_r(px(1.0))
+                .border_color(diff_gutter_separator())
+                .when(gutter_layout.reserve_waypoint_slot, |el| {
+                    el.child(div().w(px(DIFF_WAYPOINT_SLOT_WIDTH)).h_full())
+                })
+                .child(
+                    div()
+                        .w(px(DIFF_LINE_NUMBER_COLUMN_WIDTH))
+                        .px(px(DIFF_LINE_NUMBER_CELL_PADDING_X))
+                        .flex()
+                        .justify_end()
+                        .text_size(px(DIFF_LINE_NUMBER_FONT_SIZE))
+                        .line_height(px(DIFF_CODE_LINE_HEIGHT))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(" "),
+                ),
+        )
+        .child(
+            div()
+                .w(px(DIFF_MARKER_COLUMN_WIDTH))
+                .flex_shrink_0()
+                .min_h(px(DIFF_ROW_HEIGHT))
+                .py(px(1.0))
+                .child(" "),
+        )
+        .child(
+            div()
+                .flex_grow()
+                .min_w_0()
+                .px(px(8.0))
+                .py(px(1.0))
+                .child("\u{00a0}".to_string()),
+        )
 }
 
 fn render_diff_section_header(label: &str, count: usize) -> impl IntoElement {
@@ -8870,6 +9101,7 @@ const DIFF_LINE_NUMBER_COLUMN_WIDTH: f32 = 40.0;
 const DIFF_LINE_NUMBER_CELL_PADDING_X: f32 = 8.0;
 const DIFF_MARKER_COLUMN_WIDTH: f32 = 16.0;
 const DIFF_WAYPOINT_SLOT_WIDTH: f32 = DIFF_ROW_HEIGHT;
+const STRUCTURAL_SIDE_BY_SIDE_MIN_WIDTH: f32 = 960.0;
 
 #[derive(Clone, Copy)]
 struct DiffGutterLayout {
@@ -9783,6 +10015,7 @@ fn render_tour_diff_preview(
                 gutter_layout,
                 parsed_file_index,
                 None,
+                None,
                 highlighted_hunks.as_deref(),
                 file_lsp_context.as_ref(),
                 &rows[*row_ix],
@@ -9885,7 +10118,8 @@ fn build_tour_diff_preview_items(
     rows: &[DiffRenderRow],
     selected_anchor: Option<&DiffAnchor>,
 ) -> TourDiffPreviewItems {
-    let full_items = build_diff_view_items(file, Some(parsed_file), prepared_file, rows, None);
+    let full_items =
+        build_diff_view_items(file, Some(parsed_file), prepared_file, rows, None, None);
     if full_items.len() <= TOUR_PREVIEW_MAX_ITEMS {
         return TourDiffPreviewItems {
             items: full_items,
