@@ -51,6 +51,7 @@ mod source_browser;
 mod stacks;
 mod state;
 mod syntax;
+mod temp_source_window;
 mod theme;
 mod views;
 mod window_settings;
@@ -66,6 +67,10 @@ use branding::APP_NAME;
 use cache::CacheStore;
 use platform_macos::apply_app_icon;
 use state::AppState;
+use temp_source_window::{
+    close_temp_source_window_if_active, install_temp_source_window_key_bindings,
+    open_temp_source_window_for_selected_diff_line,
+};
 use views::{
     blur_review_editor, close_palette, close_review_line_action, close_waypoint_spotlight,
     execute_palette_selection, execute_waypoint_spotlight_selection, move_palette_selection,
@@ -101,6 +106,7 @@ fn start_app(cx: &mut App) -> Result<(), String> {
         .map_err(|error| format!("Failed to initialize cache: {error}"))?;
     let initial_window_size = window_settings::load_window_size(&cache);
     let app_state = cx.new(|_| AppState::new(cache));
+    install_temp_source_window_key_bindings(cx);
     let initial_window_appearance = cx.window_appearance();
     app_state.update(cx, |state, _| {
         state.set_window_appearance(initial_window_appearance);
@@ -162,6 +168,13 @@ fn start_app(cx: &mut App) -> Result<(), String> {
             return;
         }
 
+        if is_platform_plain
+            && keystroke.key == "o"
+            && open_temp_source_window_for_selected_diff_line(&app_state_for_keys, window, cx)
+        {
+            return;
+        }
+
         let waypoint_spotlight_open = app_state_for_keys.read(cx).waypoint_spotlight_open;
         if waypoint_spotlight_open {
             match keystroke.key.as_str() {
@@ -171,6 +184,11 @@ fn start_app(cx: &mut App) -> Result<(), String> {
                 "enter" => execute_waypoint_spotlight_selection(&app_state_for_keys, window, cx),
                 _ => {}
             }
+            return;
+        }
+
+        if keystroke.key == "escape" && close_temp_source_window_if_active(&app_state_for_keys, cx)
+        {
             return;
         }
 

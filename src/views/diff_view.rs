@@ -50,6 +50,10 @@ use crate::stacks::{
 };
 use crate::state::*;
 use crate::syntax::{self, SyntaxSpan};
+use crate::temp_source_window::{
+    open_temp_source_window_for_diff_target, temp_source_target_for_diff_line,
+    temp_source_target_for_diff_side,
+};
 use crate::theme::*;
 use crate::{github, notifications, review_intelligence};
 
@@ -4969,6 +4973,269 @@ pub async fn load_local_source_file_content_flow(
         .ok();
 }
 
+pub async fn load_temp_source_file_content_flow(
+    model: Entity<AppState>,
+    target: TempSourceTarget,
+    cx: &mut AsyncWindowContext,
+) {
+    let request = model
+        .read_with(cx, |state, _| {
+            let cache = state.cache.clone();
+            let lsp_session_manager = state.lsp_session_manager.clone();
+            let detail = state.active_detail()?.clone();
+            let detail_key = state.active_pr_key.clone()?;
+            let existing_local_repo_status = state
+                .detail_states
+                .get(&detail_key)
+                .and_then(|detail_state| detail_state.local_repository_status.clone());
+            let request = build_temp_source_file_content_request(&detail, &target)?;
+            let detail_state = state.detail_states.get(&detail_key);
+            let content_loaded = state.temp_source_window.request_key.as_deref()
+                == Some(request.request_key.as_str())
+                && state.temp_source_window.prepared.is_some()
+                && state.temp_source_window.error.is_none();
+            let lsp_loaded = target.side == TempSourceSide::Base
+                || is_lsp_status_loaded(detail_state, &target.path);
+            let already_loaded = content_loaded && lsp_loaded;
+
+            Some((
+                cache,
+                lsp_session_manager,
+                detail_key,
+                detail,
+                request,
+                already_loaded,
+                existing_local_repo_status,
+                target.clone(),
+            ))
+        })
+        .ok()
+        .flatten();
+
+    let Some((
+        cache,
+        lsp_session_manager,
+        detail_key,
+        detail,
+        request,
+        already_loaded,
+        existing_local_repo_status,
+        target,
+    )) = request
+    else {
+        return;
+    };
+
+    if already_loaded {
+        model
+            .update(cx, |state, cx| {
+                if state.temp_source_window.request_key.as_deref() == Some(&request.request_key) {
+                    state.temp_source_window.loading = false;
+                    state.temp_source_window.error = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        return;
+    }
+
+    model
+        .update(cx, |state, cx| {
+            state.temp_source_window.target = Some(target.clone());
+            state.temp_source_window.request_key = Some(request.request_key.clone());
+            state.temp_source_window.document = None;
+            state.temp_source_window.prepared = None;
+            state.temp_source_window.loading = true;
+            state.temp_source_window.error = None;
+
+            if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
+                detail_state.local_repository_loading = existing_local_repo_status
+                    .as_ref()
+                    .map(|status| !status.ready_for_snapshot_features())
+                    .unwrap_or(true);
+                detail_state.local_repository_error = None;
+                if target.side == TempSourceSide::Head {
+                    detail_state.lsp_loading_paths.insert(target.path.clone());
+                }
+            }
+
+            cx.notify();
+        })
+        .ok();
+
+    let local_repo_result = if let Some(status) = existing_local_repo_status
+        .clone()
+        .filter(|status| status.ready_for_snapshot_features())
+    {
+        Ok(status)
+    } else {
+        cx.background_executor()
+            .spawn({
+                let cache = cache.clone();
+                let repository = detail.repository.clone();
+                let pull_request_number = detail.number;
+                let head_ref_oid = detail.head_ref_oid.clone();
+                async move {
+                    local_repo::load_or_prepare_local_repository_for_pull_request(
+                        &cache,
+                        &repository,
+                        pull_request_number,
+                        head_ref_oid.as_deref(),
+                    )
+                }
+            })
+            .await
+    };
+
+    let local_repo_status = local_repo_result.as_ref().ok().cloned();
+    let local_repo_error = local_repo_result
+        .as_ref()
+        .ok()
+        .and_then(|status| {
+            if status.ready_for_snapshot_features() {
+                None
+            } else {
+                Some(status.message.clone())
+            }
+        })
+        .or_else(|| local_repo_result.as_ref().err().cloned());
+
+    let local_load_result = if let Some(status) = local_repo_status.as_ref() {
+        if status.ready_for_snapshot_features() {
+            if let Some(root) = status.path.as_deref() {
+                cx.background_executor()
+                    .spawn({
+                        let cache = cache.clone();
+                        let repository = detail.repository.clone();
+                        let path = request.path.clone();
+                        let reference = request.local_reference.clone();
+                        let prefer_worktree =
+                            request.prefer_worktree && status.should_prefer_worktree_contents();
+                        let root = std::path::PathBuf::from(root);
+                        async move {
+                            local_documents::load_local_repository_file_content(
+                                &cache,
+                                &repository,
+                                &root,
+                                &reference,
+                                &path,
+                                prefer_worktree,
+                            )
+                        }
+                    })
+                    .await
+            } else {
+                Err(status.message.clone())
+            }
+        } else {
+            Err(local_repo_error
+                .clone()
+                .unwrap_or_else(|| "Local checkout is not ready yet.".to_string()))
+        }
+    } else {
+        Err(local_repo_error
+            .clone()
+            .unwrap_or_else(|| "Local checkout is not ready yet.".to_string()))
+    };
+
+    let load_result = match local_load_result {
+        Ok(document) => Ok(document),
+        Err(local_error) => cx
+            .background_executor()
+            .spawn({
+                let cache = cache.clone();
+                let repository = detail.repository.clone();
+                let path = request.path.clone();
+                let reference = request.reference.clone();
+                async move {
+                    github::load_pull_request_file_content(&cache, &repository, &reference, &path)
+                        .map_err(|github_error| {
+                            format!(
+                                "{local_error}\nGitHub fallback also failed for {repository}@{reference}:{path}: {github_error}"
+                            )
+                        })
+                }
+            })
+            .await,
+    };
+
+    let lsp_status = if target.side == TempSourceSide::Head {
+        Some(if let Some(status) = local_repo_status.as_ref() {
+            if status.ready_for_snapshot_features() {
+                if let Some(root) = status.path.as_deref() {
+                    cx.background_executor()
+                        .spawn({
+                            let lsp_session_manager = lsp_session_manager.clone();
+                            let root = std::path::PathBuf::from(root);
+                            let file_path = target.path.clone();
+                            async move { lsp_session_manager.status_for_file(&root, &file_path) }
+                        })
+                        .await
+                } else {
+                    lsp::LspServerStatus::checkout_unavailable(status.message.clone())
+                }
+            } else {
+                lsp::LspServerStatus::checkout_unavailable(
+                    local_repo_error
+                        .clone()
+                        .unwrap_or_else(|| "Local checkout is not ready yet.".to_string()),
+                )
+            }
+        } else {
+            lsp::LspServerStatus::checkout_unavailable(
+                local_repo_error
+                    .clone()
+                    .unwrap_or_else(|| "Local checkout is not ready yet.".to_string()),
+            )
+        })
+    } else {
+        None
+    };
+
+    let prepared_result = load_result.map(|document| {
+        let prepared = prepare_file_content(&request.path, &request.reference, &document);
+        (document, prepared)
+    });
+
+    model
+        .update(cx, |state, cx| {
+            if state.temp_source_window.request_key.as_deref() != Some(&request.request_key) {
+                return;
+            }
+
+            state.temp_source_window.loading = false;
+            if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
+                detail_state.local_repository_loading = false;
+                detail_state.local_repository_status = local_repo_status.clone();
+                detail_state.local_repository_error = local_repo_error.clone();
+                if target.side == TempSourceSide::Head {
+                    detail_state.lsp_loading_paths.remove(&target.path);
+                }
+                if let Some(lsp_status) = lsp_status.clone() {
+                    detail_state
+                        .lsp_statuses
+                        .insert(target.path.clone(), lsp_status);
+                }
+            }
+
+            match prepared_result {
+                Ok((document, prepared)) => {
+                    state.temp_source_window.document = Some(document);
+                    state.temp_source_window.prepared = Some(prepared);
+                    state.temp_source_window.error = None;
+                }
+                Err(error) => {
+                    state.temp_source_window.document = None;
+                    state.temp_source_window.prepared = None;
+                    state.temp_source_window.error = Some(error);
+                }
+            }
+
+            cx.notify();
+        })
+        .ok();
+}
+
 #[derive(Clone)]
 struct FileContentRequest {
     path: String,
@@ -5150,6 +5417,40 @@ fn build_head_file_content_request(
         reference,
         local_reference,
         prefer_worktree: true,
+    })
+}
+
+fn build_temp_source_file_content_request(
+    detail: &PullRequestDetail,
+    target: &TempSourceTarget,
+) -> Option<FileContentRequest> {
+    let path = target.path.trim();
+    let reference = target.reference.trim();
+    if path.is_empty() || reference.is_empty() {
+        return None;
+    }
+
+    let local_reference = match target.side {
+        TempSourceSide::Head => detail
+            .head_ref_oid
+            .clone()
+            .unwrap_or_else(|| "HEAD".to_string()),
+        TempSourceSide::Base => detail
+            .base_ref_oid
+            .clone()
+            .unwrap_or_else(|| detail.base_ref_name.clone()),
+    };
+    let local_reference = local_reference.trim().to_string();
+    if local_reference.is_empty() {
+        return None;
+    }
+
+    Some(FileContentRequest {
+        request_key: crate::temp_source_window::temp_source_request_key(detail, target),
+        path: path.to_string(),
+        reference: reference.to_string(),
+        local_reference,
+        prefer_worktree: target.side == TempSourceSide::Head,
     })
 }
 
@@ -7972,6 +8273,8 @@ fn render_virtualized_diff_row(
                                 render_structural_side_by_side_diff_row(
                                     state,
                                     gutter_layout,
+                                    detail,
+                                    parsed,
                                     path,
                                     hunk.header.as_str(),
                                     side_by_side_row,
@@ -7991,6 +8294,9 @@ fn render_virtualized_diff_row(
                             .cloned()
                             .unwrap_or_default();
                         let line_lsp_context = build_diff_line_lsp_context(file_lsp_context, line);
+                        let temp_source_target = detail.and_then(|detail| {
+                            temp_source_target_for_diff_line(detail, parsed, line)
+                        });
                         render_reviewable_diff_line(
                             state,
                             gutter_layout,
@@ -8001,6 +8307,7 @@ fn render_virtualized_diff_row(
                             Some(highlight.emphasis_ranges.as_slice()),
                             selected_anchor,
                             line_lsp_context.as_ref(),
+                            temp_source_target,
                             cx,
                         )
                         .into_any_element()
@@ -8035,6 +8342,8 @@ enum StructuralDiffSide {
 fn render_structural_side_by_side_diff_row(
     state: &Entity<AppState>,
     gutter_layout: DiffGutterLayout,
+    detail: Option<&PullRequestDetail>,
+    parsed_file: &ParsedDiffFile,
     file_path: &str,
     hunk_header: &str,
     row: &crate::difftastic::AdaptedDifftasticSideBySideRow,
@@ -8056,6 +8365,8 @@ fn render_structural_side_by_side_diff_row(
             row.left.as_ref(),
             selected_anchor,
             None,
+            detail,
+            parsed_file,
             cx,
         ))
         .child(render_structural_side_by_side_cell(
@@ -8067,6 +8378,8 @@ fn render_structural_side_by_side_diff_row(
             row.right.as_ref(),
             selected_anchor,
             file_lsp_context,
+            detail,
+            parsed_file,
             cx,
         ))
 }
@@ -8080,6 +8393,8 @@ fn render_structural_side_by_side_cell(
     cell: Option<&crate::difftastic::AdaptedDifftasticSideBySideCell>,
     selected_anchor: Option<&DiffAnchor>,
     file_lsp_context: Option<&DiffFileLspContext>,
+    detail: Option<&PullRequestDetail>,
+    parsed_file: &ParsedDiffFile,
     cx: &App,
 ) -> AnyElement {
     let gutter_layout = structural_side_by_side_gutter_layout(side, reserve_waypoint_slot);
@@ -8088,6 +8403,13 @@ fn render_structural_side_by_side_cell(
             let line_lsp_context = (side == StructuralDiffSide::Right)
                 .then(|| build_diff_line_lsp_context(file_lsp_context, &cell.line))
                 .flatten();
+            let target_side = match side {
+                StructuralDiffSide::Left => TempSourceSide::Base,
+                StructuralDiffSide::Right => TempSourceSide::Head,
+            };
+            let temp_source_target = detail.and_then(|detail| {
+                temp_source_target_for_diff_side(detail, parsed_file, &cell.line, target_side)
+            });
 
             render_reviewable_diff_line(
                 state,
@@ -8099,6 +8421,7 @@ fn render_structural_side_by_side_cell(
                 Some(cell.emphasis_ranges.as_slice()),
                 selected_anchor,
                 line_lsp_context.as_ref(),
+                temp_source_target,
                 cx,
             )
             .into_any_element()
@@ -8125,6 +8448,7 @@ fn structural_side_by_side_gutter_layout(
         show_left_numbers: side == StructuralDiffSide::Left,
         show_right_numbers: side == StructuralDiffSide::Right,
         reserve_waypoint_slot,
+        reserve_source_slot: true,
     }
 }
 
@@ -8149,6 +8473,9 @@ fn render_empty_structural_side_by_side_cell(gutter_layout: DiffGutterLayout) ->
                 .bg(diff_context_gutter_bg())
                 .border_r(px(1.0))
                 .border_color(diff_gutter_separator())
+                .when(gutter_layout.reserve_source_slot, |el| {
+                    el.child(div().w(px(DIFF_SOURCE_SLOT_WIDTH)).h_full())
+                })
                 .when(gutter_layout.reserve_waypoint_slot, |el| {
                     el.child(div().w(px(DIFF_WAYPOINT_SLOT_WIDTH)).h_full())
                 })
@@ -8327,6 +8654,7 @@ fn render_reviewable_diff_line(
     emphasis_ranges: Option<&[DiffInlineRange]>,
     selected_anchor: Option<&DiffAnchor>,
     lsp_context: Option<&DiffLineLspContext>,
+    temp_source_target: Option<TempSourceTarget>,
     cx: &App,
 ) -> impl IntoElement {
     let line_action_target = build_review_line_action_target(file_path, hunk_header, line);
@@ -8360,6 +8688,7 @@ fn render_reviewable_diff_line(
         selected_anchor,
         lsp_context,
         line_action_target.map(|target| (state.clone(), target)),
+        temp_source_target.map(|target| (state.clone(), target)),
         has_waypoint,
         popup_open,
     )
@@ -8384,6 +8713,19 @@ fn render_diff_waypoint_icon() -> impl IntoElement {
                 .rounded(px(999.0))
                 .bg(waypoint_icon_core()),
         )
+}
+
+fn render_diff_open_source_icon() -> impl IntoElement {
+    div()
+        .w(px(12.0))
+        .h(px(12.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .font_family("lucide")
+        .text_size(px(12.0))
+        .line_height(px(12.0))
+        .child(LucideIcon::ExternalLink.unicode().to_string())
 }
 
 fn build_static_tooltip(text: &'static str, cx: &mut App) -> AnyView {
@@ -8752,6 +9094,7 @@ fn render_diff_line_with_threads(
             selected_anchor,
             None,
             None,
+            None,
             false,
             false,
         ))
@@ -8783,11 +9126,14 @@ fn render_diff_line(
     selected_anchor: Option<&DiffAnchor>,
     lsp_context: Option<&DiffLineLspContext>,
     line_action: Option<(Entity<AppState>, ReviewLineActionTarget)>,
+    source_action: Option<(Entity<AppState>, TempSourceTarget)>,
     has_waypoint: bool,
     force_marker_visible: bool,
 ) -> impl IntoElement {
     let is_selected = line_matches_diff_anchor(line, selected_anchor);
     let row_action = line_action.clone();
+    let source_slot_action = source_action.clone();
+    let hover_source_action = source_action.clone();
 
     let left_num = line
         .left_line_number
@@ -8851,6 +9197,14 @@ fn render_diff_line(
         .when(is_selected, |el| {
             el.border_l(px(2.0)).border_color(diff_selected_edge())
         })
+        .when_some(hover_source_action, |el, (state, target)| {
+            el.on_mouse_move(move |_, _, cx| {
+                state.update(cx, |state, cx| {
+                    state.hovered_temp_source_target = Some(target.clone());
+                    cx.notify();
+                });
+            })
+        })
         .when_some(row_action, |el, (state, target)| {
             el.cursor_pointer()
                 .on_mouse_down(MouseButton::Left, move |event, _, cx| {
@@ -8866,6 +9220,60 @@ fn render_diff_line(
                 .bg(gutter_bg)
                 .border_r(px(1.0))
                 .border_color(diff_gutter_separator())
+                .when(gutter_layout.reserve_source_slot, |el| {
+                    el.child(
+                        div()
+                            .w(px(DIFF_SOURCE_SLOT_WIDTH))
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when_some(source_slot_action, |slot, (state, target)| {
+                                let tooltip_label = format!("Open {} source", target.side.label());
+                                slot.child(
+                                    div()
+                                        .id((
+                                            ElementId::named_usize(
+                                                "diff-open-source",
+                                                line.right_line_number
+                                                    .or(line.left_line_number)
+                                                    .unwrap_or_default()
+                                                    as usize,
+                                            ),
+                                            SharedString::from(format!(
+                                                "{}:{}",
+                                                file_path,
+                                                target.side.diff_side()
+                                            )),
+                                        ))
+                                        .w(px(18.0))
+                                        .h(px(18.0))
+                                        .rounded(radius_sm())
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(diff_editor_surface()))
+                                        .tooltip(move |_, cx| {
+                                            build_text_tooltip(
+                                                SharedString::from(tooltip_label.clone()),
+                                                cx,
+                                            )
+                                        })
+                                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                            cx.stop_propagation();
+                                            open_temp_source_window_for_diff_target(
+                                                &state,
+                                                target.clone(),
+                                                window,
+                                                cx,
+                                            );
+                                        })
+                                        .child(render_diff_open_source_icon()),
+                                )
+                            }),
+                    )
+                })
                 .when(gutter_layout.reserve_waypoint_slot, |el| {
                     el.child(
                         div()
@@ -9100,6 +9508,7 @@ const DIFF_LINE_NUMBER_FONT_SIZE: f32 = 12.5;
 const DIFF_LINE_NUMBER_COLUMN_WIDTH: f32 = 40.0;
 const DIFF_LINE_NUMBER_CELL_PADDING_X: f32 = 8.0;
 const DIFF_MARKER_COLUMN_WIDTH: f32 = 16.0;
+const DIFF_SOURCE_SLOT_WIDTH: f32 = DIFF_ROW_HEIGHT;
 const DIFF_WAYPOINT_SLOT_WIDTH: f32 = DIFF_ROW_HEIGHT;
 const STRUCTURAL_SIDE_BY_SIDE_MIN_WIDTH: f32 = 960.0;
 
@@ -9108,12 +9517,18 @@ struct DiffGutterLayout {
     show_left_numbers: bool,
     show_right_numbers: bool,
     reserve_waypoint_slot: bool,
+    reserve_source_slot: bool,
 }
 
 impl DiffGutterLayout {
     fn gutter_width(self) -> f32 {
         let column_count = self.show_left_numbers as u8 + self.show_right_numbers as u8;
         DIFF_LINE_NUMBER_COLUMN_WIDTH * f32::from(column_count.max(1))
+            + if self.reserve_source_slot {
+                DIFF_SOURCE_SLOT_WIDTH
+            } else {
+                0.0
+            }
             + if self.reserve_waypoint_slot {
                 DIFF_WAYPOINT_SLOT_WIDTH
             } else {
@@ -9148,6 +9563,7 @@ fn diff_gutter_layout(
                 show_left_numbers,
                 show_right_numbers,
                 reserve_waypoint_slot,
+                reserve_source_slot: true,
             };
         }
     }
@@ -9157,16 +9573,19 @@ fn diff_gutter_layout(
             show_left_numbers: false,
             show_right_numbers: true,
             reserve_waypoint_slot,
+            reserve_source_slot: true,
         },
         "DELETED" => DiffGutterLayout {
             show_left_numbers: true,
             show_right_numbers: false,
             reserve_waypoint_slot,
+            reserve_source_slot: true,
         },
         _ => DiffGutterLayout {
             show_left_numbers: true,
             show_right_numbers: true,
             reserve_waypoint_slot,
+            reserve_source_slot: true,
         },
     }
 }
@@ -9187,6 +9606,7 @@ fn diff_gutter_layout_from_parsed(parsed_file: &ParsedDiffFile) -> DiffGutterLay
         show_left_numbers: show_left_numbers || !show_right_numbers,
         show_right_numbers,
         reserve_waypoint_slot: false,
+        reserve_source_slot: false,
     }
 }
 
@@ -10090,6 +10510,7 @@ fn render_full_tour_diff_preview(
                     Some(highlight.emphasis_ranges.as_slice()),
                     anchor,
                     line_lsp_context.as_ref(),
+                    None,
                     None,
                     false,
                     false,

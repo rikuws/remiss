@@ -253,11 +253,43 @@ pub fn render_virtualized_prepared_file_with_line_numbers(
     lsp_context: Option<&PreparedFileLspContext>,
     list_state: ListState,
 ) -> AnyElement {
+    render_virtualized_prepared_file_with_line_numbers_and_focus(
+        prepared_file,
+        lsp_context,
+        list_state,
+        None,
+    )
+}
+
+pub fn render_virtualized_prepared_file_with_line_numbers_and_focus(
+    prepared_file: &PreparedFileContent,
+    lsp_context: Option<&PreparedFileLspContext>,
+    list_state: ListState,
+    focused_line: Option<usize>,
+) -> AnyElement {
     render_virtualized_prepared_code_block_lines(
         prepared_file.lines.clone(),
         lsp_context.cloned(),
         None,
         list_state,
+        focused_line,
+        CodeBlockPadding::Default,
+    )
+}
+
+pub fn render_virtualized_prepared_file_with_line_numbers_and_focus_flush(
+    prepared_file: &PreparedFileContent,
+    lsp_context: Option<&PreparedFileLspContext>,
+    list_state: ListState,
+    focused_line: Option<usize>,
+) -> AnyElement {
+    render_virtualized_prepared_code_block_lines(
+        prepared_file.lines.clone(),
+        lsp_context.cloned(),
+        None,
+        list_state,
+        focused_line,
+        CodeBlockPadding::None,
     )
 }
 
@@ -267,11 +299,46 @@ pub fn render_virtualized_prepared_file_with_line_numbers_and_diffs(
     diff_lines: PreparedFileLineDiffs,
     list_state: ListState,
 ) -> AnyElement {
+    render_virtualized_prepared_file_with_line_numbers_diffs_and_focus(
+        prepared_file,
+        lsp_context,
+        diff_lines,
+        list_state,
+        None,
+    )
+}
+
+pub fn render_virtualized_prepared_file_with_line_numbers_diffs_and_focus(
+    prepared_file: &PreparedFileContent,
+    lsp_context: Option<&PreparedFileLspContext>,
+    diff_lines: PreparedFileLineDiffs,
+    list_state: ListState,
+    focused_line: Option<usize>,
+) -> AnyElement {
     render_virtualized_prepared_code_block_lines(
         prepared_file.lines.clone(),
         lsp_context.cloned(),
         Some(diff_lines),
         list_state,
+        focused_line,
+        CodeBlockPadding::Default,
+    )
+}
+
+pub fn render_virtualized_prepared_file_with_line_numbers_diffs_and_focus_flush(
+    prepared_file: &PreparedFileContent,
+    lsp_context: Option<&PreparedFileLspContext>,
+    diff_lines: PreparedFileLineDiffs,
+    list_state: ListState,
+    focused_line: Option<usize>,
+) -> AnyElement {
+    render_virtualized_prepared_code_block_lines(
+        prepared_file.lines.clone(),
+        lsp_context.cloned(),
+        Some(diff_lines),
+        list_state,
+        focused_line,
+        CodeBlockPadding::None,
     )
 }
 
@@ -342,6 +409,8 @@ fn render_virtualized_prepared_code_block_lines(
     lsp_context: Option<PreparedFileLspContext>,
     diff_lines: Option<PreparedFileLineDiffs>,
     list_state: ListState,
+    focused_line: Option<usize>,
+    padding: CodeBlockPadding,
 ) -> AnyElement {
     let line_count = lines.len();
     if list_state.item_count() != line_count {
@@ -359,9 +428,8 @@ fn render_virtualized_prepared_code_block_lines(
         .bg(bg_inset())
         .overflow_hidden()
         .child(
-            div()
-                .px(px(16.0))
-                .py(px(12.0))
+            padding
+                .apply(div())
                 .flex()
                 .flex_col()
                 .flex_grow()
@@ -371,9 +439,25 @@ fn render_virtualized_prepared_code_block_lines(
                     lsp_context,
                     diff_lines,
                     list_state,
+                    focused_line,
                 )),
         )
         .into_any_element()
+}
+
+#[derive(Clone, Copy)]
+enum CodeBlockPadding {
+    Default,
+    None,
+}
+
+impl CodeBlockPadding {
+    fn apply(self, element: Div) -> Div {
+        match self {
+            Self::Default => element.px(px(16.0)).py(px(12.0)),
+            Self::None => element,
+        }
+    }
 }
 
 fn render_prepared_code_lines(
@@ -418,6 +502,7 @@ fn render_prepared_code_lines(
                         line_lsp_context,
                         diff_kind,
                         show_diff_markers,
+                        false,
                     )
                 })),
         )
@@ -428,6 +513,7 @@ fn render_virtualized_prepared_code_lines(
     lsp_context: Option<PreparedFileLspContext>,
     diff_lines: Option<PreparedFileLineDiffs>,
     list_state: ListState,
+    focused_line: Option<usize>,
 ) -> impl IntoElement {
     let block_id = CODE_BLOCK_ID.fetch_add(1, Ordering::Relaxed);
     let show_diff_markers = diff_lines.is_some();
@@ -466,6 +552,7 @@ fn render_virtualized_prepared_code_lines(
                     .as_ref()
                     .and_then(|diff_lines| diff_lines.get(&line.line_number))
                     .copied();
+                let is_focused = focused_line == Some(line.line_number);
 
                 render_prepared_code_line_with_diff(
                     block_id,
@@ -473,6 +560,7 @@ fn render_virtualized_prepared_code_lines(
                     line_lsp_context,
                     diff_kind,
                     show_diff_markers,
+                    is_focused,
                 )
                 .into_any_element()
             })
@@ -558,6 +646,7 @@ fn render_prepared_code_line_with_diff(
     lsp_context: Option<PreparedFileLineLspContext>,
     diff_kind: Option<PreparedFileLineDiffKind>,
     show_diff_markers: bool,
+    is_focused: bool,
 ) -> Div {
     let (row_bg, gutter_bg, marker, marker_color) = match diff_kind {
         Some(PreparedFileLineDiffKind::Addition) => {
@@ -583,6 +672,12 @@ fn render_prepared_code_line_with_diff(
         .bg(row_bg)
         .text_color(transparent())
         .hover(move |style| style.bg(diff_line_hover_bg()).text_color(marker_color))
+        .when(is_focused, |el| {
+            el.border_l(px(2.0))
+                .border_color(focus_border())
+                .bg(diff_line_hover_bg())
+                .text_color(marker_color)
+        })
         .child(
             div()
                 .w(px(CODE_LINE_NUMBER_GUTTER_WIDTH))
