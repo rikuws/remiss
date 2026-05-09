@@ -5,9 +5,10 @@ use gpui::*;
 
 use crate::{
     code_display::{
-        build_prepared_file_lsp_context, render_virtualized_prepared_file_with_line_numbers,
-        render_virtualized_prepared_file_with_line_numbers_and_diffs, PreparedFileLineDiffKind,
-        PreparedFileLineDiffs,
+        build_prepared_file_lsp_context,
+        render_virtualized_prepared_file_with_line_numbers_and_focus,
+        render_virtualized_prepared_file_with_line_numbers_diffs_and_focus,
+        PreparedFileLineDiffKind, PreparedFileLineDiffs,
     },
     diff::{DiffLineKind, ParsedDiffFile},
     review_session::ReviewSourceTarget,
@@ -59,17 +60,19 @@ pub fn render_source_browser(
         build_prepared_file_lsp_context(state, target.path.as_str(), Some(&prepared_file), cx);
     let list_state = prepare_source_browser_list_state(state, target.path.as_str(), cx);
     let full_file = if let Some(parsed) = parsed {
-        render_virtualized_prepared_file_with_line_numbers_and_diffs(
+        render_virtualized_prepared_file_with_line_numbers_diffs_and_focus(
             &prepared_file,
             lsp_context.as_ref(),
             build_full_file_diff_lines(parsed),
             list_state,
+            target.line,
         )
     } else {
-        render_virtualized_prepared_file_with_line_numbers(
+        render_virtualized_prepared_file_with_line_numbers_and_focus(
             &prepared_file,
             lsp_context.as_ref(),
             list_state,
+            target.line,
         )
     };
 
@@ -105,7 +108,7 @@ fn prepare_source_browser_list_state(
         .clone()
 }
 
-fn build_full_file_diff_lines(parsed: &ParsedDiffFile) -> PreparedFileLineDiffs {
+pub(crate) fn build_full_file_diff_lines(parsed: &ParsedDiffFile) -> PreparedFileLineDiffs {
     let mut lines = BTreeMap::new();
 
     for line in parsed.hunks.iter().flat_map(|hunk| hunk.lines.iter()) {

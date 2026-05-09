@@ -27,7 +27,9 @@ use crate::semantic_diff::SemanticDiffFile;
 use crate::stacks::model::{ReviewStack, StackDiffMode, StackPullRequestRef};
 use crate::syntax::{self, SyntaxSpan};
 use crate::theme::{self, ThemePreference};
-use gpui::{px, ListAlignment, ListState, Pixels, Point, ScrollHandle, WindowAppearance};
+use gpui::{
+    px, AnyWindowHandle, ListAlignment, ListState, Pixels, Point, ScrollHandle, WindowAppearance,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SectionId {
@@ -236,6 +238,71 @@ impl Default for FileContentState {
             prepared: None,
             loading: false,
             error: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TempSourceSide {
+    Base,
+    Head,
+}
+
+impl TempSourceSide {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Base => "base",
+            Self::Head => "head",
+        }
+    }
+
+    pub fn diff_side(self) -> &'static str {
+        match self {
+            Self::Base => "LEFT",
+            Self::Head => "RIGHT",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TempSourceTarget {
+    pub path: String,
+    pub side: TempSourceSide,
+    pub line: usize,
+    pub reference: String,
+}
+
+impl TempSourceTarget {
+    pub fn content_key(&self) -> String {
+        format!("{}:{}:{}", self.side.label(), self.reference, self.path)
+    }
+
+    pub fn focus_key(&self) -> String {
+        format!("{}:{}", self.content_key(), self.line)
+    }
+}
+
+#[derive(Clone)]
+pub struct TempSourceWindowState {
+    pub target: Option<TempSourceTarget>,
+    pub request_key: Option<String>,
+    pub document: Option<RepositoryFileContent>,
+    pub prepared: Option<PreparedFileContent>,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub window: Option<AnyWindowHandle>,
+}
+
+impl Default for TempSourceWindowState {
+    fn default() -> Self {
+        Self {
+            target: None,
+            request_key: None,
+            document: None,
+            prepared: None,
+            loading: false,
+            error: None,
+            window: None,
         }
     }
 }
@@ -497,6 +564,8 @@ pub struct AppState {
     pub review_file_tree_list_states: RefCell<std::collections::HashMap<String, ListState>>,
     pub review_nav_list_states: RefCell<std::collections::HashMap<String, ListState>>,
     pub source_browser_list_states: RefCell<std::collections::HashMap<String, ListState>>,
+    pub temp_source_window: TempSourceWindowState,
+    pub hovered_temp_source_target: Option<TempSourceTarget>,
     // Review form
     pub review_action: ReviewAction,
     pub review_body: String,
@@ -590,6 +659,8 @@ impl AppState {
             review_file_tree_list_states: RefCell::new(std::collections::HashMap::new()),
             review_nav_list_states: RefCell::new(std::collections::HashMap::new()),
             source_browser_list_states: RefCell::new(std::collections::HashMap::new()),
+            temp_source_window: TempSourceWindowState::default(),
+            hovered_temp_source_target: None,
             review_action: ReviewAction::Comment,
             review_body: String::new(),
             review_editor_active: false,
