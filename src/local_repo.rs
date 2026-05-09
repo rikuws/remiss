@@ -1,6 +1,9 @@
 use std::{
-    fs,
+    fs::{self, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -8,6 +11,10 @@ use serde::{Deserialize, Serialize};
 use crate::{app_storage, cache::CacheStore, command_runner::CommandRunner, gh};
 
 const LOCAL_REPO_LINK_KEY_PREFIX: &str = "local-repo-link-v1:";
+const CHECKOUT_LOGS_DIR: &str = "checkout-logs";
+const CHECKOUT_LOG_OUTPUT_LIMIT_CHARS: usize = 2_000;
+
+static LOCAL_REPOSITORY_PREPARE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,6 +48,162 @@ struct LocalRepositoryLink {
     path: String,
 }
 
+#[derive(Clone, Debug)]
+struct CheckoutLog {
+    path: PathBuf,
+}
+
+impl CheckoutLog {
+    fn for_pull_request(
+        repository: &str,
+        pull_request_number: i64,
+        head_ref_oid: Option<&str>,
+    ) -> Self {
+        Self {
+            path: checkout_log_path(repository, pull_request_number, head_ref_oid),
+        }
+    }
+
+    fn event(&self, message: impl AsRef<str>) {
+        append_checkout_log_line(&self.path, message.as_ref());
+    }
+
+    fn command_start(&self, label: &str, command: &str, cwd: Option<&Path>) {
+        self.event(format!(
+            "command start: {label}; cwd={}; command={command}",
+            cwd.map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<none>".to_string())
+        ));
+    }
+
+    fn command_result(&self, label: &str, output: &gh::CommandOutput) {
+        self.event(format!(
+            "command finish: {label}; exit={:?}; timed_out={}; duration_ms={}; stdout_bytes={}; stderr_bytes={}; stdout_truncated={}; stderr_truncated={}; stdout=\"{}\"; stderr=\"{}\"",
+            output.exit_code,
+            output.timed_out,
+            output.duration_ms,
+            output.stdout_bytes.len(),
+            output.stderr_bytes.len(),
+            output.stdout_truncated,
+            output.stderr_truncated,
+            shorten_for_log(&output.stdout),
+            shorten_for_log(&output.stderr),
+        ));
+    }
+}
+
+pub fn checkout_log_path(
+    repository: &str,
+    pull_request_number: i64,
+    head_ref_oid: Option<&str>,
+) -> PathBuf {
+    app_storage::data_dir_root()
+        .join(CHECKOUT_LOGS_DIR)
+        .join(format!(
+            "{}-pr-{}-{}.log",
+            managed_repository_directory_name(repository),
+            pull_request_number,
+            managed_worktree_head_component(head_ref_oid)
+        ))
+}
+
+pub fn log_checkout_event(
+    repository: &str,
+    pull_request_number: i64,
+    head_ref_oid: Option<&str>,
+    message: impl AsRef<str>,
+) -> PathBuf {
+    let path = checkout_log_path(repository, pull_request_number, head_ref_oid);
+    append_checkout_log_line(&path, message.as_ref());
+    path
+}
+
+fn append_checkout_log_line(path: &Path, message: &str) {
+    if let Some(parent) = path.parent() {
+        if let Err(error) = fs::create_dir_all(parent) {
+            eprintln!(
+                "Failed to create checkout log directory '{}': {error}",
+                parent.display()
+            );
+            return;
+        }
+    }
+
+    let line = format!("[{}] {}\n", now_ms(), sanitize_log_line(message));
+    match OpenOptions::new().create(true).append(true).open(path) {
+        Ok(mut file) => {
+            if let Err(error) = file.write_all(line.as_bytes()) {
+                eprintln!("Failed to write checkout log '{}': {error}", path.display());
+            }
+        }
+        Err(error) => {
+            eprintln!("Failed to open checkout log '{}': {error}", path.display());
+        }
+    }
+}
+
+fn sanitize_log_line(value: &str) -> String {
+    value.replace('\r', "\\r").replace('\n', "\\n")
+}
+
+fn shorten_for_log(value: &str) -> String {
+    let sanitized = sanitize_log_line(value);
+    if sanitized.chars().count() <= CHECKOUT_LOG_OUTPUT_LIMIT_CHARS {
+        return sanitized;
+    }
+
+    let mut shortened = sanitized
+        .chars()
+        .take(CHECKOUT_LOG_OUTPUT_LIMIT_CHARS)
+        .collect::<String>();
+    shortened.push_str("...[truncated]");
+    shortened
+}
+
+fn format_command_args(args: &[String]) -> String {
+    args.iter()
+        .map(|arg| {
+            if arg
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "-_./:=@".contains(character))
+            {
+                arg.clone()
+            } else {
+                format!("'{}'", arg.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn summarize_status(status: &LocalRepositoryStatus) -> String {
+    format!(
+        "repository={}; source={}; path={}; exists={}; valid={}; current_head={}; expected_head={}; matches_expected_head={}; clean={}; ready={}; message=\"{}\"",
+        status.repository,
+        status.source,
+        status.path.as_deref().unwrap_or("<none>"),
+        status.exists,
+        status.is_valid_repository,
+        status.current_head_oid.as_deref().unwrap_or("<none>"),
+        status.expected_head_oid.as_deref().unwrap_or("<none>"),
+        status.matches_expected_head,
+        status.is_worktree_clean,
+        status.ready_for_local_features,
+        shorten_for_log(&status.message),
+    )
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
+fn local_repository_prepare_lock() -> &'static Mutex<()> {
+    LOCAL_REPOSITORY_PREPARE_LOCK.get_or_init(|| Mutex::new(()))
+}
+
 pub fn load_local_repository_status(
     cache: &CacheStore,
     repository: &str,
@@ -62,35 +225,88 @@ pub fn load_or_prepare_local_repository_for_pull_request(
     pull_request_number: i64,
     head_ref_oid: Option<&str>,
 ) -> Result<LocalRepositoryStatus, String> {
+    let log = CheckoutLog::for_pull_request(repository, pull_request_number, head_ref_oid);
+    log.event(format!(
+        "checkout prepare start: repository={repository}; pr={pull_request_number}; expected_head={}; log_path={}",
+        head_ref_oid.unwrap_or("<none>"),
+        log.path.display(),
+    ));
+
+    log.event("checkout prepare waiting for local repository lock");
+    let result = {
+        let _guard = local_repository_prepare_lock()
+            .lock()
+            .expect("local repository prepare lock poisoned");
+        log.event("checkout prepare acquired local repository lock");
+        load_or_prepare_local_repository_for_pull_request_logged(
+            cache,
+            repository,
+            pull_request_number,
+            head_ref_oid,
+            &log,
+        )
+    };
+    log.event("checkout prepare released local repository lock");
+
+    match &result {
+        Ok(status) => log.event(format!(
+            "checkout prepare finish: {}",
+            summarize_status(status)
+        )),
+        Err(error) => log.event(format!("checkout prepare failed: {error}")),
+    }
+
+    result
+}
+
+fn load_or_prepare_local_repository_for_pull_request_logged(
+    cache: &CacheStore,
+    repository: &str,
+    pull_request_number: i64,
+    head_ref_oid: Option<&str>,
+    log: &CheckoutLog,
+) -> Result<LocalRepositoryStatus, String> {
     let status = resolve_local_repository_status(cache, repository, head_ref_oid)?;
+    log.event(format!(
+        "initial repository status: {}",
+        summarize_status(&status)
+    ));
+
     if status.source == "linked" && status.ready_for_local_features {
+        log.event("using linked checkout; no managed checkout needed");
         return Ok(status);
     }
 
     if status.source == "linked" {
+        log.event("linked checkout is not ready; falling back to app-managed checkout");
         return load_or_prepare_managed_repository_for_pull_request(
             cache,
             repository,
             pull_request_number,
             head_ref_oid,
+            log,
         );
     }
 
     if normalized_expected_head_oid(head_ref_oid).is_some() {
+        log.event("expected PR head is known; preparing app-managed per-PR worktree");
         return load_or_prepare_managed_repository_for_pull_request(
             cache,
             repository,
             pull_request_number,
             head_ref_oid,
+            log,
         );
     }
 
     if status.source == "managed" && !status.ready_for_local_features {
+        log.event("managed checkout exists but is not ready; refreshing app-managed checkout");
         let root = prepare_local_repository_for_pull_request(
             cache,
             repository,
             pull_request_number,
             head_ref_oid,
+            log,
         )?;
         return inspect_repository_candidate(
             repository,
@@ -122,11 +338,14 @@ pub fn ensure_local_repository_for_pull_request(
     }
 
     if status.source == "linked" {
+        let log = CheckoutLog::for_pull_request(repository, pull_request_number, head_ref_oid);
+        log.event("ensure fallback: linked checkout still not ready after prepare call; retrying managed checkout");
         let managed_status = load_or_prepare_managed_repository_for_pull_request(
             cache,
             repository,
             pull_request_number,
             head_ref_oid,
+            &log,
         )?;
 
         if managed_status.ready_for_local_features {
@@ -212,6 +431,25 @@ fn inspect_repository_candidate(
         });
     };
 
+    let current_head_oid = current_head_oid(&root)?;
+    if source == "managed" && current_head_oid.is_none() {
+        let message = "The app-managed checkout is incomplete. The app will remove it and recreate it before local code features run.".to_string();
+
+        return Ok(LocalRepositoryStatus {
+            repository: repository.to_string(),
+            path: Some(root.display().to_string()),
+            source,
+            exists: true,
+            is_valid_repository: false,
+            current_head_oid: None,
+            expected_head_oid,
+            matches_expected_head: false,
+            is_worktree_clean: false,
+            ready_for_local_features: false,
+            message,
+        });
+    }
+
     if !repository_matches_git_remote(repository, &root)? {
         let message = if source == "linked" {
             format!(
@@ -231,7 +469,7 @@ fn inspect_repository_candidate(
             source,
             exists: true,
             is_valid_repository: false,
-            current_head_oid: None,
+            current_head_oid,
             expected_head_oid,
             matches_expected_head: false,
             is_worktree_clean: false,
@@ -240,7 +478,6 @@ fn inspect_repository_candidate(
         });
     }
 
-    let current_head_oid = current_head_oid(&root)?;
     let matches_expected_head = expected_head_oid
         .as_ref()
         .map(|expected| current_head_oid.as_deref() == Some(expected.as_str()))
@@ -306,8 +543,9 @@ fn prepare_local_repository_for_pull_request(
     repository: &str,
     pull_request_number: i64,
     head_ref_oid: Option<&str>,
+    log: &CheckoutLog,
 ) -> Result<PathBuf, String> {
-    ensure_managed_repository_for_pull_request(repository, pull_request_number, head_ref_oid)
+    ensure_managed_repository_for_pull_request(repository, pull_request_number, head_ref_oid, log)
 }
 
 fn load_or_prepare_managed_repository_for_pull_request(
@@ -315,9 +553,15 @@ fn load_or_prepare_managed_repository_for_pull_request(
     repository: &str,
     pull_request_number: i64,
     head_ref_oid: Option<&str>,
+    log: &CheckoutLog,
 ) -> Result<LocalRepositoryStatus, String> {
     let status = inspect_managed_worktree_candidate(repository, pull_request_number, head_ref_oid)?;
+    log.event(format!(
+        "managed worktree status before prepare: {}",
+        summarize_status(&status)
+    ));
     if status.ready_for_local_features {
+        log.event("managed worktree is already ready");
         return Ok(status);
     }
 
@@ -326,6 +570,7 @@ fn load_or_prepare_managed_repository_for_pull_request(
         repository,
         pull_request_number,
         head_ref_oid,
+        log,
     )?;
     inspect_repository_candidate(
         repository,
@@ -368,22 +613,44 @@ fn inspect_managed_worktree_candidate(
     )
 }
 
-fn ensure_managed_repository(repository: &str) -> Result<PathBuf, String> {
+fn ensure_managed_repository(repository: &str, log: &CheckoutLog) -> Result<PathBuf, String> {
     let target = managed_repository_path(repository)?;
+    log.event(format!(
+        "ensuring base managed repository at {}",
+        target.display()
+    ));
 
     if target.exists() {
-        let root = resolve_git_root(&target)?.ok_or_else(|| {
-            "The app-managed checkout is missing its git metadata. Remove it from app storage and try again.".to_string()
-        })?;
+        log.event("base managed repository path exists; inspecting git root and remote");
+        let Some(root) = resolve_git_root(&target)? else {
+            log.event(format!(
+                "base managed repository at {} has no git metadata; removing incomplete clone before retry",
+                target.display()
+            ));
+            remove_incomplete_managed_repository(&target, log)?;
+            return ensure_managed_repository(repository, log);
+        };
 
-        if repository_matches_git_remote(repository, &root)? {
+        if current_head_oid(&root)?.is_some() {
+            if !repository_matches_git_remote(repository, &root)? {
+                return Err(format!(
+                    "The app-managed checkout does not match {}. Remove it from app storage and try again.",
+                    repository
+                ));
+            }
+
+            log.event(format!(
+                "base managed repository is valid at {}",
+                root.display()
+            ));
             return Ok(root);
         }
 
-        return Err(format!(
-            "The app-managed checkout does not match {}. Remove it from app storage and try again.",
-            repository
+        log.event(format!(
+            "base managed repository at {} has no HEAD; removing incomplete clone before retry",
+            root.display()
         ));
+        remove_incomplete_managed_repository(&target, log)?;
     }
 
     let Some(parent) = target.parent() else {
@@ -395,24 +662,53 @@ fn ensure_managed_repository(repository: &str) -> Result<PathBuf, String> {
     fs::create_dir_all(parent).map_err(|error| {
         format!("Failed to create the app-managed checkout folder in app storage: {error}")
     })?;
+    log.event(format!(
+        "created base managed repository parent {}",
+        parent.display()
+    ));
 
-    let output = gh::run_owned(vec![
-        "repo".to_string(),
-        "clone".to_string(),
-        repository.to_string(),
-        target.display().to_string(),
-    ])?;
+    let output = run_gh_logged(
+        log,
+        vec![
+            "repo".to_string(),
+            "clone".to_string(),
+            repository.to_string(),
+            target.display().to_string(),
+            "--".to_string(),
+            "--filter=blob:none".to_string(),
+            "--no-checkout".to_string(),
+        ],
+        None,
+        "clone base managed repository",
+    )?;
 
     if output.exit_code != Some(0) {
-        return Err(combine_process_error(
+        let cleanup_error = remove_incomplete_managed_repository(&target, log).err();
+        let mut error = combine_process_error(
             output,
             &format!("Failed to create the app-managed checkout for {repository}"),
-        ));
+        );
+        if let Some(cleanup_error) = cleanup_error {
+            error.push_str(&format!(
+                " Also failed to clean up the incomplete clone: {cleanup_error}"
+            ));
+        }
+        return Err(error);
     }
 
     let root = resolve_git_root(&target)?.ok_or_else(|| {
         "The app-managed checkout was created but is not a git repository.".to_string()
     })?;
+    log.event(format!(
+        "base managed repository clone resolved git root {}",
+        root.display()
+    ));
+    if current_head_oid(&root)?.is_none() {
+        remove_incomplete_managed_repository(&target, log)?;
+        return Err(
+            "The app-managed checkout was created but did not resolve a HEAD commit.".to_string(),
+        );
+    }
 
     if repository_matches_git_remote(repository, &root)? {
         Ok(root)
@@ -424,24 +720,68 @@ fn ensure_managed_repository(repository: &str) -> Result<PathBuf, String> {
     }
 }
 
+fn remove_incomplete_managed_repository(target: &Path, log: &CheckoutLog) -> Result<(), String> {
+    if !target.exists() {
+        return Ok(());
+    }
+
+    log.event(format!(
+        "removing incomplete base managed repository at {}",
+        target.display()
+    ));
+    fs::remove_dir_all(target).map_err(|error| {
+        format!(
+            "Failed to remove incomplete app-managed checkout '{}': {error}",
+            target.display()
+        )
+    })?;
+    log.event(format!(
+        "removed incomplete base managed repository at {}",
+        target.display()
+    ));
+    Ok(())
+}
+
 fn ensure_managed_repository_for_pull_request(
     repository: &str,
     pull_request_number: i64,
     head_ref_oid: Option<&str>,
+    log: &CheckoutLog,
 ) -> Result<PathBuf, String> {
-    let root = ensure_managed_repository(repository)?;
+    let root = ensure_managed_repository(repository, log)?;
+    log.event(format!(
+        "base managed repository ready at {}",
+        root.display()
+    ));
     if normalized_expected_head_oid(head_ref_oid).is_some() {
         let status =
             inspect_managed_worktree_candidate(repository, pull_request_number, head_ref_oid)?;
+        log.event(format!(
+            "existing per-PR worktree status: {}",
+            summarize_status(&status)
+        ));
         if status.ready_for_local_features {
             if let Some(path) = status.path {
+                log.event(format!("using existing per-PR worktree at {path}"));
                 return Ok(PathBuf::from(path));
             }
         }
     }
 
-    sync_managed_repository_to_pull_request(&root, repository, pull_request_number, head_ref_oid)?;
-    ensure_managed_worktree_for_pull_request(&root, repository, pull_request_number, head_ref_oid)
+    sync_managed_repository_to_pull_request(
+        &root,
+        repository,
+        pull_request_number,
+        head_ref_oid,
+        log,
+    )?;
+    ensure_managed_worktree_for_pull_request(
+        &root,
+        repository,
+        pull_request_number,
+        head_ref_oid,
+        log,
+    )
 }
 
 fn ensure_managed_worktree_for_pull_request(
@@ -449,6 +789,7 @@ fn ensure_managed_worktree_for_pull_request(
     repository: &str,
     pull_request_number: i64,
     head_ref_oid: Option<&str>,
+    log: &CheckoutLog,
 ) -> Result<PathBuf, String> {
     let expected_head = normalized_expected_head_oid(head_ref_oid);
     let worktree_path = managed_repository_worktree_path(
@@ -456,8 +797,21 @@ fn ensure_managed_worktree_for_pull_request(
         pull_request_number,
         expected_head.as_deref(),
     )?;
+    log.event(format!(
+        "ensuring per-PR managed worktree at {}; expected_head={}",
+        worktree_path.display(),
+        expected_head.as_deref().unwrap_or("<none>")
+    ));
+    remove_stale_managed_worktrees_for_pull_request(
+        base_root,
+        repository,
+        pull_request_number,
+        &worktree_path,
+        log,
+    )?;
 
     if worktree_path.exists() {
+        log.event("per-PR worktree path exists; inspecting before reuse/removal");
         let status = inspect_repository_candidate(
             repository,
             worktree_path.clone(),
@@ -465,6 +819,10 @@ fn ensure_managed_worktree_for_pull_request(
             Some("Using the app-managed checkout.".to_string()),
             expected_head.as_deref(),
         )?;
+        log.event(format!(
+            "per-PR worktree status before reuse/removal: {}",
+            summarize_status(&status)
+        ));
         if expected_head.is_some() && status.ready_for_local_features {
             return Ok(PathBuf::from(
                 status
@@ -473,13 +831,17 @@ fn ensure_managed_worktree_for_pull_request(
             ));
         }
 
-        remove_managed_worktree(base_root, &worktree_path)?;
+        remove_managed_worktree(base_root, &worktree_path, log)?;
     }
 
     if let Some(parent) = worktree_path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             format!("Failed to create the app-managed worktree folder in app storage: {error}")
         })?;
+        log.event(format!(
+            "ensured per-PR worktree parent {}",
+            parent.display()
+        ));
     }
 
     let target_ref = expected_head
@@ -488,8 +850,13 @@ fn ensure_managed_worktree_for_pull_request(
         .ok_or_else(|| {
             "The app-managed checkout could not resolve the pull request head commit.".to_string()
         })?;
+    log.event(format!(
+        "creating per-PR worktree from target_ref={target_ref}"
+    ));
 
-    let output = run_git(
+    let output = run_git_logged(
+        log,
+        "git worktree add",
         base_root,
         vec![
             "worktree".to_string(),
@@ -517,6 +884,10 @@ fn ensure_managed_worktree_for_pull_request(
         Some("Using the app-managed checkout.".to_string()),
         expected_head.as_deref(),
     )?;
+    log.event(format!(
+        "per-PR worktree status after creation: {}",
+        summarize_status(&status)
+    ));
     if status.ready_for_local_features {
         Ok(PathBuf::from(
             status
@@ -528,8 +899,67 @@ fn ensure_managed_worktree_for_pull_request(
     }
 }
 
-fn remove_managed_worktree(base_root: &Path, worktree_path: &Path) -> Result<(), String> {
-    let _ = run_git(
+fn remove_stale_managed_worktrees_for_pull_request(
+    base_root: &Path,
+    repository: &str,
+    pull_request_number: i64,
+    keep_path: &Path,
+    log: &CheckoutLog,
+) -> Result<(), String> {
+    let worktrees_root = managed_repository_worktrees_root(repository)?;
+    if !worktrees_root.exists() {
+        return Ok(());
+    }
+
+    let stale_prefix = format!("pr-{pull_request_number}-");
+    let entries = fs::read_dir(&worktrees_root).map_err(|error| {
+        format!(
+            "Failed to inspect app-managed worktree folder '{}': {error}",
+            worktrees_root.display()
+        )
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            format!(
+                "Failed to inspect app-managed worktree folder '{}': {error}",
+                worktrees_root.display()
+            )
+        })?;
+        let path = entry.path();
+        if path == keep_path || !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.starts_with(&stale_prefix) {
+            continue;
+        }
+
+        log.event(format!(
+            "removing stale per-PR managed worktree sibling {}; keeping {}",
+            path.display(),
+            keep_path.display()
+        ));
+        remove_managed_worktree(base_root, &path, log)?;
+    }
+
+    Ok(())
+}
+
+fn remove_managed_worktree(
+    base_root: &Path,
+    worktree_path: &Path,
+    log: &CheckoutLog,
+) -> Result<(), String> {
+    log.event(format!(
+        "removing stale per-PR worktree at {}",
+        worktree_path.display()
+    ));
+    let _ = run_git_logged(
+        log,
+        "git worktree remove",
         base_root,
         vec![
             "worktree".to_string(),
@@ -546,9 +976,13 @@ fn remove_managed_worktree(base_root: &Path, worktree_path: &Path) -> Result<(),
                 worktree_path.display()
             )
         })?;
+        log.event(format!(
+            "removed stale per-PR worktree directory {}",
+            worktree_path.display()
+        ));
     }
 
-    let _ = run_git(base_root, ["worktree", "prune"]);
+    let _ = run_git_logged(log, "git worktree prune", base_root, ["worktree", "prune"]);
     Ok(())
 }
 
@@ -557,24 +991,43 @@ fn sync_managed_repository_to_pull_request(
     repository: &str,
     pull_request_number: i64,
     head_ref_oid: Option<&str>,
+    log: &CheckoutLog,
 ) -> Result<(), String> {
     let expected_head = head_ref_oid
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
 
-    if expected_head.is_some() && current_head_oid(root)? == expected_head.clone() {
+    let current_head_before = current_head_oid(root)?;
+    log.event(format!(
+        "sync base managed repository to PR: root={}; current_head={}; expected_head={}; fetch_ref=refs/pull/{pull_request_number}/head",
+        root.display(),
+        current_head_before.as_deref().unwrap_or("<none>"),
+        expected_head.as_deref().unwrap_or("<none>")
+    ));
+
+    if expected_head
+        .as_deref()
+        .is_some_and(|head| git_commit_exists(root, head).unwrap_or(false))
+    {
+        log.event("base managed repository already has expected PR head object");
         return Ok(());
     }
 
-    let output = gh::run_owned_in(
+    let pr_ref = format!("refs/remotes/remiss/pr/{pull_request_number}");
+    let output = run_git_logged(
+        log,
+        "fetch PR head in base managed repository",
+        root,
         vec![
-            "pr".to_string(),
-            "checkout".to_string(),
-            pull_request_number.to_string(),
-            "--detach".to_string(),
+            "fetch".to_string(),
+            "--force".to_string(),
+            "--no-tags".to_string(),
+            "--depth=1".to_string(),
+            "--filter=blob:none".to_string(),
+            "origin".to_string(),
+            format!("+refs/pull/{pull_request_number}/head:{pr_ref}"),
         ],
-        Some(root),
     )?;
 
     if output.exit_code != Some(0) {
@@ -587,15 +1040,61 @@ fn sync_managed_repository_to_pull_request(
     }
 
     if let Some(expected_head) = expected_head {
-        let current_head = current_head_oid(root)?.unwrap_or_else(|| "unknown".to_string());
-        if current_head != expected_head {
+        let has_expected_head = git_commit_exists(root, &expected_head)?;
+        log.event(format!(
+            "base managed repository expected PR head object after fetch: expected_head={expected_head}; exists={has_expected_head}"
+        ));
+        if !has_expected_head {
             return Err(format!(
-                "The app-managed checkout did not reach pull request #{pull_request_number}. Expected HEAD {expected_head}, but found {current_head}.",
+                "The app-managed checkout did not fetch pull request #{pull_request_number}. Expected commit {expected_head} was not present after fetching refs/pull/{pull_request_number}/head.",
             ));
         }
     }
 
     Ok(())
+}
+
+fn git_commit_exists(path: &Path, oid: &str) -> Result<bool, String> {
+    let output = run_git(path, ["cat-file", "-e", &format!("{oid}^{{commit}}")])?;
+    Ok(output.exit_code == Some(0))
+}
+
+fn run_gh_logged(
+    log: &CheckoutLog,
+    args: Vec<String>,
+    working_directory: Option<&Path>,
+    label: &str,
+) -> Result<gh::CommandOutput, String> {
+    log.command_start(
+        label,
+        &format!("gh {}", format_command_args(&args)),
+        working_directory,
+    );
+
+    let mut runner = CommandRunner::new("gh")
+        .args(args)
+        .timeout(Duration::from_secs(120));
+    if let Some(path) = working_directory {
+        runner = runner.current_dir(path);
+    }
+
+    let output = runner.run();
+    match output {
+        Ok(output) => {
+            log.command_result(label, &output);
+            if output.timed_out {
+                Err("gh command timed out after 120 seconds.".to_string())
+            } else {
+                Ok(output)
+            }
+        }
+        Err(error) => {
+            log.event(format!(
+                "command launch/poll failed: {label}; error={error}"
+            ));
+            Err(error)
+        }
+    }
 }
 
 fn run_git(
@@ -609,6 +1108,39 @@ fn run_git(
         return Err("git command timed out after 120 seconds.".to_string());
     }
     Ok(output)
+}
+
+fn run_git_logged(
+    log: &CheckoutLog,
+    label: &str,
+    path: &Path,
+    args: impl IntoIterator<Item = impl Into<String>>,
+) -> Result<gh::CommandOutput, String> {
+    let mut command_args = vec!["-C".to_string(), path.display().to_string()];
+    command_args.extend(args.into_iter().map(Into::into));
+    log.command_start(
+        label,
+        &format!("git {}", format_command_args(&command_args)),
+        None,
+    );
+
+    let output = CommandRunner::new("git").args(command_args).run();
+    match output {
+        Ok(output) => {
+            log.command_result(label, &output);
+            if output.timed_out {
+                Err("git command timed out after 120 seconds.".to_string())
+            } else {
+                Ok(output)
+            }
+        }
+        Err(error) => {
+            log.event(format!(
+                "command launch/poll failed: {label}; error={error}"
+            ));
+            Err(error)
+        }
+    }
 }
 
 fn resolve_git_root(path: &Path) -> Result<Option<PathBuf>, String> {
@@ -694,11 +1226,14 @@ fn managed_repository_worktree_path(
     pull_request_number: i64,
     head_ref_oid: Option<&str>,
 ) -> Result<PathBuf, String> {
-    let repository_dir = managed_repository_directory_name(repository);
     let head = managed_worktree_head_component(head_ref_oid);
-    Ok(app_storage::managed_repositories_root()
-        .join(format!("{repository_dir}__worktrees"))
+    Ok(managed_repository_worktrees_root(repository)?
         .join(format!("pr-{pull_request_number}-{head}")))
+}
+
+fn managed_repository_worktrees_root(repository: &str) -> Result<PathBuf, String> {
+    let repository_dir = managed_repository_directory_name(repository);
+    Ok(app_storage::managed_repositories_root().join(format!("{repository_dir}__worktrees")))
 }
 
 fn managed_repository_directory_name(repository: &str) -> String {
@@ -1105,6 +1640,68 @@ mod tests {
         assert_ne!(first, second);
         assert!(first.to_string_lossy().contains("pr-42-aaaaaaaaaaaaaaaa"));
         assert!(second.to_string_lossy().contains("pr-42-bbbbbbbbbbbbbbbb"));
+    }
+
+    #[test]
+    fn ensure_local_repository_removes_stale_worktree_for_updated_pr_head() {
+        let repository_name = format!(
+            "openai/example-stale-worktree-{}",
+            NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
+        );
+        let linked_repository = GitTestRepository::new(&repository_name);
+        linked_repository.write_file("src/lib.rs", "pub fn value() -> i32 { 1 }\n");
+        let first_head = linked_repository.commit_all("initial");
+        linked_repository.write_file("src/lib.rs", "pub fn value() -> i32 { 2 }\n");
+        let second_head = linked_repository.commit_all("second");
+
+        let managed_path = create_managed_clone(&repository_name, &linked_repository.root);
+        linked_repository.write_file("src/lib.rs", "pub fn value() -> i32 { 3 }\n");
+
+        let stale_path = managed_repository_worktree_path(&repository_name, 42, Some(&first_head))
+            .expect("stale worktree path");
+        fs::create_dir_all(&stale_path).expect("failed to create stale worktree");
+        fs::write(stale_path.join("stale.txt"), "stale").expect("failed to write stale marker");
+
+        let cache =
+            CacheStore::new(unique_test_directory("local-repo-cache").join("cache.sqlite3"))
+                .expect("failed to create cache");
+        cache
+            .put(
+                &local_repo_link_key(&repository_name),
+                &LocalRepositoryLink {
+                    path: linked_repository.root.display().to_string(),
+                },
+                0,
+            )
+            .expect("failed to write link");
+
+        let status = ensure_local_repository_for_pull_request(
+            &cache,
+            &repository_name,
+            42,
+            Some(&second_head),
+        )
+        .expect("failed to ensure repository");
+
+        let expected_path =
+            managed_repository_worktree_path(&repository_name, 42, Some(&second_head))
+                .expect("expected worktree path");
+        assert_eq!(status.source, "managed");
+        assert_eq!(
+            status.current_head_oid.as_deref(),
+            Some(second_head.as_str())
+        );
+        assert_eq!(
+            status.path.as_deref(),
+            Some(expected_path.to_string_lossy().as_ref())
+        );
+        assert!(!stale_path.exists());
+        assert!(expected_path.exists());
+
+        if let Some(parent) = expected_path.parent() {
+            let _ = fs::remove_dir_all(parent);
+        }
+        let _ = fs::remove_dir_all(managed_path);
     }
 
     #[test]

@@ -738,9 +738,10 @@ fn render_prepared_code_line_content(
         let click_ranges: Vec<std::ops::Range<usize>> =
             token_ranges.iter().map(|t| t.byte_range.clone()).collect();
         let interactive = styled_selectable_code_text(
-            format!(
-                "prepared-code-lsp:{}:{}:{}",
-                block_id, lsp_context.file.file_path, lsp_context.line_number
+            prepared_lsp_text_id(
+                lsp_context.file.file_path.as_str(),
+                lsp_context.file.reference.as_str(),
+                lsp_context.line_number,
             ),
             &line.text,
             &line.spans,
@@ -821,6 +822,10 @@ impl PreparedFileLineLspContext {
             },
         })
     }
+}
+
+fn prepared_lsp_text_id(file_path: &str, reference: &str, line_number: usize) -> String {
+    format!("prepared-code-lsp:{file_path}:{reference}:{line_number}")
 }
 
 pub fn build_interactive_code_tokens(text: &str) -> Vec<InteractiveCodeToken> {
@@ -1318,7 +1323,7 @@ fn prepared_excerpt_range(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_interactive_code_tokens, prepared_excerpt_range};
+    use super::{build_interactive_code_tokens, prepared_excerpt_range, prepared_lsp_text_id};
 
     #[test]
     fn prepared_excerpt_range_clamps_to_available_lines() {
@@ -1347,6 +1352,14 @@ mod tests {
                 .find(|token| token.text == "parse_value")
                 .map(|token| token.column_start),
             Some(5)
+        );
+    }
+
+    #[test]
+    fn prepared_lsp_text_id_is_stable_for_file_reference_and_line() {
+        assert_eq!(
+            prepared_lsp_text_id("src/main.rs", "head-sha", 42),
+            "prepared-code-lsp:src/main.rs:head-sha:42"
         );
     }
 }

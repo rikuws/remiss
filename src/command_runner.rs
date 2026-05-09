@@ -1,10 +1,13 @@
 use std::{
     io::Read,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 1_048_576;
@@ -78,6 +81,7 @@ impl CommandRunner {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        configure_child_process(&mut command);
 
         if let Some(working_directory) = &self.working_directory {
             command.current_dir(working_directory);
@@ -106,15 +110,13 @@ impl CommandRunner {
                 Ok(None) => {
                     if started_at.elapsed() >= self.timeout {
                         timed_out = true;
-                        let _ = child.kill();
-                        let _ = child.wait();
+                        terminate_child_tree(&mut child);
                         break None;
                     }
                     thread::sleep(Duration::from_millis(20));
                 }
                 Err(error) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    terminate_child_tree(&mut child);
                     return Err(format!("Failed to poll {}: {error}", self.program));
                 }
             }
@@ -138,6 +140,47 @@ impl CommandRunner {
             stderr_truncated: stderr.truncated,
         })
     }
+}
+
+#[cfg(unix)]
+fn configure_child_process(command: &mut Command) {
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn configure_child_process(_command: &mut Command) {}
+
+#[cfg(unix)]
+fn terminate_child_tree(child: &mut Child) {
+    let process_group_id = child.id() as libc::pid_t;
+    unsafe {
+        let _ = libc::kill(-process_group_id, libc::SIGTERM);
+    }
+    for _ in 0..10 {
+        if child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    unsafe {
+        let _ = libc::kill(-process_group_id, libc::SIGKILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(not(unix))]
+fn terminate_child_tree(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[derive(Debug, Default)]

@@ -2,7 +2,6 @@ use gpui::prelude::*;
 use gpui::*;
 
 use crate::icons::{lucide_icon, LucideIcon};
-use crate::review_queue::default_review_file;
 use crate::review_session::{load_review_session, location_label};
 use crate::shader_surface::{
     opengl_shader_surface_variant_with_corner_mask, opengl_shader_surface_with_corner_mask,
@@ -2095,6 +2094,7 @@ pub fn open_pull_request(
 
         s.detail_states.entry(key.clone()).or_default();
         s.apply_review_session_document(&key, cached_review_session.clone());
+        s.ensure_active_selected_file_is_valid();
         let detail_state = s.detail_states.entry(key.clone()).or_default();
         detail_state.loading = load_plan.show_loading;
         if load_plan.load_cached_snapshot || load_plan.sync_live {
@@ -2147,17 +2147,7 @@ pub fn open_pull_request(
                                 ds.error = Some(error.clone());
                             }
                         }
-                        if s.selected_file_path.is_none() {
-                            if let Some(detail) =
-                                ds.snapshot.as_ref().and_then(|sn| sn.detail.as_ref())
-                            {
-                                s.selected_file_path = default_review_file(detail).or_else(|| {
-                                    detail.files.first().map(|file| file.path.clone()).or_else(
-                                        || detail.parsed_diff.first().map(|file| file.path.clone()),
-                                    )
-                                });
-                            }
-                        }
+                        s.ensure_active_selected_file_is_valid();
                         cx.notify();
                     })
                     .ok();
@@ -2214,18 +2204,7 @@ pub fn open_pull_request(
                             ds.error = Some(e);
                         }
                     }
-                    // Set default selected file
-                    if s.selected_file_path.is_none() {
-                        if let Some(detail) = ds.snapshot.as_ref().and_then(|sn| sn.detail.as_ref())
-                        {
-                            s.selected_file_path =
-                                default_review_file(detail).or_else(|| {
-                                    detail.files.first().map(|file| file.path.clone()).or_else(
-                                        || detail.parsed_diff.first().map(|file| file.path.clone()),
-                                    )
-                                });
-                        }
-                    }
+                    s.ensure_active_selected_file_is_valid();
                     if let Some(unread_ids) = next_unread_ids {
                         s.unread_review_comment_ids = unread_ids;
                     }

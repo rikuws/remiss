@@ -17,7 +17,7 @@ use crate::local_repo::LocalRepositoryStatus;
 use crate::lsp::{LspServerStatus, LspSessionManager, LspSymbolDetails};
 use crate::managed_lsp::{ManagedServerInstallStatus, ManagedServerKind};
 use crate::notifications;
-use crate::review_queue::ReviewQueue;
+use crate::review_queue::{default_review_file, ReviewQueue};
 use crate::review_session::{
     add_waymark, load_review_session, location_label, push_history_location, push_route_location,
     remove_waymark, sanitize_code_lens_mode, save_review_session, ReviewCenterMode, ReviewLocation,
@@ -807,6 +807,38 @@ impl AppState {
             .as_ref()
     }
 
+    pub fn default_changed_file_path(detail: &PullRequestDetail) -> Option<String> {
+        default_review_file(detail)
+            .filter(|path| Self::detail_has_changed_file(detail, path))
+            .or_else(|| detail.files.first().map(|file| file.path.clone()))
+    }
+
+    pub fn select_changed_file_path_for_detail(
+        detail: &PullRequestDetail,
+        candidate: Option<String>,
+    ) -> Option<String> {
+        candidate
+            .filter(|path| Self::detail_has_changed_file(detail, path))
+            .or_else(|| Self::default_changed_file_path(detail))
+    }
+
+    pub fn ensure_active_selected_file_is_valid(&mut self) {
+        let Some(detail) = self.active_detail().cloned() else {
+            return;
+        };
+
+        let selected_file =
+            Self::select_changed_file_path_for_detail(&detail, self.selected_file_path.clone());
+        if self.selected_file_path != selected_file {
+            self.selected_file_path = selected_file;
+            self.selected_diff_anchor = None;
+        }
+    }
+
+    fn detail_has_changed_file(detail: &PullRequestDetail, path: &str) -> bool {
+        detail.files.iter().any(|file| file.path == path)
+    }
+
     pub fn is_review_comment_unread(&self, comment_id: &str) -> bool {
         self.unread_review_comment_ids.contains(comment_id)
     }
@@ -1003,11 +1035,14 @@ impl AppState {
                 detail_state.review_session = ReviewSessionState::from_document(document);
             }
         } else {
+            self.selected_file_path = None;
+            self.selected_diff_anchor = None;
             if let Some(detail_state) = self.detail_states.get_mut(detail_key) {
                 detail_state.review_session.loaded = true;
                 detail_state.review_session.error = None;
             }
         }
+        self.ensure_active_selected_file_is_valid();
     }
 
     pub fn navigate_to_review_location(&mut self, location: ReviewLocation, push_history: bool) {

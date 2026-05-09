@@ -4885,6 +4885,7 @@ dependencies = [
  "giallo",
  "gpui",
  "json5",
+ "libc",
  "lucide-icons",
  "objc2",
  "objc2-app-kit",

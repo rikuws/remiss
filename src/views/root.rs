@@ -11,8 +11,8 @@ use crate::theme::*;
 
 use super::ai_tour::refresh_active_tour;
 use super::diff_view::{
-    ensure_active_review_focus_loaded, enter_files_surface, enter_stack_review_mode,
-    warm_structural_diffs_flow,
+    ensure_active_review_focus_loaded, ensure_structural_diff_warmup_started, enter_files_surface,
+    enter_stack_review_mode, warm_structural_diffs_flow,
 };
 use super::palette::render_palette;
 use super::pr_detail::render_pr_workspace;
@@ -809,14 +809,23 @@ fn render_workspace_tabs(
                 &tab.state,
                 tab.is_draft,
                 is_active,
-                move |_, _, cx| {
+                move |_, window, cx| {
+                    let cached_review_session = {
+                        let cache = state.read(cx).cache.clone();
+                        load_review_session(cache.as_ref(), &key).ok().flatten()
+                    };
                     state.update(cx, |s, cx| {
                         s.active_pr_key = Some(key.clone());
                         s.set_active_section(SectionId::Pulls);
                         s.palette_open = false;
                         s.palette_selected_index = 0;
+                        s.detail_states.entry(key.clone()).or_default();
+                        s.apply_review_session_document(&key, cached_review_session.clone());
+                        s.ensure_active_selected_file_is_valid();
                         cx.notify();
                     });
+                    ensure_active_review_focus_loaded(&state, window, cx);
+                    ensure_structural_diff_warmup_started(&state, window, cx);
                 },
             )
         }))

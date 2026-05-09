@@ -12,6 +12,7 @@ difftastic = { git = "https://github.com/rikuws/difftastic", rev = "007b1a2dbc8a
 flate2 = "1"
 gpui = "0.2"
 json5 = { version = "0.4", optional = true }
+libc = "0.2"
 lucide-icons = "1.14"
 once_cell = "1"
 rusqlite = { version = "0.33", features = ["bundled"] }
