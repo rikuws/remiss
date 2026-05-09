@@ -33,6 +33,7 @@ const APP_TITLEBAR_TOGGLE_LEFT: f32 = 88.0;
 const APP_TITLEBAR_TOGGLE_SIZE: f32 = 24.0;
 const APP_TITLEBAR_TOGGLE_TOP: f32 = (APP_CHROME_HEIGHT - APP_TITLEBAR_TOGGLE_SIZE) / 2.0;
 const APP_TITLEBAR_TOGGLE_ICON_SIZE: f32 = 13.0;
+const APP_TITLEBAR_TOGGLE_GAP: f32 = 4.0;
 const APP_CHROME_HIDDEN_LEFT_INSET: f32 = 206.0;
 const APP_SIDEBAR_ANIMATION_MS: u64 = 220;
 const NOTIFICATION_DRAWER_ANIMATION_MS: u64 = 160;
@@ -272,7 +273,7 @@ impl Render for RootView {
             .font_family(ui_font_family())
             .child(render_app_sidebar(&self.state, cx))
             .child(render_main_column(&self.state, cx))
-            .child(render_titlebar_sidebar_toggle(&self.state, cx))
+            .child(render_titlebar_panel_toggles(&self.state, cx))
             .when(notification_drawer_open, |el| {
                 el.child(render_notification_drawer(&self.state, cx))
             })
@@ -467,31 +468,67 @@ fn render_main_column(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
         .child(render_workspace_body(state, cx))
 }
 
-fn render_titlebar_sidebar_toggle(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
-    let hidden = state.read(cx).app_sidebar_collapsed;
-    let state = state.clone();
-    let tooltip = if hidden {
+fn render_titlebar_panel_toggles(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
+    let s = state.read(cx);
+    let sidebar_hidden = s.app_sidebar_collapsed;
+    let show_file_tree_toggle =
+        s.active_surface == PullRequestSurface::Files && s.active_detail().is_some();
+    let file_tree_visible = s
+        .active_review_session()
+        .map(|session| session.show_file_tree)
+        .unwrap_or(true);
+    let state_for_sidebar = state.clone();
+    let state_for_file_tree = state.clone();
+    let sidebar_tooltip = if sidebar_hidden {
         "Show sidebar"
     } else {
         "Hide sidebar"
+    };
+    let file_tree_tooltip = if file_tree_visible {
+        "Hide file tree"
+    } else {
+        "Show file tree"
+    };
+    let file_tree_icon = if file_tree_visible {
+        LucideIcon::PanelLeftClose
+    } else {
+        LucideIcon::PanelLeftOpen
     };
 
     div()
         .absolute()
         .left(px(APP_TITLEBAR_TOGGLE_LEFT))
         .top(px(APP_TITLEBAR_TOGGLE_TOP))
+        .flex()
+        .items_center()
+        .gap(px(APP_TITLEBAR_TOGGLE_GAP))
         .child(titlebar_icon_button(
             "titlebar-sidebar-toggle",
             LucideIcon::PanelLeft,
-            tooltip,
+            sidebar_tooltip,
             false,
             move |_, _, cx| {
-                state.update(cx, |state, cx| {
-                    state.app_sidebar_collapsed = !hidden;
+                state_for_sidebar.update(cx, |state, cx| {
+                    state.app_sidebar_collapsed = !sidebar_hidden;
                     cx.notify();
                 });
             },
         ))
+        .when(show_file_tree_toggle, |el| {
+            el.child(titlebar_icon_button(
+                "titlebar-file-tree-toggle",
+                file_tree_icon,
+                file_tree_tooltip,
+                false,
+                move |_, _, cx| {
+                    state_for_file_tree.update(cx, |state, cx| {
+                        state.set_review_file_tree_visible(!file_tree_visible);
+                        state.persist_active_review_session();
+                        cx.notify();
+                    });
+                },
+            ))
+        })
 }
 
 fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoElement {

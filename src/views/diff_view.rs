@@ -845,6 +845,8 @@ pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement
     let review_queue = prepare_review_queue(&s, detail);
     let review_session = s.active_review_session().cloned().unwrap_or_default();
     let show_file_tree = review_session.show_file_tree;
+    let file_tree_hidden = !show_file_tree;
+    let file_tree_animation_key = ("review-file-tree", usize::from(file_tree_hidden));
 
     let default_path = review_queue
         .default_item()
@@ -875,18 +877,41 @@ pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement
         .flex_grow()
         .min_h_0()
         .bg(diff_editor_bg())
-        .when(show_file_tree, |el| {
-            el.child(render_review_sidebar_pane(
-                state,
-                detail,
-                review_queue.as_ref(),
-                sidebar_selected_path,
-                semantic_file.as_deref(),
-                &review_session,
-                review_stack.clone(),
-                cx,
-            ))
-        })
+        .child(
+            div()
+                .w(if show_file_tree {
+                    file_tree_width()
+                } else {
+                    px(0.0)
+                })
+                .h_full()
+                .flex_shrink_0()
+                .min_h_0()
+                .flex()
+                .flex_row()
+                .overflow_hidden()
+                .child(render_review_sidebar_pane(
+                    state,
+                    detail,
+                    review_queue.as_ref(),
+                    sidebar_selected_path,
+                    semantic_file.as_deref(),
+                    &review_session,
+                    review_stack.clone(),
+                    cx,
+                ))
+                .with_animation(
+                    file_tree_animation_key,
+                    Animation::new(Duration::from_millis(REVIEW_FILE_TREE_ANIMATION_MS))
+                        .with_easing(ease_in_out),
+                    move |el, delta| {
+                        let progress = review_file_tree_hidden_progress(file_tree_hidden, delta);
+                        let expanded_width = file_tree_width();
+                        let hidden_width = px(0.0);
+                        el.w(expanded_width + (hidden_width - expanded_width) * progress)
+                    },
+                ),
+        )
         .child(
             div()
                 .flex()
@@ -905,11 +930,6 @@ pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement
                     cx,
                 )),
         )
-        .child(render_review_panel_toggle(
-            state,
-            ReviewPanelToggleSide::FileTree,
-            show_file_tree,
-        ))
         .when(waypoint_spotlight_open, |el| {
             el.child(render_waypoint_spotlight(state, cx))
         })
@@ -931,113 +951,14 @@ pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement
         .into_any_element()
 }
 
-const REVIEW_PANEL_TOGGLE_SIZE: f32 = 22.0;
-const REVIEW_PANEL_TOGGLE_HIDDEN_INSET: f32 = 10.0;
-const REVIEW_PANEL_TOGGLE_OVERLAP: f32 = REVIEW_PANEL_TOGGLE_SIZE / 2.0;
-const REVIEW_PANEL_TOGGLE_TOP: f32 = 10.0;
+const REVIEW_FILE_TREE_ANIMATION_MS: u64 = 220;
 
-#[derive(Clone, Copy)]
-enum ReviewPanelToggleSide {
-    FileTree,
-}
-
-fn render_review_panel_toggle(
-    state: &Entity<AppState>,
-    side: ReviewPanelToggleSide,
-    visible: bool,
-) -> AnyElement {
-    let (icon, tooltip) = match (side, visible) {
-        (ReviewPanelToggleSide::FileTree, true) => {
-            (LucideIcon::PanelLeftClose, "Hide review sidebar")
-        }
-        (ReviewPanelToggleSide::FileTree, false) => {
-            (LucideIcon::PanelLeftOpen, "Show review sidebar")
-        }
-    };
-    let button_id = match side {
-        ReviewPanelToggleSide::FileTree => "review-file-tree-toggle",
-    };
-    let button_animation_id =
-        SharedString::from(format!("{button_id}-button-{}", usize::from(visible)));
-    let position_animation_id =
-        SharedString::from(format!("{button_id}-position-{}", usize::from(visible)));
-    let state = state.clone();
-    let button = div()
-        .id(button_id)
-        .w(px(REVIEW_PANEL_TOGGLE_SIZE))
-        .h(px(REVIEW_PANEL_TOGGLE_SIZE))
-        .rounded(radius_sm())
-        .border_1()
-        .border_color(if visible {
-            diff_annotation_border()
-        } else {
-            border_muted()
-        })
-        .bg(if visible {
-            diff_editor_chrome()
-        } else {
-            diff_editor_surface()
-        })
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor_pointer()
-        .hover(|style| style.bg(diff_line_hover_bg()))
-        .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
-        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-            state.update(cx, |state, cx| {
-                match side {
-                    ReviewPanelToggleSide::FileTree => {
-                        state.set_review_file_tree_visible(!visible);
-                    }
-                }
-                state.persist_active_review_session();
-                cx.notify();
-            });
-        })
-        .child(lucide_icon(
-            icon,
-            12.0,
-            if visible { fg_emphasis() } else { fg_muted() },
-        ))
-        .with_animation(
-            button_animation_id,
-            Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
-            move |el, delta| {
-                let progress = selected_reveal_progress(visible, delta);
-                el.bg(mix_rgba(
-                    diff_editor_surface(),
-                    diff_editor_chrome(),
-                    progress,
-                ))
-                .border_color(mix_rgba(
-                    border_muted(),
-                    diff_annotation_border(),
-                    progress,
-                ))
-            },
-        );
-
-    div()
-        .absolute()
-        .top(px(REVIEW_PANEL_TOGGLE_TOP))
-        .left(if visible {
-            file_tree_width() - px(REVIEW_PANEL_TOGGLE_OVERLAP)
-        } else {
-            px(REVIEW_PANEL_TOGGLE_HIDDEN_INSET)
-        })
-        .child(button)
-        .with_animation(
-            position_animation_id,
-            Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
-            move |el, delta| {
-                let progress = selected_transition_progress(visible, delta);
-                let hidden_left = px(REVIEW_PANEL_TOGGLE_HIDDEN_INSET);
-                let visible_left = file_tree_width() - px(REVIEW_PANEL_TOGGLE_OVERLAP);
-                el.left(hidden_left + (visible_left - hidden_left) * progress)
-            },
-        )
-        .into_any_element()
+fn review_file_tree_hidden_progress(hidden: bool, delta: f32) -> f32 {
+    if hidden {
+        delta
+    } else {
+        1.0 - delta
+    }
 }
 
 fn review_cache_key(active_pr_key: Option<&str>, scope: &str) -> String {
@@ -6904,21 +6825,6 @@ fn toolbar_icon_button(
                     ))
             },
         )
-}
-
-fn render_file_tree_toggle_icon(active: bool) -> AnyElement {
-    let color = if active { accent() } else { fg_muted() };
-
-    lucide_icon(
-        if active {
-            LucideIcon::PanelLeftClose
-        } else {
-            LucideIcon::PanelLeftOpen
-        },
-        14.0,
-        color,
-    )
-    .into_any_element()
 }
 
 fn render_stack_tree_toggle_icon(active: bool) -> AnyElement {
