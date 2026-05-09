@@ -1,10 +1,7 @@
 use gpui::prelude::*;
 use gpui::*;
 
-use crate::app_assets::{
-    OVERVIEW_MY_PULL_REQUESTS_ASSET, OVERVIEW_OPEN_PULL_REQUESTS_ASSET,
-    OVERVIEW_REVIEW_REQUESTS_ASSET,
-};
+use crate::icons::{lucide_icon, LucideIcon};
 use crate::review_queue::default_review_file;
 use crate::review_session::{load_review_session, location_label};
 use crate::shader_surface::{
@@ -17,7 +14,7 @@ use crate::{github, notifications};
 
 use super::settings::render_settings_view;
 use super::workspace_sync::trigger_sync_workspace;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 const DETAIL_AUTO_REFRESH_TTL_MS: i64 = 5 * 60 * 1000;
 
@@ -97,7 +94,7 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                         .flex_wrap()
                         .gap(px(12.0))
                         .child(overview_metric_card(
-                            OVERVIEW_OPEN_PULL_REQUESTS_ASSET,
+                            LucideIcon::GitPullRequest,
                             "Open Pull Requests",
                             open_tab_count,
                             OverviewShaderVariant::Bands,
@@ -113,7 +110,7 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                             },
                         ))
                         .child(overview_metric_card(
-                            OVERVIEW_MY_PULL_REQUESTS_ASSET,
+                            LucideIcon::GitPullRequestCreate,
                             "My Pull Requests",
                             authored_count,
                             OverviewShaderVariant::Flow,
@@ -126,7 +123,7 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                             },
                         ))
                         .child(overview_metric_card(
-                            OVERVIEW_REVIEW_REQUESTS_ASSET,
+                            LucideIcon::MessageSquareCheck,
                             "Review Requests",
                             review_count,
                             OverviewShaderVariant::Bands,
@@ -243,7 +240,7 @@ fn overview_ambient_strip(welcome_greeting: String) -> impl IntoElement {
 }
 
 fn overview_metric_card(
-    icon_asset: &str,
+    icon: LucideIcon,
     label: &str,
     count: i64,
     shader_variant: OverviewShaderVariant,
@@ -292,12 +289,7 @@ fn overview_metric_card(
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(
-                        svg()
-                            .path(icon_asset.to_string())
-                            .size(px(17.0))
-                            .text_color(fg_emphasis()),
-                    ),
+                    .child(lucide_icon(icon, 17.0, fg_emphasis())),
             ),
         )
         .child(
@@ -1232,7 +1224,7 @@ pub fn ghost_button(
         .px(px(14.0))
         .py(px(7.0))
         .rounded(radius_sm())
-        .bg(bg_overlay())
+        .bg(control_button_bg())
         .border_1()
         .border_color(border_muted())
         .text_color(fg_default())
@@ -1241,8 +1233,8 @@ pub fn ghost_button(
         .cursor_pointer()
         .hover(|style| {
             style
-                .bg(hover_bg())
-                .border_color(focus_border())
+                .bg(control_button_hover_bg())
+                .border_color(border_default())
                 .text_color(fg_emphasis())
         })
         .on_mouse_down(MouseButton::Left, on_click)
@@ -1519,6 +1511,9 @@ fn filter_pill(
     active: bool,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let animation_id = SharedString::from(format!("filter-pill-{label}-{}", usize::from(active)));
+    let border_muted_transparent = with_alpha(border_muted(), 0.0);
+
     div()
         .flex()
         .justify_between()
@@ -1528,19 +1523,21 @@ fn filter_pill(
         .rounded(radius_sm())
         .border_1()
         .border_color(if active {
-            focus_border()
+            border_muted()
         } else {
             transparent()
         })
         .text_size(px(13.0))
         .font_weight(FontWeight::MEDIUM)
         .cursor_pointer()
-        .when(active, |el| el.bg(bg_selected()).text_color(fg_emphasis()))
+        .when(active, |el| {
+            el.bg(control_selected_bg()).text_color(fg_emphasis())
+        })
         .when(!active, |el| el.text_color(fg_muted()))
         .hover(|style| {
             style
-                .bg(hover_bg())
-                .border_color(focus_border())
+                .bg(control_button_hover_bg())
+                .border_color(border_muted())
                 .text_color(fg_emphasis())
         })
         .on_mouse_down(MouseButton::Left, on_click)
@@ -1551,6 +1548,16 @@ fn filter_pill(
                 .font_family(mono_font_family())
                 .text_size(px(12.0))
                 .child(count.to_string()),
+        )
+        .with_animation(
+            animation_id,
+            Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
+            move |el, delta| {
+                let progress = selected_reveal_progress(active, delta);
+                el.bg(mix_rgba(transparent(), control_selected_bg(), progress))
+                    .border_color(mix_rgba(border_muted_transparent, border_muted(), progress))
+                    .text_color(mix_rgba(fg_muted(), fg_emphasis(), progress))
+            },
         )
 }
 

@@ -778,12 +778,9 @@ mod tests {
             .manual_review_atom_ids
             .iter()
             .any(|id| id == "atom_2"));
-        assert!(validated
-            .plan
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("omitted")
-                && warning.contains("manual_review_atom_ids")));
+        assert!(validated.plan.warnings.iter().any(
+            |warning| warning.contains("omitted") && warning.contains("manual_review_atom_ids")
+        ));
     }
 
     #[test]

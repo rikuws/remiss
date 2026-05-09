@@ -10,6 +10,7 @@ const THEME_SETTINGS_CACHE_KEY: &str = "theme-settings-v1";
 const UI_FONT_FAMILY: &str = ".AppleSystemUIFont";
 const MONO_FONT_FAMILY: &str = "Fira Code";
 const DISPLAY_SERIF_FONT_FAMILY: &str = "Instrument Serif";
+pub const TOGGLE_ANIMATION_MS: u64 = 140;
 
 const LIGHT_CANVAS: u32 = 0xf6f8fb;
 const LIGHT_SURFACE: u32 = 0xffffff;
@@ -109,6 +110,36 @@ fn color(r: f32, g: f32, b: f32, a: f32) -> Rgba {
 
 pub fn transparent() -> Rgba {
     color(0.0, 0.0, 0.0, 0.0)
+}
+
+pub fn with_alpha(mut color: Rgba, alpha: f32) -> Rgba {
+    color.a = alpha;
+    color
+}
+
+pub fn mix_rgba(from: Rgba, to: Rgba, progress: f32) -> Rgba {
+    Rgba {
+        r: from.r + (to.r - from.r) * progress,
+        g: from.g + (to.g - from.g) * progress,
+        b: from.b + (to.b - from.b) * progress,
+        a: from.a + (to.a - from.a) * progress,
+    }
+}
+
+pub fn selected_transition_progress(selected: bool, delta: f32) -> f32 {
+    if selected {
+        delta
+    } else {
+        1.0 - delta
+    }
+}
+
+pub fn selected_reveal_progress(selected: bool, delta: f32) -> f32 {
+    if selected {
+        delta
+    } else {
+        0.0
+    }
 }
 
 fn hex(hex: u32) -> Rgba {
@@ -243,6 +274,28 @@ pub fn bg_selected() -> Rgba {
     theme_hex(LIGHT_SELECTED, DARK_SELECTED)
 }
 
+pub fn control_track_bg() -> Rgba {
+    match active_theme() {
+        ActiveTheme::Light => bg_inset(),
+        ActiveTheme::Dark => bg_overlay(),
+    }
+}
+
+pub fn control_selected_bg() -> Rgba {
+    match active_theme() {
+        ActiveTheme::Light => bg_surface(),
+        ActiveTheme::Dark => bg_inset(),
+    }
+}
+
+pub fn control_button_bg() -> Rgba {
+    bg_subtle()
+}
+
+pub fn control_button_hover_bg() -> Rgba {
+    bg_emphasis()
+}
+
 pub fn focus() -> Rgba {
     theme_hex(LIGHT_FOCUS, DARK_FOCUS)
 }
@@ -311,56 +364,88 @@ pub fn border_muted() -> Rgba {
     theme_hex_alpha((LIGHT_BORDER_MUTED, 0.90), (DARK_BORDER_MUTED, 0.92))
 }
 
+pub fn diff_editor_bg() -> Rgba {
+    theme_hex(0xf8fafc, 0x0c0c0c)
+}
+
+pub fn diff_editor_chrome() -> Rgba {
+    theme_hex(0xffffff, 0x131313)
+}
+
+pub fn diff_editor_surface() -> Rgba {
+    theme_hex(0xffffff, 0x0b0d10)
+}
+
+pub fn diff_annotation_bg() -> Rgba {
+    theme_hex(0xf2f6fb, 0x101417)
+}
+
+pub fn diff_annotation_border() -> Rgba {
+    theme_hex_alpha((LIGHT_BORDER_MUTED, 0.72), (0x2a3035, 0.58))
+}
+
+pub fn diff_line_hover_bg() -> Rgba {
+    theme_hex_alpha((0xe6edf6, 0.58), (0xffffff, 0.045))
+}
+
+pub fn diff_selected_edge() -> Rgba {
+    theme_hex_alpha((LIGHT_FOCUS, 0.58), (DARK_FOCUS, 0.72))
+}
+
+pub fn diff_gutter_separator() -> Rgba {
+    theme_hex_alpha((LIGHT_BORDER_MUTED, 0.64), (0x163022, 0.82))
+}
+
 pub fn diff_hunk_bg() -> Rgba {
-    theme_hex(0xeaf2ff, 0x102033)
+    theme_hex(0xf1f6fb, 0x0f1518)
 }
 
 pub fn diff_hunk_fg() -> Rgba {
-    focus()
+    theme_hex(0x315f8f, 0x7f8d9f)
 }
 
 pub fn diff_context_bg() -> Rgba {
-    theme_hex(0xfbfdff, 0x0b1118)
+    theme_hex(0xffffff, 0x0d1110)
 }
 
 pub fn diff_context_gutter_bg() -> Rgba {
-    theme_hex(0xf1f5f9, 0x101720)
+    theme_hex(0xf4f7fa, 0x111818)
 }
 
 pub fn diff_meta_bg() -> Rgba {
-    theme_hex(0xeaf2ff, 0x102033)
+    theme_hex(0xf1f6fb, 0x0f1518)
 }
 
 pub fn diff_add_bg() -> Rgba {
-    theme_hex(0xecfdf3, 0x0c1f16)
+    theme_hex(0xeaf9ef, 0x12221c)
 }
 
 pub fn diff_add_gutter_bg() -> Rgba {
-    theme_hex(0xdcfce7, 0x123320)
+    theme_hex(0xd7f0df, 0x174530)
 }
 
 pub fn diff_add_emphasis_bg() -> Rgba {
-    theme_hex_alpha((LIGHT_SUCCESS, 0.16), (DARK_SUCCESS, 0.20))
+    theme_hex_alpha((LIGHT_SUCCESS, 0.18), (DARK_SUCCESS, 0.24))
 }
 
 pub fn diff_add_border() -> Rgba {
-    theme_hex_alpha((LIGHT_SUCCESS, 0.28), (DARK_SUCCESS, 0.28))
+    theme_hex_alpha((LIGHT_SUCCESS, 0.18), (0x1f6f48, 0.42))
 }
 
 pub fn diff_remove_bg() -> Rgba {
-    theme_hex(0xfef2f2, 0x2a1216)
+    theme_hex(0xfff0f0, 0x231616)
 }
 
 pub fn diff_remove_gutter_bg() -> Rgba {
-    theme_hex(0xfee2e2, 0x3a171c)
+    theme_hex(0xf9dddd, 0x4a1e24)
 }
 
 pub fn diff_remove_emphasis_bg() -> Rgba {
-    theme_hex_alpha((LIGHT_DANGER, 0.15), (DARK_DANGER, 0.20))
+    theme_hex_alpha((LIGHT_DANGER, 0.17), (DARK_DANGER, 0.23))
 }
 
 pub fn diff_remove_border() -> Rgba {
-    theme_hex_alpha((LIGHT_DANGER, 0.26), (DARK_DANGER, 0.28))
+    theme_hex_alpha((LIGHT_DANGER, 0.18), (0x8b3038, 0.42))
 }
 
 pub fn fg_default() -> Rgba {
@@ -495,7 +580,7 @@ pub fn sidebar_width() -> Pixels {
 }
 
 pub fn file_tree_width() -> Pixels {
-    px(268.0)
+    px(292.0)
 }
 
 pub fn detail_side_width() -> Pixels {

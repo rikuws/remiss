@@ -34,6 +34,18 @@ struct TextSelectionState {
     hovered_index: Option<usize>,
 }
 
+#[derive(Clone)]
+struct ActiveTextTooltip {
+    key: String,
+    mouse_position: gpui::Point<Pixels>,
+    view: AnyView,
+}
+
+#[derive(Default)]
+struct TextTooltipState {
+    active: Option<ActiveTextTooltip>,
+}
+
 impl TextSelectionState {
     fn clamp(&mut self, len: usize) {
         self.anchor_index = self.anchor_index.map(|index| index.min(len));
@@ -85,6 +97,7 @@ struct SelectableTextClickEvent {
 #[derive(Default)]
 pub struct SelectableTextState {
     selection: Rc<RefCell<TextSelectionState>>,
+    tooltip: Rc<RefCell<TextTooltipState>>,
 }
 
 pub struct SelectableText {
@@ -96,7 +109,7 @@ pub struct SelectableText {
         Option<Box<dyn Fn(&[Range<usize>], SelectableTextClickEvent, &mut Window, &mut App)>>,
     unmatched_click_listener: Option<Box<dyn Fn(&mut Window, &mut App)>>,
     hover_listener: Option<Box<dyn Fn(Option<usize>, MouseMoveEvent, &mut Window, &mut App)>>,
-    tooltip_builder: Option<Rc<dyn Fn(usize, &mut Window, &mut App) -> Option<AnyView>>>,
+    tooltip_builder: Option<Rc<dyn Fn(usize, &mut Window, &mut App) -> Option<(String, AnyView)>>>,
     clickable_ranges: Vec<Range<usize>>,
     selection_color: gpui::Rgba,
 }
@@ -163,6 +176,16 @@ impl SelectableText {
         mut self,
         builder: impl Fn(usize, &mut Window, &mut App) -> Option<AnyView> + 'static,
     ) -> Self {
+        self.tooltip_builder = Some(Rc::new(move |index, window, cx| {
+            builder(index, window, cx).map(|view| (index.to_string(), view))
+        }));
+        self
+    }
+
+    pub fn tooltip_with_key(
+        mut self,
+        builder: impl Fn(usize, &mut Window, &mut App) -> Option<(String, AnyView)> + 'static,
+    ) -> Self {
         self.tooltip_builder = Some(Rc::new(builder));
         self
     }
@@ -214,24 +237,65 @@ impl Element for SelectableText {
                         .as_ref()
                         .map(|state| state.selection.clone())
                         .unwrap_or_default();
+                    let tooltip_state = selectable_state
+                        .as_ref()
+                        .map(|state| state.tooltip.clone())
+                        .unwrap_or_default();
                     let mouse_position = window.mouse_position();
-                    if bounds.contains(&mouse_position) && !selection_state.borrow().selecting {
+                    if selection_state.borrow().selecting {
+                        tooltip_state.borrow_mut().active = None;
+                    } else if bounds.contains(&mouse_position) {
                         if let Ok(index) = self.text.layout().index_for_position(mouse_position) {
-                            if let Some(view) = tooltip_builder(index, window, cx) {
-                                let source_bounds = bounds;
-                                let selection_state = selection_state.clone();
-                                window.set_tooltip(AnyTooltip {
-                                    view,
-                                    mouse_position,
-                                    check_visible_and_update: Rc::new(
-                                        move |_tooltip_bounds, window, _cx| {
-                                            source_bounds.contains(&window.mouse_position())
-                                                && !selection_state.borrow().selecting
-                                        },
-                                    ),
-                                });
+                            if let Some((key, view)) = tooltip_builder(index, window, cx) {
+                                let mut state = tooltip_state.borrow_mut();
+                                let replace_tooltip = state
+                                    .active
+                                    .as_ref()
+                                    .map(|tooltip| tooltip.key != key)
+                                    .unwrap_or(true);
+                                if replace_tooltip {
+                                    state.active = Some(ActiveTextTooltip {
+                                        key,
+                                        mouse_position,
+                                        view,
+                                    });
+                                }
                             }
                         }
+                    }
+
+                    let active_tooltip = tooltip_state.borrow().active.clone();
+                    if let Some(active_tooltip) = active_tooltip {
+                        let source_bounds = bounds;
+                        let selection_state = selection_state.clone();
+                        let tooltip_state = tooltip_state.clone();
+                        let tooltip_key = active_tooltip.key.clone();
+                        window.set_tooltip(AnyTooltip {
+                            view: active_tooltip.view,
+                            mouse_position: active_tooltip.mouse_position,
+                            check_visible_and_update: Rc::new(
+                                move |tooltip_bounds, window, _cx| {
+                                    let mouse_position = window.mouse_position();
+                                    let visible = !selection_state.borrow().selecting
+                                        && (source_bounds.contains(&mouse_position)
+                                            || tooltip_bounds.contains(&mouse_position));
+
+                                    if !visible {
+                                        let mut state = tooltip_state.borrow_mut();
+                                        if state
+                                            .active
+                                            .as_ref()
+                                            .map(|tooltip| tooltip.key == tooltip_key)
+                                            .unwrap_or(false)
+                                        {
+                                            state.active = None;
+                                        }
+                                    }
+
+                                    visible
+                                },
+                            ),
+                        });
                     }
                 }
 

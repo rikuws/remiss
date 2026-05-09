@@ -275,63 +275,22 @@ pub fn render_pr_workspace(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
     let detail_state = s.active_detail_state();
     let surface = s.active_surface;
 
-    let Some(pr) = pr else {
+    let Some(_pr) = pr else {
         return div()
             .child(panel_state_text("No pull request selected."))
             .into_any_element();
     };
 
-    let pr_title = detail
-        .map(|d| d.title.clone())
-        .unwrap_or_else(|| pr.title.clone());
-    let pr_state = detail
-        .map(|d| d.state.clone())
-        .unwrap_or_else(|| pr.state.clone());
-    let is_draft = detail.map(|d| d.is_draft).unwrap_or(pr.is_draft);
-    let author = detail
-        .map(|d| d.author_login.clone())
-        .unwrap_or_else(|| pr.author_login.clone());
-    let author_avatar_url = detail
-        .and_then(|d| d.author_avatar_url.clone())
-        .or_else(|| pr.author_avatar_url.clone());
-    let repository = pr.repository.clone();
-    let number = pr.number;
     let loading = detail_state.map(|d| d.loading).unwrap_or(false);
     let syncing = detail_state.map(|d| d.syncing).unwrap_or(false);
     let error = detail_state.and_then(|d| d.error.clone());
     let show_loading_state = detail.is_none() && (loading || syncing);
-    let header_compact = surface != PullRequestSurface::Overview || s.pr_header_compact;
-    let unread_review_comment_ids = detail
-        .map(|detail| s.unread_review_comment_ids_for_detail(detail))
-        .unwrap_or_default();
-    let unread_review_comment_count = unread_review_comment_ids.len();
-
-    let state_for_surface = state.clone();
-    let state_for_refresh = state.clone();
 
     div()
         .flex()
         .flex_col()
         .flex_grow()
         .min_h_0()
-        // Header (fixed, never scrolls)
-        .child(render_pr_header(
-            &repository,
-            number,
-            &pr_title,
-            &pr_state,
-            is_draft,
-            &author,
-            author_avatar_url.as_deref(),
-            detail.map(|d| (d.base_ref_name.clone(), d.head_ref_name.clone())),
-            syncing,
-            surface,
-            header_compact,
-            unread_review_comment_count,
-            unread_review_comment_ids,
-            state_for_refresh,
-            state_for_surface,
-        ))
         // Content area (scrollable or flex-fill depending on surface)
         .when(show_loading_state, |el| {
             el.child(
@@ -2719,6 +2678,9 @@ pub fn surface_tab(
     active: bool,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let animation_id = SharedString::from(format!("surface-tab-{label}-{}", usize::from(active)));
+    let border_muted_transparent = with_alpha(border_muted(), 0.0);
+
     div()
         .px(px(14.0))
         .py(px(6.0))
@@ -2726,21 +2688,33 @@ pub fn surface_tab(
         .text_size(px(12.0))
         .border_1()
         .border_color(if active {
-            focus_border()
+            border_muted()
         } else {
             transparent()
         })
         .cursor_pointer()
-        .when(active, |el| el.bg(bg_selected()).text_color(fg_emphasis()))
+        .when(active, |el| {
+            el.bg(control_selected_bg()).text_color(fg_emphasis())
+        })
         .when(!active, |el| el.text_color(fg_muted()))
         .hover(|style| {
             style
-                .bg(hover_bg())
-                .border_color(focus_border())
+                .bg(control_button_hover_bg())
+                .border_color(border_muted())
                 .text_color(fg_emphasis())
         })
         .on_mouse_down(MouseButton::Left, on_click)
         .child(label.to_string())
+        .with_animation(
+            animation_id,
+            Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
+            move |el, delta| {
+                let progress = selected_reveal_progress(active, delta);
+                el.bg(mix_rgba(transparent(), control_selected_bg(), progress))
+                    .border_color(mix_rgba(border_muted_transparent, border_muted(), progress))
+                    .text_color(mix_rgba(fg_muted(), fg_emphasis(), progress))
+            },
+        )
 }
 
 fn trigger_sync_pr(

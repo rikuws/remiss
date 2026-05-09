@@ -3,34 +3,10 @@ use std::fs;
 use std::path::PathBuf;
 
 use gpui::{AssetSource, Result, SharedString};
+use lucide_icons::LUCIDE_FONT_BYTES;
 
 pub const APP_MARK_ASSET: &str = "brand/app-icon.png";
 pub const BRAND_HERO_LANDSCAPE_ASSET: &str = "brand/hero_landscape.png";
-pub const OVERVIEW_OPEN_PULL_REQUESTS_ASSET: &str = "icons/overview-open-pull-requests.svg";
-pub const OVERVIEW_MY_PULL_REQUESTS_ASSET: &str = "icons/overview-my-pull-requests.svg";
-pub const OVERVIEW_REVIEW_REQUESTS_ASSET: &str = "icons/overview-review-requests.svg";
-pub const SIDEBAR_OVERVIEW_ASSET: &str = "icons/sidebar-overview.svg";
-pub const SIDEBAR_PULLS_ASSET: &str = "icons/sidebar-pulls.svg";
-pub const SIDEBAR_REVIEWS_ASSET: &str = "icons/sidebar-reviews.svg";
-pub const SIDEBAR_SETTINGS_ASSET: &str = "icons/sidebar-settings.svg";
-pub const SIDEBAR_COLLAPSE_ASSET: &str = "icons/sidebar-collapse.svg";
-pub const SIDEBAR_EXPAND_ASSET: &str = "icons/sidebar-expand.svg";
-pub const SIDEBAR_SYNC_ASSET: &str = "icons/sidebar-sync.svg";
-pub const SIDEBAR_SYSTEM_ASSET: &str = "icons/sidebar-system.svg";
-pub const SIDEBAR_LIGHT_ASSET: &str = "icons/sidebar-light.svg";
-pub const SIDEBAR_DARK_ASSET: &str = "icons/sidebar-dark.svg";
-pub const TOUR_AUTH_SECURITY_ASSET: &str = "icons/tour-auth-security.svg";
-pub const TOUR_DATA_STATE_ASSET: &str = "icons/tour-data-state.svg";
-pub const TOUR_API_IO_ASSET: &str = "icons/tour-api-io.svg";
-pub const TOUR_UI_UX_ASSET: &str = "icons/tour-ui-ux.svg";
-pub const TOUR_TESTS_ASSET: &str = "icons/tour-tests.svg";
-pub const TOUR_DOCS_ASSET: &str = "icons/tour-docs.svg";
-pub const TOUR_CONFIG_ASSET: &str = "icons/tour-config.svg";
-pub const TOUR_INFRA_ASSET: &str = "icons/tour-infra.svg";
-pub const TOUR_REFACTOR_ASSET: &str = "icons/tour-refactor.svg";
-pub const TOUR_PERFORMANCE_ASSET: &str = "icons/tour-performance.svg";
-pub const TOUR_RELIABILITY_ASSET: &str = "icons/tour-reliability.svg";
-pub const TOUR_OTHER_ASSET: &str = "icons/tour-other.svg";
 
 pub struct AppAssets {
     base: PathBuf,
@@ -58,10 +34,12 @@ pub fn load_bundled_fonts() -> Result<Vec<Cow<'static, [u8]>>> {
         .collect();
     font_paths.sort();
 
-    font_paths
+    let mut fonts: Vec<Cow<'static, [u8]>> = font_paths
         .into_iter()
         .map(|path| fs::read(path).map(Cow::Owned).map_err(Into::into))
-        .collect()
+        .collect::<Result<_>>()?;
+    fonts.push(Cow::Borrowed(LUCIDE_FONT_BYTES));
+    Ok(fonts)
 }
 
 impl AssetSource for AppAssets {

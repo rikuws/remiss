@@ -29,8 +29,10 @@ mod code_tour;
 mod code_tour_background;
 mod command_runner;
 mod diff;
+mod difftastic;
 mod gh;
 mod github;
+mod icons;
 mod local_documents;
 mod local_repo;
 mod lsp;
@@ -38,8 +40,6 @@ mod managed_lsp;
 mod markdown;
 mod notifications;
 mod platform_macos;
-mod review_context;
-mod review_graph;
 mod review_intelligence;
 mod review_queue;
 mod review_routes;
@@ -53,6 +53,7 @@ mod state;
 mod syntax;
 mod theme;
 mod views;
+mod window_settings;
 
 use std::sync::Arc;
 
@@ -66,12 +67,16 @@ use cache::CacheStore;
 use platform_macos::apply_app_icon;
 use state::AppState;
 use views::{
-    blur_review_editor, close_palette, close_review_graph_overlay, close_review_line_action,
-    close_waypoint_spotlight, execute_palette_selection, execute_waypoint_spotlight_selection,
-    move_palette_selection, move_waypoint_spotlight_selection, toggle_palette,
-    toggle_waypoint_spotlight, trigger_add_waypoint_shortcut, trigger_submit_inline_comment,
-    trigger_submit_review, RootView,
+    blur_review_editor, close_palette, close_review_line_action, close_waypoint_spotlight,
+    execute_palette_selection, execute_waypoint_spotlight_selection, move_palette_selection,
+    move_waypoint_spotlight_selection, toggle_palette, toggle_waypoint_spotlight,
+    trigger_add_waypoint_shortcut, trigger_submit_inline_comment, trigger_submit_review, RootView,
+    APP_CHROME_HEIGHT,
 };
+
+const MACOS_TRAFFIC_LIGHT_LEFT: f32 = 18.0;
+const MACOS_TRAFFIC_LIGHT_SIZE: f32 = 14.0;
+const MACOS_TRAFFIC_LIGHT_TOP: f32 = (APP_CHROME_HEIGHT - MACOS_TRAFFIC_LIGHT_SIZE) / 2.0;
 
 fn main() {
     Application::new()
@@ -94,18 +99,24 @@ fn start_app(cx: &mut App) -> Result<(), String> {
 
     let cache = CacheStore::new(cache_path())
         .map_err(|error| format!("Failed to initialize cache: {error}"))?;
+    let initial_window_size = window_settings::load_window_size(&cache);
     let app_state = cx.new(|_| AppState::new(cache));
     let initial_window_appearance = cx.window_appearance();
     app_state.update(cx, |state, _| {
         state.set_window_appearance(initial_window_appearance);
     });
 
-    let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
+    let bounds = Bounds::centered(None, initial_window_size, cx);
     cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
                 title: Some(APP_NAME.into()),
+                appears_transparent: true,
+                traffic_light_position: Some(point(
+                    px(MACOS_TRAFFIC_LIGHT_LEFT),
+                    px(MACOS_TRAFFIC_LIGHT_TOP),
+                )),
                 ..Default::default()
             }),
             ..Default::default()
@@ -160,12 +171,6 @@ fn start_app(cx: &mut App) -> Result<(), String> {
                 "enter" => execute_waypoint_spotlight_selection(&app_state_for_keys, window, cx),
                 _ => {}
             }
-            return;
-        }
-
-        let review_graph_expanded = app_state_for_keys.read(cx).review_graph_expanded;
-        if review_graph_expanded && keystroke.key == "escape" {
-            close_review_graph_overlay(&app_state_for_keys, cx);
             return;
         }
 

@@ -8,9 +8,11 @@ edition = "2021"
 [dependencies]
 codex-codes = { version = "0.101", default-features = false, features = ["async-client"] }
 dirs = "6"
+difftastic = { path = "../difftastic" }
 flate2 = "1"
 gpui = "0.2"
 json5 = { version = "0.4", optional = true }
+lucide-icons = "1.14"
 once_cell = "1"
 rusqlite = { version = "0.33", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

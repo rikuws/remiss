@@ -26,6 +26,7 @@ pub struct CommandOutput {
 pub struct CommandRunner {
     program: String,
     args: Vec<String>,
+    env: Vec<(String, String)>,
     working_directory: Option<PathBuf>,
     timeout: Duration,
     output_limit_bytes: usize,
@@ -36,6 +37,7 @@ impl CommandRunner {
         Self {
             program: program.into(),
             args: Vec::new(),
+            env: Vec::new(),
             working_directory: None,
             timeout: DEFAULT_TIMEOUT,
             output_limit_bytes: DEFAULT_OUTPUT_LIMIT_BYTES,
@@ -44,6 +46,11 @@ impl CommandRunner {
 
     pub fn args(mut self, args: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.args.extend(args.into_iter().map(Into::into));
+        self
+    }
+
+    pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.push((key.into(), value.into()));
         self
     }
 
@@ -67,6 +74,7 @@ impl CommandRunner {
         let mut command = Command::new(&self.program);
         command
             .args(&self.args)
+            .envs(self.env.iter().map(|(key, value)| (key, value)))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

@@ -8,6 +8,7 @@ use crate::code_tour::{
     DiffAnchor, GeneratedCodeTour,
 };
 use crate::diff::DiffRenderRow;
+use crate::difftastic::AdaptedDifftasticDiffFile;
 use crate::github::{
     PullRequestDetail, PullRequestDetailSnapshot, PullRequestQueue, PullRequestSummary,
     RepositoryFileContent, ReviewAction, WorkspaceSnapshot,
@@ -16,18 +17,17 @@ use crate::local_repo::LocalRepositoryStatus;
 use crate::lsp::{LspServerStatus, LspSessionManager, LspSymbolDetails};
 use crate::managed_lsp::{ManagedServerInstallStatus, ManagedServerKind};
 use crate::notifications;
-use crate::review_graph::ReviewSymbolEvolutionState;
 use crate::review_queue::ReviewQueue;
 use crate::review_session::{
     add_waymark, load_review_session, location_label, push_history_location, push_route_location,
-    remove_waymark, save_review_session, ReviewCenterMode, ReviewInspectorMode, ReviewLocation,
+    remove_waymark, sanitize_code_lens_mode, save_review_session, ReviewCenterMode, ReviewLocation,
     ReviewSessionDocument, ReviewSessionState, ReviewSourceTarget, ReviewTaskRoute, ReviewWaymark,
 };
 use crate::semantic_diff::SemanticDiffFile;
 use crate::stacks::model::{ReviewStack, StackDiffMode, StackPullRequestRef};
 use crate::syntax::{self, SyntaxSpan};
 use crate::theme::{self, ThemePreference};
-use gpui::{point, px, ListAlignment, ListState, Pixels, Point, ScrollHandle, WindowAppearance};
+use gpui::{px, ListAlignment, ListState, Pixels, Point, ScrollHandle, WindowAppearance};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SectionId {
@@ -102,15 +102,16 @@ pub struct DetailState {
     pub local_repository_status: Option<LocalRepositoryStatus>,
     pub local_repository_loading: bool,
     pub local_repository_error: Option<String>,
+    pub source_file_tree: SourceFileTreeState,
     pub review_intelligence_request_key: Option<String>,
     pub review_intelligence_loading: bool,
     pub ai_stack_state: AiStackState,
     pub tour_states: std::collections::HashMap<CodeTourProvider, CodeTourState>,
     pub file_content_states: std::collections::HashMap<String, FileContentState>,
+    pub structural_diff_states: std::collections::HashMap<String, StructuralDiffFileState>,
     pub lsp_statuses: std::collections::HashMap<String, LspServerStatus>,
     pub lsp_loading_paths: std::collections::HashSet<String>,
     pub lsp_symbol_states: std::collections::HashMap<String, LspSymbolState>,
-    pub review_evolution_states: std::collections::HashMap<String, ReviewSymbolEvolutionState>,
     pub review_route_loading: bool,
     pub review_route_message: Option<String>,
     pub review_route_error: Option<String>,
@@ -130,15 +131,16 @@ impl Default for DetailState {
             local_repository_status: None,
             local_repository_loading: false,
             local_repository_error: None,
+            source_file_tree: SourceFileTreeState::default(),
             review_intelligence_request_key: None,
             review_intelligence_loading: false,
             ai_stack_state: AiStackState::default(),
             tour_states: std::collections::HashMap::new(),
             file_content_states: std::collections::HashMap::new(),
+            structural_diff_states: std::collections::HashMap::new(),
             lsp_statuses: std::collections::HashMap::new(),
             lsp_loading_paths: std::collections::HashSet::new(),
             lsp_symbol_states: std::collections::HashMap::new(),
-            review_evolution_states: std::collections::HashMap::new(),
             review_route_loading: false,
             review_route_message: None,
             review_route_error: None,
@@ -148,6 +150,15 @@ impl Default for DetailState {
             stack_open_pull_requests_error: None,
         }
     }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SourceFileTreeState {
+    pub request_key: Option<String>,
+    pub rows: Option<Arc<Vec<ReviewFileTreeRow>>>,
+    pub file_count: usize,
+    pub loading: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -227,6 +238,14 @@ impl Default for FileContentState {
             error: None,
         }
     }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct StructuralDiffFileState {
+    pub request_key: Option<String>,
+    pub diff: Option<Arc<AdaptedDifftasticDiffFile>>,
+    pub loading: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -465,6 +484,7 @@ pub struct AppState {
     pub theme_preference: ThemePreference,
     pub window_appearance: WindowAppearance,
     pub app_sidebar_collapsed: bool,
+    pub notification_drawer_open: bool,
 
     // Selected file in diff view
     pub selected_file_path: Option<String>,
@@ -488,12 +508,6 @@ pub struct AppState {
     pub active_review_line_action: Option<ReviewLineActionTarget>,
     pub active_review_line_action_position: Option<Point<Pixels>>,
     pub review_line_action_mode: ReviewLineActionMode,
-    pub review_graph_expanded: bool,
-    pub review_graph_selected_node_id: Option<String>,
-    pub review_graph_pan_offset: Point<Pixels>,
-    pub review_graph_zoom: f32,
-    pub review_graph_panning: bool,
-    pub review_graph_last_pan_position: Option<Point<Pixels>>,
     pub inline_comment_draft: String,
     pub inline_comment_loading: bool,
     pub inline_comment_error: Option<String>,
@@ -565,6 +579,7 @@ impl AppState {
             theme_preference,
             window_appearance: WindowAppearance::Light,
             app_sidebar_collapsed: true,
+            notification_drawer_open: false,
             selected_file_path: None,
             selected_diff_anchor: None,
             diff_view_states: RefCell::new(std::collections::HashMap::new()),
@@ -585,12 +600,6 @@ impl AppState {
             active_review_line_action: None,
             active_review_line_action_position: None,
             review_line_action_mode: ReviewLineActionMode::Menu,
-            review_graph_expanded: false,
-            review_graph_selected_node_id: None,
-            review_graph_pan_offset: point(px(0.0), px(0.0)),
-            review_graph_zoom: 1.0,
-            review_graph_panning: false,
-            review_graph_last_pan_position: None,
             inline_comment_draft: String::new(),
             inline_comment_loading: false,
             inline_comment_error: None,
@@ -834,13 +843,15 @@ impl AppState {
         }
 
         self.selected_file_path.clone().map(|file_path| {
-            if session
-                .map(|session| session.center_mode == ReviewCenterMode::AiTour)
-                .unwrap_or(false)
-            {
-                ReviewLocation::from_ai_tour(file_path, self.selected_diff_anchor.clone())
-            } else {
-                ReviewLocation::from_diff(file_path, self.selected_diff_anchor.clone())
+            match session.map(|session| session.center_mode) {
+                Some(ReviewCenterMode::AiTour) => {
+                    ReviewLocation::from_ai_tour(file_path, self.selected_diff_anchor.clone())
+                }
+                Some(ReviewCenterMode::StructuralDiff) => ReviewLocation::from_structural_diff(
+                    file_path,
+                    self.selected_diff_anchor.clone(),
+                ),
+                _ => ReviewLocation::from_diff(file_path, self.selected_diff_anchor.clone()),
             }
         })
     }
@@ -912,7 +923,10 @@ impl AppState {
             .unwrap_or(false);
 
         match location.mode {
-            ReviewCenterMode::SemanticDiff | ReviewCenterMode::AiTour => {
+            ReviewCenterMode::SemanticDiff
+            | ReviewCenterMode::StructuralDiff
+            | ReviewCenterMode::AiTour
+            | ReviewCenterMode::Stack => {
                 self.selected_file_path = Some(location.file_path.clone());
                 self.selected_diff_anchor = location.anchor.clone();
             }
@@ -935,6 +949,14 @@ impl AppState {
         }
 
         session.center_mode = location.mode;
+        if matches!(
+            location.mode,
+            ReviewCenterMode::SemanticDiff
+                | ReviewCenterMode::StructuralDiff
+                | ReviewCenterMode::SourceBrowser
+        ) {
+            session.code_lens_mode = location.mode;
+        }
         session.source_target = location.as_source_target();
         session.last_read = Some(location.clone());
         push_route_location(&mut session.route, location);
@@ -1034,16 +1056,17 @@ impl AppState {
     pub fn set_review_center_mode(&mut self, mode: ReviewCenterMode) {
         if let Some(session) = self.active_review_session_mut() {
             session.center_mode = mode;
+            if matches!(
+                mode,
+                ReviewCenterMode::SemanticDiff
+                    | ReviewCenterMode::StructuralDiff
+                    | ReviewCenterMode::SourceBrowser
+            ) {
+                session.code_lens_mode = mode;
+            }
             if mode != ReviewCenterMode::SourceBrowser {
                 session.source_target = None;
             }
-        }
-    }
-
-    pub fn set_review_inspector_mode(&mut self, mode: ReviewInspectorMode) {
-        if let Some(session) = self.active_review_session_mut() {
-            session.inspector_mode = mode;
-            session.show_inspector = true;
         }
     }
 
@@ -1053,17 +1076,23 @@ impl AppState {
         }
     }
 
-    pub fn set_review_inspector_visible(&mut self, visible: bool) {
-        if let Some(session) = self.active_review_session_mut() {
-            session.show_inspector = visible;
-        }
-    }
-
     pub fn set_review_source_target(&mut self, target: ReviewSourceTarget) {
         if let Some(session) = self.active_review_session_mut() {
             session.center_mode = ReviewCenterMode::SourceBrowser;
+            session.code_lens_mode = ReviewCenterMode::SourceBrowser;
             session.source_target = Some(target);
         }
+    }
+
+    pub fn active_code_lens_mode(&self) -> ReviewCenterMode {
+        self.active_review_session()
+            .map(|session| session.active_code_lens_mode())
+            .unwrap_or(ReviewCenterMode::SemanticDiff)
+    }
+
+    pub fn enter_code_review_mode(&mut self) {
+        let mode = sanitize_code_lens_mode(self.active_code_lens_mode());
+        self.set_review_center_mode(mode);
     }
 
     pub fn set_selected_stack_layer(&mut self, layer_id: Option<String>) {
