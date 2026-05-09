@@ -1382,6 +1382,7 @@ dependencies = [
 [[package]]
 name = "difftastic"
 version = "0.70.0"
+source = "git+https://github.com/rikuws/difftastic?rev=007b1a2dbc8a997d1a9b4b9a773aafb3f032cdc0#007b1a2dbc8a997d1a9b4b9a773aafb3f032cdc0"
 dependencies = [
  "bumpalo",
  "cc",

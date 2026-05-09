@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 codex-codes = { version = "0.101", default-features = false, features = ["async-client"] }
 dirs = "6"
-difftastic = { path = "../difftastic" }
+difftastic = { git = "https://github.com/rikuws/difftastic", rev = "007b1a2dbc8a997d1a9b4b9a773aafb3f032cdc0" }
 flate2 = "1"
 gpui = "0.2"
 json5 = { version = "0.4", optional = true }

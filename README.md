@@ -6,6 +6,9 @@ Remiss is a native Rust/GPUI desktop app for read-only pull request review. It c
 
 Remiss is an early alpha. The core workflow is usable for local development, but packaging, onboarding, and provider disclosure are still being hardened.
 
+Remiss uses a small fork of difftastic for embedded structural diffs. See
+`THIRD_PARTY_NOTICES.md` for attribution and fork details.
+
 ## Requirements
 
 - macOS is the primary development target today.
