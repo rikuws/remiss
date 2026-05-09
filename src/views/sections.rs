@@ -12,6 +12,7 @@ use crate::state::*;
 use crate::theme::*;
 use crate::{github, notifications};
 
+use super::diff_view::{ensure_structural_diff_warmup_started, warm_structural_diffs_flow};
 use super::settings::render_settings_view;
 use super::workspace_sync::trigger_sync_workspace;
 use std::{collections::BTreeMap, time::Duration};
@@ -2102,6 +2103,8 @@ pub fn open_pull_request(
         cx.notify();
     });
 
+    ensure_structural_diff_warmup_started(state, window, cx);
+
     if !load_plan.load_cached_snapshot && !load_plan.sync_live {
         return;
     }
@@ -2158,6 +2161,8 @@ pub fn open_pull_request(
                         cx.notify();
                     })
                     .ok();
+
+                warm_structural_diffs_flow(model.clone(), cx).await;
             }
 
             if !should_sync {
@@ -2227,6 +2232,8 @@ pub fn open_pull_request(
                     cx.notify();
                 })
                 .ok();
+
+            warm_structural_diffs_flow(model.clone(), cx).await;
         })
         .detach();
 }

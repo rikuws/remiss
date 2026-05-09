@@ -30,6 +30,7 @@ use crate::theme::{self, ThemePreference};
 use gpui::{
     px, AnyWindowHandle, ListAlignment, ListState, Pixels, Point, ScrollHandle, WindowAppearance,
 };
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SectionId {
@@ -111,6 +112,7 @@ pub struct DetailState {
     pub tour_states: std::collections::HashMap<CodeTourProvider, CodeTourState>,
     pub file_content_states: std::collections::HashMap<String, FileContentState>,
     pub structural_diff_states: std::collections::HashMap<String, StructuralDiffFileState>,
+    pub structural_diff_warmup: StructuralDiffWarmupState,
     pub lsp_statuses: std::collections::HashMap<String, LspServerStatus>,
     pub lsp_loading_paths: std::collections::HashSet<String>,
     pub lsp_symbol_states: std::collections::HashMap<String, LspSymbolState>,
@@ -140,6 +142,7 @@ impl Default for DetailState {
             tour_states: std::collections::HashMap::new(),
             file_content_states: std::collections::HashMap::new(),
             structural_diff_states: std::collections::HashMap::new(),
+            structural_diff_warmup: StructuralDiffWarmupState::default(),
             lsp_statuses: std::collections::HashMap::new(),
             lsp_loading_paths: std::collections::HashSet::new(),
             lsp_symbol_states: std::collections::HashMap::new(),
@@ -313,6 +316,43 @@ pub struct StructuralDiffFileState {
     pub diff: Option<Arc<AdaptedDifftasticDiffFile>>,
     pub loading: bool,
     pub error: Option<String>,
+    pub terminal_error: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct StructuralDiffWarmupState {
+    pub request_key: Option<String>,
+    pub total: usize,
+    pub completed: usize,
+    pub failed: usize,
+    pub loading: bool,
+}
+
+impl StructuralDiffWarmupState {
+    pub fn status_text(&self) -> Option<String> {
+        if self.total == 0 {
+            return self
+                .loading
+                .then(|| "Preparing structural diffs".to_string());
+        }
+
+        if !self.loading && self.completed == 0 && self.failed == 0 {
+            return None;
+        }
+
+        let mut text = format!("Structural diffs {}/{} ready", self.completed, self.total);
+        if self.failed > 0 {
+            text.push_str(&format!(", {} unavailable", self.failed));
+        }
+        if self.loading {
+            let processed = self.completed + self.failed;
+            if processed < self.total {
+                text.push_str(&format!(", {} queued", self.total - processed));
+            }
+        }
+
+        Some(text)
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -414,7 +454,7 @@ pub struct PreparedFileLine {
     pub spans: Vec<SyntaxSpan>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiffInlineRange {
     pub column_start: usize,
     pub column_end: usize,

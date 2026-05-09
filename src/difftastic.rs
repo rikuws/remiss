@@ -7,6 +7,7 @@ use ::difftastic::{
     DifftasticOptions as LibraryDifftasticOptions, DifftasticSide,
     DifftasticStatus as LibraryDifftasticStatus,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{
     diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk, ParsedDiffLine},
@@ -19,7 +20,7 @@ pub struct DifftasticAdaptOptions {
     pub context_lines: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AdaptedDifftasticDiffFile {
     pub parsed_file: ParsedDiffFile,
     pub emphasis_hunks: Vec<Vec<Vec<DiffInlineRange>>>,
@@ -27,24 +28,24 @@ pub struct AdaptedDifftasticDiffFile {
     pub side_by_side_line_map: Vec<Vec<Option<AdaptedDifftasticSideBySideLineMap>>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AdaptedDifftasticSideBySideHunk {
     pub rows: Vec<AdaptedDifftasticSideBySideRow>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AdaptedDifftasticSideBySideRow {
     pub left: Option<AdaptedDifftasticSideBySideCell>,
     pub right: Option<AdaptedDifftasticSideBySideCell>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AdaptedDifftasticSideBySideCell {
     pub line: ParsedDiffLine,
     pub emphasis_ranges: Vec<DiffInlineRange>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AdaptedDifftasticSideBySideLineMap {
     pub row_index: usize,
     pub primary: bool,

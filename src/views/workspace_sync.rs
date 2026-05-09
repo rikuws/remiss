@@ -7,6 +7,8 @@ use crate::{
     state::{pr_key, AppState},
 };
 
+use super::diff_view::warm_structural_diffs_flow;
+
 pub const WORKSPACE_SYNC_POLL_INTERVAL: Duration = Duration::from_secs(90);
 
 pub fn trigger_sync_workspace(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
@@ -69,6 +71,8 @@ pub async fn sync_workspace_flow(model: Entity<AppState>, cx: &mut AsyncWindowCo
                 })
                 .ok();
             notifications::deliver_system_notifications(&notifications);
+
+            warm_structural_diffs_flow(model.clone(), cx).await;
 
             let should_sync_background_tours = model
                 .read_with(cx, |state, _| !state.code_tour_settings.background_syncing)

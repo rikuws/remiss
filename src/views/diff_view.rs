@@ -1,5 +1,5 @@
 use std::{
-    collections::{hash_map::DefaultHasher, BTreeSet},
+    collections::{hash_map::DefaultHasher, BTreeSet, VecDeque},
     hash::{Hash, Hasher},
     path::PathBuf,
     sync::Arc,
@@ -49,6 +49,10 @@ use crate::stacks::{
     },
 };
 use crate::state::*;
+use crate::structural_diff_cache::{
+    load_cached_structural_diff, save_cached_structural_diff, structural_diff_cache_key,
+    CachedStructuralDiffResult,
+};
 use crate::syntax::{self, SyntaxSpan};
 use crate::temp_source_window::{
     open_temp_source_window_for_diff_target, temp_source_target_for_diff_line,
@@ -89,6 +93,7 @@ pub fn enter_files_surface(state: &Entity<AppState>, window: &mut Window, cx: &m
         review_intelligence::ReviewIntelligenceScope::All,
         false,
     );
+    ensure_structural_diff_warmup_started(state, window, cx);
 }
 
 pub fn enter_stack_review_mode(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
@@ -247,6 +252,19 @@ pub fn ensure_selected_structural_diff_loaded(
     window
         .spawn(cx, async move |cx: &mut AsyncWindowContext| {
             load_structural_diff_flow(model, None, cx).await;
+        })
+        .detach();
+}
+
+pub fn ensure_structural_diff_warmup_started(
+    state: &Entity<AppState>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let model = state.clone();
+    window
+        .spawn(cx, async move |cx: &mut AsyncWindowContext| {
+            warm_structural_diffs_flow(model, cx).await;
         })
         .detach();
 }
@@ -1306,14 +1324,22 @@ fn render_changed_files_pane(
     open_mode: ReviewFileRowOpenMode,
     cx: &App,
 ) -> impl IntoElement {
-    let (tree_rows, file_count, additions, deletions) = {
+    let (tree_rows, file_count, additions, deletions, structural_status) = {
         let app_state = state.read(cx);
         let (file_count, additions, deletions) = review_file_tree_totals(detail, None);
+        let structural_status = if matches!(open_mode, ReviewFileRowOpenMode::Structural) {
+            app_state
+                .active_detail_state()
+                .and_then(|detail_state| detail_state.structural_diff_warmup.status_text())
+        } else {
+            None
+        };
         (
             prepare_review_file_tree_rows(&app_state, detail, None),
             file_count,
             additions,
             deletions,
+            structural_status,
         )
     };
     let list_state = {
@@ -1339,6 +1365,9 @@ fn render_changed_files_pane(
             file_count,
             Some((additions, deletions)),
         ))
+        .when_some(structural_status, |el, status| {
+            el.child(render_structural_warmup_status(status))
+        })
         .child(
             div()
                 .id("changed-files-scroll")
@@ -3500,6 +3529,21 @@ fn render_file_tree_header(
         )
 }
 
+fn render_structural_warmup_status(status: String) -> impl IntoElement {
+    div()
+        .px(px(12.0))
+        .py(px(7.0))
+        .border_b(px(1.0))
+        .border_color(diff_annotation_border())
+        .text_size(px(10.0))
+        .font_family(mono_font_family())
+        .text_color(fg_muted())
+        .text_ellipsis()
+        .whitespace_nowrap()
+        .overflow_x_hidden()
+        .child(status)
+}
+
 fn render_source_file_tree(
     state: &Entity<AppState>,
     detail: &PullRequestDetail,
@@ -4340,11 +4384,15 @@ pub async fn load_structural_diff_flow(
     requested_path: Option<String>,
     cx: &mut AsyncWindowContext,
 ) {
-    let request = model
+    let initial = model
         .read_with(cx, |state, _| {
             let cache = state.cache.clone();
             let detail = state.active_detail()?.clone();
             let detail_key = state.active_pr_key.clone()?;
+            let existing_local_repo_status = state
+                .detail_states
+                .get(&detail_key)
+                .and_then(|detail_state| detail_state.local_repository_status.clone());
             let selected_path = requested_path
                 .clone()
                 .or_else(|| state.selected_file_path.clone())
@@ -4355,31 +4403,173 @@ pub async fn load_structural_diff_flow(
                 .find(|file| file.path == selected_path)
                 .cloned()?;
             let parsed = find_parsed_diff_file(&detail.parsed_diff, &selected_file.path).cloned();
-            let request = build_structural_diff_request(&detail, &selected_file, parsed.as_ref())?;
-            let already_loaded = state
-                .detail_states
-                .get(&detail_key)
-                .and_then(|detail_state| detail_state.structural_diff_states.get(&request.path))
-                .map(|state| {
-                    state.request_key.as_deref() == Some(request.request_key.as_str())
-                        && (state.loading || state.diff.is_some())
-                })
-                .unwrap_or(false);
 
             Some((
                 cache,
                 detail_key,
-                detail.repository.clone(),
-                request,
-                already_loaded,
+                detail,
+                selected_file,
+                parsed,
+                existing_local_repo_status,
             ))
         })
         .ok()
         .flatten();
 
-    let Some((cache, detail_key, repository, request, already_loaded)) = request else {
+    let Some((cache, detail_key, detail, selected_file, parsed, existing_local_repo_status)) =
+        initial
+    else {
         return;
     };
+
+    model
+        .update(cx, |state, cx| {
+            if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
+                detail_state.local_repository_loading = existing_local_repo_status
+                    .as_ref()
+                    .map(|status| !status.ready_for_snapshot_features())
+                    .unwrap_or(true);
+                detail_state.local_repository_error = None;
+            }
+            cx.notify();
+        })
+        .ok();
+
+    let local_repo_result = if let Some(status) = existing_local_repo_status
+        .clone()
+        .filter(|status| status.ready_for_snapshot_features())
+    {
+        Ok(status)
+    } else {
+        cx.background_executor()
+            .spawn({
+                let cache = cache.clone();
+                let repository = detail.repository.clone();
+                let pull_request_number = detail.number;
+                let head_ref_oid = detail.head_ref_oid.clone();
+                async move {
+                    local_repo::load_or_prepare_local_repository_for_pull_request(
+                        &cache,
+                        &repository,
+                        pull_request_number,
+                        head_ref_oid.as_deref(),
+                    )
+                }
+            })
+            .await
+    };
+
+    let local_repo_status = local_repo_result.as_ref().ok().cloned();
+    let local_repo_error = local_repo_result
+        .as_ref()
+        .ok()
+        .and_then(|status| {
+            if status.ready_for_snapshot_features() {
+                None
+            } else {
+                Some(status.message.clone())
+            }
+        })
+        .or_else(|| local_repo_result.as_ref().err().cloned());
+
+    let Some(local_repo_status) =
+        local_repo_status.filter(|status| status.ready_for_snapshot_features())
+    else {
+        model
+            .update(cx, |state, cx| {
+                if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
+                    detail_state.local_repository_loading = false;
+                    detail_state.local_repository_status = local_repo_result.as_ref().ok().cloned();
+                    detail_state.local_repository_error = local_repo_error.clone();
+                    let structural_state = detail_state
+                        .structural_diff_states
+                        .entry(selected_file.path.clone())
+                        .or_default();
+                    structural_state.loading = false;
+                    structural_state.diff = None;
+                    structural_state.error = Some(local_repo_error.clone().unwrap_or_else(|| {
+                        "Local checkout is not ready for structural diffs.".to_string()
+                    }));
+                    structural_state.terminal_error = false;
+                }
+                cx.notify();
+            })
+            .ok();
+        return;
+    };
+
+    let Some(head_oid) = checkout_head_oid(&local_repo_status) else {
+        model
+            .update(cx, |state, cx| {
+                if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
+                    detail_state.local_repository_loading = false;
+                    detail_state.local_repository_status = Some(local_repo_status.clone());
+                    detail_state.local_repository_error = Some(local_repo_status.message.clone());
+                    let structural_state = detail_state
+                        .structural_diff_states
+                        .entry(selected_file.path.clone())
+                        .or_default();
+                    structural_state.loading = false;
+                    structural_state.diff = None;
+                    structural_state.error = Some(local_repo_status.message.clone());
+                    structural_state.terminal_error = false;
+                }
+                cx.notify();
+            })
+            .ok();
+        return;
+    };
+
+    let Some(request) =
+        build_structural_diff_request(&detail, &selected_file, parsed.as_ref(), &head_oid)
+    else {
+        model
+            .update(cx, |state, cx| {
+                if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
+                    detail_state.local_repository_loading = false;
+                    detail_state.local_repository_status = Some(local_repo_status.clone());
+                    detail_state.local_repository_error = None;
+                    let structural_state = detail_state
+                        .structural_diff_states
+                        .entry(selected_file.path.clone())
+                        .or_default();
+                    structural_state.loading = false;
+                    structural_state.diff = None;
+                    structural_state.error = Some(
+                        "Structural diff needs PR base and checkout head commits.".to_string(),
+                    );
+                    structural_state.terminal_error = false;
+                }
+                cx.notify();
+            })
+            .ok();
+        return;
+    };
+
+    let already_loaded = model
+        .read_with(cx, |state, _| {
+            state
+                .detail_states
+                .get(&detail_key)
+                .and_then(|detail_state| detail_state.structural_diff_states.get(&request.path))
+                .map(|file_state| {
+                    should_reuse_structural_diff_state(file_state, &request.request_key)
+                })
+                .unwrap_or(false)
+        })
+        .ok()
+        .unwrap_or(false);
+
+    model
+        .update(cx, |state, cx| {
+            if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
+                detail_state.local_repository_loading = false;
+                detail_state.local_repository_status = Some(local_repo_status.clone());
+                detail_state.local_repository_error = None;
+            }
+            cx.notify();
+        })
+        .ok();
 
     if already_loaded {
         return;
@@ -4396,71 +4586,361 @@ pub async fn load_structural_diff_flow(
                 structural_state.diff = None;
                 structural_state.loading = true;
                 structural_state.error = None;
+                structural_state.terminal_error = false;
             }
             cx.notify();
         })
         .ok();
 
+    let cached_result = cx
+        .background_executor()
+        .spawn({
+            let cache = cache.clone();
+            let cache_key = request.cache_key.clone();
+            async move { load_cached_structural_diff(cache.as_ref(), &cache_key) }
+        })
+        .await;
+
+    if let Ok(Some(cached)) = cached_result {
+        let result = structural_result_from_cached(cached);
+        model
+            .update(cx, |state, cx| {
+                let active_pr_key = state.active_pr_key.clone();
+                apply_structural_diff_file_result(
+                    state,
+                    active_pr_key.as_deref(),
+                    &detail_key,
+                    &request,
+                    result,
+                );
+                cx.notify();
+            })
+            .ok();
+        return;
+    }
+
+    let Some(checkout_root) = local_repo_status.path.as_deref().map(PathBuf::from) else {
+        return;
+    };
+
     let result = cx
         .background_executor()
         .spawn({
             let cache = cache.clone();
-            let repository = repository.clone();
+            let repository = detail.repository.clone();
+            let checkout_root = checkout_root.clone();
             let request = request.clone();
             async move {
-                let old_text = load_structural_side_text(
+                build_and_cache_structural_diff(
                     cache.as_ref(),
                     repository.as_str(),
-                    &request.old_side,
-                )?;
-                let new_text = load_structural_side_text(
-                    cache.as_ref(),
-                    repository.as_str(),
-                    &request.new_side,
-                )?;
-                let file = run_difftastic_for_texts(
-                    request.old_side.path.as_str(),
-                    old_text.as_str(),
-                    request.new_side.path.as_str(),
-                    new_text.as_str(),
-                )?;
-                Ok::<_, String>(adapt_difftastic_file(
-                    &file,
-                    old_text.as_str(),
-                    new_text.as_str(),
-                    request.path.clone(),
-                    request.previous_path.clone(),
-                    &DifftasticAdaptOptions { context_lines: 3 },
-                ))
+                    checkout_root.as_path(),
+                    &request,
+                )
             }
         })
         .await;
 
     model
         .update(cx, |state, cx| {
+            let active_pr_key = state.active_pr_key.clone();
+            apply_structural_diff_file_result(
+                state,
+                active_pr_key.as_deref(),
+                &detail_key,
+                &request,
+                result,
+            );
+            cx.notify();
+        })
+        .ok();
+}
+
+pub async fn warm_structural_diffs_flow(model: Entity<AppState>, cx: &mut AsyncWindowContext) {
+    let initial = model
+        .read_with(cx, |state, _| {
+            let cache = state.cache.clone();
+            let detail = state.active_detail()?.clone();
+            let detail_key = state.active_pr_key.clone()?;
+            let existing_local_repo_status = state
+                .detail_states
+                .get(&detail_key)
+                .and_then(|detail_state| detail_state.local_repository_status.clone());
+
+            Some((cache, detail_key, detail, existing_local_repo_status))
+        })
+        .ok()
+        .flatten();
+
+    let Some((cache, detail_key, detail, existing_local_repo_status)) = initial else {
+        return;
+    };
+
+    let local_repo_result = if let Some(status) = existing_local_repo_status
+        .clone()
+        .filter(|status| status.ready_for_snapshot_features())
+    {
+        Ok(status)
+    } else {
+        cx.background_executor()
+            .spawn({
+                let cache = cache.clone();
+                let repository = detail.repository.clone();
+                let pull_request_number = detail.number;
+                let head_ref_oid = detail.head_ref_oid.clone();
+                async move {
+                    local_repo::load_or_prepare_local_repository_for_pull_request(
+                        &cache,
+                        &repository,
+                        pull_request_number,
+                        head_ref_oid.as_deref(),
+                    )
+                }
+            })
+            .await
+    };
+
+    let local_repo_status = local_repo_result.as_ref().ok().cloned();
+    let local_repo_error = local_repo_result
+        .as_ref()
+        .ok()
+        .and_then(|status| {
+            if status.ready_for_snapshot_features() {
+                None
+            } else {
+                Some(status.message.clone())
+            }
+        })
+        .or_else(|| local_repo_result.as_ref().err().cloned());
+
+    let Some(local_repo_status) =
+        local_repo_status.filter(|status| status.ready_for_snapshot_features())
+    else {
+        model
+            .update(cx, |state, cx| {
+                if state.active_pr_key.as_deref() != Some(detail_key.as_str()) {
+                    return;
+                }
+                if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
+                    detail_state.local_repository_loading = false;
+                    detail_state.local_repository_status = local_repo_result.as_ref().ok().cloned();
+                    detail_state.local_repository_error = local_repo_error.clone();
+                    detail_state.structural_diff_warmup.loading = false;
+                }
+                cx.notify();
+            })
+            .ok();
+        return;
+    };
+
+    let Some(head_oid) = checkout_head_oid(&local_repo_status) else {
+        return;
+    };
+    let Some(checkout_root) = local_repo_status.path.as_deref().map(PathBuf::from) else {
+        return;
+    };
+
+    let requests = detail
+        .files
+        .iter()
+        .filter_map(|file| {
+            let parsed = find_parsed_diff_file(&detail.parsed_diff, &file.path);
+            build_structural_diff_request(&detail, file, parsed, &head_oid)
+        })
+        .collect::<Vec<_>>();
+    let total = requests.len();
+    if total == 0 {
+        return;
+    }
+
+    let warmup_key = structural_diff_warmup_request_key(&detail, &head_oid);
+    let preloaded = model
+        .read_with(cx, |state, _| {
+            state
+                .detail_states
+                .get(&detail_key)
+                .map(|detail_state| {
+                    requests
+                        .iter()
+                        .map(|request| {
+                            (
+                                request.request_key.clone(),
+                                detail_state
+                                    .structural_diff_states
+                                    .get(&request.path)
+                                    .and_then(|file_state| {
+                                        structural_diff_state_terminal_status(
+                                            file_state,
+                                            &request.request_key,
+                                        )
+                                    }),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+        .ok()
+        .unwrap_or_default();
+
+    let mut completed = 0usize;
+    let mut failed = 0usize;
+    let mut pending = VecDeque::new();
+    for request in requests {
+        let status = preloaded
+            .iter()
+            .find(|(request_key, _)| request_key == &request.request_key)
+            .and_then(|(_, status)| *status);
+        match status {
+            Some(StructuralDiffTerminalStatus::Ready) => completed += 1,
+            Some(StructuralDiffTerminalStatus::Error) => failed += 1,
+            None => pending.push_back(request),
+        }
+    }
+
+    let should_run = model
+        .update(cx, |state, cx| {
+            if state.active_pr_key.as_deref() != Some(detail_key.as_str()) {
+                return false;
+            }
+
+            let detail_state = state.detail_states.entry(detail_key.clone()).or_default();
+            if detail_state.structural_diff_warmup.request_key.as_deref()
+                == Some(warmup_key.as_str())
+                && (detail_state.structural_diff_warmup.loading
+                    || detail_state.structural_diff_warmup.completed
+                        + detail_state.structural_diff_warmup.failed
+                        >= total)
+            {
+                return false;
+            }
+
+            detail_state.local_repository_loading = false;
+            detail_state.local_repository_status = Some(local_repo_status.clone());
+            detail_state.local_repository_error = None;
+            detail_state.structural_diff_warmup.request_key = Some(warmup_key.clone());
+            detail_state.structural_diff_warmup.total = total;
+            detail_state.structural_diff_warmup.completed = completed;
+            detail_state.structural_diff_warmup.failed = failed;
+            detail_state.structural_diff_warmup.loading = !pending.is_empty();
+
+            for request in &pending {
+                let structural_state = detail_state
+                    .structural_diff_states
+                    .entry(request.path.clone())
+                    .or_default();
+                structural_state.request_key = Some(request.request_key.clone());
+                structural_state.diff = None;
+                structural_state.loading = true;
+                structural_state.error = None;
+                structural_state.terminal_error = false;
+            }
+
+            cx.notify();
+            !pending.is_empty()
+        })
+        .ok()
+        .unwrap_or(false);
+
+    if !should_run {
+        return;
+    }
+
+    while !pending.is_empty() {
+        let mut batch = Vec::new();
+        for _ in 0..STRUCTURAL_DIFF_WARMUP_CONCURRENCY {
+            let Some(request) = pending.pop_front() else {
+                break;
+            };
+            let task = cx.background_executor().spawn({
+                let cache = cache.clone();
+                let repository = detail.repository.clone();
+                let checkout_root = checkout_root.clone();
+                let request = request.clone();
+                async move {
+                    load_cached_structural_diff(cache.as_ref(), &request.cache_key)
+                        .ok()
+                        .flatten()
+                        .map(structural_result_from_cached)
+                        .unwrap_or_else(|| {
+                            build_and_cache_structural_diff(
+                                cache.as_ref(),
+                                repository.as_str(),
+                                checkout_root.as_path(),
+                                &request,
+                            )
+                        })
+                }
+            });
+            batch.push((request, task));
+        }
+
+        for (request, task) in batch {
+            let result = task.await;
+            model
+                .update(cx, |state, cx| {
+                    let active_pr_key = state.active_pr_key.clone();
+                    if active_pr_key.as_deref() != Some(detail_key.as_str()) {
+                        return;
+                    }
+                    let warmup_matches = state
+                        .detail_states
+                        .get(&detail_key)
+                        .map(|detail_state| {
+                            detail_state.structural_diff_warmup.request_key.as_deref()
+                                == Some(warmup_key.as_str())
+                        })
+                        .unwrap_or(false);
+                    if !warmup_matches {
+                        return;
+                    }
+
+                    let is_ready = matches!(&result, StructuralDiffBuildResult::Ready(_));
+                    let is_terminal_error =
+                        matches!(&result, StructuralDiffBuildResult::TerminalError(_));
+                    let should_count = apply_structural_diff_file_result(
+                        state,
+                        active_pr_key.as_deref(),
+                        &detail_key,
+                        &request,
+                        result,
+                    );
+                    if should_count {
+                        let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
+                            return;
+                        };
+                        if detail_state.structural_diff_warmup.request_key.as_deref()
+                            != Some(warmup_key.as_str())
+                        {
+                            return;
+                        }
+                        if is_ready {
+                            detail_state.structural_diff_warmup.completed += 1;
+                        } else if is_terminal_error {
+                            detail_state.structural_diff_warmup.failed += 1;
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+        }
+    }
+
+    model
+        .update(cx, |state, cx| {
+            if state.active_pr_key.as_deref() != Some(detail_key.as_str()) {
+                return;
+            }
             let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
                 return;
             };
-            let structural_state = detail_state
-                .structural_diff_states
-                .entry(request.path.clone())
-                .or_default();
-            if structural_state.request_key.as_deref() != Some(request.request_key.as_str()) {
+            if detail_state.structural_diff_warmup.request_key.as_deref()
+                != Some(warmup_key.as_str())
+            {
                 return;
             }
 
-            structural_state.loading = false;
-            match result {
-                Ok(diff) => {
-                    structural_state.diff = Some(Arc::new(diff));
-                    structural_state.error = None;
-                }
-                Err(error) => {
-                    structural_state.diff = None;
-                    structural_state.error = Some(error);
-                }
-            }
-
+            detail_state.structural_diff_warmup.loading = false;
             cx.notify();
         })
         .ok();
@@ -5166,6 +5646,8 @@ struct FileContentRequest {
     request_key: String,
 }
 
+const STRUCTURAL_DIFF_WARMUP_CONCURRENCY: usize = 2;
+
 #[derive(Clone)]
 struct StructuralDiffRequest {
     path: String,
@@ -5173,6 +5655,7 @@ struct StructuralDiffRequest {
     old_side: StructuralDiffSideRequest,
     new_side: StructuralDiffSideRequest,
     request_key: String,
+    cache_key: String,
 }
 
 #[derive(Clone)]
@@ -5180,6 +5663,41 @@ struct StructuralDiffSideRequest {
     path: String,
     reference: String,
     fetch: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StructuralDiffTerminalStatus {
+    Ready,
+    Error,
+}
+
+#[derive(Clone, Debug)]
+enum StructuralDiffBuildResult {
+    Ready(crate::difftastic::AdaptedDifftasticDiffFile),
+    TerminalError(String),
+    TransientError(String),
+}
+
+impl StructuralDiffBuildResult {
+    fn cached_result(&self) -> Option<CachedStructuralDiffResult> {
+        match self {
+            StructuralDiffBuildResult::Ready(diff) => {
+                Some(CachedStructuralDiffResult::Ready { diff: diff.clone() })
+            }
+            StructuralDiffBuildResult::TerminalError(message) => {
+                Some(CachedStructuralDiffResult::TerminalError {
+                    message: message.clone(),
+                })
+            }
+            StructuralDiffBuildResult::TransientError(_) => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum StructuralDiffBuildError {
+    Terminal(String),
+    Transient(String),
 }
 
 fn build_file_content_request(
@@ -5237,19 +5755,14 @@ fn build_structural_diff_request(
     detail: &PullRequestDetail,
     file: &PullRequestFile,
     parsed: Option<&ParsedDiffFile>,
+    head_oid: &str,
 ) -> Option<StructuralDiffRequest> {
     if file.path.is_empty() {
         return None;
     }
 
-    let base_reference = detail
-        .base_ref_oid
-        .clone()
-        .unwrap_or_else(|| detail.base_ref_name.clone());
-    let head_reference = detail
-        .head_ref_oid
-        .clone()
-        .unwrap_or_else(|| detail.head_ref_name.clone());
+    let base_reference = detail.base_ref_oid.clone()?;
+    let head_reference = head_oid.trim().to_string();
     if base_reference.is_empty() || head_reference.is_empty() {
         return None;
     }
@@ -5260,6 +5773,8 @@ fn build_structural_diff_request(
     let old_path = previous_path.clone().unwrap_or_else(|| file.path.clone());
     let old_fetch = file.change_type != "ADDED";
     let new_fetch = file.change_type != "DELETED";
+    let cache_key =
+        structural_diff_cache_key(detail, &head_reference, file, previous_path.as_deref());
 
     Some(StructuralDiffRequest {
         path: file.path.clone(),
@@ -5274,37 +5789,201 @@ fn build_structural_diff_request(
             reference: head_reference.clone(),
             fetch: new_fetch,
         },
-        request_key: format!(
-            "{}:{}:{}:{}:{}:{}",
-            detail.updated_at,
-            detail.repository,
-            base_reference,
-            head_reference,
-            file.change_type,
-            file.path
-        ),
+        request_key: cache_key.clone(),
+        cache_key,
     })
 }
 
 fn load_structural_side_text(
     cache: &crate::cache::CacheStore,
     repository: &str,
+    checkout_root: &std::path::Path,
     side: &StructuralDiffSideRequest,
-) -> Result<String, String> {
+) -> Result<String, StructuralDiffBuildError> {
     if !side.fetch {
         return Ok(String::new());
     }
 
-    let document =
-        github::load_pull_request_file_content(cache, repository, &side.reference, &side.path)?;
+    let document = local_documents::load_local_repository_file_content(
+        cache,
+        repository,
+        checkout_root,
+        &side.reference,
+        &side.path,
+        false,
+    )
+    .map_err(StructuralDiffBuildError::Transient)?;
     if document.is_binary {
-        return Err(format!(
+        return Err(StructuralDiffBuildError::Terminal(format!(
             "Structural diff is not available for binary file {}.",
             side.path
-        ));
+        )));
     }
 
     Ok(document.content.unwrap_or_default())
+}
+
+fn checkout_head_oid(status: &local_repo::LocalRepositoryStatus) -> Option<String> {
+    status
+        .ready_for_snapshot_features()
+        .then(|| status.current_head_oid.as_deref())
+        .flatten()
+        .map(str::trim)
+        .filter(|head| !head.is_empty())
+        .map(str::to_string)
+}
+
+fn structural_diff_warmup_request_key(detail: &PullRequestDetail, head_oid: &str) -> String {
+    format!(
+        "structural-diff-warmup-v1:{}:{}:{}",
+        detail.repository, detail.number, head_oid
+    )
+}
+
+fn structural_result_from_cached(cached: CachedStructuralDiffResult) -> StructuralDiffBuildResult {
+    match cached {
+        CachedStructuralDiffResult::Ready { diff } => StructuralDiffBuildResult::Ready(diff),
+        CachedStructuralDiffResult::TerminalError { message } => {
+            StructuralDiffBuildResult::TerminalError(message)
+        }
+    }
+}
+
+fn should_reuse_structural_diff_state(
+    file_state: &StructuralDiffFileState,
+    request_key: &str,
+) -> bool {
+    file_state.request_key.as_deref() == Some(request_key)
+        && (file_state.loading || file_state.diff.is_some() || file_state.terminal_error)
+}
+
+fn structural_diff_state_terminal_status(
+    file_state: &StructuralDiffFileState,
+    request_key: &str,
+) -> Option<StructuralDiffTerminalStatus> {
+    if file_state.request_key.as_deref() != Some(request_key) {
+        return None;
+    }
+    if file_state.diff.is_some() {
+        return Some(StructuralDiffTerminalStatus::Ready);
+    }
+    if file_state.terminal_error {
+        return Some(StructuralDiffTerminalStatus::Error);
+    }
+    None
+}
+
+fn should_apply_structural_diff_update(
+    active_pr_key: Option<&str>,
+    detail_key: &str,
+    current_request_key: Option<&str>,
+    request_key: &str,
+) -> bool {
+    active_pr_key == Some(detail_key) && current_request_key == Some(request_key)
+}
+
+fn build_and_cache_structural_diff(
+    cache: &crate::cache::CacheStore,
+    repository: &str,
+    checkout_root: &std::path::Path,
+    request: &StructuralDiffRequest,
+) -> StructuralDiffBuildResult {
+    let result = build_structural_diff_from_local(cache, repository, checkout_root, request);
+    if let Some(cached) = result.cached_result() {
+        let _ = save_cached_structural_diff(cache, &request.cache_key, &cached);
+    }
+    result
+}
+
+fn build_structural_diff_from_local(
+    cache: &crate::cache::CacheStore,
+    repository: &str,
+    checkout_root: &std::path::Path,
+    request: &StructuralDiffRequest,
+) -> StructuralDiffBuildResult {
+    let old_text =
+        match load_structural_side_text(cache, repository, checkout_root, &request.old_side) {
+            Ok(text) => text,
+            Err(StructuralDiffBuildError::Terminal(error)) => {
+                return StructuralDiffBuildResult::TerminalError(error);
+            }
+            Err(StructuralDiffBuildError::Transient(error)) => {
+                return StructuralDiffBuildResult::TransientError(error);
+            }
+        };
+    let new_text =
+        match load_structural_side_text(cache, repository, checkout_root, &request.new_side) {
+            Ok(text) => text,
+            Err(StructuralDiffBuildError::Terminal(error)) => {
+                return StructuralDiffBuildResult::TerminalError(error);
+            }
+            Err(StructuralDiffBuildError::Transient(error)) => {
+                return StructuralDiffBuildResult::TransientError(error);
+            }
+        };
+    let file = match run_difftastic_for_texts(
+        request.old_side.path.as_str(),
+        old_text.as_str(),
+        request.new_side.path.as_str(),
+        new_text.as_str(),
+    ) {
+        Ok(file) => file,
+        Err(error) => return StructuralDiffBuildResult::TerminalError(error),
+    };
+
+    StructuralDiffBuildResult::Ready(adapt_difftastic_file(
+        &file,
+        old_text.as_str(),
+        new_text.as_str(),
+        request.path.clone(),
+        request.previous_path.clone(),
+        &DifftasticAdaptOptions { context_lines: 3 },
+    ))
+}
+
+fn apply_structural_diff_file_result(
+    state: &mut AppState,
+    active_pr_key: Option<&str>,
+    detail_key: &str,
+    request: &StructuralDiffRequest,
+    result: StructuralDiffBuildResult,
+) -> bool {
+    let Some(detail_state) = state.detail_states.get_mut(detail_key) else {
+        return false;
+    };
+    let structural_state = detail_state
+        .structural_diff_states
+        .entry(request.path.clone())
+        .or_default();
+    if !should_apply_structural_diff_update(
+        active_pr_key,
+        detail_key,
+        structural_state.request_key.as_deref(),
+        &request.request_key,
+    ) {
+        return false;
+    }
+
+    structural_state.loading = false;
+    match result {
+        StructuralDiffBuildResult::Ready(diff) => {
+            structural_state.diff = Some(Arc::new(diff));
+            structural_state.error = None;
+            structural_state.terminal_error = false;
+        }
+        StructuralDiffBuildResult::TerminalError(error) => {
+            structural_state.diff = None;
+            structural_state.error = Some(error);
+            structural_state.terminal_error = true;
+        }
+        StructuralDiffBuildResult::TransientError(error) => {
+            structural_state.diff = None;
+            structural_state.error = Some(error);
+            structural_state.terminal_error = false;
+        }
+    }
+
+    true
 }
 
 fn build_head_file_content_request(
@@ -5538,6 +6217,13 @@ fn render_diff_panel(
     let source_parsed = source_target
         .as_ref()
         .and_then(|target| find_parsed_diff_file(&detail.parsed_diff, &target.path));
+    let structural_warmup_status = (center_mode == ReviewCenterMode::StructuralDiff)
+        .then(|| {
+            app_state
+                .active_detail_state()
+                .and_then(|detail_state| detail_state.structural_diff_warmup.status_text())
+        })
+        .flatten();
 
     div()
         .flex_grow()
@@ -5559,6 +6245,7 @@ fn render_diff_panel(
             lsp_status,
             lsp_loading,
             selected_anchor,
+            structural_warmup_status,
         ))
         .child(
             div()
@@ -5634,6 +6321,7 @@ fn render_diff_toolbar(
     lsp_status: Option<&lsp::LspServerStatus>,
     lsp_loading: bool,
     selected_anchor: Option<&DiffAnchor>,
+    structural_warmup_status: Option<String>,
 ) -> impl IntoElement {
     let selected_section =
         semantic_file.and_then(|semantic| semantic.section_for_anchor(selected_anchor));
@@ -5688,6 +6376,9 @@ fn render_diff_toolbar(
         focus_meta.push("indexing symbols".to_string());
     } else if let Some(status) = lsp_status.filter(|status| !status.is_ready()) {
         focus_meta.push(status.badge_label().to_string());
+    }
+    if let Some(status) = structural_warmup_status {
+        focus_meta.push(status);
     }
     let focus_summary = focus_meta.join(" / ");
 
@@ -10637,5 +11328,80 @@ fn label_for_change_type(change_type: &str) -> &str {
         "RENAMED" => "renamed",
         "COPIED" => "copied",
         _ => "modified",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::state::StructuralDiffFileState;
+
+    use super::{
+        should_apply_structural_diff_update, should_reuse_structural_diff_state,
+        structural_diff_state_terminal_status, StructuralDiffTerminalStatus,
+    };
+
+    #[test]
+    fn selected_structural_load_reuses_warmup_loading_state() {
+        let state = StructuralDiffFileState {
+            request_key: Some("structural-diff-v1:repo:1:head:MODIFIED::src/lib.rs".to_string()),
+            loading: true,
+            ..StructuralDiffFileState::default()
+        };
+
+        assert!(should_reuse_structural_diff_state(
+            &state,
+            "structural-diff-v1:repo:1:head:MODIFIED::src/lib.rs"
+        ));
+        assert_eq!(
+            structural_diff_state_terminal_status(
+                &state,
+                "structural-diff-v1:repo:1:head:MODIFIED::src/lib.rs"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn selected_structural_load_reuses_cached_terminal_error_state() {
+        let state = StructuralDiffFileState {
+            request_key: Some("structural-diff-v1:repo:1:head:MODIFIED::image.png".to_string()),
+            error: Some("Structural diff is not available for binary file image.png.".to_string()),
+            terminal_error: true,
+            ..StructuralDiffFileState::default()
+        };
+
+        assert!(should_reuse_structural_diff_state(
+            &state,
+            "structural-diff-v1:repo:1:head:MODIFIED::image.png"
+        ));
+        assert_eq!(
+            structural_diff_state_terminal_status(
+                &state,
+                "structural-diff-v1:repo:1:head:MODIFIED::image.png"
+            ),
+            Some(StructuralDiffTerminalStatus::Error)
+        );
+    }
+
+    #[test]
+    fn stale_structural_diff_results_do_not_apply_after_pr_switch() {
+        assert!(should_apply_structural_diff_update(
+            Some("acme/widgets#42"),
+            "acme/widgets#42",
+            Some("request-a"),
+            "request-a",
+        ));
+        assert!(!should_apply_structural_diff_update(
+            Some("acme/widgets#43"),
+            "acme/widgets#42",
+            Some("request-a"),
+            "request-a",
+        ));
+        assert!(!should_apply_structural_diff_update(
+            Some("acme/widgets#42"),
+            "acme/widgets#42",
+            Some("request-old"),
+            "request-a",
+        ));
     }
 }

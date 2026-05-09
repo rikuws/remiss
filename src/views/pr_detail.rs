@@ -17,7 +17,7 @@ use crate::state::*;
 use crate::theme::*;
 
 use super::ai_tour::refresh_active_tour_flow;
-use super::diff_view::{enter_files_surface, render_files_view};
+use super::diff_view::{enter_files_surface, render_files_view, warm_structural_diffs_flow};
 use super::sections::{
     badge, error_text, eyebrow, format_relative_time, ghost_button, nested_panel, panel_state_text,
     review_button, success_text, user_avatar,
@@ -2779,6 +2779,8 @@ fn trigger_sync_pr(
                     cx.notify();
                 })
                 .ok();
+
+            warm_structural_diffs_flow(model.clone(), cx).await;
 
             let should_refresh_tour = model
                 .read_with(cx, |s, _| {

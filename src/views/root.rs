@@ -12,6 +12,7 @@ use crate::theme::*;
 use super::ai_tour::refresh_active_tour;
 use super::diff_view::{
     ensure_active_review_focus_loaded, enter_files_surface, enter_stack_review_mode,
+    warm_structural_diffs_flow,
 };
 use super::palette::render_palette;
 use super::pr_detail::render_pr_workspace;
@@ -248,6 +249,8 @@ async fn maybe_bootstrap_debug_pull_request(
             cx.notify();
         })
         .ok();
+
+    warm_structural_diffs_flow(model.clone(), cx).await;
 }
 
 fn parse_debug_pull_request_target(target: &str) -> Option<(String, i64)> {

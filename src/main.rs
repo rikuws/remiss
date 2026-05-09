@@ -50,6 +50,7 @@ mod shader_surface;
 mod source_browser;
 mod stacks;
 mod state;
+mod structural_diff_cache;
 mod syntax;
 mod temp_source_window;
 mod theme;
