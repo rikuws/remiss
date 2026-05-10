@@ -234,6 +234,7 @@ pub fn ensure_active_review_focus_loaded(
             .detach();
     } else if center_mode == ReviewCenterMode::StructuralDiff {
         ensure_selected_structural_diff_loaded(state, window, cx);
+        ensure_selected_file_content_loaded(state, window, cx);
     } else {
         ensure_selected_file_content_loaded(state, window, cx);
     }
@@ -4057,6 +4058,7 @@ fn render_file_tree_file_row(
                 }
                 ReviewFileRowOpenMode::Structural => {
                     ensure_selected_structural_diff_loaded(&state_for_open, window, cx);
+                    ensure_selected_file_content_loaded(&state_for_open, window, cx);
                 }
                 ReviewFileRowOpenMode::Source => {
                     ensure_active_review_focus_loaded(&state_for_open, window, cx);
@@ -6536,6 +6538,9 @@ fn render_diff_panel(
                                 detail,
                                 file,
                                 structural_diff_state.as_ref(),
+                                file_content_state
+                                    .as_ref()
+                                    .and_then(|state| state.prepared.as_ref()),
                                 selected_anchor,
                                 review_stack.clone(),
                                 cx,
@@ -7841,6 +7846,7 @@ fn render_structural_file_diff(
     detail: &PullRequestDetail,
     file: &PullRequestFile,
     structural_state: Option<&StructuralDiffFileState>,
+    prepared_file: Option<&PreparedFileContent>,
     selected_anchor: Option<&DiffAnchor>,
     review_stack: Arc<ReviewStack>,
     cx: &App,
@@ -7879,7 +7885,7 @@ fn render_structural_file_diff(
         Some(&structural.parsed_file),
         Some(parsed_override),
         Some(structural.clone()),
-        None,
+        prepared_file,
         selected_anchor,
         diff_view_state,
         review_stack,
@@ -10251,24 +10257,6 @@ fn render_syntax_content(
     )
     .or_else(|| code_text_runs(spans));
 
-    if spans.is_empty() && rendered_runs.is_none() {
-        let mut selectable = SelectableText::new(
-            format!(
-                "diff-line:{}:{}:{}",
-                file_path,
-                line.left_line_number.unwrap_or_default(),
-                line.right_line_number.unwrap_or_default()
-            ),
-            content.to_string(),
-        );
-        if let Some((state, target)) = line_action {
-            selectable = selectable.on_click_unmatched(move |window, cx| {
-                open_review_line_action(&state, target.clone(), window.mouse_position(), cx);
-            });
-        }
-        return content_div.text_color(fallback_color).child(selectable);
-    }
-
     let selection_id = format!(
         "diff-line:{}:{}:{}",
         file_path,
@@ -10342,6 +10330,16 @@ fn render_syntax_content(
         };
 
         return content_div.text_color(fallback_color).child(interactive);
+    }
+
+    if spans.is_empty() && rendered_runs.is_none() {
+        let mut selectable = SelectableText::new(selection_id, content.to_string());
+        if let Some((state, target)) = line_action {
+            selectable = selectable.on_click_unmatched(move |window, cx| {
+                open_review_line_action(&state, target.clone(), window.mouse_position(), cx);
+            });
+        }
+        return content_div.text_color(fallback_color).child(selectable);
     }
 
     let mut selectable = if let Some(runs) = rendered_runs {

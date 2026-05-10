@@ -466,14 +466,13 @@ fn render_prepared_code_lines(
     diff_lines: Option<PreparedFileLineDiffs>,
 ) -> impl IntoElement {
     let block_id = CODE_BLOCK_ID.fetch_add(1, Ordering::Relaxed);
+    let block_element_id = prepared_code_block_element_id(lsp_context, block_id);
     let show_diff_markers = diff_lines.is_some();
 
     div()
         .w_full()
         .min_w_0()
-        .id(ElementId::Name(
-            format!("prepared-code-block-{block_id}").into(),
-        ))
+        .id(ElementId::Name(block_element_id.into()))
         .overflow_x_scroll()
         .child(
             div()
@@ -516,6 +515,7 @@ fn render_virtualized_prepared_code_lines(
     focused_line: Option<usize>,
 ) -> impl IntoElement {
     let block_id = CODE_BLOCK_ID.fetch_add(1, Ordering::Relaxed);
+    let block_element_id = prepared_code_block_element_id(lsp_context.as_ref(), block_id);
     let show_diff_markers = diff_lines.is_some();
 
     div()
@@ -525,9 +525,7 @@ fn render_virtualized_prepared_code_lines(
         .flex_col()
         .flex_grow()
         .min_h_0()
-        .id(ElementId::Name(
-            format!("prepared-code-block-{block_id}").into(),
-        ))
+        .id(ElementId::Name(block_element_id.into()))
         .whitespace_nowrap()
         .font_family(mono_font_family())
         .text_size(px(CODE_FONT_SIZE))
@@ -826,6 +824,20 @@ impl PreparedFileLineLspContext {
 
 fn prepared_lsp_text_id(file_path: &str, reference: &str, line_number: usize) -> String {
     format!("prepared-code-lsp:{file_path}:{reference}:{line_number}")
+}
+
+fn prepared_code_block_element_id(
+    lsp_context: Option<&PreparedFileLspContext>,
+    fallback_id: usize,
+) -> String {
+    lsp_context
+        .map(|context| {
+            format!(
+                "prepared-code-block:{}:{}",
+                context.file_path, context.reference
+            )
+        })
+        .unwrap_or_else(|| format!("prepared-code-block-{fallback_id}"))
 }
 
 pub fn build_interactive_code_tokens(text: &str) -> Vec<InteractiveCodeToken> {
@@ -1323,7 +1335,10 @@ fn prepared_excerpt_range(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_interactive_code_tokens, prepared_excerpt_range, prepared_lsp_text_id};
+    use super::{
+        build_interactive_code_tokens, prepared_code_block_element_id, prepared_excerpt_range,
+        prepared_lsp_text_id,
+    };
 
     #[test]
     fn prepared_excerpt_range_clamps_to_available_lines() {
@@ -1360,6 +1375,14 @@ mod tests {
         assert_eq!(
             prepared_lsp_text_id("src/main.rs", "head-sha", 42),
             "prepared-code-lsp:src/main.rs:head-sha:42"
+        );
+    }
+
+    #[test]
+    fn prepared_code_block_element_id_keeps_non_lsp_fallback_stable() {
+        assert_eq!(
+            prepared_code_block_element_id(None, 7),
+            "prepared-code-block-7"
         );
     }
 }

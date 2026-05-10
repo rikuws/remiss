@@ -1,10 +1,10 @@
-use std::{cell::RefCell, mem, ops::Range, rc::Rc};
+use std::{cell::RefCell, mem, ops::Range, rc::Rc, time::Duration};
 
 use gpui::{
     fill, point, px, size, AnyTooltip, AnyView, App, Bounds, ClipboardItem, DispatchPhase, Element,
     ElementId, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement,
     KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
-    Pixels, SharedString, StyledText, TextLayout, TextRun, Window, WrappedLineLayout,
+    Pixels, SharedString, StyledText, Task, TextLayout, TextRun, Window, WrappedLineLayout,
 };
 
 use crate::{
@@ -15,6 +15,8 @@ use crate::{
 thread_local! {
     static ACTIVE_TEXT_TARGET: RefCell<Option<String>> = const { RefCell::new(None) };
 }
+
+const TEXT_TOOLTIP_SHOW_DELAY: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppTextFieldKind {
@@ -35,15 +37,40 @@ struct TextSelectionState {
 }
 
 #[derive(Clone)]
-struct ActiveTextTooltip {
+struct VisibleTextTooltip {
     key: String,
     mouse_position: gpui::Point<Pixels>,
     view: AnyView,
 }
 
+struct PendingTextTooltip {
+    key: String,
+    _show_task: Task<()>,
+}
+
 #[derive(Default)]
 struct TextTooltipState {
-    active: Option<ActiveTextTooltip>,
+    active: Option<VisibleTextTooltip>,
+    pending: Option<PendingTextTooltip>,
+}
+
+impl TextTooltipState {
+    fn clear(&mut self) {
+        self.active = None;
+        self.pending = None;
+    }
+
+    fn has_key(&self, key: &str) -> bool {
+        self.active
+            .as_ref()
+            .map(|tooltip| tooltip.key.as_str() == key)
+            .unwrap_or(false)
+            || self
+                .pending
+                .as_ref()
+                .map(|tooltip| tooltip.key.as_str() == key)
+                .unwrap_or(false)
+    }
 }
 
 impl TextSelectionState {
@@ -243,25 +270,56 @@ impl Element for SelectableText {
                         .unwrap_or_default();
                     let mouse_position = window.mouse_position();
                     if selection_state.borrow().selecting {
-                        tooltip_state.borrow_mut().active = None;
+                        tooltip_state.borrow_mut().clear();
                     } else if bounds.contains(&mouse_position) {
+                        let mut has_tooltip_for_hover = false;
                         if let Ok(index) = self.text.layout().index_for_position(mouse_position) {
                             if let Some((key, view)) = tooltip_builder(index, window, cx) {
-                                let mut state = tooltip_state.borrow_mut();
-                                let replace_tooltip = state
-                                    .active
-                                    .as_ref()
-                                    .map(|tooltip| tooltip.key != key)
-                                    .unwrap_or(true);
-                                if replace_tooltip {
-                                    state.active = Some(ActiveTextTooltip {
+                                has_tooltip_for_hover = true;
+                                if !tooltip_state.borrow().has_key(&key) {
+                                    let show_task = window.spawn(cx, {
+                                        let tooltip_state = tooltip_state.clone();
+                                        let key = key.clone();
+                                        let view = view.clone();
+                                        async move |cx| {
+                                            cx.background_executor()
+                                                .timer(TEXT_TOOLTIP_SHOW_DELAY)
+                                                .await;
+                                            cx.update(|window, _cx| {
+                                                let mut state = tooltip_state.borrow_mut();
+                                                let should_show = state
+                                                    .pending
+                                                    .as_ref()
+                                                    .map(|tooltip| tooltip.key == key)
+                                                    .unwrap_or(false);
+                                                if should_show {
+                                                    state.active = Some(VisibleTextTooltip {
+                                                        key,
+                                                        mouse_position,
+                                                        view,
+                                                    });
+                                                    state.pending = None;
+                                                    window.refresh();
+                                                }
+                                            })
+                                            .ok();
+                                        }
+                                    });
+
+                                    let mut state = tooltip_state.borrow_mut();
+                                    state.active = None;
+                                    state.pending = Some(PendingTextTooltip {
                                         key,
-                                        mouse_position,
-                                        view,
+                                        _show_task: show_task,
                                     });
                                 }
                             }
                         }
+                        if !has_tooltip_for_hover {
+                            tooltip_state.borrow_mut().pending = None;
+                        }
+                    } else {
+                        tooltip_state.borrow_mut().pending = None;
                     }
 
                     let active_tooltip = tooltip_state.borrow().active.clone();
@@ -289,6 +347,14 @@ impl Element for SelectableText {
                                             .unwrap_or(false)
                                         {
                                             state.active = None;
+                                        }
+                                        if state
+                                            .pending
+                                            .as_ref()
+                                            .map(|tooltip| tooltip.key == tooltip_key)
+                                            .unwrap_or(false)
+                                        {
+                                            state.pending = None;
                                         }
                                     }
 
