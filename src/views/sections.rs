@@ -1512,7 +1512,6 @@ fn filter_pill(
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let animation_id = SharedString::from(format!("filter-pill-{label}-{}", usize::from(active)));
-    let border_muted_transparent = with_alpha(border_muted(), 0.0);
 
     div()
         .flex()
@@ -1522,22 +1521,15 @@ fn filter_pill(
         .py(px(6.0))
         .rounded(radius_sm())
         .border_1()
-        .border_color(if active {
-            border_muted()
-        } else {
-            transparent()
-        })
+        .border_color(transparent())
         .text_size(px(13.0))
         .font_weight(FontWeight::MEDIUM)
         .cursor_pointer()
-        .when(active, |el| {
-            el.bg(control_selected_bg()).text_color(fg_emphasis())
-        })
+        .when(active, |el| el.bg(bg_emphasis()).text_color(fg_emphasis()))
         .when(!active, |el| el.text_color(fg_muted()))
-        .hover(|style| {
+        .hover(move |style| {
             style
-                .bg(control_button_hover_bg())
-                .border_color(border_muted())
+                .bg(if active { bg_emphasis() } else { bg_selected() })
                 .text_color(fg_emphasis())
         })
         .on_mouse_down(MouseButton::Left, on_click)
@@ -1554,8 +1546,7 @@ fn filter_pill(
             Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
             move |el, delta| {
                 let progress = selected_reveal_progress(active, delta);
-                el.bg(mix_rgba(transparent(), control_selected_bg(), progress))
-                    .border_color(mix_rgba(border_muted_transparent, border_muted(), progress))
+                el.bg(mix_rgba(transparent(), bg_emphasis(), progress))
                     .text_color(mix_rgba(fg_muted(), fg_emphasis(), progress))
             },
         )

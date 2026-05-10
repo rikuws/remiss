@@ -807,18 +807,20 @@ fn render_waypoint_spotlight_row(
         .px(px(20.0))
         .py(px(13.0))
         .border_t(px(1.0))
-        .border_color(if selected {
-            focus_border()
-        } else {
-            border_muted()
-        })
+        .border_color(border_muted())
         .bg(if selected {
-            bg_selected()
+            bg_emphasis()
         } else {
             bg_overlay()
         })
         .cursor_pointer()
-        .hover(|style| style.bg(hover_bg()))
+        .hover(move |style| {
+            style.bg(if selected {
+                bg_emphasis()
+            } else {
+                bg_selected()
+            })
+        })
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             close_waypoint_spotlight(&state, cx);
             open_review_location_card(&state, &location, window, cx);
@@ -1920,14 +1922,14 @@ fn render_stack_view_layer_card(
         .unwrap_or(true);
     let (number_label, title_label) = stack_view_layer_title_parts(layer);
     let row_bg = if is_active {
-        bg_selected()
+        bg_emphasis()
     } else {
         transparent()
     };
     let hover_bg = if is_active {
         bg_emphasis()
     } else {
-        with_alpha(fg_emphasis(), 0.045)
+        bg_selected()
     };
 
     div()
@@ -2578,17 +2580,23 @@ fn render_review_queue_row(
         .rounded(radius_sm())
         .border_1()
         .border_color(if is_selected {
-            border_default()
+            transparent()
         } else {
             border_muted()
         })
         .bg(if is_selected {
-            bg_selected()
+            bg_emphasis()
         } else {
             bg_surface()
         })
         .cursor_pointer()
-        .hover(|style| style.bg(hover_bg()))
+        .hover(move |style| {
+            style.bg(if is_selected {
+                bg_emphasis()
+            } else {
+                bg_selected()
+            })
+        })
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             open_review_diff_location(&state, path.clone(), anchor.clone(), window, cx);
         })
@@ -3211,11 +3219,11 @@ fn render_stack_layer_summary_row(
         .py(px(7.0))
         .rounded(radius_sm())
         .border_1()
-        .border_color(focus_border())
-        .bg(bg_selected())
+        .border_color(transparent())
+        .bg(bg_emphasis())
         .when(can_expand, |el| {
             el.cursor_pointer()
-                .hover(|style| style.bg(hover_bg()))
+                .hover(|style| style.bg(bg_emphasis()))
                 .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                     state_for_open.update(cx, |state, cx| {
                         state.set_stack_rail_expanded(true);
@@ -3338,17 +3346,23 @@ fn render_stack_layer_row(
         .rounded(radius_sm())
         .border_1()
         .border_color(if is_active {
-            focus_border()
+            transparent()
         } else {
             border_muted()
         })
         .bg(if is_active {
-            bg_selected()
+            bg_emphasis()
         } else {
             bg_surface()
         })
         .cursor_pointer()
-        .hover(|style| style.bg(hover_bg()))
+        .hover(move |style| {
+            style.bg(if is_active {
+                bg_emphasis()
+            } else {
+                bg_selected()
+            })
+        })
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             state_for_open.update(cx, |state, cx| {
                 state.set_selected_stack_layer(Some(layer_id.clone()));
@@ -3390,7 +3404,11 @@ fn render_stack_layer_row(
                                     bg_subtle()
                                 })
                                 .border_1()
-                                .border_color(if is_active { accent() } else { border_muted() })
+                                .border_color(if is_active {
+                                    transparent()
+                                } else {
+                                    border_muted()
+                                })
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -4015,18 +4033,20 @@ fn render_file_tree_file_row(
         .py(px(4.0))
         .rounded(radius_sm())
         .border_1()
-        .border_color(if is_active {
-            diff_selected_edge()
-        } else {
-            transparent()
-        })
+        .border_color(transparent())
         .bg(if is_active {
-            diff_line_hover_bg()
+            bg_emphasis()
         } else {
             transparent()
         })
         .cursor_pointer()
-        .hover(|style| style.bg(diff_line_hover_bg()))
+        .hover(move |style| {
+            style.bg(if is_active {
+                bg_emphasis()
+            } else {
+                bg_selected()
+            })
+        })
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             state_for_open.update(cx, |state, cx| {
                 state.selected_file_path = Some(path.clone());
@@ -7736,7 +7756,6 @@ fn toolbar_icon_button(
 ) -> impl IntoElement {
     let animation_id =
         SharedString::from(format!("toolbar-icon-button-{id}-{}", usize::from(active)));
-    let selected_edge_transparent = with_alpha(diff_selected_edge(), 0.0);
 
     div()
         .id(id)
@@ -7744,16 +7763,8 @@ fn toolbar_icon_button(
         .h(px(22.0))
         .rounded(radius_sm())
         .border_1()
-        .border_color(if active {
-            diff_selected_edge()
-        } else {
-            transparent()
-        })
-        .bg(if active {
-            diff_line_hover_bg()
-        } else {
-            transparent()
-        })
+        .border_color(transparent())
+        .bg(if active { bg_emphasis() } else { transparent() })
         .opacity(if disabled { 0.42 } else { 1.0 })
         .flex()
         .items_center()
@@ -7761,11 +7772,7 @@ fn toolbar_icon_button(
         .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
         .when(!disabled, move |el| {
             el.cursor_pointer()
-                .hover(|style| {
-                    style
-                        .bg(diff_line_hover_bg())
-                        .border_color(diff_annotation_border())
-                })
+                .hover(move |style| style.bg(if active { bg_emphasis() } else { bg_selected() }))
                 .on_mouse_down(MouseButton::Left, on_click)
         })
         .child(icon)
@@ -7774,12 +7781,7 @@ fn toolbar_icon_button(
             Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
             move |el, delta| {
                 let progress = selected_reveal_progress(active, delta);
-                el.bg(mix_rgba(transparent(), diff_line_hover_bg(), progress))
-                    .border_color(mix_rgba(
-                        selected_edge_transparent,
-                        diff_selected_edge(),
-                        progress,
-                    ))
+                el.bg(mix_rgba(transparent(), bg_emphasis(), progress))
             },
         )
 }
@@ -7799,31 +7801,21 @@ fn workspace_mode_button(
         "workspace-mode-button-{label}-{}",
         usize::from(active)
     ));
-    let border_muted_transparent = with_alpha(border_muted(), 0.0);
 
     div()
         .px(px(8.0))
         .py(px(4.0))
         .rounded(radius_sm())
         .border_1()
-        .border_color(if active {
-            border_muted()
-        } else {
-            transparent()
-        })
-        .bg(if active {
-            control_selected_bg()
-        } else {
-            transparent()
-        })
+        .border_color(transparent())
+        .bg(if active { bg_emphasis() } else { transparent() })
         .text_size(px(11.0))
         .font_weight(FontWeight::MEDIUM)
         .text_color(if active { fg_emphasis() } else { fg_muted() })
         .cursor_pointer()
-        .hover(|style| {
+        .hover(move |style| {
             style
-                .bg(control_button_hover_bg())
-                .border_color(border_muted())
+                .bg(if active { bg_emphasis() } else { bg_selected() })
                 .text_color(fg_emphasis())
         })
         .on_mouse_down(MouseButton::Left, on_click)
@@ -7833,8 +7825,7 @@ fn workspace_mode_button(
             Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
             move |el, delta| {
                 let progress = selected_reveal_progress(active, delta);
-                el.bg(mix_rgba(transparent(), control_selected_bg(), progress))
-                    .border_color(mix_rgba(border_muted_transparent, border_muted(), progress))
+                el.bg(mix_rgba(transparent(), bg_emphasis(), progress))
                     .text_color(mix_rgba(fg_muted(), fg_emphasis(), progress))
             },
         )
@@ -9626,7 +9617,11 @@ fn render_waypoint_pill(label: &str, active: bool) -> impl IntoElement {
         .py(px(4.0))
         .rounded(px(999.0))
         .border_1()
-        .border_color(if active { warning() } else { waypoint_border() })
+        .border_color(if active {
+            transparent()
+        } else {
+            waypoint_border()
+        })
         .bg(if active {
             waypoint_active_bg()
         } else {
@@ -9868,7 +9863,11 @@ fn line_action_button(
         .py(px(8.0))
         .rounded(px(999.0))
         .border_1()
-        .border_color(if active { warning() } else { border_default() })
+        .border_color(if active {
+            transparent()
+        } else {
+            border_default()
+        })
         .bg(if active { waypoint_bg() } else { bg_surface() })
         .text_size(px(12.0))
         .font_weight(FontWeight::MEDIUM)
@@ -9886,7 +9885,7 @@ fn line_action_button(
             move |el, delta| {
                 let progress = selected_reveal_progress(active, delta);
                 el.bg(mix_rgba(bg_surface(), waypoint_bg(), progress))
-                    .border_color(mix_rgba(border_default(), warning(), progress))
+                    .border_color(mix_rgba(border_default(), transparent(), progress))
                     .text_color(mix_rgba(fg_emphasis(), waypoint_fg(), progress))
             },
         )

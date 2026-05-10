@@ -252,13 +252,9 @@ fn palette_item(item: CommandItem, selected: bool, state: Entity<AppState>) -> i
         .rounded(radius_sm())
         .text_size(px(13.0))
         .border_1()
-        .border_color(if selected {
-            focus_border()
-        } else {
-            transparent()
-        })
+        .border_color(transparent())
         .bg(if selected {
-            bg_selected()
+            bg_emphasis()
         } else {
             bg_overlay()
         })
@@ -268,10 +264,13 @@ fn palette_item(item: CommandItem, selected: bool, state: Entity<AppState>) -> i
             fg_default()
         })
         .cursor_pointer()
-        .hover(|style| {
+        .hover(move |style| {
             style
-                .bg(hover_bg())
-                .border_color(focus_border())
+                .bg(if selected {
+                    bg_emphasis()
+                } else {
+                    bg_selected()
+                })
                 .text_color(fg_emphasis())
         })
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {

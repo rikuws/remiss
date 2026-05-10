@@ -752,19 +752,22 @@ fn titlebar_icon_button(
 ) -> impl IntoElement {
     let animation_id =
         SharedString::from(format!("titlebar-icon-button-{id}-{}", usize::from(active)));
-    let focus_border_transparent = with_alpha(focus_border(), 0.0);
 
     div()
         .id(id)
         .w(px(APP_TITLEBAR_TOGGLE_SIZE))
         .h(px(APP_TITLEBAR_TOGGLE_SIZE))
         .rounded(px(6.0))
-        .bg(if active { bg_selected() } else { transparent() })
+        .bg(if active { bg_emphasis() } else { transparent() })
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .hover(|style| style.bg(hover_bg()).text_color(fg_emphasis()))
+        .hover(move |style| {
+            style
+                .bg(if active { bg_emphasis() } else { bg_selected() })
+                .text_color(fg_emphasis())
+        })
         .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
         .on_mouse_down(MouseButton::Left, on_click)
         .child(lucide_icon(
@@ -777,8 +780,7 @@ fn titlebar_icon_button(
             Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
             move |el, delta| {
                 let progress = selected_reveal_progress(active, delta);
-                el.bg(mix_rgba(transparent(), bg_selected(), progress))
-                    .border_color(mix_rgba(focus_border_transparent, focus_border(), progress))
+                el.bg(mix_rgba(transparent(), bg_emphasis(), progress))
             },
         )
 }
@@ -791,7 +793,7 @@ fn render_workspace_tabs(
     div()
         .flex()
         .items_center()
-        .gap(px(8.0))
+        .gap(px(4.0))
         .id("workspace-tabs-scroll")
         .overflow_x_scroll()
         .min_w_0()
@@ -862,12 +864,12 @@ fn chrome_icon_button(
         .rounded(radius_sm())
         .border_1()
         .border_color(if active {
-            border_default()
+            transparent()
         } else {
             border_muted()
         })
         .bg(if active {
-            control_selected_bg()
+            bg_emphasis()
         } else {
             control_button_bg()
         })
@@ -875,10 +877,9 @@ fn chrome_icon_button(
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .hover(|style| {
+        .hover(move |style| {
             style
-                .bg(control_button_hover_bg())
-                .border_color(border_default())
+                .bg(if active { bg_emphasis() } else { bg_selected() })
                 .text_color(fg_emphasis())
         })
         .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
@@ -912,23 +913,14 @@ fn chrome_segment(
 ) -> AnyElement {
     let animation_id =
         SharedString::from(format!("chrome-segment-{label}-{}", usize::from(active)));
-    let border_muted_transparent = with_alpha(border_muted(), 0.0);
 
     div()
         .h(px(26.0))
         .px(px(10.0))
         .rounded(px(6.0))
         .border_1()
-        .border_color(if active {
-            border_muted()
-        } else {
-            transparent()
-        })
-        .bg(if active {
-            control_selected_bg()
-        } else {
-            transparent()
-        })
+        .border_color(transparent())
+        .bg(if active { bg_emphasis() } else { transparent() })
         .text_size(px(12.0))
         .font_weight(FontWeight::MEDIUM)
         .text_color(if active { fg_emphasis() } else { fg_muted() })
@@ -937,10 +929,9 @@ fn chrome_segment(
         .justify_center()
         .opacity(if disabled { 0.5 } else { 1.0 })
         .cursor_pointer()
-        .hover(|style| {
+        .hover(move |style| {
             style
-                .bg(control_button_hover_bg())
-                .border_color(border_muted())
+                .bg(if active { bg_emphasis() } else { bg_selected() })
                 .text_color(fg_emphasis())
         })
         .on_mouse_down(MouseButton::Left, move |event, window, cx| {
@@ -954,8 +945,7 @@ fn chrome_segment(
             Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
             move |el, delta| {
                 let progress = selected_reveal_progress(active, delta);
-                el.bg(mix_rgba(transparent(), control_selected_bg(), progress))
-                    .border_color(mix_rgba(border_muted_transparent, border_muted(), progress))
+                el.bg(mix_rgba(transparent(), bg_emphasis(), progress))
                     .text_color(mix_rgba(fg_muted(), fg_emphasis(), progress))
             },
         )
@@ -1252,7 +1242,6 @@ fn sidebar_nav_button(
         "sidebar-nav-button-{label}-{}",
         usize::from(active)
     ));
-    let focus_border_transparent = with_alpha(focus_border(), 0.0);
 
     div()
         .h(px(38.0))
@@ -1260,21 +1249,16 @@ fn sidebar_nav_button(
         .when(collapsed, |el| el.px(px(0.0)))
         .rounded(radius_sm())
         .border_1()
-        .border_color(if active {
-            focus_border()
-        } else {
-            transparent()
-        })
-        .when(active, |el| el.bg(bg_selected()))
+        .border_color(transparent())
+        .when(active, |el| el.bg(bg_emphasis()))
         .flex()
         .items_center()
         .justify_between()
         .gap(px(10.0))
         .cursor_pointer()
-        .hover(|style| {
+        .hover(move |style| {
             style
-                .bg(hover_bg())
-                .border_color(focus_border())
+                .bg(if active { bg_emphasis() } else { bg_selected() })
                 .text_color(fg_emphasis())
         })
         .on_mouse_down(MouseButton::Left, on_click)
@@ -1318,8 +1302,7 @@ fn sidebar_nav_button(
             Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
             move |el, delta| {
                 let progress = selected_reveal_progress(active, delta);
-                el.bg(mix_rgba(transparent(), bg_selected(), progress))
-                    .border_color(mix_rgba(focus_border_transparent, focus_border(), progress))
+                el.bg(mix_rgba(transparent(), bg_emphasis(), progress))
             },
         )
 }
@@ -1343,12 +1326,12 @@ fn sidebar_theme_button(
         .rounded(radius_sm())
         .border_1()
         .border_color(if active {
-            border_muted()
+            transparent()
         } else {
             border_muted()
         })
         .bg(if active {
-            control_selected_bg()
+            bg_emphasis()
         } else {
             control_button_bg()
         })
@@ -1356,11 +1339,7 @@ fn sidebar_theme_button(
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .hover(|style| {
-            style
-                .bg(control_button_hover_bg())
-                .border_color(border_default())
-        })
+        .hover(move |style| style.bg(if active { bg_emphasis() } else { bg_selected() }))
         .on_mouse_down(MouseButton::Left, on_click)
         .child(lucide_icon(
             icon,
@@ -1372,12 +1351,7 @@ fn sidebar_theme_button(
             Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
             move |el, delta| {
                 let progress = selected_reveal_progress(active, delta);
-                el.bg(mix_rgba(
-                    control_button_bg(),
-                    control_selected_bg(),
-                    progress,
-                ))
-                .border_color(border_muted())
+                el.bg(mix_rgba(control_button_bg(), bg_emphasis(), progress))
             },
         )
 }
@@ -1399,7 +1373,7 @@ fn sidebar_utility_button(
             transparent()
         })
         .bg(if active {
-            control_selected_bg()
+            bg_emphasis()
         } else {
             control_button_bg()
         })
@@ -1407,7 +1381,7 @@ fn sidebar_utility_button(
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .hover(|style| style.bg(control_button_hover_bg()))
+        .hover(move |style| style.bg(if active { bg_emphasis() } else { bg_selected() }))
         .on_mouse_down(MouseButton::Left, on_click)
         .child(lucide_icon(
             icon,
@@ -1454,8 +1428,8 @@ fn pr_tab(
     repository: &str,
     number: i64,
     title: &str,
-    _additions: i64,
-    _deletions: i64,
+    additions: i64,
+    deletions: i64,
     pr_state: &str,
     is_draft: bool,
     active: bool,
@@ -1465,66 +1439,60 @@ fn pr_tab(
         "pr-tab-{repository}-{number}-{}",
         usize::from(active)
     ));
-    let dot_color = pr_tab_state_dot(pr_state, is_draft);
+    let tab_bg = if active { bg_emphasis() } else { transparent() };
+    let tab_hover_bg = if active { bg_emphasis() } else { bg_selected() };
+    let icon_color = pr_tab_state_color(pr_state, is_draft);
     let state_badge = pr_tab_state_badge(pr_state, is_draft);
     let repo_short = repository
         .split('/')
         .last()
         .unwrap_or(repository)
         .to_string();
-    let tab_label = format!("#{number} {title}");
+    let pr_number = format!("#{number}");
+    let title = title.to_string();
+    let additions_label = format!("+{additions}");
+    let deletions_label = format!("-{deletions}");
 
     div()
+        .relative()
+        .h(px(32.0))
         .flex()
         .items_center()
         .gap(px(8.0))
         .px(px(10.0))
-        .py(px(5.0))
-        .rounded(radius_sm())
+        .rounded(px(7.0))
         .border_1()
-        .border_color(if active {
-            focus_border()
-        } else {
-            border_muted()
-        })
-        .bg(if active { bg_selected() } else { bg_overlay() })
-        .text_size(px(11.0))
-        .max_w(px(280.0))
+        .border_color(transparent())
+        .bg(tab_bg)
+        .text_size(px(12.0))
+        .max_w(px(320.0))
         .min_w_0()
         .cursor_pointer()
-        .hover(move |style| {
-            style
-                .bg(if active { bg_selected() } else { hover_bg() })
-                .border_color(focus_border())
-                .text_color(fg_emphasis())
-        })
+        .hover(move |style| style.bg(tab_hover_bg).text_color(fg_emphasis()))
         .on_mouse_down(MouseButton::Left, on_click)
+        .child(lucide_icon(LucideIcon::GitPullRequest, 13.0, icon_color))
         .child(
             div()
                 .flex()
                 .items_center()
-                .gap(px(8.0))
+                .gap(px(6.0))
                 .min_w_0()
                 .flex_grow()
                 .child(
                     div()
-                        .w(px(5.0))
-                        .h(px(5.0))
-                        .rounded(px(999.0))
-                        .bg(dot_color)
-                        .flex_shrink_0(),
-                )
-                .child(
-                    div()
-                        .px(px(6.0))
-                        .py(px(1.0))
-                        .rounded(px(999.0))
-                        .bg(if active { bg_overlay() } else { bg_emphasis() })
-                        .text_size(px(10.0))
+                        .text_size(px(11.0))
                         .font_family(mono_font_family())
                         .text_color(if active { fg_default() } else { fg_subtle() })
                         .flex_shrink_0()
                         .child(repo_short),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_family(mono_font_family())
+                        .text_color(if active { fg_default() } else { fg_subtle() })
+                        .flex_shrink_0()
+                        .child(pr_number),
                 )
                 .child(
                     div()
@@ -1534,22 +1502,36 @@ fn pr_tab(
                         .whitespace_nowrap()
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(if active { fg_emphasis() } else { fg_default() })
-                        .child(tab_label),
+                        .child(title),
                 ),
         )
         .when_some(state_badge, |el, badge| el.child(badge))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .font_family(mono_font_family())
+                .text_size(px(11.0))
+                .flex_shrink_0()
+                .child(div().text_color(success()).child(additions_label))
+                .child(
+                    div()
+                        .text_color(if deletions > 0 { danger() } else { fg_subtle() })
+                        .child(deletions_label),
+                ),
+        )
         .with_animation(
             animation_id,
             Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
             move |el, delta| {
                 let progress = selected_reveal_progress(active, delta);
-                el.bg(mix_rgba(bg_overlay(), bg_selected(), progress))
-                    .border_color(mix_rgba(border_muted(), focus_border(), progress))
+                el.bg(mix_rgba(transparent(), bg_emphasis(), progress))
             },
         )
 }
 
-fn pr_tab_state_dot(pr_state: &str, is_draft: bool) -> Rgba {
+fn pr_tab_state_color(pr_state: &str, is_draft: bool) -> Rgba {
     if is_draft {
         return fg_muted();
     }
@@ -1563,31 +1545,25 @@ fn pr_tab_state_dot(pr_state: &str, is_draft: bool) -> Rgba {
 
 fn pr_tab_state_badge(pr_state: &str, is_draft: bool) -> Option<AnyElement> {
     if is_draft {
-        return Some(
-            pr_tab_badge("Draft", fg_muted(), bg_emphasis(), border_muted()).into_any_element(),
-        );
+        return Some(pr_tab_badge("draft", fg_muted(), bg_subtle()).into_any_element());
     }
 
     match pr_state {
-        "MERGED" => Some(pr_tab_badge("Merged", info(), info_muted(), info()).into_any_element()),
-        "CLOSED" => Some(
-            pr_tab_badge("Closed", danger(), danger_muted(), diff_remove_border())
-                .into_any_element(),
-        ),
+        "MERGED" => Some(pr_tab_badge("merged", info(), info_muted()).into_any_element()),
+        "CLOSED" => Some(pr_tab_badge("closed", danger(), danger_muted()).into_any_element()),
         _ => None,
     }
 }
 
-fn pr_tab_badge(label: &str, fg: Rgba, bg: Rgba, border: Rgba) -> impl IntoElement {
+fn pr_tab_badge(label: &str, fg: Rgba, bg: Rgba) -> impl IntoElement {
     div()
-        .px(px(8.0))
-        .py(px(2.0))
+        .px(px(6.0))
+        .py(px(1.0))
         .rounded(px(999.0))
         .bg(bg)
-        .border_1()
-        .border_color(border)
         .text_size(px(10.0))
         .font_weight(FontWeight::MEDIUM)
         .text_color(fg)
+        .flex_shrink_0()
         .child(label.to_string())
 }
