@@ -259,13 +259,22 @@ fn truncate_markdown_preview(body: &str, limit: usize) -> String {
 }
 
 fn viewer_login(state: &AppState) -> Option<String> {
-    state.workspace.as_ref().and_then(|workspace| {
-        workspace
-            .viewer
-            .as_ref()
-            .map(|viewer| viewer.login.clone())
-            .or_else(|| workspace.auth.active_login.clone())
-    })
+    state
+        .workspace
+        .as_ref()
+        .and_then(|workspace| {
+            workspace
+                .viewer
+                .as_ref()
+                .map(|viewer| viewer.login.clone())
+                .or_else(|| workspace.auth.active_login.clone())
+        })
+        .or_else(|| {
+            state
+                .active_detail_state()
+                .and_then(|detail_state| detail_state.snapshot.as_ref())
+                .and_then(|snapshot| snapshot.auth.active_login.clone())
+        })
 }
 
 pub fn render_pr_workspace(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
@@ -314,6 +323,7 @@ pub fn render_pr_workspace(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                         .flex_col()
                         .id("pr-overview-scroll")
                         .overflow_y_scroll()
+                        .pt(px(16.0))
                         .pb(px(24.0))
                         .child(render_overview_surface(state, cx)),
                 )
@@ -1540,9 +1550,14 @@ pub fn trigger_submit_review(state: &Entity<AppState>, window: &mut Window, cx: 
         return;
     };
 
-    let (action, body, loading) = {
+    let (action, body, loading, reviewer_login) = {
         let s = state.read(cx);
-        (s.review_action, s.review_body.clone(), s.review_loading)
+        (
+            s.review_action,
+            s.review_body.clone(),
+            s.review_loading,
+            viewer_login(s),
+        )
     };
 
     if loading {
@@ -1569,10 +1584,16 @@ pub fn trigger_submit_review(state: &Entity<AppState>, window: &mut Window, cx: 
     let repo = repository.clone();
     window
         .spawn(cx, async move |cx: &mut AsyncWindowContext| {
+            let body_for_submit = body.clone();
             let submit_result = cx
                 .background_executor()
                 .spawn(async move {
-                    github::submit_pull_request_review(&repository, number, action, &body)
+                    github::submit_pull_request_review(
+                        &repository,
+                        number,
+                        action,
+                        &body_for_submit,
+                    )
                 })
                 .await;
 
@@ -1581,6 +1602,7 @@ pub fn trigger_submit_review(state: &Entity<AppState>, window: &mut Window, cx: 
                 Err(error) => (false, error),
             };
 
+            let detail_key = pr_key(&repo, number);
             model
                 .update(cx, |s, cx| {
                     s.review_loading = false;
@@ -1589,6 +1611,22 @@ pub fn trigger_submit_review(state: &Entity<AppState>, window: &mut Window, cx: 
                     if success {
                         s.review_body.clear();
                         s.review_editor_active = false;
+
+                        let mut updated_detail = None;
+                        let ds = s.detail_states.entry(detail_key.clone()).or_default();
+                        ds.loading = false;
+                        ds.syncing = true;
+                        if let Some(login) = reviewer_login.as_deref() {
+                            if let Some(detail) =
+                                ds.snapshot.as_mut().and_then(|sn| sn.detail.as_mut())
+                            {
+                                apply_submitted_review_to_detail(detail, login, action, &body);
+                                updated_detail = Some(detail.clone());
+                            }
+                        }
+                        if let Some(detail) = updated_detail.as_ref() {
+                            update_open_tab_summary_from_detail(s, detail);
+                        }
                     }
                     cx.notify();
                 })
@@ -1600,7 +1638,6 @@ pub fn trigger_submit_review(state: &Entity<AppState>, window: &mut Window, cx: 
 
             let cache = model.read_with(cx, |s, _| s.cache.clone()).ok();
             let Some(cache) = cache else { return };
-            let detail_key = pr_key(&repo, number);
             let repo_for_sync = repo.clone();
             let sync_result = cx
                 .background_executor()
@@ -1615,19 +1652,126 @@ pub fn trigger_submit_review(state: &Entity<AppState>, window: &mut Window, cx: 
 
             model
                 .update(cx, |s, cx| {
-                    let ds = s.detail_states.entry(detail_key.clone()).or_default();
-                    ds.loading = false;
-                    ds.syncing = false;
-                    if let Ok((snapshot, unread_ids)) = sync_result {
-                        ds.snapshot = Some(snapshot);
-                        ds.error = None;
+                    let mut updated_detail = None;
+                    let mut unread_ids_update = None;
+                    {
+                        let ds = s.detail_states.entry(detail_key.clone()).or_default();
+                        ds.loading = false;
+                        ds.syncing = false;
+                        if let Ok((mut snapshot, unread_ids)) = sync_result {
+                            if let Some(login) = reviewer_login.as_deref() {
+                                if let Some(detail) = snapshot.detail.as_mut() {
+                                    apply_submitted_review_to_detail(detail, login, action, &body);
+                                }
+                            }
+                            updated_detail = snapshot.detail.clone();
+                            ds.snapshot = Some(snapshot);
+                            ds.error = None;
+                            unread_ids_update = Some(unread_ids);
+                        }
+                    }
+                    if let Some(unread_ids) = unread_ids_update {
                         s.unread_review_comment_ids = unread_ids;
+                    }
+                    if let Some(detail) = updated_detail.as_ref() {
+                        update_open_tab_summary_from_detail(s, detail);
                     }
                     cx.notify();
                 })
                 .ok();
         })
         .detach();
+}
+
+fn review_state_for_action(action: ReviewAction) -> &'static str {
+    match action {
+        ReviewAction::Approve => "APPROVED",
+        ReviewAction::Comment => "COMMENTED",
+        ReviewAction::RequestChanges => "CHANGES_REQUESTED",
+    }
+}
+
+fn apply_submitted_review_to_detail(
+    detail: &mut github::PullRequestDetail,
+    reviewer_login: &str,
+    action: ReviewAction,
+    body: &str,
+) {
+    let reviewer_login = reviewer_login.trim();
+    if reviewer_login.is_empty() {
+        return;
+    }
+
+    let review_state = review_state_for_action(action);
+    let body = body.trim().to_string();
+    let has_submitted_review = detail.latest_reviews.iter().any(|review| {
+        review.author_login == reviewer_login
+            && review.state == review_state
+            && review.body.trim() == body
+    });
+
+    if !has_submitted_review {
+        detail
+            .latest_reviews
+            .retain(|review| review.author_login != reviewer_login);
+        detail.latest_reviews.push(PullRequestReview {
+            author_login: reviewer_login.to_string(),
+            author_avatar_url: None,
+            state: review_state.to_string(),
+            body,
+            submitted_at: None,
+        });
+
+        detail.review_decision = optimistic_review_decision(detail);
+    }
+}
+
+fn optimistic_review_decision(detail: &github::PullRequestDetail) -> Option<String> {
+    if detail
+        .latest_reviews
+        .iter()
+        .any(|review| review.state == "CHANGES_REQUESTED")
+    {
+        return Some("CHANGES_REQUESTED".to_string());
+    }
+
+    if detail
+        .latest_reviews
+        .iter()
+        .any(|review| review.state == "APPROVED")
+    {
+        return Some("APPROVED".to_string());
+    }
+
+    detail
+        .review_decision
+        .as_deref()
+        .filter(|decision| *decision != "CHANGES_REQUESTED" && *decision != "APPROVED")
+        .map(str::to_string)
+}
+
+fn update_open_tab_summary_from_detail(state: &mut AppState, detail: &github::PullRequestDetail) {
+    let detail_key = pr_key(&detail.repository, detail.number);
+    let Some(tab) = state
+        .open_tabs
+        .iter_mut()
+        .find(|tab| pr_key(&tab.repository, tab.number) == detail_key)
+    else {
+        return;
+    };
+
+    tab.title = detail.title.clone();
+    tab.author_login = detail.author_login.clone();
+    tab.author_avatar_url = detail.author_avatar_url.clone();
+    tab.is_draft = detail.is_draft;
+    tab.comments_count = detail.comments_count;
+    tab.additions = detail.additions;
+    tab.deletions = detail.deletions;
+    tab.changed_files = detail.changed_files;
+    tab.state = detail.state.clone();
+    tab.review_decision = detail.review_decision.clone();
+    tab.updated_at = detail.updated_at.clone();
+    tab.url = detail.url.clone();
 }
 
 fn render_submit_review_panel(
@@ -1645,7 +1789,6 @@ fn render_submit_review_panel(
             div()
                 .flex()
                 .items_center()
-                .justify_between()
                 .mb(px(16.0))
                 .child(
                     div()
@@ -1669,11 +1812,6 @@ fn render_submit_review_panel(
                                 ),
                         ),
                 )
-                .child(badge(match review_action {
-                    ReviewAction::Approve => "approve",
-                    ReviewAction::Comment => "comment",
-                    ReviewAction::RequestChanges => "request changes",
-                })),
         )
         .child(
             div().flex().gap(px(4.0)).flex_wrap().children(
@@ -2825,13 +2963,13 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{
-        humanize_review_state, participant_display_name, summarize_own_pr_feedback,
-        summarize_participants, summarize_recent_activity, summarize_review_status,
-        ActivityItemKind,
+        apply_submitted_review_to_detail, humanize_review_state, participant_display_name,
+        summarize_own_pr_feedback, summarize_participants, summarize_recent_activity,
+        summarize_review_status, ActivityItemKind,
     };
     use crate::github::{
         PullRequestComment, PullRequestDetail, PullRequestFile, PullRequestReview,
-        PullRequestReviewComment, PullRequestReviewThread,
+        PullRequestReviewComment, PullRequestReviewThread, ReviewAction,
     };
 
     #[test]
@@ -3018,6 +3156,53 @@ mod tests {
         }));
         assert!(erin.is_some_and(|participant| participant.commented));
         assert!(frank.is_some_and(|participant| participant.commented));
+    }
+
+    #[test]
+    fn apply_submitted_review_replaces_viewer_review_and_updates_decision() {
+        let mut detail = detail_with_activity(
+            Vec::new(),
+            vec![
+                review("alice", "CHANGES_REQUESTED", Some("2026-04-14T10:00:00Z")),
+                review("bob", "APPROVED", Some("2026-04-14T10:30:00Z")),
+            ],
+            Vec::new(),
+        );
+        detail.review_decision = Some("CHANGES_REQUESTED".to_string());
+
+        apply_submitted_review_to_detail(&mut detail, "alice", ReviewAction::Approve, "Looks good");
+
+        let review_status = summarize_review_status(&detail.reviewers, &detail.latest_reviews);
+        assert_eq!(
+            review_status.approved,
+            vec!["alice".to_string(), "bob".to_string()]
+        );
+        assert!(review_status.changes_requested.is_empty());
+        assert_eq!(detail.review_decision.as_deref(), Some("APPROVED"));
+
+        let alice_review = detail
+            .latest_reviews
+            .iter()
+            .find(|review| review.author_login == "alice")
+            .expect("alice review should be present");
+        assert_eq!(alice_review.state, "APPROVED");
+        assert_eq!(alice_review.body, "Looks good");
+    }
+
+    #[test]
+    fn apply_submitted_review_preserves_live_decision_when_already_present() {
+        let mut detail = detail_with_activity(
+            Vec::new(),
+            vec![review("alice", "APPROVED", Some("2026-04-14T10:00:00Z"))],
+            Vec::new(),
+        );
+        detail.latest_reviews[0].body = "Looks good".to_string();
+        detail.review_decision = Some("REVIEW_REQUIRED".to_string());
+
+        apply_submitted_review_to_detail(&mut detail, "alice", ReviewAction::Approve, "Looks good");
+
+        assert_eq!(detail.latest_reviews.len(), 1);
+        assert_eq!(detail.review_decision.as_deref(), Some("REVIEW_REQUIRED"));
     }
 
     #[test]
