@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use gpui::prelude::*;
 use gpui::*;
 
@@ -11,8 +13,11 @@ use super::sections::{badge, open_pull_request, panel_state_text};
 use super::settings::prepare_settings_view;
 use super::workspace_sync::trigger_sync_workspace;
 
+const PALETTE_ANIMATION_MS: u64 = 160;
+
 pub fn render_palette(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let s = state.read(cx);
+    let palette_open = s.palette_open;
     let query = s.palette_query.clone();
     let filtered = filtered_command_items(&s);
     let selected_index = s
@@ -24,6 +29,7 @@ pub fn render_palette(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     div()
         .absolute()
         .inset_0()
+        .occlude()
         .flex()
         .justify_center()
         .pt(px(72.0))
@@ -31,6 +37,7 @@ pub fn render_palette(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
             div()
                 .absolute()
                 .inset_0()
+                .occlude()
                 .bg(palette_backdrop())
                 .on_mouse_down(MouseButton::Left, {
                     let state = state_for_backdrop.clone();
@@ -47,6 +54,7 @@ pub fn render_palette(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                 .rounded(radius_lg())
                 .border_1()
                 .border_color(border_default())
+                .occlude()
                 .shadow_sm()
                 .overflow_hidden()
                 .flex()
@@ -112,7 +120,7 @@ pub fn render_palette(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                         AppTextFieldKind::PaletteQuery,
                                         "Type to filter commands, sections, or open pull requests",
                                     )
-                                    .autofocus(true),
+                                    .autofocus(palette_open),
                                 ),
                         )
                         .child(
@@ -171,11 +179,22 @@ pub fn render_palette(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                         })),
                 ),
         )
+        .with_animation(
+            ("command-palette-overlay", usize::from(palette_open)),
+            Animation::new(Duration::from_millis(PALETTE_ANIMATION_MS)).with_easing(ease_in_out),
+            move |el, delta| {
+                let progress = palette_reveal_progress(palette_open, delta);
+                el.opacity(progress.clamp(0.0, 1.0))
+                    .pt(lerp_px(82.0, 72.0, progress))
+            },
+        )
 }
 
 pub fn open_palette(state: &Entity<AppState>, cx: &mut App) {
     state.update(cx, |s, cx| {
         s.palette_open = true;
+        s.palette_closing = false;
+        s.palette_close_generation = s.palette_close_generation.wrapping_add(1);
         s.palette_query.clear();
         s.palette_selected_index = 0;
         cx.notify();
@@ -192,12 +211,22 @@ pub fn toggle_palette(state: &Entity<AppState>, cx: &mut App) {
 }
 
 pub fn close_palette(state: &Entity<AppState>, cx: &mut App) {
+    let mut schedule_close = false;
+    let mut close_generation = 0;
     state.update(cx, |s, cx| {
+        if !s.palette_open && !s.palette_closing {
+            return;
+        }
+        schedule_close = s.palette_open;
         s.palette_open = false;
-        s.palette_query.clear();
-        s.palette_selected_index = 0;
+        s.palette_closing = true;
+        s.palette_close_generation = s.palette_close_generation.wrapping_add(1);
+        close_generation = s.palette_close_generation;
         cx.notify();
     });
+    if schedule_close {
+        finish_palette_close_after_animation(state.clone(), close_generation, cx);
+    }
 }
 
 pub fn move_palette_selection(state: &Entity<AppState>, delta: isize, cx: &mut App) {
@@ -378,22 +407,55 @@ fn apply_command_action(
             if section == SectionId::Settings {
                 prepare_settings_view(state, window, cx);
             }
+            close_palette(state, cx);
             state.update(cx, |s, cx| {
                 s.set_active_section(section);
                 s.active_pr_key = None;
-                s.palette_open = false;
-                s.palette_query.clear();
-                s.palette_selected_index = 0;
                 cx.notify();
             });
         }
         CommandAction::OpenPullRequest(pr) => {
-            open_pull_request(state, pr, window, cx);
             close_palette(state, cx);
+            open_pull_request(state, pr, window, cx);
         }
         CommandAction::SyncWorkspace => {
             trigger_sync_workspace(state, window, cx);
             close_palette(state, cx);
         }
     }
+}
+
+fn finish_palette_close_after_animation(
+    state: Entity<AppState>,
+    close_generation: u64,
+    cx: &mut App,
+) {
+    cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(Duration::from_millis(PALETTE_ANIMATION_MS))
+            .await;
+        state
+            .update(cx, |s, cx| {
+                if !s.palette_open && s.palette_close_generation == close_generation {
+                    s.palette_closing = false;
+                    s.palette_query.clear();
+                    s.palette_selected_index = 0;
+                    cx.notify();
+                }
+            })
+            .ok();
+    })
+    .detach();
+}
+
+fn palette_reveal_progress(open: bool, delta: f32) -> f32 {
+    if open {
+        delta
+    } else {
+        1.0 - delta
+    }
+}
+
+fn lerp_px(from: f32, to: f32, progress: f32) -> Pixels {
+    px(from + (to - from) * progress)
 }

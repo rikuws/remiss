@@ -271,7 +271,7 @@ impl Element for SelectableText {
                     let mouse_position = window.mouse_position();
                     if selection_state.borrow().selecting {
                         tooltip_state.borrow_mut().clear();
-                    } else if bounds.contains(&mouse_position) {
+                    } else if hitbox.is_hovered(window) {
                         let mut has_tooltip_for_hover = false;
                         if let Ok(index) = self.text.layout().index_for_position(mouse_position) {
                             if let Some((key, view)) = tooltip_builder(index, window, cx) {
@@ -324,7 +324,7 @@ impl Element for SelectableText {
 
                     let active_tooltip = tooltip_state.borrow().active.clone();
                     if let Some(active_tooltip) = active_tooltip {
-                        let source_bounds = bounds;
+                        let source_hitbox = hitbox.clone();
                         let selection_state = selection_state.clone();
                         let tooltip_state = tooltip_state.clone();
                         let tooltip_key = active_tooltip.key.clone();
@@ -335,7 +335,7 @@ impl Element for SelectableText {
                                 move |tooltip_bounds, window, _cx| {
                                     let mouse_position = window.mouse_position();
                                     let visible = !selection_state.borrow().selecting
-                                        && (source_bounds.contains(&mouse_position)
+                                        && (source_hitbox.is_hovered(window)
                                             || tooltip_bounds.contains(&mouse_position));
 
                                     if !visible {

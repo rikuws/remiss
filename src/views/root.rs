@@ -547,7 +547,7 @@ fn mark_local_review_path_inspecting(state: &Entity<AppState>, path: &PathBuf, c
 impl Render for RootView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
-        let palette_open = state.palette_open;
+        let palette_visible = state.palette_open || state.palette_closing;
         let notification_drawer_open = state.notification_drawer_open;
 
         div()
@@ -565,7 +565,9 @@ impl Render for RootView {
             .when(notification_drawer_open, |el| {
                 el.child(render_notification_drawer(&self.state, cx))
             })
-            .when(palette_open, |el| el.child(render_palette(&self.state, cx)))
+            .when(palette_visible, |el| {
+                el.child(render_palette(&self.state, cx))
+            })
     }
 }
 

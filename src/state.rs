@@ -722,6 +722,8 @@ pub struct AppState {
 
     // Command palette
     pub palette_open: bool,
+    pub palette_closing: bool,
+    pub palette_close_generation: u64,
     pub palette_query: String,
     pub palette_selected_index: usize,
     pub waypoint_spotlight_open: bool,
@@ -821,6 +823,8 @@ impl AppState {
             inline_comment_error: None,
             pr_header_compact: false,
             palette_open: false,
+            palette_closing: false,
+            palette_close_generation: 0,
             palette_query: String::new(),
             palette_selected_index: 0,
             waypoint_spotlight_open: false,
