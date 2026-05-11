@@ -23,10 +23,12 @@ pub fn structural_diff_cache_key(
     file: &PullRequestFile,
     previous_path: Option<&str>,
 ) -> String {
+    let base_oid = detail.base_ref_oid.as_deref().unwrap_or_default();
     format!(
-        "{STRUCTURAL_DIFF_CACHE_KEY_PREFIX}:{}:{}:{}:{}:{}:{}",
+        "{STRUCTURAL_DIFF_CACHE_KEY_PREFIX}:{}:{}:{}:{}:{}:{}:{}",
         detail.repository,
         detail.number,
+        base_oid,
         head_oid,
         file.change_type,
         previous_path.unwrap_or_default(),
@@ -172,14 +174,19 @@ mod tests {
     fn structural_diff_cache_key_uses_checkout_head_not_detail_updated_at() {
         let detail = sample_detail("2026-05-09T10:00:00Z");
         let changed_metadata_detail = sample_detail("2026-05-09T11:00:00Z");
+        let mut changed_base_detail = sample_detail("2026-05-09T10:00:00Z");
+        changed_base_detail.base_ref_oid = Some("other-base".to_string());
         let file = sample_file();
 
         let head_a = structural_diff_cache_key(&detail, "head-a", &file, None);
         let head_a_after_metadata_change =
             structural_diff_cache_key(&changed_metadata_detail, "head-a", &file, None);
+        let head_a_after_base_change =
+            structural_diff_cache_key(&changed_base_detail, "head-a", &file, None);
         let head_b = structural_diff_cache_key(&detail, "head-b", &file, None);
 
         assert_eq!(head_a, head_a_after_metadata_change);
+        assert_ne!(head_a, head_a_after_base_change);
         assert_ne!(head_a, head_b);
     }
 

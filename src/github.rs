@@ -30,6 +30,8 @@ pub struct Viewer {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PullRequestSummary {
+    #[serde(default)]
+    pub local_key: Option<String>,
     pub repository: String,
     pub number: i64,
     pub title: String,
@@ -1612,6 +1614,7 @@ fn default_repository_file_source() -> String {
 fn map_pull_request_summary(node: &Value) -> Option<PullRequestSummary> {
     let author = node.get("author");
     Some(PullRequestSummary {
+        local_key: None,
         repository: node
             .get("repository")?
             .get("nameWithOwner")?

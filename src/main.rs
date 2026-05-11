@@ -35,6 +35,7 @@ mod github;
 mod icons;
 mod local_documents;
 mod local_repo;
+mod local_review;
 mod lsp;
 mod managed_lsp;
 mod markdown;

@@ -209,6 +209,7 @@ mod tests {
 
     fn summary(repository: &str, number: i64, updated_at: &str) -> PullRequestSummary {
         PullRequestSummary {
+            local_key: None,
             repository: repository.to_string(),
             number,
             title: format!("PR {number}"),

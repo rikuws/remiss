@@ -65,6 +65,7 @@ use crate::theme::*;
 use crate::{github, notifications, review_intelligence};
 
 use super::ai_tour::{refresh_active_tour, trigger_generate_tour};
+use super::root::refresh_active_local_review;
 use super::sections::{
     badge, badge_success, error_text, eyebrow, ghost_button, nested_panel, panel_state_text,
     review_button, success_text, user_avatar,
@@ -199,6 +200,13 @@ pub fn open_review_source_location(
     cx: &mut App,
 ) {
     state.update(cx, |state, cx| {
+        if state
+            .active_detail()
+            .map(crate::local_review::is_local_review_detail)
+            .unwrap_or(false)
+        {
+            return;
+        }
         state.active_surface = PullRequestSurface::Files;
         state.navigate_to_review_location(
             ReviewLocation::from_source(path.clone(), line, reason.clone()),
@@ -303,6 +311,9 @@ pub fn ensure_active_stack_refs_loaded(
         let Some(detail) = app_state.active_detail() else {
             return;
         };
+        if crate::local_review::is_local_review_detail(detail) {
+            return;
+        }
         let Some(detail_key) = app_state.active_pr_key.clone() else {
             return;
         };
@@ -482,6 +493,9 @@ pub fn trigger_submit_inline_comment(state: &Entity<AppState>, window: &mut Wind
     let Some((detail_id, repository, number, target, body, loading)) = ({
         let app_state = state.read(cx);
         app_state.active_detail().and_then(|detail| {
+            if crate::local_review::is_local_review_detail(detail) {
+                return None;
+            }
             app_state.active_review_line_action.clone().map(|target| {
                 (
                     detail.id.clone(),
@@ -876,6 +890,7 @@ pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement
     let line_action_target = s.active_review_line_action.clone();
     let line_action_position = s.active_review_line_action_position;
     let line_action_mode = s.review_line_action_mode.clone();
+    let is_local_review = crate::local_review::is_local_review_detail(detail);
     let review_stack = prepare_review_stack(&s, detail);
     let review_queue = prepare_review_queue(&s, detail);
     let review_session = s.active_review_session().cloned().unwrap_or_default();
@@ -968,10 +983,14 @@ pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement
             el.child(render_waypoint_spotlight(state, cx))
         })
         .when_some(
-            line_action_target
-                .as_ref()
-                .zip(line_action_position)
-                .map(|(target, position)| (target.clone(), position)),
+            (!is_local_review)
+                .then(|| {
+                    line_action_target
+                        .as_ref()
+                        .zip(line_action_position)
+                        .map(|(target, position)| (target.clone(), position))
+                })
+                .flatten(),
             |el, (target, position)| {
                 el.child(render_review_line_action_overlay(
                     state,
@@ -6520,6 +6539,7 @@ fn render_diff_panel(
         .bg(diff_editor_bg())
         .child(render_diff_toolbar(
             state,
+            detail,
             files.len(),
             total_additions,
             total_deletions,
@@ -6538,52 +6558,64 @@ fn render_diff_panel(
                 .bg(diff_editor_bg())
                 .flex()
                 .flex_col()
-                .child(if center_mode == ReviewCenterMode::SourceBrowser {
-                    source_target
-                        .as_ref()
-                        .map(|target| render_source_browser(state, target, source_parsed, cx))
-                        .unwrap_or_else(|| {
-                            panel_state_text(
-                                "Select a file or definition to open the source browser.",
-                            )
-                            .into_any_element()
-                        })
-                } else if center_mode == ReviewCenterMode::AiTour {
-                    render_ai_tour_view(state, detail, cx)
-                } else if center_mode == ReviewCenterMode::StructuralDiff {
-                    render_combined_diff_files(
-                        state,
-                        app_state,
-                        detail,
-                        selected_path,
-                        selected_anchor,
-                        review_stack.clone(),
-                        None,
-                        center_mode,
-                        normal_diff_layout,
-                        cx,
-                    )
-                    .into_any_element()
-                } else {
-                    render_combined_diff_files(
-                        state,
-                        app_state,
-                        detail,
-                        selected_path,
-                        selected_anchor,
-                        review_stack.clone(),
-                        stack_filter.clone(),
-                        center_mode,
-                        normal_diff_layout,
-                        cx,
-                    )
-                    .into_any_element()
-                }),
+                .child(
+                    if crate::local_review::is_local_review_detail(detail) && files.is_empty() {
+                        render_local_review_empty_state(
+                            state,
+                            detail,
+                            local_repo_status,
+                            local_repo_loading,
+                            local_repo_error,
+                        )
+                        .into_any_element()
+                    } else if center_mode == ReviewCenterMode::SourceBrowser {
+                        source_target
+                            .as_ref()
+                            .map(|target| render_source_browser(state, target, source_parsed, cx))
+                            .unwrap_or_else(|| {
+                                panel_state_text(
+                                    "Select a file or definition to open the source browser.",
+                                )
+                                .into_any_element()
+                            })
+                    } else if center_mode == ReviewCenterMode::AiTour {
+                        render_ai_tour_view(state, detail, cx)
+                    } else if center_mode == ReviewCenterMode::StructuralDiff {
+                        render_combined_diff_files(
+                            state,
+                            app_state,
+                            detail,
+                            selected_path,
+                            selected_anchor,
+                            review_stack.clone(),
+                            None,
+                            center_mode,
+                            normal_diff_layout,
+                            cx,
+                        )
+                        .into_any_element()
+                    } else {
+                        render_combined_diff_files(
+                            state,
+                            app_state,
+                            detail,
+                            selected_path,
+                            selected_anchor,
+                            review_stack.clone(),
+                            stack_filter.clone(),
+                            center_mode,
+                            normal_diff_layout,
+                            cx,
+                        )
+                        .into_any_element()
+                    },
+                ),
         )
 }
 
 fn render_diff_toolbar(
     state: &Entity<AppState>,
+    detail: &PullRequestDetail,
     total_files: usize,
     total_additions: i64,
     total_deletions: i64,
@@ -6619,6 +6651,8 @@ fn render_diff_toolbar(
         center_mode,
         ReviewCenterMode::SemanticDiff | ReviewCenterMode::Stack
     );
+    let is_local_review = crate::local_review::is_local_review_detail(detail);
+    let state_for_refresh = state.clone();
 
     div()
         .flex()
@@ -6666,6 +6700,90 @@ fn render_diff_toolbar(
                 layout_toggle_disabled,
             ))
         })
+        .when(is_local_review, |el| {
+            el.child(review_button("Refresh", move |_, window, cx| {
+                refresh_active_local_review(&state_for_refresh, window, cx);
+            }))
+        })
+}
+
+fn render_local_review_empty_state(
+    state: &Entity<AppState>,
+    detail: &PullRequestDetail,
+    local_repo_status: Option<&local_repo::LocalRepositoryStatus>,
+    local_repo_loading: bool,
+    local_repo_error: Option<&str>,
+) -> impl IntoElement {
+    let state_for_refresh = state.clone();
+    let title = if local_repo_loading {
+        "Refreshing local review"
+    } else if local_repo_status
+        .map(|status| !status.is_worktree_clean)
+        .unwrap_or(false)
+    {
+        "Working checkout has local changes"
+    } else {
+        "No unpushed commits"
+    };
+    let message = local_repo_error
+        .or_else(|| local_repo_status.map(|status| status.message.as_str()))
+        .unwrap_or("This branch has no committed changes ahead of the selected base.");
+    let base = detail.base_ref_oid.as_deref().unwrap_or("unknown");
+    let head = detail.head_ref_oid.as_deref().unwrap_or("unknown");
+
+    div()
+        .flex_grow()
+        .min_h_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .p(px(24.0))
+        .child(
+            nested_panel()
+                .max_w(px(560.0))
+                .child(eyebrow("Local review"))
+                .child(
+                    div()
+                        .mt(px(8.0))
+                        .text_size(px(18.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg_emphasis())
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .mt(px(8.0))
+                        .text_size(px(13.0))
+                        .line_height(px(19.0))
+                        .text_color(fg_default())
+                        .child(message.to_string()),
+                )
+                .child(
+                    div()
+                        .mt(px(14.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(5.0))
+                        .text_size(px(11.0))
+                        .font_family(mono_font_family())
+                        .text_color(fg_muted())
+                        .child(format!("repo {}", detail.repository))
+                        .child(format!("branch {}", detail.head_ref_name))
+                        .child(format!("base {}", short_oid(base)))
+                        .child(format!("head {}", short_oid(head))),
+                )
+                .child(
+                    div()
+                        .mt(px(16.0))
+                        .child(review_button("Refresh", move |_, window, cx| {
+                            refresh_active_local_review(&state_for_refresh, window, cx);
+                        })),
+                ),
+        )
+}
+
+fn short_oid(oid: &str) -> String {
+    oid.chars().take(12).collect()
 }
 
 fn render_normal_diff_layout_toggle(

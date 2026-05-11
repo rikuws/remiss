@@ -282,7 +282,11 @@ pub fn render_pr_workspace(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
     let pr = s.active_pr();
     let detail = s.active_detail();
     let detail_state = s.active_detail_state();
-    let surface = s.active_surface;
+    let surface = if s.active_is_local_review() {
+        PullRequestSurface::Files
+    } else {
+        s.active_surface
+    };
 
     let Some(_pr) = pr else {
         return div()
@@ -638,6 +642,7 @@ fn render_overview_surface(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
         .and_then(|d| d.snapshot.as_ref())
         .and_then(|sn| sn.fetched_at_ms);
     let viewer_login = viewer_login(&s);
+    let is_local_review = crate::local_review::is_local_review_detail(detail);
     let is_own_pull_request = viewer_login
         .as_deref()
         .map(|viewer_login| detail.author_login == viewer_login)
@@ -700,7 +705,7 @@ fn render_overview_surface(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                     &recent_activity,
                     &state_for_activity,
                 ))
-                .when(!is_own_pull_request, |el| {
+                .when(!is_own_pull_request && !is_local_review, |el| {
                     el.child(render_submit_review_panel(
                         review_action,
                         review_body,
@@ -1542,6 +1547,10 @@ pub fn blur_review_editor(state: &Entity<AppState>, cx: &mut App) {
 }
 
 pub fn trigger_submit_review(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
+    if state.read(cx).active_is_local_review() {
+        return;
+    }
+
     let Some((repository, number)) = state
         .read(cx)
         .active_pr()

@@ -1,10 +1,11 @@
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use gpui::prelude::*;
 use gpui::*;
 
 use crate::github;
 use crate::icons::{lucide_icon, LucideIcon};
+use crate::local_review::{self, LocalReviewStatusKind, RememberedLocalRepository};
 use crate::review_session::{load_review_session, ReviewCenterMode};
 use crate::state::*;
 use crate::theme::*;
@@ -161,6 +162,8 @@ impl RootView {
         })
         .detach();
 
+        refresh_local_review_repositories(&state, window, cx);
+
         Self { state }
     }
 }
@@ -203,6 +206,7 @@ async fn maybe_bootstrap_debug_pull_request(
         .ok()
         .flatten();
     let summary = github::PullRequestSummary {
+        local_key: None,
         repository: detail.repository.clone(),
         number: detail.number,
         title: detail.title.clone(),
@@ -257,6 +261,284 @@ fn parse_debug_pull_request_target(target: &str) -> Option<(String, i64)> {
     let (repository, number) = target.trim().rsplit_once('#')?;
     let number = number.parse::<i64>().ok()?;
     Some((repository.to_string(), number))
+}
+
+pub(crate) fn refresh_active_local_review(
+    state: &Entity<AppState>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let path = {
+        let s = state.read(cx);
+        let Some(detail) = s
+            .active_detail()
+            .filter(|detail| local_review::is_local_review_detail(detail))
+        else {
+            return;
+        };
+        s.local_review_repositories
+            .iter()
+            .find(|item| item.repository == detail.repository)
+            .map(|item| PathBuf::from(item.path.clone()))
+    };
+
+    if let Some(path) = path {
+        open_local_review_from_path(state, path, true, window, cx);
+    }
+}
+
+fn trigger_add_local_repository(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
+    let receiver = cx.prompt_for_paths(PathPromptOptions {
+        files: false,
+        directories: true,
+        multiple: false,
+        prompt: Some(SharedString::from("Add Repository")),
+    });
+    let model = state.clone();
+
+    window
+        .spawn(cx, async move |cx: &mut AsyncWindowContext| {
+            let selected_path = match receiver.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                Ok(Ok(None)) => None,
+                Ok(Err(error)) => {
+                    set_local_review_error(
+                        &model,
+                        format!("Failed to open folder picker: {error}"),
+                        cx,
+                    )
+                    .await;
+                    return;
+                }
+                Err(_) => {
+                    set_local_review_error(
+                        &model,
+                        "Folder picker was closed before returning a path.".to_string(),
+                        cx,
+                    )
+                    .await;
+                    return;
+                }
+            };
+
+            let Some(path) = selected_path else {
+                return;
+            };
+
+            inspect_and_open_local_review(model, path, false, cx).await;
+        })
+        .detach();
+}
+
+fn open_local_review_from_path(
+    state: &Entity<AppState>,
+    path: PathBuf,
+    fetch: bool,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    mark_local_review_path_inspecting(state, &path, cx);
+    let model = state.clone();
+    window
+        .spawn(cx, async move |cx: &mut AsyncWindowContext| {
+            inspect_and_open_local_review(model, path, fetch, cx).await;
+        })
+        .detach();
+}
+
+fn refresh_local_review_repositories(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
+    let repositories = state.read(cx).local_review_repositories.clone();
+    if repositories.is_empty() {
+        return;
+    }
+
+    state.update(cx, |state, cx| {
+        state.local_review_loading = true;
+        state.local_review_error = None;
+        for repository in &mut state.local_review_repositories {
+            local_review::mark_repository_inspecting(repository);
+        }
+        cx.notify();
+    });
+
+    let model = state.clone();
+    window
+        .spawn(cx, async move |cx: &mut AsyncWindowContext| {
+            let result =
+                cx.background_executor()
+                    .spawn(async move {
+                        Ok::<_, String>(
+                            repositories
+                                .into_iter()
+                                .map(|remembered| {
+                                    local_review::inspect_working_checkout(
+                                        &PathBuf::from(&remembered.path),
+                                        false,
+                                    )
+                                    .map(|inspection| {
+                                        local_review::remembered_from_inspection(&inspection)
+                                    })
+                                    .unwrap_or_else(|error| RememberedLocalRepository {
+                                        last_status: LocalReviewStatusKind::Error,
+                                        last_message: Some(error),
+                                        last_inspected_at_ms: None,
+                                        ..remembered
+                                    })
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .await;
+
+            model
+                .update(cx, |state, cx| {
+                    state.local_review_loading = false;
+                    match result {
+                        Ok(updated) => {
+                            state.local_review_repositories = updated;
+                            let _ = local_review::save_remembered_repositories(
+                                state.cache.as_ref(),
+                                &state.local_review_repositories,
+                            );
+                        }
+                        Err(error) => {
+                            state.local_review_error = Some(error);
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+        })
+        .detach();
+}
+
+async fn inspect_and_open_local_review(
+    model: Entity<AppState>,
+    path: PathBuf,
+    fetch: bool,
+    cx: &mut AsyncWindowContext,
+) {
+    let result = cx
+        .background_executor()
+        .spawn({
+            let path = path.clone();
+            async move { local_review::inspect_working_checkout(&path, fetch) }
+        })
+        .await;
+
+    match result {
+        Ok(inspection) => {
+            let detail_key = inspection.key.clone();
+            let remembered = local_review::remembered_from_inspection(&inspection);
+            let snapshot = local_review::detail_snapshot_from_inspection(&inspection);
+            let summary = inspection.summary.clone();
+            let local_repository_status = inspection.local_repository_status.clone();
+
+            model
+                .update(cx, |state, cx| {
+                    local_review::upsert_remembered_repository(
+                        &mut state.local_review_repositories,
+                        remembered.clone(),
+                    );
+                    let _ = local_review::save_remembered_repositories(
+                        state.cache.as_ref(),
+                        &state.local_review_repositories,
+                    );
+
+                    state.open_tabs.retain(|tab| summary_key(tab) != detail_key);
+                    state.open_tabs.insert(0, summary.clone());
+                    state.active_pr_key = Some(detail_key.clone());
+                    state.active_surface = PullRequestSurface::Files;
+                    state.pr_header_compact = false;
+                    state.review_body.clear();
+                    state.review_editor_active = false;
+                    state.review_message = None;
+                    state.review_success = false;
+                    state.local_review_loading = false;
+                    state.local_review_error = None;
+
+                    let detail_state = state.detail_states.entry(detail_key.clone()).or_default();
+                    detail_state.snapshot = Some(snapshot.clone());
+                    detail_state.loading = false;
+                    detail_state.syncing = false;
+                    detail_state.error = None;
+                    detail_state.local_repository_status = Some(local_repository_status.clone());
+                    detail_state.local_repository_loading = false;
+                    detail_state.local_repository_error =
+                        if local_repository_status.ready_for_local_features {
+                            None
+                        } else {
+                            Some(local_repository_status.message.clone())
+                        };
+
+                    let cached_review_session =
+                        load_review_session(state.cache.as_ref(), &detail_key)
+                            .ok()
+                            .flatten();
+                    state.apply_review_session_document(&detail_key, cached_review_session);
+                    state.ensure_active_selected_file_is_valid();
+                    cx.notify();
+                })
+                .ok();
+
+            super::diff_view::load_pull_request_file_content_flow(model.clone(), None, cx).await;
+            warm_structural_diffs_flow(model.clone(), cx).await;
+            crate::review_intelligence::run_review_intelligence_flow(
+                model.clone(),
+                crate::review_intelligence::ReviewIntelligenceScope::All,
+                false,
+                false,
+                cx,
+            )
+            .await;
+        }
+        Err(error) => {
+            model
+                .update(cx, |state, cx| {
+                    state.local_review_loading = false;
+                    state.local_review_error = Some(error.clone());
+                    for repository in &mut state.local_review_repositories {
+                        if PathBuf::from(&repository.path) == path {
+                            repository.last_status = LocalReviewStatusKind::Error;
+                            repository.last_message = Some(error.clone());
+                        }
+                    }
+                    let _ = local_review::save_remembered_repositories(
+                        state.cache.as_ref(),
+                        &state.local_review_repositories,
+                    );
+                    cx.notify();
+                })
+                .ok();
+        }
+    }
+}
+
+async fn set_local_review_error(
+    model: &Entity<AppState>,
+    error: String,
+    cx: &mut AsyncWindowContext,
+) {
+    model
+        .update(cx, |state, cx| {
+            state.local_review_loading = false;
+            state.local_review_error = Some(error);
+            cx.notify();
+        })
+        .ok();
+}
+
+fn mark_local_review_path_inspecting(state: &Entity<AppState>, path: &PathBuf, cx: &mut App) {
+    state.update(cx, |state, cx| {
+        state.local_review_loading = true;
+        state.local_review_error = None;
+        for repository in &mut state.local_review_repositories {
+            if PathBuf::from(&repository.path) == *path {
+                local_review::mark_repository_inspecting(repository);
+            }
+        }
+        cx.notify();
+    });
 }
 
 impl Render for RootView {
@@ -381,6 +663,7 @@ fn render_app_sidebar(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                 }),
                         ),
                 )
+                .child(render_local_review_sidebar_section(state, cx))
                 .child(
                     div()
                         .px(px(14.0))
@@ -458,6 +741,203 @@ fn render_app_sidebar(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                 ))
             },
         )
+}
+
+fn render_local_review_sidebar_section(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
+    let s = state.read(cx);
+    let repositories = s.local_review_repositories.clone();
+    let error = s.local_review_error.clone();
+    let loading = s.local_review_loading;
+    let active_local_repository = s
+        .active_detail()
+        .filter(|detail| local_review::is_local_review_detail(detail))
+        .map(|detail| detail.repository.clone());
+    let state_for_add = state.clone();
+
+    div()
+        .px(px(14.0))
+        .pb(px(10.0))
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .child(
+            div()
+                .px(px(6.0))
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .font_family(mono_font_family())
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg_subtle())
+                        .child("LOCAL REVIEW"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .child(sidebar_utility_button(
+                            if loading {
+                                LucideIcon::RefreshCw
+                            } else {
+                                LucideIcon::Plus
+                            },
+                            false,
+                            false,
+                            move |_, window, cx| {
+                                trigger_add_local_repository(&state_for_add, window, cx);
+                            },
+                        )),
+                ),
+        )
+        .when(repositories.is_empty(), |el| {
+            el.child(
+                div()
+                    .px(px(8.0))
+                    .py(px(8.0))
+                    .rounded(radius_sm())
+                    .border_1()
+                    .border_color(border_muted())
+                    .bg(bg_surface())
+                    .text_size(px(11.0))
+                    .line_height(px(15.0))
+                    .text_color(fg_muted())
+                    .child("Add a working checkout to review committed branch changes."),
+            )
+        })
+        .children(repositories.into_iter().map(|repository| {
+            let state = state.clone();
+            let path = PathBuf::from(repository.path.clone());
+            let active = active_local_repository.as_deref() == Some(repository.repository.as_str());
+            local_review_sidebar_row(repository, active, move |_, window, cx| {
+                open_local_review_from_path(&state, path.clone(), false, window, cx);
+            })
+        }))
+        .when_some(error, |el, error| {
+            el.child(
+                div()
+                    .px(px(8.0))
+                    .py(px(7.0))
+                    .rounded(radius_sm())
+                    .bg(danger_muted())
+                    .text_size(px(11.0))
+                    .line_height(px(15.0))
+                    .text_color(danger())
+                    .child(error),
+            )
+        })
+}
+
+fn local_review_sidebar_row(
+    repository: RememberedLocalRepository,
+    active: bool,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let repository_label = repository
+        .repository
+        .split('/')
+        .last()
+        .unwrap_or(&repository.repository)
+        .to_string();
+    let branch = repository
+        .last_branch
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let status_label = local_review_status_label(repository.last_status);
+    let status_color = local_review_status_color(repository.last_status);
+    div()
+        .h(px(48.0))
+        .px(px(9.0))
+        .py(px(7.0))
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(if active {
+            transparent()
+        } else {
+            border_muted()
+        })
+        .bg(if active { bg_emphasis() } else { bg_surface() })
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .cursor_pointer()
+        .hover(move |style| {
+            style
+                .bg(if active { bg_emphasis() } else { bg_selected() })
+                .text_color(fg_emphasis())
+        })
+        .on_mouse_down(MouseButton::Left, on_click)
+        .child(lucide_icon(LucideIcon::GitBranch, 14.0, status_color))
+        .child(
+            div()
+                .min_w_0()
+                .flex_grow()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(if active { fg_emphasis() } else { fg_default() })
+                        .whitespace_nowrap()
+                        .overflow_x_hidden()
+                        .text_ellipsis()
+                        .child(repository_label),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .min_w_0()
+                        .child(
+                            div()
+                                .min_w_0()
+                                .text_size(px(10.0))
+                                .font_family(mono_font_family())
+                                .text_color(fg_muted())
+                                .whitespace_nowrap()
+                                .overflow_x_hidden()
+                                .text_ellipsis()
+                                .child(branch),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(10.0))
+                                .font_family(mono_font_family())
+                                .text_color(status_color)
+                                .child(status_label),
+                        ),
+                ),
+        )
+}
+
+fn local_review_status_label(status: LocalReviewStatusKind) -> &'static str {
+    match status {
+        LocalReviewStatusKind::Ready => "ahead",
+        LocalReviewStatusKind::NoDiff => "no diff",
+        LocalReviewStatusKind::Blocked => "blocked",
+        LocalReviewStatusKind::Error => "error",
+        LocalReviewStatusKind::Inspecting => "checking",
+        LocalReviewStatusKind::Unknown => "unknown",
+    }
+}
+
+fn local_review_status_color(status: LocalReviewStatusKind) -> Rgba {
+    match status {
+        LocalReviewStatusKind::Ready => success(),
+        LocalReviewStatusKind::NoDiff => fg_subtle(),
+        LocalReviewStatusKind::Blocked => warning(),
+        LocalReviewStatusKind::Error => danger(),
+        LocalReviewStatusKind::Inspecting => accent(),
+        LocalReviewStatusKind::Unknown => fg_subtle(),
+    }
 }
 
 fn render_main_column(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
@@ -544,6 +1024,7 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
         .unwrap_or(ReviewCenterMode::SemanticDiff);
     let active_code_lens = s.active_code_lens_mode();
     let has_active_pr = active_pr_key.is_some();
+    let active_is_local_review = s.active_is_local_review();
     let unread_count = s
         .active_detail()
         .map(|detail| s.unread_review_comment_ids_for_detail(detail).len())
@@ -638,29 +1119,31 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                     .items_center()
                     .gap(px(8.0))
                     .flex_shrink_0()
-                    .child(chrome_segmented_control(vec![
-                        chrome_segment(
-                            "Briefing",
-                            active_surface == PullRequestSurface::Overview,
-                            false,
-                            move |_, _, cx| {
-                                state_for_briefing.update(cx, |state, cx| {
-                                    state.active_surface = PullRequestSurface::Overview;
-                                    state.pr_header_compact = false;
-                                    state.persist_active_review_session();
-                                    cx.notify();
-                                });
-                            },
-                        ),
-                        chrome_segment(
-                            "Review",
-                            active_surface == PullRequestSurface::Files,
-                            false,
-                            move |_, window, cx| {
-                                enter_files_surface(&state_for_review, window, cx);
-                            },
-                        ),
-                    ]))
+                    .when(!active_is_local_review, |el| {
+                        el.child(chrome_segmented_control(vec![
+                            chrome_segment(
+                                "Briefing",
+                                active_surface == PullRequestSurface::Overview,
+                                false,
+                                move |_, _, cx| {
+                                    state_for_briefing.update(cx, |state, cx| {
+                                        state.active_surface = PullRequestSurface::Overview;
+                                        state.pr_header_compact = false;
+                                        state.persist_active_review_session();
+                                        cx.notify();
+                                    });
+                                },
+                            ),
+                            chrome_segment(
+                                "Review",
+                                active_surface == PullRequestSurface::Files,
+                                false,
+                                move |_, window, cx| {
+                                    enter_files_surface(&state_for_review, window, cx);
+                                },
+                            ),
+                        ]))
+                    })
                     .child(chrome_segmented_control(vec![
                         chrome_segment(
                             "Code",
@@ -796,7 +1279,8 @@ fn render_workspace_tabs(
         .min_w_0()
         .flex_grow()
         .children(tabs.into_iter().map(|tab| {
-            let key = pr_key(&tab.repository, tab.number);
+            let key = summary_key(&tab);
+            let is_local = tab.local_key.is_some();
             let is_active = active_pr_key.as_deref() == Some(&key);
             let state = state.clone();
             pr_tab(
@@ -807,6 +1291,7 @@ fn render_workspace_tabs(
                 tab.deletions,
                 &tab.state,
                 tab.is_draft,
+                is_local,
                 is_active,
                 move |_, window, cx| {
                     let cached_review_session = {
@@ -1429,6 +1914,7 @@ fn pr_tab(
     deletions: i64,
     pr_state: &str,
     is_draft: bool,
+    is_local: bool,
     active: bool,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
@@ -1445,7 +1931,11 @@ fn pr_tab(
         .last()
         .unwrap_or(repository)
         .to_string();
-    let pr_number = format!("#{number}");
+    let pr_number = if is_local {
+        "local".to_string()
+    } else {
+        format!("#{number}")
+    };
     let title = title.to_string();
     let additions_label = format!("+{additions}");
     let deletions_label = format!("-{deletions}");
@@ -1467,7 +1957,15 @@ fn pr_tab(
         .cursor_pointer()
         .hover(move |style| style.bg(tab_hover_bg).text_color(fg_emphasis()))
         .on_mouse_down(MouseButton::Left, on_click)
-        .child(lucide_icon(LucideIcon::GitPullRequest, 13.0, icon_color))
+        .child(lucide_icon(
+            if is_local {
+                LucideIcon::GitBranch
+            } else {
+                LucideIcon::GitPullRequest
+            },
+            13.0,
+            icon_color,
+        ))
         .child(
             div()
                 .flex()
@@ -1534,6 +2032,7 @@ fn pr_tab_state_color(pr_state: &str, is_draft: bool) -> Rgba {
     }
 
     match pr_state {
+        "LOCAL" => accent(),
         "MERGED" => info(),
         "CLOSED" => danger(),
         _ => success(),
@@ -1546,6 +2045,7 @@ fn pr_tab_state_badge(pr_state: &str, is_draft: bool) -> Option<AnyElement> {
     }
 
     match pr_state {
+        "LOCAL" => Some(pr_tab_badge("local", accent(), accent_muted()).into_any_element()),
         "MERGED" => Some(pr_tab_badge("merged", info(), info_muted()).into_any_element()),
         "CLOSED" => Some(pr_tab_badge("closed", danger(), danger_muted()).into_any_element()),
         _ => None,

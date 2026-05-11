@@ -15,6 +15,7 @@ use crate::github::{
     RepositoryFileContent, ReviewAction, WorkspaceSnapshot,
 };
 use crate::local_repo::LocalRepositoryStatus;
+use crate::local_review::{self, RememberedLocalRepository};
 use crate::lsp::{LspServerStatus, LspSessionManager, LspSymbolDetails};
 use crate::managed_lsp::{ManagedServerInstallStatus, ManagedServerKind};
 use crate::notifications;
@@ -96,6 +97,13 @@ impl PullRequestSurface {
 
 pub fn pr_key(repository: &str, number: i64) -> String {
     format!("{repository}#{number}")
+}
+
+pub fn summary_key(summary: &PullRequestSummary) -> String {
+    summary
+        .local_key
+        .clone()
+        .unwrap_or_else(|| pr_key(&summary.repository, summary.number))
 }
 
 #[derive(Clone, Debug)]
@@ -645,6 +653,9 @@ pub struct AppState {
     pub active_queue_id: String,
     pub active_pr_key: Option<String>,
     pub open_tabs: Vec<PullRequestSummary>,
+    pub local_review_repositories: Vec<RememberedLocalRepository>,
+    pub local_review_loading: bool,
+    pub local_review_error: Option<String>,
     pub muted_repos: std::collections::HashSet<String>,
     pub overview_greeting_index: usize,
 
@@ -744,6 +755,8 @@ impl AppState {
                 ..CodeTourSettingsState::default()
             },
         };
+        let local_review_repositories =
+            local_review::load_remembered_repositories(&cache).unwrap_or_default();
         let mut state = Self {
             cache: Arc::new(cache),
             lsp_session_manager: Arc::new(LspSessionManager::new()),
@@ -752,6 +765,9 @@ impl AppState {
             active_queue_id: "reviewRequested".to_string(),
             active_pr_key: None,
             open_tabs: Vec::new(),
+            local_review_repositories,
+            local_review_loading: false,
+            local_review_error: None,
             muted_repos: std::collections::HashSet::new(),
             overview_greeting_index: random_overview_greeting_index(),
             workspace: None,
@@ -873,9 +889,7 @@ impl AppState {
 
     pub fn active_pr(&self) -> Option<&PullRequestSummary> {
         let key = self.active_pr_key.as_ref()?;
-        self.open_tabs
-            .iter()
-            .find(|tab| pr_key(&tab.repository, tab.number) == *key)
+        self.open_tabs.iter().find(|tab| summary_key(tab) == *key)
     }
 
     pub fn active_detail(&self) -> Option<&PullRequestDetail> {
@@ -886,6 +900,13 @@ impl AppState {
             .as_ref()?
             .detail
             .as_ref()
+    }
+
+    pub fn active_is_local_review(&self) -> bool {
+        self.active_pr_key
+            .as_deref()
+            .map(local_review::is_local_review_key)
+            .unwrap_or(false)
     }
 
     pub fn default_changed_file_path(detail: &PullRequestDetail) -> Option<String> {
@@ -1576,6 +1597,7 @@ impl AppState {
         };
 
         let summary = PullRequestSummary {
+            local_key: None,
             repository: detail.repository.clone(),
             number: detail.number,
             title: detail.title.clone(),
