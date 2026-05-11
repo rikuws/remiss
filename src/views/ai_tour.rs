@@ -278,14 +278,12 @@ pub async fn refresh_active_tour_flow(
                     .insert(request_key.clone());
             })
             .ok();
-        review_intelligence::run_review_intelligence_flow(
-            model,
-            ReviewIntelligenceScope::All,
-            false,
-            true,
-            cx,
-        )
-        .await;
+        let scope = if local_review::is_local_review_detail(&detail) {
+            ReviewIntelligenceScope::TourOnly
+        } else {
+            ReviewIntelligenceScope::All
+        };
+        review_intelligence::run_review_intelligence_flow(model, scope, false, true, cx).await;
     }
 }
 
@@ -295,13 +293,20 @@ pub fn trigger_generate_tour(
     cx: &mut App,
     _automatic: bool,
 ) {
-    review_intelligence::trigger_review_intelligence(
-        state,
-        window,
-        cx,
-        ReviewIntelligenceScope::All,
-        true,
-    );
+    let scope = {
+        let state = state.read(cx);
+        if state
+            .active_detail()
+            .map(local_review::is_local_review_detail)
+            .unwrap_or(false)
+        {
+            ReviewIntelligenceScope::TourOnly
+        } else {
+            ReviewIntelligenceScope::All
+        }
+    };
+
+    review_intelligence::trigger_review_intelligence(state, window, cx, scope, true);
 }
 
 pub(crate) async fn generate_tour_flow(

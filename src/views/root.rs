@@ -283,7 +283,7 @@ pub(crate) fn refresh_active_local_review(
     };
 
     if let Some(path) = path {
-        open_local_review_from_path(state, path, true, window, cx);
+        open_local_review_from_path(state, path, false, window, cx);
     }
 }
 
@@ -488,7 +488,7 @@ async fn inspect_and_open_local_review(
             warm_structural_diffs_flow(model.clone(), cx).await;
             crate::review_intelligence::run_review_intelligence_flow(
                 model.clone(),
-                crate::review_intelligence::ReviewIntelligenceScope::All,
+                crate::review_intelligence::ReviewIntelligenceScope::TourOnly,
                 false,
                 false,
                 cx,
