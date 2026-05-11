@@ -7,6 +7,7 @@ use crate::code_tour::{
     CodeTourProvider, GeneratedCodeTour,
 };
 use crate::local_repo;
+use crate::local_review;
 use crate::review_intelligence::{self, ReviewIntelligenceScope};
 use crate::state::{AppState, CodeTourState};
 use crate::{code_tour, github};
@@ -36,6 +37,10 @@ pub async fn refresh_active_tour_flow(
         .read_with(cx, |state, _| {
             let detail = state.active_detail()?.clone();
             let detail_key = state.active_pr_key.clone()?;
+            let existing_local_repository_status = state
+                .detail_states
+                .get(&detail_key)
+                .and_then(|detail_state| detail_state.local_repository_status.clone());
             Some((
                 state.cache.clone(),
                 detail_key,
@@ -44,6 +49,7 @@ pub async fn refresh_active_tour_flow(
                 state.code_tour_settings.settings.clone(),
                 state.code_tour_provider_statuses_loaded,
                 state.code_tour_provider_statuses.clone(),
+                existing_local_repository_status,
             ))
         })
         .ok()
@@ -57,6 +63,7 @@ pub async fn refresh_active_tour_flow(
         existing_settings,
         statuses_loaded,
         existing_statuses,
+        existing_local_repository_status,
     )) = initial
     else {
         return;
@@ -107,6 +114,9 @@ pub async fn refresh_active_tour_flow(
         .unwrap_or_else(|_| existing_settings.clone());
     let provider = settings.provider;
     let automatic_generation_enabled = settings.automatically_generates_for(&detail.repository);
+    let local_review_repository_status =
+        local_review::reusable_local_repository_status(&detail, existing_local_repository_status);
+    let local_repository_already_ready = matches!(&local_review_repository_status, Ok(Some(_)));
 
     model
         .update(cx, |state, cx| {
@@ -129,8 +139,11 @@ pub async fn refresh_active_tour_flow(
             }
 
             if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
-                detail_state.local_repository_loading = true;
+                detail_state.local_repository_loading = !local_repository_already_ready;
                 detail_state.local_repository_error = None;
+                if let Ok(Some(status)) = local_review_repository_status.as_ref() {
+                    detail_state.local_repository_status = Some(status.clone());
+                }
 
                 let request_key = build_tour_request_key(&detail, provider);
                 let tour_state = detail_state.tour_states.entry(provider).or_default();
@@ -149,21 +162,26 @@ pub async fn refresh_active_tour_flow(
 
     let request_key = build_tour_request_key(&detail, provider);
 
-    let local_repo_result = cx
-        .background_executor()
-        .spawn({
-            let cache = cache.clone();
-            let repository = detail.repository.clone();
-            let head_ref_oid = detail.head_ref_oid.clone();
-            async move {
-                local_repo::load_local_repository_status_for_pull_request(
-                    &cache,
-                    &repository,
-                    head_ref_oid.as_deref(),
-                )
-            }
-        })
-        .await;
+    let local_repo_result = match local_review_repository_status {
+        Ok(Some(status)) => Ok(status),
+        Ok(None) => {
+            cx.background_executor()
+                .spawn({
+                    let cache = cache.clone();
+                    let repository = detail.repository.clone();
+                    let head_ref_oid = detail.head_ref_oid.clone();
+                    async move {
+                        local_repo::load_local_repository_status_for_pull_request(
+                            &cache,
+                            &repository,
+                            head_ref_oid.as_deref(),
+                        )
+                    }
+                })
+                .await
+        }
+        Err(error) => Err(error),
+    };
 
     let cached_tour_result = cx
         .background_executor()
@@ -189,6 +207,7 @@ pub async fn refresh_active_tour_flow(
     let should_auto_generate = allow_automatic_generation
         && automatic_generation_enabled
         && provider_ready
+        && matches!(local_repo_result.as_ref(), Ok(status) if status.path.is_some())
         && missing_cached_tour
         && cached_tour_error.is_none()
         && model
@@ -372,6 +391,27 @@ pub(crate) async fn generate_tour_flow(
         return;
     }
 
+    let mut prepared_local_repo_status = prepared_local_repo_status;
+    let local_review_status_error = if prepared_local_repo_status.is_none() {
+        let existing_status = model
+            .read_with(cx, |state, _| {
+                state
+                    .detail_states
+                    .get(&detail_key)
+                    .and_then(|detail_state| detail_state.local_repository_status.clone())
+            })
+            .ok()
+            .flatten();
+        match local_review::reusable_local_repository_status(&detail, existing_status) {
+            Ok(status) => {
+                prepared_local_repo_status = status;
+                None
+            }
+            Err(error) => Some(error),
+        }
+    } else {
+        None
+    };
     let has_prepared_checkout = prepared_local_repo_status.is_some();
     let prepared_checkout_for_ui = prepared_local_repo_status.clone();
 
@@ -426,6 +466,11 @@ pub(crate) async fn generate_tour_flow(
             cx.notify();
         })
         .ok();
+
+    if let Some(error) = local_review_status_error {
+        set_local_repo_error(&model, &detail_key, provider, &request_key, error, cx);
+        return;
+    }
 
     let local_repo_result = if let Some(status) = prepared_local_repo_status {
         Ok(status)

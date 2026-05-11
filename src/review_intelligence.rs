@@ -14,7 +14,7 @@ use crate::{
     cache::CacheStore,
     code_tour::{self, build_tour_request_key, tour_code_version_key, CodeTourProvider},
     github::PullRequestDetail,
-    local_repo,
+    local_repo, local_review,
     stacks::{
         cache::{load_ai_review_stack, save_ai_review_stack},
         discover_review_stack,
@@ -111,6 +111,9 @@ pub(crate) async fn run_review_intelligence_flow(
                 .active_detail_state()
                 .and_then(|detail_state| detail_state.stack_open_pull_requests.clone())
                 .unwrap_or_default();
+            let existing_local_repository_status = state
+                .active_detail_state()
+                .and_then(|detail_state| detail_state.local_repository_status.clone());
             Some((
                 state.cache.clone(),
                 detail_key,
@@ -118,6 +121,7 @@ pub(crate) async fn run_review_intelligence_flow(
                 provider,
                 state.code_tour_provider_statuses_loaded,
                 open_pull_requests,
+                existing_local_repository_status,
             ))
         })
         .ok()
@@ -126,10 +130,21 @@ pub(crate) async fn run_review_intelligence_flow(
         return;
     };
 
-    let (cache, detail_key, detail, provider, statuses_loaded, open_pull_requests) = initial;
+    let (
+        cache,
+        detail_key,
+        detail,
+        provider,
+        statuses_loaded,
+        open_pull_requests,
+        existing_local_repository_status,
+    ) = initial;
     let request_key = review_intelligence_request_key(&detail, provider);
     let code_version_key = tour_code_version_key(&detail);
     let tour_request_key = build_tour_request_key(&detail, provider);
+    let local_review_repository_status =
+        local_review::reusable_local_repository_status(&detail, existing_local_repository_status);
+    let local_repository_already_ready = matches!(&local_review_repository_status, Ok(Some(_)));
 
     let should_start = model
         .update(cx, |state, cx| {
@@ -144,8 +159,11 @@ pub(crate) async fn run_review_intelligence_flow(
 
             detail_state.review_intelligence_request_key = Some(request_key.clone());
             detail_state.review_intelligence_loading = true;
-            detail_state.local_repository_loading = true;
+            detail_state.local_repository_loading = !local_repository_already_ready;
             detail_state.local_repository_error = None;
+            if let Ok(Some(status)) = local_review_repository_status.as_ref() {
+                detail_state.local_repository_status = Some(status.clone());
+            }
 
             if !statuses_loaded {
                 state.code_tour_provider_loading = true;
@@ -203,6 +221,24 @@ pub(crate) async fn run_review_intelligence_flow(
         return;
     }
 
+    let local_review_repository_status = match local_review_repository_status {
+        Ok(status) => status,
+        Err(error) => {
+            fail_checkout(
+                &model,
+                &detail_key,
+                scope,
+                provider,
+                &request_key,
+                &error,
+                cx,
+            )
+            .await;
+            finish_request(&model, &detail_key, &request_key, cx).await;
+            return;
+        }
+    };
+
     let _permit = ForegroundJobPermit::new();
 
     if !statuses_loaded {
@@ -228,25 +264,28 @@ pub(crate) async fn run_review_intelligence_flow(
             .ok();
     }
 
-    let local_repo_result = cx
-        .background_executor()
-        .spawn({
-            let cache = cache.clone();
-            let repository = detail.repository.clone();
-            let pull_request_number = detail.number;
-            let head_ref_oid = detail.head_ref_oid.clone();
-            async move {
-                run_foreground_blocking(|| {
-                    local_repo::ensure_local_repository_for_pull_request(
-                        &cache,
-                        &repository,
-                        pull_request_number,
-                        head_ref_oid.as_deref(),
-                    )
-                })
-            }
-        })
-        .await;
+    let local_repo_result = if let Some(status) = local_review_repository_status {
+        Ok(status)
+    } else {
+        cx.background_executor()
+            .spawn({
+                let cache = cache.clone();
+                let repository = detail.repository.clone();
+                let pull_request_number = detail.number;
+                let head_ref_oid = detail.head_ref_oid.clone();
+                async move {
+                    run_foreground_blocking(|| {
+                        local_repo::ensure_local_repository_for_pull_request(
+                            &cache,
+                            &repository,
+                            pull_request_number,
+                            head_ref_oid.as_deref(),
+                        )
+                    })
+                }
+            })
+            .await
+    };
 
     let local_repo_status = match local_repo_result {
         Ok(status) => {

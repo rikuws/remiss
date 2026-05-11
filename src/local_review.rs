@@ -85,6 +85,35 @@ pub fn is_local_review_detail(detail: &PullRequestDetail) -> bool {
     is_local_review_key(&detail.id)
 }
 
+pub fn reusable_local_repository_status(
+    detail: &PullRequestDetail,
+    status: Option<LocalRepositoryStatus>,
+) -> Result<Option<LocalRepositoryStatus>, String> {
+    if !is_local_review_detail(detail) {
+        return Ok(None);
+    }
+
+    let Some(status) = status else {
+        return Err(
+            "Local Review needs the inspected working checkout. Refresh the local review and retry."
+                .to_string(),
+        );
+    };
+
+    if status.source != "local-review" {
+        return Err(
+            "Local Review has an unexpected checkout state. Refresh the local review and retry."
+                .to_string(),
+        );
+    }
+
+    if !status.ready_for_local_features || status.path.is_none() {
+        return Err(status.message.clone());
+    }
+
+    Ok(Some(status))
+}
+
 pub fn load_remembered_repositories(
     cache: &CacheStore,
 ) -> Result<Vec<RememberedLocalRepository>, String> {
@@ -894,8 +923,8 @@ mod tests {
     use crate::cache::CacheStore;
 
     use super::{
-        inspect_working_checkout, normalized_remote_repository, upsert_remembered_repository,
-        LocalReviewStatusKind, RememberedLocalRepository,
+        inspect_working_checkout, normalized_remote_repository, reusable_local_repository_status,
+        upsert_remembered_repository, LocalReviewStatusKind, RememberedLocalRepository,
     };
 
     static NEXT_TEST_ID: AtomicUsize = AtomicUsize::new(0);
@@ -1149,6 +1178,33 @@ mod tests {
         assert_eq!(inspection.detail.files[0].deletions, 1);
         assert!(inspection.message.contains("Working tree changes"));
         assert!(inspection.key.contains(":worktree-"));
+    }
+
+    #[test]
+    fn local_review_ai_reuses_inspected_worktree_checkout_status() {
+        let fixture = GitFixture::new("openai/example");
+        fixture.set_file("src/lib.rs", "pub fn value() -> i32 { 1 }\n");
+        fixture.commit_all("initial");
+        fixture.push_main();
+        fixture.checkout_branch("feature");
+        fixture.set_file("src/lib.rs", "pub fn value() -> i32 { 2 }\n");
+        let inspection = inspect_working_checkout(&fixture.root, false).expect("inspection");
+
+        let status = reusable_local_repository_status(
+            &inspection.detail,
+            Some(inspection.local_repository_status.clone()),
+        )
+        .expect("local review status should be reusable")
+        .expect("local review detail should return a checkout status");
+
+        assert_eq!(status.source, "local-review");
+        assert!(status.ready_for_local_features);
+        assert!(!status.is_worktree_clean);
+        assert_eq!(
+            reusable_local_repository_status(&inspection.detail, None)
+                .expect_err("missing local review status should be reported"),
+            "Local Review needs the inspected working checkout. Refresh the local review and retry."
+        );
     }
 
     #[test]
