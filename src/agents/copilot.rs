@@ -28,7 +28,7 @@ const RUNNING_TICKER_MS: u64 = 10_000;
 const POLL_INTERVAL: Duration = Duration::from_millis(120);
 const MAX_PROMPT_BYTES: usize = 120_000;
 const MAX_STACK_PLAN_PROMPT_BYTES: usize = 140_000;
-const COPILOT_TOOL_ALLOWLISTS: &[&str] = &["view,grep,glob", "view,rg,glob", "view,glob"];
+const COPILOT_TOOL_ALLOWLISTS: &[&str] = &["view,rg,glob", "view,grep,glob", "view,glob"];
 
 pub struct CopilotBackend;
 
@@ -512,6 +512,10 @@ fn handle_stdout_line(
     let event = match serde_json::from_str::<Value>(trimmed) {
         Ok(event) => event,
         Err(_) => {
+            if is_unknown_tool_allowlist_error(trimmed) {
+                outcome.error = Some(format!("GitHub Copilot CLI configuration error: {trimmed}"));
+                return;
+            }
             append_line(&mut outcome.current_turn_stream, trimmed);
             outcome.last_visible_activity = Some(limit_text(trimmed, 180));
             return;
@@ -607,7 +611,7 @@ fn handle_json_event(
             if let Some(message) = data.get("message").and_then(Value::as_str) {
                 let trimmed = message.trim();
                 if !trimmed.is_empty() {
-                    if trimmed.contains("Unknown tool name") {
+                    if is_unknown_tool_allowlist_error(trimmed) {
                         outcome.error =
                             Some(format!("GitHub Copilot CLI configuration error: {trimmed}"));
                     }
@@ -984,6 +988,13 @@ mod tests {
     }
 
     #[test]
+    fn copilot_tool_allowlists_prefer_current_search_tool_before_legacy_grep() {
+        assert_eq!(COPILOT_TOOL_ALLOWLISTS[0], "view,rg,glob");
+        assert_eq!(COPILOT_TOOL_ALLOWLISTS[1], "view,grep,glob");
+        assert_eq!(COPILOT_TOOL_ALLOWLISTS[2], "view,glob");
+    }
+
+    #[test]
     fn stderr_unknown_tool_allowlist_sets_retryable_error() {
         let mut outcome = CopilotOutcome::default();
         let mut progress = Vec::new();
@@ -995,6 +1006,22 @@ mod tests {
         );
 
         assert!(outcome_has_unknown_tool_allowlist_error(&outcome));
+        assert!(progress.is_empty());
+    }
+
+    #[test]
+    fn stdout_unknown_tool_allowlist_sets_retryable_error() {
+        let mut outcome = CopilotOutcome::default();
+        let mut progress = Vec::new();
+
+        handle_stream_line(
+            StreamLine::Stdout("unknown tool name in the tool allowlist: \"grep\"".to_string()),
+            &mut outcome,
+            &mut |update| progress.push(update),
+        );
+
+        assert!(outcome_has_unknown_tool_allowlist_error(&outcome));
+        assert!(outcome.current_turn_stream.is_empty());
         assert!(progress.is_empty());
     }
 
@@ -1039,6 +1066,26 @@ mod tests {
         assert_eq!(
             outcome.error.as_deref(),
             Some("GitHub Copilot CLI configuration error: Unknown tool name in the tool allowlist: \"grep\"")
+        );
+        assert!(progress.is_empty());
+    }
+
+    #[test]
+    fn session_info_lowercase_unknown_tool_sets_error() {
+        let event = json!({
+            "type": "session.info",
+            "data": {
+                "message": "unknown tool name in the tool allowlist: \"grep\""
+            }
+        });
+
+        let mut outcome = CopilotOutcome::default();
+        let mut progress = Vec::new();
+        handle_json_event(&event, &mut outcome, &mut |update| progress.push(update));
+
+        assert_eq!(
+            outcome.error.as_deref(),
+            Some("GitHub Copilot CLI configuration error: unknown tool name in the tool allowlist: \"grep\"")
         );
         assert!(progress.is_empty());
     }
