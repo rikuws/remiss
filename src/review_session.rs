@@ -186,6 +186,8 @@ pub struct ReviewSessionDocument {
     pub code_lens_mode: ReviewCenterMode,
     #[serde(default)]
     pub normal_diff_layout: NormalDiffLayout,
+    #[serde(default = "default_false")]
+    pub wrap_diff_lines: bool,
     #[serde(default = "default_true")]
     pub show_file_tree: bool,
     #[serde(default)]
@@ -223,6 +225,7 @@ pub struct ReviewSessionState {
     pub center_mode: ReviewCenterMode,
     pub code_lens_mode: ReviewCenterMode,
     pub normal_diff_layout: NormalDiffLayout,
+    pub wrap_diff_lines: bool,
     pub show_file_tree: bool,
     pub source_target: Option<ReviewSourceTarget>,
     pub waymarks: Vec<ReviewWaymark>,
@@ -247,6 +250,7 @@ impl Default for ReviewSessionState {
             center_mode: ReviewCenterMode::SemanticDiff,
             code_lens_mode: ReviewCenterMode::SemanticDiff,
             normal_diff_layout: NormalDiffLayout::Unified,
+            wrap_diff_lines: false,
             show_file_tree: true,
             source_target: None,
             waymarks: Vec::new(),
@@ -289,6 +293,7 @@ impl ReviewSessionState {
             center_mode,
             code_lens_mode,
             normal_diff_layout: document.normal_diff_layout,
+            wrap_diff_lines: document.wrap_diff_lines,
             show_file_tree: document.show_file_tree,
             source_target: document.source_target,
             waymarks: document.waymarks,
@@ -317,6 +322,7 @@ impl ReviewSessionState {
             center_mode: self.center_mode,
             code_lens_mode: sanitize_code_lens_mode(self.code_lens_mode),
             normal_diff_layout: self.normal_diff_layout,
+            wrap_diff_lines: self.wrap_diff_lines,
             show_file_tree: self.show_file_tree,
             source_target: self.source_target.clone(),
             waymarks: self.waymarks.clone(),
@@ -621,5 +627,20 @@ mod tests {
             restored.to_document(None, None).normal_diff_layout,
             NormalDiffLayout::SideBySide
         );
+    }
+
+    #[test]
+    fn review_session_persists_diff_line_wrap() {
+        let document: super::ReviewSessionDocument = serde_json::from_str(
+            r#"{
+                "wrapDiffLines": true
+            }"#,
+        )
+        .expect("diff line wrap setting should deserialize");
+
+        let restored = ReviewSessionState::from_document(document);
+
+        assert!(restored.wrap_diff_lines);
+        assert!(restored.to_document(None, None).wrap_diff_lines);
     }
 }

@@ -1494,6 +1494,12 @@ impl AppState {
         }
     }
 
+    pub fn set_diff_line_wrap(&mut self, wrap: bool) {
+        if let Some(session) = self.active_review_session_mut() {
+            session.wrap_diff_lines = wrap;
+        }
+    }
+
     pub fn set_review_source_target(&mut self, target: ReviewSourceTarget) {
         if let Some(session) = self.active_review_session_mut() {
             session.center_mode = ReviewCenterMode::SourceBrowser;

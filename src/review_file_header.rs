@@ -46,9 +46,17 @@ impl ReviewFileHeaderProps {
 }
 
 pub fn render_review_file_header(props: ReviewFileHeaderProps) -> AnyElement {
+    render_review_file_header_with_action(props, None)
+}
+
+pub fn render_review_file_header_with_action(
+    props: ReviewFileHeaderProps,
+    action: Option<AnyElement>,
+) -> AnyElement {
     let display_path = review_file_display_path(&props);
 
     div()
+        .w_full()
         .min_w_0()
         .h(px(48.0))
         .pl(px(20.0))
@@ -151,7 +159,8 @@ pub fn render_review_file_header(props: ReviewFileHeaderProps) -> AnyElement {
                                 ),
                         )
                     },
-                ),
+                )
+                .when_some(action, |el, action| el.child(action)),
         )
         .into_any_element()
 }

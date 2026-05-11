@@ -35,7 +35,9 @@ use crate::local_documents;
 use crate::local_repo;
 use crate::lsp;
 use crate::markdown::render_markdown;
-use crate::review_file_header::{render_review_file_header, ReviewFileHeaderProps};
+use crate::review_file_header::{
+    render_review_file_header, render_review_file_header_with_action, ReviewFileHeaderProps,
+};
 use crate::review_queue::{build_review_queue, ReviewQueue, ReviewQueueBucket};
 use crate::review_session::{
     NormalDiffLayout, ReviewCenterMode, ReviewLocation, ReviewSourceTarget,
@@ -3742,7 +3744,9 @@ const DIFF_SECTION_BODY_LEFT_MARGIN: f32 = DIFF_SECTION_LEFT_MARGIN + DIFF_SECTI
 const DIFF_SECTION_BODY_RIGHT_MARGIN: f32 = DIFF_SECTION_RIGHT_MARGIN + DIFF_SECTION_BODY_INSET;
 const DIFF_FILE_HEADER_TOP_MARGIN_FIRST: f32 = 14.0;
 const DIFF_FILE_HEADER_TOP_MARGIN: f32 = 36.0;
-const DIFF_FILE_HEADER_BOTTOM_MARGIN: f32 = 0.0;
+const DIFF_FILE_HEADER_BOTTOM_MARGIN: f32 = 10.0;
+const DIFF_FLOATING_FILE_HEADER_TOP_PADDING: f32 = 10.0;
+const DIFF_FLOATING_FILE_HEADER_BOTTOM_PADDING: f32 = 10.0;
 
 fn prepare_review_file_tree_list_state_for_scope(app_state: &AppState, scope: &str) -> ListState {
     let key = review_cache_key(app_state.active_pr_key.as_deref(), scope);
@@ -8093,6 +8097,10 @@ fn render_combined_diff_files(
         return panel_state_text("No files returned for this pull request.").into_any_element();
     }
 
+    let wrap_diff_lines = app_state
+        .active_review_session()
+        .map(|session| session.wrap_diff_lines)
+        .unwrap_or(false);
     let (items, horizontally_scrollable) = build_combined_diff_view_items(&contexts);
     let view_state = prepare_combined_diff_view_state(app_state, center_mode);
     reset_list_state_preserving_scroll(&view_state.list_state, items.len());
@@ -8115,27 +8123,49 @@ fn render_combined_diff_files(
         );
     }
 
+    let floating_header = app_state
+        .pr_header_compact
+        .then(|| {
+            current_combined_diff_header(
+                &contexts,
+                app_state.selected_file_path.as_deref().or(selected_path),
+            )
+        })
+        .flatten();
     let state = state.clone();
+    let render_state = state.clone();
     let items = Arc::new(items);
     let contexts = Arc::new(contexts);
     let list_state = view_state.list_state.clone();
     let rows = list(list_state, move |ix, _window, cx| {
-        render_combined_diff_view_item(&state, contexts.as_ref(), items[ix].clone(), ix, cx)
+        render_combined_diff_view_item(
+            &render_state,
+            contexts.as_ref(),
+            items[ix].clone(),
+            ix,
+            wrap_diff_lines,
+            cx,
+        )
     })
     .with_sizing_behavior(ListSizingBehavior::Auto)
     .flex_grow()
     .min_h_0();
 
-    let body = if horizontally_scrollable {
+    let body = if !wrap_diff_lines {
+        let min_width = if horizontally_scrollable {
+            DIFF_SIDE_BY_SIDE_MIN_WIDTH
+        } else {
+            DIFF_UNIFIED_MIN_WIDTH
+        };
         div()
             .flex()
             .flex_col()
             .flex_grow()
             .min_h_0()
             .min_w_0()
-            .id("combined-diff-side-by-side-scroll")
+            .id("combined-diff-horizontal-scroll")
             .overflow_x_scroll()
-            .child(rows.min_w(px(DIFF_SIDE_BY_SIDE_MIN_WIDTH)))
+            .child(rows.min_w(px(min_width)))
             .into_any_element()
     } else {
         rows.into_any_element()
@@ -8151,6 +8181,13 @@ fn render_combined_diff_files(
         .overflow_hidden()
         .pl(px(DIFF_CONTENT_LEFT_GUTTER))
         .pr(px(DIFF_CONTENT_RIGHT_GUTTER))
+        .when_some(floating_header, |el, header| {
+            el.child(render_floating_diff_file_header(
+                &state,
+                header,
+                wrap_diff_lines,
+            ))
+        })
         .child(body)
         .into_any_element()
 }
@@ -8472,6 +8509,7 @@ fn render_combined_diff_view_item(
     contexts: &[CombinedDiffFileContext],
     item: CombinedDiffViewItem,
     item_ix: usize,
+    wrap_diff_lines: bool,
     cx: &App,
 ) -> AnyElement {
     match item {
@@ -8487,7 +8525,12 @@ fn render_combined_diff_view_item(
                         px(DIFF_FILE_HEADER_TOP_MARGIN)
                     })
                     .mb(px(DIFF_FILE_HEADER_BOTTOM_MARGIN))
-                    .child(render_review_file_header(context.header.clone()))
+                    .child(render_diff_file_header_row(
+                        state,
+                        context.header.clone(),
+                        wrap_diff_lines,
+                        format!("row-{item_ix}"),
+                    ))
                     .into_any_element()
             })
             .unwrap_or_else(|| div().into_any_element()),
@@ -8683,6 +8726,118 @@ fn find_combined_diff_file_header_index(
     })
 }
 
+fn current_combined_diff_header(
+    contexts: &[CombinedDiffFileContext],
+    selected_path: Option<&str>,
+) -> Option<ReviewFileHeaderProps> {
+    let mut header = selected_path
+        .and_then(|path| {
+            contexts
+                .iter()
+                .find(|context| context.file.path == path)
+                .map(|context| context.header.clone())
+        })
+        .or_else(|| contexts.first().map(|context| context.header.clone()))?;
+    header.active = true;
+    Some(header)
+}
+
+fn render_floating_diff_file_header(
+    state: &Entity<AppState>,
+    header: ReviewFileHeaderProps,
+    wrap_diff_lines: bool,
+) -> impl IntoElement {
+    div()
+        .pt(px(DIFF_FLOATING_FILE_HEADER_TOP_PADDING))
+        .pb(px(DIFF_FLOATING_FILE_HEADER_BOTTOM_PADDING))
+        .bg(diff_editor_bg())
+        .child(render_diff_file_header_row(
+            state,
+            header,
+            wrap_diff_lines,
+            "floating",
+        ))
+}
+
+fn render_diff_file_header_row(
+    state: &Entity<AppState>,
+    header: ReviewFileHeaderProps,
+    wrap_diff_lines: bool,
+    scope: impl Into<String>,
+) -> impl IntoElement {
+    let toggle_key = header.path.clone();
+    let scope = scope.into();
+
+    render_review_file_header_with_action(
+        header,
+        Some(
+            render_diff_line_wrap_toggle(state, wrap_diff_lines, scope, toggle_key)
+                .into_any_element(),
+        ),
+    )
+}
+
+fn render_diff_line_wrap_toggle(
+    state: &Entity<AppState>,
+    wrap_diff_lines: bool,
+    scope: String,
+    key: String,
+) -> impl IntoElement {
+    let state_for_toggle = state.clone();
+    let tooltip = if wrap_diff_lines {
+        "Disable line wrap"
+    } else {
+        "Wrap diff lines"
+    };
+    let icon = if wrap_diff_lines {
+        LucideIcon::TextWrap
+    } else {
+        LucideIcon::ArrowLeftRight
+    };
+
+    div()
+        .id(ElementId::Name(
+            format!("diff-line-wrap-toggle-{scope}-{key}").into(),
+        ))
+        .h(px(28.0))
+        .w(px(30.0))
+        .flex_shrink_0()
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(if wrap_diff_lines {
+            accent()
+        } else {
+            diff_annotation_border()
+        })
+        .bg(if wrap_diff_lines {
+            accent_muted()
+        } else {
+            diff_annotation_bg()
+        })
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
+        .hover(|style| style.bg(bg_selected()).text_color(fg_emphasis()))
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            state_for_toggle.update(cx, |state, cx| {
+                state.set_diff_line_wrap(!wrap_diff_lines);
+                state.persist_active_review_session();
+                cx.notify();
+            });
+        })
+        .child(lucide_icon(
+            icon,
+            14.0,
+            if wrap_diff_lines {
+                accent()
+            } else {
+                fg_muted()
+            },
+        ))
+}
+
 fn combined_file_focus_key(file_path: &str) -> String {
     format!("file:{file_path}")
 }
@@ -8768,18 +8923,25 @@ fn render_file_diff(
     let rows = diff_view_state.rows.clone();
     let parsed_file_index = diff_view_state.parsed_file_index;
     let highlighted_hunks = diff_view_state.highlighted_hunks.clone();
-    let reserve_waypoint_slot = state
-        .read(cx)
-        .active_review_session()
-        .map(|session| {
-            session.waymarks.iter().any(|waymark| {
-                matches!(
-                    waymark.location.mode,
-                    ReviewCenterMode::SemanticDiff | ReviewCenterMode::StructuralDiff
-                ) && waymark.location.file_path == file.path
+    let (reserve_waypoint_slot, wrap_diff_lines) = {
+        let app_state = state.read(cx);
+        let reserve_waypoint_slot = app_state
+            .active_review_session()
+            .map(|session| {
+                session.waymarks.iter().any(|waymark| {
+                    matches!(
+                        waymark.location.mode,
+                        ReviewCenterMode::SemanticDiff | ReviewCenterMode::StructuralDiff
+                    ) && waymark.location.file_path == file.path
+                })
             })
-        })
-        .unwrap_or(false);
+            .unwrap_or(false);
+        let wrap_diff_lines = app_state
+            .active_review_session()
+            .map(|session| session.wrap_diff_lines)
+            .unwrap_or(false);
+        (reserve_waypoint_slot, wrap_diff_lines)
+    };
     let gutter_layout = diff_gutter_layout(file, parsed, reserve_waypoint_slot);
     let selected_anchor = selected_anchor.cloned();
     let list_state = diff_view_state.list_state.clone();
@@ -8912,6 +9074,7 @@ fn render_file_diff(
                         selected_anchor,
                         list_state,
                         items,
+                        wrap_diff_lines,
                     )
                     .into_any_element(),
                 ),
@@ -8931,6 +9094,7 @@ fn render_virtualized_diff_rows(
     selected_anchor: Option<DiffAnchor>,
     list_state: ListState,
     items: Arc<Vec<DiffViewItem>>,
+    wrap_diff_lines: bool,
 ) -> AnyElement {
     let state = state.clone();
     let horizontally_scrollable =
@@ -8961,16 +9125,21 @@ fn render_virtualized_diff_rows(
     .flex_grow()
     .min_h_0();
 
-    if horizontally_scrollable {
+    if !wrap_diff_lines {
+        let min_width = if horizontally_scrollable {
+            DIFF_SIDE_BY_SIDE_MIN_WIDTH
+        } else {
+            DIFF_UNIFIED_MIN_WIDTH
+        };
         div()
             .flex()
             .flex_col()
             .flex_grow()
             .min_h_0()
             .min_w_0()
-            .id("diff-side-by-side-scroll")
+            .id("diff-horizontal-scroll")
             .overflow_x_scroll()
-            .child(rows.min_w(px(DIFF_SIDE_BY_SIDE_MIN_WIDTH)))
+            .child(rows.min_w(px(min_width)))
             .into_any_element()
     } else {
         rows.into_any_element()
@@ -10544,10 +10713,19 @@ fn render_normal_side_by_side_diff_row(
     file_lsp_context: Option<&DiffFileLspContext>,
     cx: &App,
 ) -> impl IntoElement {
+    let wrap_diff_lines = state
+        .read(cx)
+        .active_review_session()
+        .map(|session| session.wrap_diff_lines)
+        .unwrap_or(false);
     div()
         .flex()
         .w_full()
-        .min_w_0()
+        .min_w(px(if wrap_diff_lines {
+            0.0
+        } else {
+            DIFF_SIDE_BY_SIDE_MIN_WIDTH
+        }))
         .bg(diff_editor_bg())
         .child(render_normal_side_by_side_cell(
             state,
@@ -10597,8 +10775,19 @@ fn render_normal_side_by_side_cell(
     cx: &App,
 ) -> AnyElement {
     let gutter_layout = side_by_side_gutter_layout(side, reserve_waypoint_slot);
-    let content = line_index
-        .and_then(|line_index| hunk.lines.get(line_index).map(|line| (line_index, line)))
+    let wrap_diff_lines = state
+        .read(cx)
+        .active_review_session()
+        .map(|session| session.wrap_diff_lines)
+        .unwrap_or(false);
+    let line_entry =
+        line_index.and_then(|line_index| hunk.lines.get(line_index).map(|line| (line_index, line)));
+    let cell_min_width = side_by_side_cell_min_width(
+        gutter_layout,
+        line_entry.map(|(_, line)| line.content.as_str()),
+        wrap_diff_lines,
+    );
+    let content = line_entry
         .map(|(line_index, line)| {
             let highlight = highlighted_hunk
                 .and_then(|lines| lines.get(line_index))
@@ -10641,7 +10830,7 @@ fn render_normal_side_by_side_cell(
 
     div()
         .flex_1()
-        .min_w_0()
+        .min_w(px(cell_min_width))
         .when(side == SideBySideDiffSide::Left, |el| {
             el.border_r(px(1.0)).border_color(diff_gutter_separator())
         })
@@ -10661,10 +10850,19 @@ fn render_structural_side_by_side_diff_row(
     file_lsp_context: Option<&DiffFileLspContext>,
     cx: &App,
 ) -> impl IntoElement {
+    let wrap_diff_lines = state
+        .read(cx)
+        .active_review_session()
+        .map(|session| session.wrap_diff_lines)
+        .unwrap_or(false);
     div()
         .flex()
         .w_full()
-        .min_w_0()
+        .min_w(px(if wrap_diff_lines {
+            0.0
+        } else {
+            DIFF_SIDE_BY_SIDE_MIN_WIDTH
+        }))
         .bg(diff_editor_bg())
         .child(render_structural_side_by_side_cell(
             state,
@@ -10708,6 +10906,16 @@ fn render_structural_side_by_side_cell(
     cx: &App,
 ) -> AnyElement {
     let gutter_layout = side_by_side_gutter_layout(side, reserve_waypoint_slot);
+    let wrap_diff_lines = state
+        .read(cx)
+        .active_review_session()
+        .map(|session| session.wrap_diff_lines)
+        .unwrap_or(false);
+    let cell_min_width = side_by_side_cell_min_width(
+        gutter_layout,
+        cell.map(|cell| cell.line.content.as_str()),
+        wrap_diff_lines,
+    );
     let content = cell
         .map(|cell| {
             let line_lsp_context = (side == SideBySideDiffSide::Right)
@@ -10747,7 +10955,7 @@ fn render_structural_side_by_side_cell(
 
     div()
         .flex_1()
-        .min_w_0()
+        .min_w(px(cell_min_width))
         .when(side == SideBySideDiffSide::Left, |el| {
             el.border_r(px(1.0)).border_color(diff_gutter_separator())
         })
@@ -10911,7 +11119,15 @@ fn render_raw_diff_fallback(raw_diff: &str) -> impl IntoElement {
                 .child("No diff returned.".to_string())
                 .into_any_element()
         } else {
-            render_highlighted_code_content("diff.patch", raw_diff).into_any_element()
+            div()
+                .id("raw-diff-horizontal-scroll")
+                .overflow_x_scroll()
+                .child(
+                    div()
+                        .min_w(px(DIFF_UNIFIED_MIN_WIDTH))
+                        .child(render_highlighted_code_content("diff.patch", raw_diff)),
+                )
+                .into_any_element()
         })
 }
 
@@ -11004,7 +11220,7 @@ fn render_reviewable_diff_line(
     cx: &App,
 ) -> impl IntoElement {
     let line_action_target = build_review_line_action_target(file_path, hunk_header, line);
-    let (active_line_action, waypoint) = {
+    let (active_line_action, waypoint, wrap_diff_lines) = {
         let app_state = state.read(cx);
         let active_line_action = app_state.active_review_line_action.clone();
         let waypoint = line_action_target
@@ -11015,7 +11231,11 @@ fn render_reviewable_diff_line(
                     .and_then(|session| session.waymark_for_location(&target.review_location()))
             })
             .cloned();
-        (active_line_action, waypoint)
+        let wrap_diff_lines = app_state
+            .active_review_session()
+            .map(|session| session.wrap_diff_lines)
+            .unwrap_or(false);
+        (active_line_action, waypoint, wrap_diff_lines)
     };
 
     let popup_open = line_action_target
@@ -11037,6 +11257,7 @@ fn render_reviewable_diff_line(
         temp_source_target.map(|target| (state.clone(), target)),
         has_waypoint,
         popup_open,
+        wrap_diff_lines,
     )
 }
 
@@ -11451,6 +11672,7 @@ fn render_diff_line_with_threads(
             None,
             false,
             false,
+            false,
         ))
         .when(!threads.is_empty(), |el| {
             el.child(
@@ -11483,6 +11705,7 @@ fn render_diff_line(
     source_action: Option<(Entity<AppState>, TempSourceTarget)>,
     has_waypoint: bool,
     force_marker_visible: bool,
+    wrap_diff_lines: bool,
 ) -> impl IntoElement {
     let is_selected = line_matches_diff_anchor(line, selected_anchor);
     let row_action = line_action.clone();
@@ -11535,7 +11758,12 @@ fn render_diff_line(
     div()
         .flex()
         .w_full()
-        .min_w_0()
+        .min_w(px(diff_line_min_width(
+            gutter_layout,
+            line.content.as_str(),
+            wrap_diff_lines,
+        )))
+        .items_start()
         .min_h(px(DIFF_ROW_HEIGHT))
         .bg(row_bg)
         .font_family(mono_font_family())
@@ -11700,6 +11928,7 @@ fn render_diff_line(
             fallback_text_color,
             lsp_context,
             line_action,
+            wrap_diff_lines,
         ))
 }
 
@@ -11711,18 +11940,24 @@ fn render_syntax_content(
     fallback_color: Rgba,
     lsp_context: Option<&DiffLineLspContext>,
     line_action: Option<(Entity<AppState>, ReviewLineActionTarget)>,
+    wrap_diff_lines: bool,
 ) -> Div {
     let content = line.content.as_str();
     let content_div = div()
         .flex_grow()
-        .min_w_0()
+        .min_w(px(if wrap_diff_lines {
+            0.0
+        } else {
+            diff_code_text_width(content)
+        }))
         .px(px(8.0))
         .py(px(1.0))
-        .whitespace_nowrap()
         .text_size(px(DIFF_CODE_FONT_SIZE))
         .line_height(px(DIFF_CODE_LINE_HEIGHT))
         .font_weight(FontWeight::MEDIUM)
-        .font_family(mono_font_family());
+        .font_family(mono_font_family())
+        .when(wrap_diff_lines, |el| el.whitespace_normal())
+        .when(!wrap_diff_lines, |el| el.whitespace_nowrap());
 
     if content.is_empty() {
         return content_div
@@ -11856,7 +12091,11 @@ const DIFF_LINE_NUMBER_CELL_PADDING_X: f32 = 8.0;
 const DIFF_MARKER_COLUMN_WIDTH: f32 = 16.0;
 const DIFF_SOURCE_SLOT_WIDTH: f32 = DIFF_ROW_HEIGHT;
 const DIFF_WAYPOINT_SLOT_WIDTH: f32 = DIFF_ROW_HEIGHT;
+const DIFF_UNIFIED_MIN_WIDTH: f32 = 720.0;
 const DIFF_SIDE_BY_SIDE_MIN_WIDTH: f32 = 960.0;
+const DIFF_CODE_CHAR_WIDTH: f32 = 8.4;
+const DIFF_CODE_MIN_TEXT_WIDTH: f32 = 16.0;
+const DIFF_CODE_MAX_TEXT_WIDTH: f32 = 16000.0;
 
 #[derive(Clone, Copy)]
 struct DiffGutterLayout {
@@ -11884,6 +12123,42 @@ impl DiffGutterLayout {
 
     fn inline_thread_inset(self) -> f32 {
         self.gutter_width() + 12.0
+    }
+}
+
+fn diff_code_text_width(content: &str) -> f32 {
+    let chars = content.chars().count().max(1) as f32;
+    (chars * DIFF_CODE_CHAR_WIDTH).clamp(DIFF_CODE_MIN_TEXT_WIDTH, DIFF_CODE_MAX_TEXT_WIDTH)
+}
+
+fn diff_line_min_width(
+    gutter_layout: DiffGutterLayout,
+    content: &str,
+    wrap_diff_lines: bool,
+) -> f32 {
+    if wrap_diff_lines {
+        0.0
+    } else {
+        gutter_layout.gutter_width()
+            + DIFF_MARKER_COLUMN_WIDTH
+            + 16.0
+            + diff_code_text_width(content)
+    }
+}
+
+fn side_by_side_cell_min_width(
+    gutter_layout: DiffGutterLayout,
+    content: Option<&str>,
+    wrap_diff_lines: bool,
+) -> f32 {
+    if wrap_diff_lines {
+        0.0
+    } else {
+        let content_width = content
+            .map(diff_code_text_width)
+            .unwrap_or(DIFF_CODE_MIN_TEXT_WIDTH);
+        (gutter_layout.gutter_width() + DIFF_MARKER_COLUMN_WIDTH + 16.0 + content_width)
+            .max(DIFF_SIDE_BY_SIDE_MIN_WIDTH / 2.0)
     }
 }
 
@@ -12648,6 +12923,11 @@ fn render_tour_diff_file_with_options(
                 )
             })
             .flatten();
+        let wrap_diff_lines = state
+            .read(cx)
+            .active_review_session()
+            .map(|session| session.wrap_diff_lines)
+            .unwrap_or(false);
 
         let diff_body = if parsed_file.hunks.is_empty() {
             panel_state_text("No textual hunks available for this file.").into_any_element()
@@ -12660,12 +12940,18 @@ fn render_tour_diff_file_with_options(
                 anchor,
                 diff_view_state,
                 file_lsp_context,
+                wrap_diff_lines,
                 cx,
             )
             .into_any_element()
         } else {
-            render_full_tour_diff_preview(parsed_file, anchor, file_lsp_context.as_ref())
-                .into_any_element()
+            render_full_tour_diff_preview(
+                parsed_file,
+                anchor,
+                file_lsp_context.as_ref(),
+                wrap_diff_lines,
+            )
+            .into_any_element()
         };
 
         if !show_header {
@@ -12723,6 +13009,7 @@ fn render_tour_diff_preview(
     selected_anchor: Option<&DiffAnchor>,
     diff_view_state: DiffFileViewState,
     file_lsp_context: Option<DiffFileLspContext>,
+    wrap_diff_lines: bool,
     cx: &App,
 ) -> impl IntoElement {
     let rows = diff_view_state.rows;
@@ -12795,13 +13082,18 @@ fn render_tour_diff_preview(
                     ),
             )
         })
-        .child(div().flex().flex_col().bg(diff_editor_bg()).children(elements))
+        .child(render_tour_diff_rows_container(
+            file.path.as_str(),
+            elements,
+            wrap_diff_lines,
+        ))
 }
 
 fn render_full_tour_diff_preview(
     parsed_file: &ParsedDiffFile,
     anchor: Option<&DiffAnchor>,
     file_lsp_context: Option<&DiffFileLspContext>,
+    wrap_diff_lines: bool,
 ) -> impl IntoElement {
     let highlighted_hunks = build_diff_highlights(parsed_file);
     let gutter_layout = diff_gutter_layout_from_parsed(parsed_file);
@@ -12832,13 +13124,50 @@ fn render_full_tour_diff_preview(
                     None,
                     false,
                     false,
+                    wrap_diff_lines,
                 )
                 .into_any_element(),
             );
         }
     }
 
-    div().flex().flex_col().children(elements)
+    render_tour_diff_rows_container(parsed_file.path.as_str(), elements, wrap_diff_lines)
+}
+
+fn render_tour_diff_rows_container(
+    id_key: &str,
+    elements: Vec<AnyElement>,
+    wrap_diff_lines: bool,
+) -> AnyElement {
+    let rows = div()
+        .flex()
+        .flex_col()
+        .min_w(px(if wrap_diff_lines {
+            0.0
+        } else {
+            DIFF_UNIFIED_MIN_WIDTH
+        }))
+        .children(elements);
+
+    if wrap_diff_lines {
+        div()
+            .flex()
+            .flex_col()
+            .bg(diff_editor_bg())
+            .child(rows)
+            .into_any_element()
+    } else {
+        div()
+            .id(ElementId::Name(
+                format!("tour-diff-horizontal-scroll-{id_key}").into(),
+            ))
+            .flex()
+            .flex_col()
+            .bg(diff_editor_bg())
+            .overflow_x_scroll()
+            .child(rows)
+            .into_any_element()
+    }
 }
 
 const TOUR_PREVIEW_MAX_ITEMS: usize = 96;
