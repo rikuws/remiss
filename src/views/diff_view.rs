@@ -999,6 +999,16 @@ fn review_cache_key(active_pr_key: Option<&str>, scope: &str) -> String {
     format!("{}:{scope}", active_pr_key.unwrap_or("detached"))
 }
 
+fn reset_list_state_preserving_scroll(list_state: &ListState, item_count: usize) {
+    if list_state.item_count() == item_count {
+        return;
+    }
+
+    let scroll_top = list_state.logical_scroll_top();
+    list_state.reset(item_count);
+    list_state.scroll_to(scroll_top);
+}
+
 fn prepare_review_stack(app_state: &AppState, detail: &PullRequestDetail) -> Arc<ReviewStack> {
     if let Some(stack) = prepare_discovered_review_stack(
         app_state,
@@ -7954,9 +7964,7 @@ fn render_combined_diff_files(
 
     let (items, horizontally_scrollable) = build_combined_diff_view_items(&contexts);
     let view_state = prepare_combined_diff_view_state(app_state, center_mode);
-    if view_state.list_state.item_count() != items.len() {
-        view_state.list_state.reset(items.len());
-    }
+    reset_list_state_preserving_scroll(&view_state.list_state, items.len());
     scroll_combined_diff_list_to_focus(
         &view_state,
         &items,
@@ -8666,9 +8674,7 @@ fn render_file_diff(
         stack_visibility.as_ref(),
     );
 
-    if list_state.item_count() != items.len() {
-        list_state.reset(items.len());
-    }
+    reset_list_state_preserving_scroll(&list_state, items.len());
     scroll_diff_list_to_focus(
         &diff_view_state,
         &items,
