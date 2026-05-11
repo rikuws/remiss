@@ -40,6 +40,7 @@ mod managed_lsp;
 mod markdown;
 mod notifications;
 mod platform_macos;
+mod review_file_header;
 mod review_intelligence;
 mod review_queue;
 mod review_routes;

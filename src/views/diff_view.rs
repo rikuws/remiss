@@ -35,8 +35,11 @@ use crate::local_documents;
 use crate::local_repo;
 use crate::lsp;
 use crate::markdown::render_markdown;
+use crate::review_file_header::{render_review_file_header, ReviewFileHeaderProps};
 use crate::review_queue::{build_review_queue, ReviewQueue, ReviewQueueBucket};
-use crate::review_session::{ReviewCenterMode, ReviewLocation, ReviewSourceTarget};
+use crate::review_session::{
+    NormalDiffLayout, ReviewCenterMode, ReviewLocation, ReviewSourceTarget,
+};
 use crate::selectable_text::{AppTextFieldKind, AppTextInput, SelectableText};
 use crate::semantic_diff::{build_semantic_diff_file, SemanticDiffFile, SemanticDiffSection};
 use crate::source_browser::render_source_browser;
@@ -89,6 +92,21 @@ pub fn enter_files_surface(state: &Entity<AppState>, window: &mut Window, cx: &m
         false,
     );
     ensure_structural_diff_warmup_started(state, window, cx);
+}
+
+pub fn switch_review_code_mode(
+    state: &Entity<AppState>,
+    mode: ReviewCenterMode,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    state.update(cx, |state, cx| {
+        state.set_review_center_mode_preserving_focus(mode);
+        state.persist_active_review_session();
+        cx.notify();
+    });
+
+    ensure_active_review_focus_loaded(state, window, cx);
 }
 
 pub fn enter_stack_review_mode(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
@@ -942,7 +960,6 @@ pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement
                     detail,
                     selected_path,
                     selected_anchor.as_ref(),
-                    semantic_file.as_deref(),
                     review_stack.clone(),
                     cx,
                 )),
@@ -3687,6 +3704,16 @@ fn render_file_tree_state_message(message: String, is_error: bool) -> impl IntoE
 }
 
 const REVIEW_FILE_TREE_ROW_HEIGHT: f32 = 30.0;
+const DIFF_CONTENT_LEFT_GUTTER: f32 = 36.0;
+const DIFF_CONTENT_RIGHT_GUTTER: f32 = 16.0;
+const DIFF_SECTION_LEFT_MARGIN: f32 = 0.0;
+const DIFF_SECTION_RIGHT_MARGIN: f32 = 0.0;
+const DIFF_SECTION_BODY_INSET: f32 = 12.0;
+const DIFF_SECTION_BODY_LEFT_MARGIN: f32 = DIFF_SECTION_LEFT_MARGIN + DIFF_SECTION_BODY_INSET;
+const DIFF_SECTION_BODY_RIGHT_MARGIN: f32 = DIFF_SECTION_RIGHT_MARGIN + DIFF_SECTION_BODY_INSET;
+const DIFF_FILE_HEADER_TOP_MARGIN_FIRST: f32 = 14.0;
+const DIFF_FILE_HEADER_TOP_MARGIN: f32 = 36.0;
+const DIFF_FILE_HEADER_BOTTOM_MARGIN: f32 = 0.0;
 
 fn prepare_review_file_tree_list_state_for_scope(app_state: &AppState, scope: &str) -> ListState {
     let key = review_cache_key(app_state.active_pr_key.as_deref(), scope);
@@ -6412,7 +6439,6 @@ fn render_diff_panel(
     detail: &PullRequestDetail,
     selected_path: Option<&str>,
     selected_anchor: Option<&DiffAnchor>,
-    semantic_file: Option<&SemanticDiffFile>,
     review_stack: Arc<ReviewStack>,
     cx: &App,
 ) -> impl IntoElement {
@@ -6421,30 +6447,8 @@ fn render_diff_panel(
         .and_then(|p| files.iter().find(|f| f.path == p))
         .or(files.first());
 
-    let selected_parsed =
-        selected_file.and_then(|file| find_parsed_diff_file(&detail.parsed_diff, &file.path));
-    let file_thread_count = selected_file
-        .map(|file| {
-            detail
-                .review_threads
-                .iter()
-                .filter(|thread| thread.path == file.path)
-                .count()
-        })
-        .unwrap_or(0);
-    let diff_view_state =
-        selected_file.map(|file| prepare_diff_view_state(app_state, detail, &file.path));
-    let structural_diff_state = selected_file.and_then(|file| {
-        app_state
-            .active_detail_state()
-            .and_then(|detail_state| detail_state.structural_diff_states.get(&file.path))
-            .cloned()
-    });
-    let file_content_state = selected_file.and_then(|file| {
-        app_state
-            .active_detail_state()
-            .and_then(|detail_state| detail_state.file_content_states.get(&file.path))
-            .cloned()
+    let (total_additions, total_deletions) = files.iter().fold((0i64, 0i64), |acc, file| {
+        (acc.0 + file.additions, acc.1 + file.deletions)
     });
     let local_repo_status = app_state
         .active_detail_state()
@@ -6456,27 +6460,12 @@ fn render_diff_panel(
     let local_repo_error = app_state
         .active_detail_state()
         .and_then(|detail_state| detail_state.local_repository_error.as_deref());
-    let file_document = file_content_state
-        .as_ref()
-        .and_then(|state| state.document.as_ref());
-    let lsp_status = selected_file.and_then(|file| {
-        app_state
-            .active_detail_state()
-            .and_then(|detail_state| detail_state.lsp_statuses.get(&file.path))
-    });
-    let lsp_loading = selected_file
-        .map(|file| {
-            app_state
-                .active_detail_state()
-                .map(|detail_state| detail_state.lsp_loading_paths.contains(&file.path))
-                .unwrap_or(false)
-        })
-        .unwrap_or(false);
     let review_session = app_state
         .active_review_session()
         .cloned()
         .unwrap_or_default();
     let center_mode = review_session.center_mode;
+    let normal_diff_layout = review_session.normal_diff_layout;
     let stack_filter = (center_mode == ReviewCenterMode::Stack)
         .then(|| {
             build_layer_diff_filter(
@@ -6487,6 +6476,10 @@ fn render_diff_panel(
             )
         })
         .flatten();
+    let has_textual_diff = detail
+        .parsed_diff
+        .iter()
+        .any(|parsed| !parsed.is_binary && !parsed.hunks.is_empty());
     let source_target = review_session.source_target.clone().or_else(|| {
         selected_file.map(|file| ReviewSourceTarget {
             path: file.path.clone(),
@@ -6516,19 +6509,17 @@ fn render_diff_panel(
         .flex_col()
         .bg(diff_editor_bg())
         .child(render_diff_toolbar(
+            state,
             files.len(),
-            selected_file,
-            selected_parsed,
-            semantic_file,
-            file_thread_count,
-            file_document,
+            total_additions,
+            total_deletions,
             local_repo_status,
             local_repo_loading,
             local_repo_error,
-            lsp_status,
-            lsp_loading,
-            selected_anchor,
             structural_warmup_status,
+            center_mode,
+            normal_diff_layout,
+            !has_textual_diff,
         ))
         .child(
             div()
@@ -6550,102 +6541,54 @@ fn render_diff_panel(
                 } else if center_mode == ReviewCenterMode::AiTour {
                     render_ai_tour_view(state, detail, cx)
                 } else if center_mode == ReviewCenterMode::StructuralDiff {
-                    selected_file
-                        .map(|file| {
-                            render_structural_file_diff(
-                                state,
-                                app_state,
-                                detail,
-                                file,
-                                structural_diff_state.as_ref(),
-                                file_content_state
-                                    .as_ref()
-                                    .and_then(|state| state.prepared.as_ref()),
-                                selected_anchor,
-                                review_stack.clone(),
-                                cx,
-                            )
-                        })
-                        .unwrap_or_else(|| {
-                            panel_state_text("No files returned for this pull request.")
-                                .into_any_element()
-                        })
-                } else if let (Some(file), Some(diff_view_state)) = (selected_file, diff_view_state)
-                {
-                    render_file_diff(
+                    render_combined_diff_files(
                         state,
-                        file,
-                        selected_parsed,
-                        None,
-                        None,
-                        file_content_state
-                            .as_ref()
-                            .and_then(|state| state.prepared.as_ref()),
+                        app_state,
+                        detail,
+                        selected_path,
                         selected_anchor,
-                        diff_view_state,
                         review_stack.clone(),
-                        stack_filter.clone(),
+                        None,
+                        center_mode,
+                        normal_diff_layout,
                         cx,
                     )
                     .into_any_element()
                 } else {
-                    panel_state_text("No files returned for this pull request.").into_any_element()
+                    render_combined_diff_files(
+                        state,
+                        app_state,
+                        detail,
+                        selected_path,
+                        selected_anchor,
+                        review_stack.clone(),
+                        stack_filter.clone(),
+                        center_mode,
+                        normal_diff_layout,
+                        cx,
+                    )
+                    .into_any_element()
                 }),
         )
 }
 
 fn render_diff_toolbar(
+    state: &Entity<AppState>,
     total_files: usize,
-    selected_file: Option<&PullRequestFile>,
-    selected_parsed: Option<&ParsedDiffFile>,
-    semantic_file: Option<&SemanticDiffFile>,
-    file_thread_count: usize,
-    file_document: Option<&RepositoryFileContent>,
+    total_additions: i64,
+    total_deletions: i64,
     local_repo_status: Option<&local_repo::LocalRepositoryStatus>,
     local_repo_loading: bool,
     _local_repo_error: Option<&str>,
-    lsp_status: Option<&lsp::LspServerStatus>,
-    lsp_loading: bool,
-    selected_anchor: Option<&DiffAnchor>,
     structural_warmup_status: Option<String>,
+    center_mode: ReviewCenterMode,
+    normal_diff_layout: NormalDiffLayout,
+    layout_toggle_disabled: bool,
 ) -> impl IntoElement {
-    let selected_section =
-        semantic_file.and_then(|semantic| semantic.section_for_anchor(selected_anchor));
-    let focus_title = selected_file
-        .map(|file| file.path.clone())
-        .unwrap_or_else(|| format!("{total_files} changed files"));
     let mut focus_meta = Vec::new();
-    if let Some(file) = selected_file {
-        focus_meta.push(format!("{} file", label_for_change_type(&file.change_type)));
-        focus_meta.push(format!("+{} / -{}", file.additions, file.deletions));
-        focus_meta.push(
-            selected_section
-                .map(|section| format!("{}: {}", section.kind.label(), section.title.as_str()))
-                .unwrap_or_else(|| format!("{total_files} files changed")),
-        );
-    } else {
-        focus_meta.push(format!("{total_files} changed files"));
-    }
-    if file_thread_count > 0 {
-        focus_meta.push(format!(
-            "{} open thread{}",
-            file_thread_count,
-            if file_thread_count == 1 { "" } else { "s" }
-        ));
-    }
-    if selected_parsed
-        .map(|parsed| parsed.is_binary)
-        .unwrap_or(false)
-    {
-        focus_meta.push("binary diff".to_string());
-    }
+    focus_meta.push(format!("+{total_additions} / -{total_deletions}"));
     if local_repo_loading {
         focus_meta.push("preparing checkout".to_string());
-    } else if file_document
-        .map(|document| document.source != REPOSITORY_FILE_SOURCE_LOCAL_CHECKOUT)
-        .unwrap_or(false)
-    {
-        focus_meta.push("GitHub snapshot".to_string());
     } else if let Some(status) = local_repo_status.filter(|status| !status.ready_for_local_features)
     {
         focus_meta.push(if !status.is_valid_repository {
@@ -6658,15 +6601,14 @@ fn render_diff_toolbar(
             "checkout pending".to_string()
         });
     }
-    if lsp_loading {
-        focus_meta.push("indexing symbols".to_string());
-    } else if let Some(status) = lsp_status.filter(|status| !status.is_ready()) {
-        focus_meta.push(status.badge_label().to_string());
-    }
     if let Some(status) = structural_warmup_status {
         focus_meta.push(status);
     }
     let focus_summary = focus_meta.join(" / ");
+    let show_layout_toggle = matches!(
+        center_mode,
+        ReviewCenterMode::SemanticDiff | ReviewCenterMode::Stack
+    );
 
     div()
         .flex()
@@ -6682,6 +6624,7 @@ fn render_diff_toolbar(
                 .flex()
                 .flex_col()
                 .gap(px(3.0))
+                .flex_grow()
                 .min_w_0()
                 .child(
                     div()
@@ -6692,7 +6635,7 @@ fn render_diff_toolbar(
                         .whitespace_nowrap()
                         .overflow_x_hidden()
                         .text_ellipsis()
-                        .child(focus_title),
+                        .child(format!("{total_files} files changed")),
                 )
                 .child(
                     div()
@@ -6705,6 +6648,105 @@ fn render_diff_toolbar(
                         .text_ellipsis()
                         .child(focus_summary),
                 ),
+        )
+        .when(show_layout_toggle, |el| {
+            el.child(render_normal_diff_layout_toggle(
+                state,
+                normal_diff_layout,
+                layout_toggle_disabled,
+            ))
+        })
+}
+
+fn render_normal_diff_layout_toggle(
+    state: &Entity<AppState>,
+    active_layout: NormalDiffLayout,
+    disabled: bool,
+) -> impl IntoElement {
+    let state_for_unified = state.clone();
+    let state_for_side_by_side = state.clone();
+
+    div()
+        .id("normal-diff-layout-toggle")
+        .h(px(28.0))
+        .p(px(2.0))
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(border_muted())
+        .bg(control_track_bg())
+        .flex()
+        .items_center()
+        .gap(px(1.0))
+        .opacity(if disabled { 0.5 } else { 1.0 })
+        .tooltip(|_, cx| build_static_tooltip("Normal diff layout", cx))
+        .child(diff_layout_segment(
+            "Unified",
+            active_layout == NormalDiffLayout::Unified,
+            disabled,
+            move |_, _, cx| {
+                state_for_unified.update(cx, |state, cx| {
+                    state.set_normal_diff_layout(NormalDiffLayout::Unified);
+                    state.persist_active_review_session();
+                    cx.notify();
+                });
+            },
+        ))
+        .child(diff_layout_segment(
+            "Split",
+            active_layout == NormalDiffLayout::SideBySide,
+            disabled,
+            move |_, _, cx| {
+                state_for_side_by_side.update(cx, |state, cx| {
+                    state.set_normal_diff_layout(NormalDiffLayout::SideBySide);
+                    state.persist_active_review_session();
+                    cx.notify();
+                });
+            },
+        ))
+}
+
+fn diff_layout_segment(
+    label: &'static str,
+    active: bool,
+    disabled: bool,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let animation_id = SharedString::from(format!(
+        "normal-diff-layout-{label}-{}",
+        usize::from(active)
+    ));
+
+    div()
+        .h(px(22.0))
+        .px(px(8.0))
+        .rounded(px(5.0))
+        .border_1()
+        .border_color(transparent())
+        .bg(if active { bg_emphasis() } else { transparent() })
+        .text_size(px(11.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(if active { fg_emphasis() } else { fg_muted() })
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(!disabled, move |el| {
+            el.cursor_pointer()
+                .hover(move |style| {
+                    style
+                        .bg(if active { bg_emphasis() } else { bg_selected() })
+                        .text_color(fg_emphasis())
+                })
+                .on_mouse_down(MouseButton::Left, on_click)
+        })
+        .child(label)
+        .with_animation(
+            animation_id,
+            Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
+            move |el, delta| {
+                let progress = selected_reveal_progress(active, delta);
+                el.bg(mix_rgba(transparent(), bg_emphasis(), progress))
+                    .text_color(mix_rgba(fg_muted(), fg_emphasis(), progress))
+            },
         )
 }
 
@@ -7831,6 +7873,689 @@ fn workspace_mode_button(
         )
 }
 
+#[derive(Clone)]
+struct CombinedDiffFileContext {
+    file: PullRequestFile,
+    header: ReviewFileHeaderProps,
+    parsed: Option<Arc<ParsedDiffFile>>,
+    parsed_override: Option<Arc<ParsedDiffFile>>,
+    structural_side_by_side: Option<Arc<crate::difftastic::AdaptedDifftasticDiffFile>>,
+    normal_side_by_side: Option<Arc<NormalSideBySideDiffFile>>,
+    rows: Arc<Vec<DiffRenderRow>>,
+    parsed_file_index: Option<usize>,
+    highlighted_hunks: Option<Arc<Vec<Vec<DiffLineHighlight>>>>,
+    gutter_layout: DiffGutterLayout,
+    file_lsp_context: Option<DiffFileLspContext>,
+    selected_anchor: Option<DiffAnchor>,
+    stack_visibility: Option<StackFileVisibility>,
+    items: Arc<Vec<DiffViewItem>>,
+    state_message: Option<String>,
+}
+
+#[derive(Clone)]
+enum CombinedDiffViewItem {
+    Header(usize),
+    StackNotice(usize),
+    State {
+        file_index: usize,
+        message: String,
+    },
+    Row {
+        file_index: usize,
+        item: DiffViewItem,
+    },
+    Footer,
+}
+
+fn render_combined_diff_files(
+    state: &Entity<AppState>,
+    app_state: &AppState,
+    detail: &PullRequestDetail,
+    selected_path: Option<&str>,
+    selected_anchor: Option<&DiffAnchor>,
+    review_stack: Arc<ReviewStack>,
+    stack_filter: Option<LayerDiffFilter>,
+    center_mode: ReviewCenterMode,
+    normal_diff_layout: NormalDiffLayout,
+    cx: &App,
+) -> AnyElement {
+    let visible_paths = stack_filter
+        .as_ref()
+        .map(|filter| stack_file_paths_for_filter(review_stack.as_ref(), filter));
+    let contexts = detail
+        .files
+        .iter()
+        .filter(|file| {
+            visible_paths
+                .as_ref()
+                .map(|paths| paths.contains(&file.path))
+                .unwrap_or(true)
+        })
+        .map(|file| {
+            prepare_combined_diff_file_context(
+                state,
+                app_state,
+                detail,
+                file,
+                selected_path,
+                selected_anchor,
+                review_stack.as_ref(),
+                stack_filter.as_ref(),
+                center_mode,
+                normal_diff_layout,
+                cx,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if contexts.is_empty() {
+        return panel_state_text("No files returned for this pull request.").into_any_element();
+    }
+
+    let (items, horizontally_scrollable) = build_combined_diff_view_items(&contexts);
+    let view_state = prepare_combined_diff_view_state(app_state, center_mode);
+    if view_state.list_state.item_count() != items.len() {
+        view_state.list_state.reset(items.len());
+    }
+    scroll_combined_diff_list_to_focus(
+        &view_state,
+        &items,
+        &contexts,
+        selected_path,
+        selected_anchor,
+    );
+
+    if let Some(active_pr_key) = app_state.active_pr_key.clone() {
+        install_combined_diff_scroll_handler(
+            state,
+            &view_state,
+            items.clone(),
+            contexts.clone(),
+            active_pr_key,
+            center_mode,
+        );
+    }
+
+    let state = state.clone();
+    let items = Arc::new(items);
+    let contexts = Arc::new(contexts);
+    let list_state = view_state.list_state.clone();
+    let rows = list(list_state, move |ix, _window, cx| {
+        render_combined_diff_view_item(&state, contexts.as_ref(), items[ix].clone(), ix, cx)
+    })
+    .with_sizing_behavior(ListSizingBehavior::Auto)
+    .flex_grow()
+    .min_h_0();
+
+    let body = if horizontally_scrollable {
+        div()
+            .flex()
+            .flex_col()
+            .flex_grow()
+            .min_h_0()
+            .min_w_0()
+            .id("combined-diff-side-by-side-scroll")
+            .overflow_x_scroll()
+            .child(rows.min_w(px(DIFF_SIDE_BY_SIDE_MIN_WIDTH)))
+            .into_any_element()
+    } else {
+        rows.into_any_element()
+    };
+
+    div()
+        .flex()
+        .flex_col()
+        .flex_grow()
+        .min_h_0()
+        .min_w_0()
+        .bg(diff_editor_bg())
+        .overflow_hidden()
+        .pl(px(DIFF_CONTENT_LEFT_GUTTER))
+        .pr(px(DIFF_CONTENT_RIGHT_GUTTER))
+        .child(body)
+        .into_any_element()
+}
+
+fn prepare_combined_diff_file_context(
+    state: &Entity<AppState>,
+    app_state: &AppState,
+    detail: &PullRequestDetail,
+    file: &PullRequestFile,
+    selected_path: Option<&str>,
+    selected_anchor: Option<&DiffAnchor>,
+    review_stack: &ReviewStack,
+    stack_filter: Option<&LayerDiffFilter>,
+    center_mode: ReviewCenterMode,
+    normal_diff_layout: NormalDiffLayout,
+    cx: &App,
+) -> CombinedDiffFileContext {
+    let original_parsed = find_parsed_diff_file(&detail.parsed_diff, &file.path);
+    let file_content_state = app_state
+        .active_detail_state()
+        .and_then(|detail_state| detail_state.file_content_states.get(&file.path));
+    let prepared_file = file_content_state.and_then(|state| state.prepared.as_ref());
+    let reserve_waypoint_slot = app_state
+        .active_review_session()
+        .map(|session| {
+            session.waymarks.iter().any(|waymark| {
+                matches!(
+                    waymark.location.mode,
+                    ReviewCenterMode::SemanticDiff | ReviewCenterMode::StructuralDiff
+                ) && waymark.location.file_path == file.path
+            })
+        })
+        .unwrap_or(false);
+
+    let mut parsed = original_parsed.cloned().map(Arc::new);
+    let mut parsed_override = None;
+    let mut structural_side_by_side = None;
+    let mut state_message = None;
+    let diff_view_state = if center_mode == ReviewCenterMode::StructuralDiff {
+        let structural_state = app_state
+            .active_detail_state()
+            .and_then(|detail_state| detail_state.structural_diff_states.get(&file.path));
+        match structural_state {
+            None => {
+                state_message = Some("Preparing structural diff with difftastic...".to_string());
+                None
+            }
+            Some(structural_state) if structural_state.loading => {
+                state_message = Some("Building structural diff with difftastic...".to_string());
+                None
+            }
+            Some(structural_state) => {
+                if let Some(error) = structural_state.error.as_deref() {
+                    state_message = Some(format!("Structural diff unavailable: {error}"));
+                    None
+                } else if let Some(structural) = structural_state.diff.as_ref() {
+                    let request_key = structural_state
+                        .request_key
+                        .as_deref()
+                        .unwrap_or("structural");
+                    let view_state = prepare_structural_diff_view_state(
+                        app_state,
+                        detail,
+                        &file.path,
+                        request_key,
+                        structural,
+                    );
+                    let structural_parsed = Arc::new(structural.parsed_file.clone());
+                    parsed = Some(structural_parsed.clone());
+                    parsed_override = Some(structural_parsed);
+                    structural_side_by_side = Some(structural.clone());
+                    Some(view_state)
+                } else {
+                    state_message =
+                        Some("Preparing structural diff with difftastic...".to_string());
+                    None
+                }
+            }
+        }
+    } else {
+        Some(prepare_diff_view_state(app_state, detail, &file.path))
+    };
+
+    let rows = diff_view_state
+        .as_ref()
+        .map(|state| state.rows.clone())
+        .unwrap_or_else(|| Arc::new(Vec::new()));
+    let parsed_file_index = diff_view_state
+        .as_ref()
+        .and_then(|state| state.parsed_file_index);
+    let highlighted_hunks = diff_view_state
+        .as_ref()
+        .and_then(|state| state.highlighted_hunks.clone());
+    let normal_side_by_side = (structural_side_by_side.is_none()
+        && normal_diff_layout == NormalDiffLayout::SideBySide)
+        .then(|| {
+            parsed
+                .as_deref()
+                .filter(|parsed| !parsed.hunks.is_empty() && !parsed.is_binary)
+        })
+        .flatten()
+        .map(|parsed| Arc::new(build_normal_side_by_side_diff_file(parsed)));
+    let stack_visibility =
+        stack_filter.map(|filter| stack_file_visibility(review_stack, filter, &file.path));
+    let gutter_layout = diff_gutter_layout(file, parsed.as_deref(), reserve_waypoint_slot);
+    let file_lsp_context =
+        build_diff_file_lsp_context(state, file.path.as_str(), prepared_file, cx);
+    let selected_anchor = selected_anchor
+        .filter(|anchor| {
+            diff_anchor_matches_file(anchor, &file.path)
+                && (!anchor.file_path.is_empty() || selected_path == Some(file.path.as_str()))
+        })
+        .cloned();
+    let items = state_message
+        .is_none()
+        .then(|| {
+            build_diff_view_items(
+                file,
+                parsed.as_deref(),
+                prepared_file,
+                rows.as_ref(),
+                structural_side_by_side.as_deref(),
+                normal_side_by_side.as_deref(),
+                stack_visibility.as_ref(),
+            )
+        })
+        .unwrap_or_default();
+    let mut header = ReviewFileHeaderProps::from_pull_request_file(file);
+    header.previous_path = parsed
+        .as_ref()
+        .and_then(|parsed| parsed.previous_path.clone());
+    header.binary = parsed
+        .as_ref()
+        .map(|parsed| parsed.is_binary)
+        .unwrap_or(false);
+    header.active = selected_path == Some(file.path.as_str());
+
+    CombinedDiffFileContext {
+        file: file.clone(),
+        header,
+        parsed,
+        parsed_override,
+        structural_side_by_side,
+        normal_side_by_side,
+        rows,
+        parsed_file_index,
+        highlighted_hunks,
+        gutter_layout,
+        file_lsp_context,
+        selected_anchor,
+        stack_visibility,
+        items: Arc::new(items),
+        state_message,
+    }
+}
+
+fn build_combined_diff_view_items(
+    contexts: &[CombinedDiffFileContext],
+) -> (Vec<CombinedDiffViewItem>, bool) {
+    let mut items = Vec::new();
+    let mut horizontally_scrollable = false;
+
+    for (file_index, context) in contexts.iter().enumerate() {
+        items.push(CombinedDiffViewItem::Header(file_index));
+        if context.stack_visibility.is_some() {
+            items.push(CombinedDiffViewItem::StackNotice(file_index));
+        }
+        if let Some(message) = context.state_message.as_ref() {
+            items.push(CombinedDiffViewItem::State {
+                file_index,
+                message: message.clone(),
+            });
+        } else {
+            items.extend(context.items.iter().map(|item| CombinedDiffViewItem::Row {
+                file_index,
+                item: *item,
+            }));
+        }
+        items.push(CombinedDiffViewItem::Footer);
+        horizontally_scrollable = horizontally_scrollable
+            || context.structural_side_by_side.is_some()
+            || context.normal_side_by_side.is_some();
+    }
+
+    (items, horizontally_scrollable)
+}
+
+fn prepare_combined_diff_view_state(
+    app_state: &AppState,
+    center_mode: ReviewCenterMode,
+) -> CombinedDiffViewState {
+    let scope = match center_mode {
+        ReviewCenterMode::StructuralDiff => "combined-structural-diff",
+        ReviewCenterMode::Stack => "combined-stack-diff",
+        _ => "combined-files-diff",
+    };
+    let key = review_cache_key(app_state.active_pr_key.as_deref(), scope);
+    let mut list_states = app_state.combined_diff_view_states.borrow_mut();
+    list_states
+        .entry(key)
+        .or_insert_with(CombinedDiffViewState::new)
+        .clone()
+}
+
+fn scroll_combined_diff_list_to_focus(
+    view_state: &CombinedDiffViewState,
+    items: &[CombinedDiffViewItem],
+    contexts: &[CombinedDiffFileContext],
+    selected_path: Option<&str>,
+    selected_anchor: Option<&DiffAnchor>,
+) {
+    let Some(selected_path) = selected_path else {
+        return;
+    };
+
+    let target_key = selected_anchor
+        .filter(|anchor| diff_anchor_matches_file(anchor, selected_path))
+        .and_then(|anchor| diff_focus_key(selected_path, anchor))
+        .unwrap_or_else(|| combined_file_focus_key(selected_path));
+    let mut last_focus_key = view_state.last_focus_key.borrow_mut();
+    if last_focus_key.as_deref() == Some(target_key.as_str()) {
+        return;
+    }
+
+    let item_ix = selected_anchor
+        .filter(|anchor| diff_anchor_matches_file(anchor, selected_path))
+        .and_then(|anchor| {
+            find_combined_diff_anchor_item_index(items, contexts, selected_path, anchor)
+        })
+        .or_else(|| find_combined_diff_file_header_index(items, contexts, selected_path));
+
+    if let Some(item_ix) = item_ix {
+        view_state.list_state.scroll_to(ListOffset {
+            item_ix: item_ix.saturating_sub(2),
+            offset_in_item: px(0.0),
+        });
+        *last_focus_key = Some(target_key);
+    }
+}
+
+fn install_combined_diff_scroll_handler(
+    state: &Entity<AppState>,
+    view_state: &CombinedDiffViewState,
+    items: Vec<CombinedDiffViewItem>,
+    contexts: Vec<CombinedDiffFileContext>,
+    active_pr_key: String,
+    center_mode: ReviewCenterMode,
+) {
+    let list_state = view_state.list_state.clone();
+    let last_focus_key = view_state.last_focus_key.clone();
+    let state_for_scroll = state.clone();
+    let items = Arc::new(items);
+    let contexts = Arc::new(contexts);
+    list_state.clone().set_scroll_handler(move |_, window, _| {
+        let state = state_for_scroll.clone();
+        let list_state = list_state.clone();
+        let last_focus_key = last_focus_key.clone();
+        let items = items.clone();
+        let contexts = contexts.clone();
+        let active_pr_key = active_pr_key.clone();
+        window.on_next_frame(move |window, cx| {
+            let scroll_top = list_state.logical_scroll_top();
+            let compact = scroll_top.item_ix > 0 || scroll_top.offset_in_item > px(0.0);
+            let focus = combined_diff_scroll_focus_for_item_index(
+                items.as_ref(),
+                contexts.as_ref(),
+                scroll_top.item_ix,
+            );
+            let mut should_load_content = false;
+            let mut should_load_structural = false;
+            state.update(cx, |state, cx| {
+                if state.active_surface != PullRequestSurface::Files
+                    || state.active_pr_key.as_deref() != Some(active_pr_key.as_str())
+                    || state
+                        .active_review_session()
+                        .map(|session| session.center_mode != center_mode)
+                        .unwrap_or(true)
+                {
+                    return;
+                }
+
+                if let Some(focus) = focus.as_ref() {
+                    if state.selected_file_path.as_deref() != Some(focus.file_path.as_str()) {
+                        state.selected_file_path = Some(focus.file_path.clone());
+                        state.selected_diff_anchor = None;
+                        *last_focus_key.borrow_mut() =
+                            Some(combined_file_focus_key(&focus.file_path));
+                        should_load_content = true;
+                        should_load_structural = center_mode == ReviewCenterMode::StructuralDiff;
+                        cx.notify();
+                    }
+                    state.set_review_scroll_focus(
+                        center_mode,
+                        focus.file_path.clone(),
+                        focus.line,
+                        focus.side.clone(),
+                        focus.anchor.clone(),
+                    );
+                }
+
+                if state.pr_header_compact != compact {
+                    state.pr_header_compact = compact;
+                    cx.notify();
+                }
+            });
+
+            if should_load_structural {
+                ensure_selected_structural_diff_loaded(&state, window, cx);
+            }
+            if should_load_content {
+                ensure_selected_file_content_loaded(&state, window, cx);
+            }
+        });
+    });
+}
+
+fn render_combined_diff_view_item(
+    state: &Entity<AppState>,
+    contexts: &[CombinedDiffFileContext],
+    item: CombinedDiffViewItem,
+    item_ix: usize,
+    cx: &App,
+) -> AnyElement {
+    match item {
+        CombinedDiffViewItem::Header(file_index) => contexts
+            .get(file_index)
+            .map(|context| {
+                div()
+                    .ml(px(DIFF_SECTION_LEFT_MARGIN))
+                    .mr(px(DIFF_SECTION_RIGHT_MARGIN))
+                    .mt(if item_ix == 0 {
+                        px(DIFF_FILE_HEADER_TOP_MARGIN_FIRST)
+                    } else {
+                        px(DIFF_FILE_HEADER_TOP_MARGIN)
+                    })
+                    .mb(px(DIFF_FILE_HEADER_BOTTOM_MARGIN))
+                    .child(render_review_file_header(context.header.clone()))
+                    .into_any_element()
+            })
+            .unwrap_or_else(|| div().into_any_element()),
+        CombinedDiffViewItem::StackNotice(file_index) => contexts
+            .get(file_index)
+            .and_then(|context| context.stack_visibility.as_ref())
+            .map(|visibility| {
+                render_combined_diff_body_row(
+                    render_stack_layer_diff_notice(visibility).into_any_element(),
+                )
+            })
+            .unwrap_or_else(|| div().into_any_element()),
+        CombinedDiffViewItem::State {
+            file_index,
+            message,
+        } => contexts
+            .get(file_index)
+            .map(|_| {
+                render_combined_diff_body_row(render_diff_state_row(message).into_any_element())
+            })
+            .unwrap_or_else(|| div().into_any_element()),
+        CombinedDiffViewItem::Row { file_index, item } => contexts
+            .get(file_index)
+            .map(|context| render_combined_diff_row_item(state, context, item, cx))
+            .unwrap_or_else(|| div().into_any_element()),
+        CombinedDiffViewItem::Footer => div().h(px(12.0)).into_any_element(),
+    }
+}
+
+fn render_combined_diff_row_item(
+    state: &Entity<AppState>,
+    context: &CombinedDiffFileContext,
+    item: DiffViewItem,
+    cx: &App,
+) -> AnyElement {
+    let row = match item {
+        DiffViewItem::Gap(gap) => {
+            render_diff_gap_row(gap, context.gutter_layout).into_any_element()
+        }
+        DiffViewItem::StackLayerEmpty => render_diff_state_row(
+            "No changed hunks in this file belong to the selected stack layer.",
+        )
+        .into_any_element(),
+        DiffViewItem::Row(row_ix) => context
+            .rows
+            .get(row_ix)
+            .map(|row| {
+                render_virtualized_diff_row(
+                    state,
+                    context.gutter_layout,
+                    context.parsed_file_index,
+                    context.parsed_override.as_deref(),
+                    context.structural_side_by_side.as_deref(),
+                    context.normal_side_by_side.as_deref(),
+                    context.highlighted_hunks.as_deref(),
+                    context.file_lsp_context.as_ref(),
+                    row,
+                    context.selected_anchor.as_ref(),
+                    cx,
+                )
+                .into_any_element()
+            })
+            .unwrap_or_else(|| div().into_any_element()),
+    };
+
+    render_combined_diff_body_row(row)
+}
+
+fn render_combined_diff_body_row(child: AnyElement) -> AnyElement {
+    div()
+        .ml(px(DIFF_SECTION_BODY_LEFT_MARGIN))
+        .mr(px(DIFF_SECTION_BODY_RIGHT_MARGIN))
+        .border_l(px(1.0))
+        .border_r(px(1.0))
+        .border_color(diff_annotation_border())
+        .child(child)
+        .into_any_element()
+}
+
+fn combined_diff_scroll_focus_for_item_index(
+    items: &[CombinedDiffViewItem],
+    contexts: &[CombinedDiffFileContext],
+    item_ix: usize,
+) -> Option<DiffScrollFocus> {
+    if items.is_empty() {
+        return None;
+    }
+
+    let item_ix = item_ix.min(items.len().saturating_sub(1));
+    for ix in item_ix..items.len() {
+        if let Some(focus) = combined_diff_scroll_focus_for_item(&items[ix], contexts) {
+            return Some(focus);
+        }
+    }
+
+    (0..item_ix)
+        .rev()
+        .find_map(|ix| combined_diff_scroll_focus_for_item(&items[ix], contexts))
+}
+
+fn combined_diff_scroll_focus_for_item(
+    item: &CombinedDiffViewItem,
+    contexts: &[CombinedDiffFileContext],
+) -> Option<DiffScrollFocus> {
+    match item {
+        CombinedDiffViewItem::Header(file_index)
+        | CombinedDiffViewItem::StackNotice(file_index)
+        | CombinedDiffViewItem::State { file_index, .. } => contexts
+            .get(*file_index)
+            .map(|context| combined_file_scroll_focus(&context.file.path)),
+        CombinedDiffViewItem::Row { file_index, item } => {
+            let context = contexts.get(*file_index)?;
+            context
+                .parsed
+                .as_deref()
+                .and_then(|parsed| {
+                    diff_scroll_focus_for_item(
+                        *item,
+                        context.rows.as_ref(),
+                        parsed,
+                        context.file.path.as_str(),
+                    )
+                })
+                .or_else(|| Some(combined_file_scroll_focus(&context.file.path)))
+        }
+        CombinedDiffViewItem::Footer => None,
+    }
+}
+
+fn combined_file_scroll_focus(file_path: &str) -> DiffScrollFocus {
+    DiffScrollFocus {
+        file_path: file_path.to_string(),
+        line: None,
+        side: None,
+        anchor: None,
+    }
+}
+
+fn find_combined_diff_anchor_item_index(
+    items: &[CombinedDiffViewItem],
+    contexts: &[CombinedDiffFileContext],
+    file_path: &str,
+    anchor: &DiffAnchor,
+) -> Option<usize> {
+    let context_ix = contexts
+        .iter()
+        .position(|context| context.file.path == file_path)?;
+    let context = contexts.get(context_ix)?;
+    let local_ix = context.parsed.as_deref().and_then(|parsed| {
+        find_diff_focus_item_index(
+            context.items.as_ref(),
+            context.rows.as_ref(),
+            parsed,
+            context.structural_side_by_side.as_deref(),
+            context.normal_side_by_side.as_deref(),
+            anchor,
+        )
+    })?;
+
+    let mut seen_rows = 0usize;
+    for (item_ix, item) in items.iter().enumerate() {
+        if matches!(
+            item,
+            CombinedDiffViewItem::Row {
+                file_index,
+                ..
+            } if *file_index == context_ix
+        ) {
+            if seen_rows == local_ix {
+                return Some(item_ix);
+            }
+            seen_rows += 1;
+        }
+    }
+
+    None
+}
+
+fn find_combined_diff_file_header_index(
+    items: &[CombinedDiffViewItem],
+    contexts: &[CombinedDiffFileContext],
+    file_path: &str,
+) -> Option<usize> {
+    items.iter().position(|item| {
+        matches!(
+            item,
+            CombinedDiffViewItem::Header(file_index)
+                if contexts
+                    .get(*file_index)
+                    .map(|context| context.file.path == file_path)
+                    .unwrap_or(false)
+        )
+    })
+}
+
+fn combined_file_focus_key(file_path: &str) -> String {
+    format!("file:{file_path}")
+}
+
+fn diff_anchor_matches_file(anchor: &DiffAnchor, fallback_file_path: &str) -> bool {
+    if anchor.file_path.is_empty() {
+        true
+    } else {
+        anchor.file_path == fallback_file_path
+    }
+}
+
 fn render_structural_file_diff(
     state: &Entity<AppState>,
     app_state: &AppState,
@@ -7881,6 +8606,7 @@ fn render_structural_file_diff(
         diff_view_state,
         review_stack,
         None,
+        NormalDiffLayout::Unified,
         cx,
     )
     .into_any_element()
@@ -7897,6 +8623,7 @@ fn render_file_diff(
     diff_view_state: DiffFileViewState,
     review_stack: Arc<ReviewStack>,
     stack_filter: Option<LayerDiffFilter>,
+    normal_diff_layout: NormalDiffLayout,
     cx: &App,
 ) -> impl IntoElement {
     let rows = diff_view_state.rows.clone();
@@ -7923,6 +8650,11 @@ fn render_file_diff(
     let stack_visibility = stack_filter
         .as_ref()
         .map(|filter| stack_file_visibility(review_stack.as_ref(), filter, &file.path));
+    let normal_side_by_side = (structural_side_by_side.is_none()
+        && normal_diff_layout == NormalDiffLayout::SideBySide)
+        .then(|| parsed.filter(|parsed| !parsed.hunks.is_empty() && !parsed.is_binary))
+        .flatten()
+        .map(|parsed| Arc::new(build_normal_side_by_side_diff_file(parsed)));
 
     let items = build_diff_view_items(
         file,
@@ -7930,33 +8662,80 @@ fn render_file_diff(
         prepared_file.as_ref(),
         &rows,
         structural_side_by_side.as_deref(),
+        normal_side_by_side.as_deref(),
         stack_visibility.as_ref(),
     );
 
     if list_state.item_count() != items.len() {
         list_state.reset(items.len());
     }
+    scroll_diff_list_to_focus(
+        &diff_view_state,
+        &items,
+        &rows,
+        parsed,
+        structural_side_by_side.as_deref(),
+        normal_side_by_side.as_deref(),
+        selected_anchor.as_ref(),
+        file.path.as_str(),
+    );
 
     if let Some(active_pr_key) = state.read(cx).active_pr_key.clone() {
         let state_for_scroll = state.clone();
         let list_state_for_scroll = list_state.clone();
+        let items_for_scroll_focus = Arc::new(items.clone());
+        let rows_for_scroll_focus = rows.clone();
+        let parsed_for_scroll_focus = parsed.cloned();
+        let file_path_for_scroll_focus = file.path.clone();
         list_state.set_scroll_handler(move |_, window, _| {
             let state = state_for_scroll.clone();
             let list_state = list_state_for_scroll.clone();
             let active_pr_key = active_pr_key.clone();
+            let items_for_scroll_focus = items_for_scroll_focus.clone();
+            let rows_for_scroll_focus = rows_for_scroll_focus.clone();
+            let parsed_for_scroll_focus = parsed_for_scroll_focus.clone();
+            let file_path_for_scroll_focus = file_path_for_scroll_focus.clone();
             window.on_next_frame(move |_, cx| {
                 let scroll_top = list_state.logical_scroll_top();
                 let compact = scroll_top.item_ix > 0 || scroll_top.offset_in_item > px(0.0);
+                let focus = parsed_for_scroll_focus.as_ref().and_then(|parsed| {
+                    diff_scroll_focus_for_item_index(
+                        items_for_scroll_focus.as_ref(),
+                        rows_for_scroll_focus.as_ref(),
+                        parsed,
+                        scroll_top.item_ix,
+                        file_path_for_scroll_focus.as_str(),
+                    )
+                });
                 state.update(cx, |state, cx| {
                     if state.active_surface != PullRequestSurface::Files
                         || state.active_pr_key.as_deref() != Some(active_pr_key.as_str())
-                        || state.pr_header_compact == compact
                     {
                         return;
                     }
 
-                    state.pr_header_compact = compact;
-                    cx.notify();
+                    if let Some(focus) = focus {
+                        if let Some(mode) = state.active_review_session().and_then(|session| {
+                            matches!(
+                                session.center_mode,
+                                ReviewCenterMode::SemanticDiff | ReviewCenterMode::StructuralDiff
+                            )
+                            .then_some(session.center_mode)
+                        }) {
+                            state.set_review_scroll_focus(
+                                mode,
+                                focus.file_path,
+                                focus.line,
+                                focus.side,
+                                focus.anchor,
+                            );
+                        }
+                    }
+
+                    if state.pr_header_compact != compact {
+                        state.pr_header_compact = compact;
+                        cx.notify();
+                    }
                 });
             });
         });
@@ -7990,6 +8769,7 @@ fn render_file_diff(
                         parsed_file_index,
                         parsed_override,
                         structural_side_by_side,
+                        normal_side_by_side,
                         highlighted_hunks,
                         file_lsp_context,
                         selected_anchor,
@@ -8008,6 +8788,7 @@ fn render_virtualized_diff_rows(
     parsed_file_index: Option<usize>,
     parsed_file_override: Option<Arc<ParsedDiffFile>>,
     structural_side_by_side: Option<Arc<crate::difftastic::AdaptedDifftasticDiffFile>>,
+    normal_side_by_side: Option<Arc<NormalSideBySideDiffFile>>,
     highlighted_hunks: Option<Arc<Vec<Vec<DiffLineHighlight>>>>,
     file_lsp_context: Option<DiffFileLspContext>,
     selected_anchor: Option<DiffAnchor>,
@@ -8015,7 +8796,8 @@ fn render_virtualized_diff_rows(
     items: Arc<Vec<DiffViewItem>>,
 ) -> AnyElement {
     let state = state.clone();
-    let horizontally_scrollable = structural_side_by_side.is_some();
+    let horizontally_scrollable =
+        structural_side_by_side.is_some() || normal_side_by_side.is_some();
 
     let rows = list(list_state, move |ix, _window, cx| match items[ix] {
         DiffViewItem::Gap(gap) => render_diff_gap_row(gap, gutter_layout).into_any_element(),
@@ -8029,6 +8811,7 @@ fn render_virtualized_diff_rows(
             parsed_file_index,
             parsed_file_override.as_deref(),
             structural_side_by_side.as_deref(),
+            normal_side_by_side.as_deref(),
             highlighted_hunks.as_deref(),
             file_lsp_context.as_ref(),
             &rows[row_ix],
@@ -8048,9 +8831,9 @@ fn render_virtualized_diff_rows(
             .flex_grow()
             .min_h_0()
             .min_w_0()
-            .id("structural-side-by-side-scroll")
+            .id("diff-side-by-side-scroll")
             .overflow_x_scroll()
-            .child(rows.min_w(px(STRUCTURAL_SIDE_BY_SIDE_MIN_WIDTH)))
+            .child(rows.min_w(px(DIFF_SIDE_BY_SIDE_MIN_WIDTH)))
             .into_any_element()
     } else {
         rows.into_any_element()
@@ -8062,6 +8845,371 @@ enum DiffViewItem {
     Row(usize),
     Gap(DiffGapSummary),
     StackLayerEmpty,
+}
+
+#[derive(Clone)]
+struct NormalSideBySideDiffFile {
+    hunks: Vec<NormalSideBySideHunk>,
+    line_map: Vec<Vec<Option<NormalSideBySideLineMap>>>,
+}
+
+#[derive(Clone)]
+struct NormalSideBySideHunk {
+    rows: Vec<NormalSideBySideRow>,
+}
+
+#[derive(Clone, Copy)]
+struct NormalSideBySideRow {
+    left_line_index: Option<usize>,
+    right_line_index: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+struct NormalSideBySideLineMap {
+    row_index: usize,
+    primary: bool,
+}
+
+#[derive(Clone)]
+struct DiffScrollFocus {
+    file_path: String,
+    line: Option<usize>,
+    side: Option<String>,
+    anchor: Option<DiffAnchor>,
+}
+
+fn build_normal_side_by_side_diff_file(parsed: &ParsedDiffFile) -> NormalSideBySideDiffFile {
+    let mut hunks = Vec::with_capacity(parsed.hunks.len());
+    let mut line_map = Vec::with_capacity(parsed.hunks.len());
+
+    for hunk in &parsed.hunks {
+        let mut rows = Vec::new();
+        let mut hunk_line_map = vec![None; hunk.lines.len()];
+        let mut line_ix = 0usize;
+
+        while line_ix < hunk.lines.len() {
+            match hunk.lines[line_ix].kind {
+                DiffLineKind::Addition | DiffLineKind::Deletion => {
+                    let mut deletions = Vec::new();
+                    let mut additions = Vec::new();
+
+                    while line_ix < hunk.lines.len()
+                        && matches!(
+                            hunk.lines[line_ix].kind,
+                            DiffLineKind::Addition | DiffLineKind::Deletion
+                        )
+                    {
+                        match hunk.lines[line_ix].kind {
+                            DiffLineKind::Deletion => deletions.push(line_ix),
+                            DiffLineKind::Addition => additions.push(line_ix),
+                            _ => {}
+                        }
+                        line_ix += 1;
+                    }
+
+                    let row_count = deletions.len().max(additions.len());
+                    for row_offset in 0..row_count {
+                        let left_line_index = deletions.get(row_offset).copied();
+                        let right_line_index = additions.get(row_offset).copied();
+                        let row_index = rows.len();
+                        let primary_line_index = match (left_line_index, right_line_index) {
+                            (Some(left), Some(right)) => left.min(right),
+                            (Some(left), None) => left,
+                            (None, Some(right)) => right,
+                            (None, None) => continue,
+                        };
+
+                        if let Some(left) = left_line_index {
+                            hunk_line_map[left] = Some(NormalSideBySideLineMap {
+                                row_index,
+                                primary: left == primary_line_index,
+                            });
+                        }
+                        if let Some(right) = right_line_index {
+                            hunk_line_map[right] = Some(NormalSideBySideLineMap {
+                                row_index,
+                                primary: right == primary_line_index,
+                            });
+                        }
+
+                        rows.push(NormalSideBySideRow {
+                            left_line_index,
+                            right_line_index,
+                        });
+                    }
+                }
+                DiffLineKind::Context | DiffLineKind::Meta => {
+                    let row_index = rows.len();
+                    hunk_line_map[line_ix] = Some(NormalSideBySideLineMap {
+                        row_index,
+                        primary: true,
+                    });
+                    rows.push(NormalSideBySideRow {
+                        left_line_index: Some(line_ix),
+                        right_line_index: Some(line_ix),
+                    });
+                    line_ix += 1;
+                }
+            }
+        }
+
+        hunks.push(NormalSideBySideHunk { rows });
+        line_map.push(hunk_line_map);
+    }
+
+    NormalSideBySideDiffFile { hunks, line_map }
+}
+
+fn diff_scroll_focus_for_item_index(
+    items: &[DiffViewItem],
+    rows: &[DiffRenderRow],
+    parsed: &ParsedDiffFile,
+    item_ix: usize,
+    fallback_file_path: &str,
+) -> Option<DiffScrollFocus> {
+    if items.is_empty() {
+        return None;
+    }
+
+    let item_ix = item_ix.min(items.len().saturating_sub(1));
+    for ix in item_ix..items.len() {
+        if let Some(focus) = diff_scroll_focus_for_item(items[ix], rows, parsed, fallback_file_path)
+        {
+            return Some(focus);
+        }
+    }
+
+    (0..item_ix)
+        .rev()
+        .find_map(|ix| diff_scroll_focus_for_item(items[ix], rows, parsed, fallback_file_path))
+}
+
+fn diff_scroll_focus_for_item(
+    item: DiffViewItem,
+    rows: &[DiffRenderRow],
+    parsed: &ParsedDiffFile,
+    fallback_file_path: &str,
+) -> Option<DiffScrollFocus> {
+    let DiffViewItem::Row(row_ix) = item else {
+        return None;
+    };
+    let DiffRenderRow::Line {
+        hunk_index,
+        line_index,
+    } = rows.get(row_ix)?
+    else {
+        return None;
+    };
+    let hunk = parsed.hunks.get(*hunk_index)?;
+    let line = hunk.lines.get(*line_index)?;
+    let file_path = if parsed.path.is_empty() {
+        fallback_file_path
+    } else {
+        parsed.path.as_str()
+    };
+    let target = build_review_line_action_target(file_path, Some(hunk.header.as_str()), line)?;
+    let line = target
+        .anchor
+        .line
+        .and_then(|line| usize::try_from(line).ok())
+        .filter(|line| *line > 0);
+
+    Some(DiffScrollFocus {
+        file_path: target.anchor.file_path.clone(),
+        line,
+        side: target.anchor.side.clone(),
+        anchor: Some(target.anchor),
+    })
+}
+
+fn scroll_diff_list_to_focus(
+    view_state: &DiffFileViewState,
+    items: &[DiffViewItem],
+    rows: &[DiffRenderRow],
+    parsed: Option<&ParsedDiffFile>,
+    structural_side_by_side: Option<&crate::difftastic::AdaptedDifftasticDiffFile>,
+    normal_side_by_side: Option<&NormalSideBySideDiffFile>,
+    selected_anchor: Option<&DiffAnchor>,
+    fallback_file_path: &str,
+) {
+    let Some(anchor) = selected_anchor else {
+        return;
+    };
+    let Some(focus_key) = diff_focus_key(fallback_file_path, anchor) else {
+        return;
+    };
+    let mut last_focus_key = view_state.last_focus_key.borrow_mut();
+    if last_focus_key.as_deref() == Some(focus_key.as_str()) {
+        return;
+    }
+
+    if let Some(item_ix) = parsed.and_then(|parsed| {
+        find_diff_focus_item_index(
+            items,
+            rows,
+            parsed,
+            structural_side_by_side,
+            normal_side_by_side,
+            anchor,
+        )
+    }) {
+        view_state.list_state.scroll_to(ListOffset {
+            item_ix: item_ix.saturating_sub(6),
+            offset_in_item: px(0.0),
+        });
+        *last_focus_key = Some(focus_key);
+    }
+}
+
+fn diff_focus_key(fallback_file_path: &str, anchor: &DiffAnchor) -> Option<String> {
+    anchor
+        .line
+        .or_else(|| anchor.hunk_header.as_ref().map(|_| 0))?;
+    Some(format!(
+        "{}:{}:{}:{}",
+        if anchor.file_path.is_empty() {
+            fallback_file_path
+        } else {
+            anchor.file_path.as_str()
+        },
+        anchor.side.as_deref().unwrap_or(""),
+        anchor.line.unwrap_or_default(),
+        anchor.hunk_header.as_deref().unwrap_or("")
+    ))
+}
+
+fn find_diff_focus_item_index(
+    items: &[DiffViewItem],
+    rows: &[DiffRenderRow],
+    parsed: &ParsedDiffFile,
+    structural_side_by_side: Option<&crate::difftastic::AdaptedDifftasticDiffFile>,
+    normal_side_by_side: Option<&NormalSideBySideDiffFile>,
+    anchor: &DiffAnchor,
+) -> Option<usize> {
+    let direct_row_ix = rows.iter().position(|row| match row {
+        DiffRenderRow::HunkHeader { hunk_index } => {
+            anchor.line.is_none()
+                && anchor.hunk_header.as_deref().is_some_and(|header| {
+                    parsed
+                        .hunks
+                        .get(*hunk_index)
+                        .map(|hunk| hunk.header == header)
+                        .unwrap_or(false)
+                })
+        }
+        DiffRenderRow::Line {
+            hunk_index,
+            line_index,
+        } => parsed
+            .hunks
+            .get(*hunk_index)
+            .and_then(|hunk| hunk.lines.get(*line_index))
+            .map(|line| line_matches_diff_anchor(line, Some(anchor)))
+            .unwrap_or(false),
+        _ => false,
+    });
+    if let Some(row_ix) = direct_row_ix {
+        if let Some(item_ix) = items.iter().position(
+            |item| matches!(item, DiffViewItem::Row(item_row_ix) if *item_row_ix == row_ix),
+        ) {
+            return Some(item_ix);
+        }
+    }
+
+    let row_ix = {
+        let (hunk_index, line_index) = find_parsed_line_index_for_anchor(parsed, anchor)?;
+        side_by_side_primary_row_index(
+            rows,
+            hunk_index,
+            line_index,
+            structural_side_by_side,
+            normal_side_by_side,
+        )
+    }?;
+
+    items
+        .iter()
+        .position(|item| matches!(item, DiffViewItem::Row(item_row_ix) if *item_row_ix == row_ix))
+}
+
+fn find_parsed_line_index_for_anchor(
+    parsed: &ParsedDiffFile,
+    anchor: &DiffAnchor,
+) -> Option<(usize, usize)> {
+    for (hunk_index, hunk) in parsed.hunks.iter().enumerate() {
+        for (line_index, line) in hunk.lines.iter().enumerate() {
+            if line_matches_diff_anchor(line, Some(anchor)) {
+                return Some((hunk_index, line_index));
+            }
+        }
+    }
+
+    None
+}
+
+fn side_by_side_primary_row_index(
+    rows: &[DiffRenderRow],
+    hunk_index: usize,
+    line_index: usize,
+    structural_side_by_side: Option<&crate::difftastic::AdaptedDifftasticDiffFile>,
+    normal_side_by_side: Option<&NormalSideBySideDiffFile>,
+) -> Option<usize> {
+    let target_row_index = structural_side_by_side
+        .and_then(|side_by_side| {
+            side_by_side
+                .side_by_side_line_map
+                .get(hunk_index)
+                .and_then(|lines| lines.get(line_index))
+                .and_then(|entry| *entry)
+        })
+        .map(|entry| entry.row_index)
+        .or_else(|| {
+            normal_side_by_side
+                .and_then(|side_by_side| {
+                    side_by_side
+                        .line_map
+                        .get(hunk_index)
+                        .and_then(|lines| lines.get(line_index))
+                        .and_then(|entry| *entry)
+                })
+                .map(|entry| entry.row_index)
+        })?;
+
+    rows.iter().position(|row| {
+        let DiffRenderRow::Line {
+            hunk_index: row_hunk_index,
+            line_index: row_line_index,
+        } = row
+        else {
+            return false;
+        };
+
+        if *row_hunk_index != hunk_index {
+            return false;
+        }
+
+        structural_side_by_side
+            .and_then(|side_by_side| {
+                side_by_side
+                    .side_by_side_line_map
+                    .get(hunk_index)
+                    .and_then(|lines| lines.get(*row_line_index))
+                    .and_then(|entry| *entry)
+            })
+            .map(|entry| entry.primary && entry.row_index == target_row_index)
+            .or_else(|| {
+                normal_side_by_side
+                    .and_then(|side_by_side| {
+                        side_by_side
+                            .line_map
+                            .get(hunk_index)
+                            .and_then(|lines| lines.get(*row_line_index))
+                            .and_then(|entry| *entry)
+                    })
+                    .map(|entry| entry.primary && entry.row_index == target_row_index)
+            })
+            .unwrap_or(false)
+    })
 }
 
 #[derive(Clone)]
@@ -8464,6 +9612,7 @@ fn build_diff_view_items(
     prepared_file: Option<&PreparedFileContent>,
     rows: &[DiffRenderRow],
     structural_side_by_side: Option<&crate::difftastic::AdaptedDifftasticDiffFile>,
+    normal_side_by_side: Option<&NormalSideBySideDiffFile>,
     stack_visibility: Option<&StackFileVisibility>,
 ) -> Vec<DiffViewItem> {
     let mut items = Vec::with_capacity(rows.len() + 4);
@@ -8504,16 +9653,30 @@ fn build_diff_view_items(
             DiffRenderRow::Line {
                 hunk_index,
                 line_index,
-            } => structural_side_by_side
-                .and_then(|side_by_side| {
-                    side_by_side
-                        .side_by_side_line_map
-                        .get(*hunk_index)
-                        .and_then(|lines| lines.get(*line_index))
-                        .and_then(|entry| *entry)
-                })
-                .map(|entry| !entry.primary)
-                .unwrap_or(false),
+            } => {
+                let structural_non_primary = structural_side_by_side
+                    .and_then(|side_by_side| {
+                        side_by_side
+                            .side_by_side_line_map
+                            .get(*hunk_index)
+                            .and_then(|lines| lines.get(*line_index))
+                            .and_then(|entry| *entry)
+                    })
+                    .map(|entry| !entry.primary);
+                let normal_non_primary = normal_side_by_side
+                    .and_then(|side_by_side| {
+                        side_by_side
+                            .line_map
+                            .get(*hunk_index)
+                            .and_then(|lines| lines.get(*line_index))
+                            .and_then(|entry| *entry)
+                    })
+                    .map(|entry| !entry.primary);
+
+                structural_non_primary
+                    .or(normal_non_primary)
+                    .unwrap_or(false)
+            }
             _ => false,
         };
 
@@ -9024,6 +10187,7 @@ fn render_virtualized_diff_row(
     parsed_file_index: Option<usize>,
     parsed_file_override: Option<&ParsedDiffFile>,
     structural_side_by_side: Option<&crate::difftastic::AdaptedDifftasticDiffFile>,
+    normal_side_by_side: Option<&NormalSideBySideDiffFile>,
     highlighted_hunks: Option<&Vec<Vec<DiffLineHighlight>>>,
     file_lsp_context: Option<&DiffFileLspContext>,
     row: &DiffRenderRow,
@@ -9141,6 +10305,41 @@ fn render_virtualized_diff_row(
                             });
                     }
 
+                    if let Some(side_by_side) = normal_side_by_side {
+                        let line_map = side_by_side
+                            .line_map
+                            .get(*hunk_index)
+                            .and_then(|lines| lines.get(*line_index))
+                            .and_then(|entry| *entry)?;
+                        if !line_map.primary {
+                            return Some(div().into_any_element());
+                        }
+
+                        return side_by_side
+                            .hunks
+                            .get(*hunk_index)
+                            .and_then(|side_by_side_hunk| {
+                                side_by_side_hunk.rows.get(line_map.row_index)
+                            })
+                            .map(|side_by_side_row| {
+                                render_normal_side_by_side_diff_row(
+                                    state,
+                                    gutter_layout.reserve_waypoint_slot,
+                                    detail,
+                                    parsed,
+                                    path,
+                                    hunk.header.as_str(),
+                                    hunk,
+                                    highlighted_hunks.and_then(|hunks| hunks.get(*hunk_index)),
+                                    side_by_side_row,
+                                    selected_anchor,
+                                    file_lsp_context,
+                                    cx,
+                                )
+                                .into_any_element()
+                            });
+                    }
+
                     hunk.lines.get(*line_index).map(|line| {
                         let hunk_header = hunk.header.as_str();
                         let highlight = highlighted_hunks
@@ -9189,9 +10388,128 @@ fn render_virtualized_diff_row(
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum StructuralDiffSide {
+enum SideBySideDiffSide {
     Left,
     Right,
+}
+
+fn render_normal_side_by_side_diff_row(
+    state: &Entity<AppState>,
+    reserve_waypoint_slot: bool,
+    detail: Option<&PullRequestDetail>,
+    parsed_file: &ParsedDiffFile,
+    file_path: &str,
+    hunk_header: &str,
+    hunk: &ParsedDiffHunk,
+    highlighted_hunk: Option<&Vec<DiffLineHighlight>>,
+    row: &NormalSideBySideRow,
+    selected_anchor: Option<&DiffAnchor>,
+    file_lsp_context: Option<&DiffFileLspContext>,
+    cx: &App,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .w_full()
+        .min_w_0()
+        .bg(diff_editor_bg())
+        .child(render_normal_side_by_side_cell(
+            state,
+            SideBySideDiffSide::Left,
+            reserve_waypoint_slot,
+            file_path,
+            hunk_header,
+            hunk,
+            highlighted_hunk,
+            row.left_line_index,
+            selected_anchor,
+            None,
+            detail,
+            parsed_file,
+            cx,
+        ))
+        .child(render_normal_side_by_side_cell(
+            state,
+            SideBySideDiffSide::Right,
+            reserve_waypoint_slot,
+            file_path,
+            hunk_header,
+            hunk,
+            highlighted_hunk,
+            row.right_line_index,
+            selected_anchor,
+            file_lsp_context,
+            detail,
+            parsed_file,
+            cx,
+        ))
+}
+
+fn render_normal_side_by_side_cell(
+    state: &Entity<AppState>,
+    side: SideBySideDiffSide,
+    reserve_waypoint_slot: bool,
+    file_path: &str,
+    hunk_header: &str,
+    hunk: &ParsedDiffHunk,
+    highlighted_hunk: Option<&Vec<DiffLineHighlight>>,
+    line_index: Option<usize>,
+    selected_anchor: Option<&DiffAnchor>,
+    file_lsp_context: Option<&DiffFileLspContext>,
+    detail: Option<&PullRequestDetail>,
+    parsed_file: &ParsedDiffFile,
+    cx: &App,
+) -> AnyElement {
+    let gutter_layout = side_by_side_gutter_layout(side, reserve_waypoint_slot);
+    let content = line_index
+        .and_then(|line_index| hunk.lines.get(line_index).map(|line| (line_index, line)))
+        .map(|(line_index, line)| {
+            let highlight = highlighted_hunk
+                .and_then(|lines| lines.get(line_index))
+                .cloned()
+                .unwrap_or_default();
+            let line_lsp_context = (side == SideBySideDiffSide::Right)
+                .then(|| build_diff_line_lsp_context(file_lsp_context, line))
+                .flatten();
+            let target_side = match side {
+                SideBySideDiffSide::Left => TempSourceSide::Base,
+                SideBySideDiffSide::Right => TempSourceSide::Head,
+            };
+            let temp_source_target = detail.and_then(|detail| {
+                temp_source_target_for_diff_side(detail, parsed_file, line, target_side)
+            });
+
+            render_reviewable_diff_line(
+                state,
+                gutter_layout,
+                file_path,
+                Some(hunk_header),
+                line,
+                Some(highlight.syntax_spans.as_slice()),
+                Some(highlight.emphasis_ranges.as_slice()),
+                selected_anchor,
+                line_lsp_context.as_ref(),
+                temp_source_target,
+                cx,
+            )
+            .into_any_element()
+        })
+        .unwrap_or_else(|| {
+            render_empty_side_by_side_cell(
+                gutter_layout,
+                side == SideBySideDiffSide::Left
+                    && should_stripe_missing_previous_side(parsed_file),
+            )
+            .into_any_element()
+        });
+
+    div()
+        .flex_1()
+        .min_w_0()
+        .when(side == SideBySideDiffSide::Left, |el| {
+            el.border_r(px(1.0)).border_color(diff_gutter_separator())
+        })
+        .child(content)
+        .into_any_element()
 }
 
 fn render_structural_side_by_side_diff_row(
@@ -9213,7 +10531,7 @@ fn render_structural_side_by_side_diff_row(
         .bg(diff_editor_bg())
         .child(render_structural_side_by_side_cell(
             state,
-            StructuralDiffSide::Left,
+            SideBySideDiffSide::Left,
             gutter_layout.reserve_waypoint_slot,
             file_path,
             hunk_header,
@@ -9226,7 +10544,7 @@ fn render_structural_side_by_side_diff_row(
         ))
         .child(render_structural_side_by_side_cell(
             state,
-            StructuralDiffSide::Right,
+            SideBySideDiffSide::Right,
             gutter_layout.reserve_waypoint_slot,
             file_path,
             hunk_header,
@@ -9241,7 +10559,7 @@ fn render_structural_side_by_side_diff_row(
 
 fn render_structural_side_by_side_cell(
     state: &Entity<AppState>,
-    side: StructuralDiffSide,
+    side: SideBySideDiffSide,
     reserve_waypoint_slot: bool,
     file_path: &str,
     hunk_header: &str,
@@ -9252,15 +10570,15 @@ fn render_structural_side_by_side_cell(
     parsed_file: &ParsedDiffFile,
     cx: &App,
 ) -> AnyElement {
-    let gutter_layout = structural_side_by_side_gutter_layout(side, reserve_waypoint_slot);
+    let gutter_layout = side_by_side_gutter_layout(side, reserve_waypoint_slot);
     let content = cell
         .map(|cell| {
-            let line_lsp_context = (side == StructuralDiffSide::Right)
+            let line_lsp_context = (side == SideBySideDiffSide::Right)
                 .then(|| build_diff_line_lsp_context(file_lsp_context, &cell.line))
                 .flatten();
             let target_side = match side {
-                StructuralDiffSide::Left => TempSourceSide::Base,
-                StructuralDiffSide::Right => TempSourceSide::Head,
+                SideBySideDiffSide::Left => TempSourceSide::Base,
+                SideBySideDiffSide::Right => TempSourceSide::Head,
             };
             let temp_source_target = detail.and_then(|detail| {
                 temp_source_target_for_diff_side(detail, parsed_file, &cell.line, target_side)
@@ -9282,86 +10600,122 @@ fn render_structural_side_by_side_cell(
             .into_any_element()
         })
         .unwrap_or_else(|| {
-            render_empty_structural_side_by_side_cell(gutter_layout).into_any_element()
+            render_empty_side_by_side_cell(
+                gutter_layout,
+                side == SideBySideDiffSide::Left
+                    && should_stripe_missing_previous_side(parsed_file),
+            )
+            .into_any_element()
         });
 
     div()
         .flex_1()
         .min_w_0()
-        .when(side == StructuralDiffSide::Left, |el| {
+        .when(side == SideBySideDiffSide::Left, |el| {
             el.border_r(px(1.0)).border_color(diff_gutter_separator())
         })
         .child(content)
         .into_any_element()
 }
 
-fn structural_side_by_side_gutter_layout(
-    side: StructuralDiffSide,
+fn side_by_side_gutter_layout(
+    side: SideBySideDiffSide,
     reserve_waypoint_slot: bool,
 ) -> DiffGutterLayout {
     DiffGutterLayout {
-        show_left_numbers: side == StructuralDiffSide::Left,
-        show_right_numbers: side == StructuralDiffSide::Right,
+        show_left_numbers: side == SideBySideDiffSide::Left,
+        show_right_numbers: side == SideBySideDiffSide::Right,
         reserve_waypoint_slot,
         reserve_source_slot: true,
     }
 }
 
-fn render_empty_structural_side_by_side_cell(gutter_layout: DiffGutterLayout) -> impl IntoElement {
+fn render_empty_side_by_side_cell(
+    gutter_layout: DiffGutterLayout,
+    striped: bool,
+) -> impl IntoElement {
     div()
+        .relative()
         .flex()
         .w_full()
         .min_w_0()
         .min_h(px(DIFF_ROW_HEIGHT))
+        .overflow_hidden()
         .bg(diff_context_bg())
         .font_family(mono_font_family())
         .text_size(px(DIFF_CODE_FONT_SIZE))
         .line_height(px(DIFF_CODE_LINE_HEIGHT))
         .font_weight(FontWeight::MEDIUM)
         .text_color(transparent())
-        .child(
-            div()
-                .flex()
-                .flex_shrink_0()
-                .w(px(gutter_layout.gutter_width()))
-                .min_h(px(DIFF_ROW_HEIGHT))
-                .bg(diff_context_gutter_bg())
-                .border_r(px(1.0))
-                .border_color(diff_gutter_separator())
-                .when(gutter_layout.reserve_source_slot, |el| {
-                    el.child(div().w(px(DIFF_SOURCE_SLOT_WIDTH)).h_full())
-                })
-                .when(gutter_layout.reserve_waypoint_slot, |el| {
-                    el.child(div().w(px(DIFF_WAYPOINT_SLOT_WIDTH)).h_full())
-                })
-                .child(
-                    div()
-                        .w(px(DIFF_LINE_NUMBER_COLUMN_WIDTH))
-                        .px(px(DIFF_LINE_NUMBER_CELL_PADDING_X))
-                        .flex()
-                        .justify_end()
-                        .text_size(px(DIFF_LINE_NUMBER_FONT_SIZE))
-                        .line_height(px(DIFF_CODE_LINE_HEIGHT))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(" "),
-                ),
-        )
-        .child(
-            div()
-                .w(px(DIFF_MARKER_COLUMN_WIDTH))
-                .flex_shrink_0()
-                .min_h(px(DIFF_ROW_HEIGHT))
-                .py(px(1.0))
-                .child(" "),
-        )
-        .child(
-            div()
-                .flex_grow()
-                .min_w_0()
-                .px(px(8.0))
-                .py(px(1.0))
-                .child("\u{00a0}".to_string()),
-        )
+        .when(striped, |el| {
+            let stripe_color: Hsla = with_alpha(fg_subtle(), 0.16).into();
+            el.child(
+                div()
+                    .absolute()
+                    .size_full()
+                    .bg(pattern_slash(stripe_color, 1.0, 7.0)),
+            )
+        })
+        .when(!striped, |el| {
+            el.child(
+                div()
+                    .flex()
+                    .flex_shrink_0()
+                    .w(px(gutter_layout.gutter_width()))
+                    .min_h(px(DIFF_ROW_HEIGHT))
+                    .bg(diff_context_gutter_bg())
+                    .border_r(px(1.0))
+                    .border_color(diff_gutter_separator())
+                    .when(gutter_layout.reserve_source_slot, |el| {
+                        el.child(div().w(px(DIFF_SOURCE_SLOT_WIDTH)).h_full())
+                    })
+                    .when(gutter_layout.reserve_waypoint_slot, |el| {
+                        el.child(div().w(px(DIFF_WAYPOINT_SLOT_WIDTH)).h_full())
+                    })
+                    .child(
+                        div()
+                            .w(px(DIFF_LINE_NUMBER_COLUMN_WIDTH))
+                            .px(px(DIFF_LINE_NUMBER_CELL_PADDING_X))
+                            .flex()
+                            .justify_end()
+                            .text_size(px(DIFF_LINE_NUMBER_FONT_SIZE))
+                            .line_height(px(DIFF_CODE_LINE_HEIGHT))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(" "),
+                    ),
+            )
+            .child(
+                div()
+                    .w(px(DIFF_MARKER_COLUMN_WIDTH))
+                    .flex_shrink_0()
+                    .min_h(px(DIFF_ROW_HEIGHT))
+                    .py(px(1.0))
+                    .child(" "),
+            )
+            .child(
+                div()
+                    .flex_grow()
+                    .min_w_0()
+                    .px(px(8.0))
+                    .py(px(1.0))
+                    .child("\u{00a0}".to_string()),
+            )
+        })
+}
+
+fn should_stripe_missing_previous_side(parsed_file: &ParsedDiffFile) -> bool {
+    let mut has_additions = false;
+    let mut has_removals = false;
+
+    for line in parsed_file.hunks.iter().flat_map(|hunk| hunk.lines.iter()) {
+        match line.kind {
+            DiffLineKind::Addition => has_additions = true,
+            DiffLineKind::Deletion => has_removals = true,
+            DiffLineKind::Context | DiffLineKind::Meta => {}
+        }
+    }
+
+    has_additions && !has_removals
 }
 
 fn render_diff_section_header(label: &str, count: usize) -> impl IntoElement {
@@ -10365,7 +11719,7 @@ const DIFF_LINE_NUMBER_CELL_PADDING_X: f32 = 8.0;
 const DIFF_MARKER_COLUMN_WIDTH: f32 = 16.0;
 const DIFF_SOURCE_SLOT_WIDTH: f32 = DIFF_ROW_HEIGHT;
 const DIFF_WAYPOINT_SLOT_WIDTH: f32 = DIFF_ROW_HEIGHT;
-const STRUCTURAL_SIDE_BY_SIDE_MIN_WIDTH: f32 = 960.0;
+const DIFF_SIDE_BY_SIDE_MIN_WIDTH: f32 = 960.0;
 
 #[derive(Clone, Copy)]
 struct DiffGutterLayout {
@@ -11204,53 +12558,12 @@ fn render_tour_diff_file_header(
     file: Option<&PullRequestFile>,
     parsed_file: &ParsedDiffFile,
 ) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .mb(px(12.0))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(fg_subtle())
-                        .font_family(mono_font_family())
-                        .child("CHANGESET"),
-                )
-                .child(
-                    div()
-                        .text_size(px(14.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(fg_emphasis())
-                        .child(
-                            if parsed_file.previous_path.is_some()
-                                && parsed_file.previous_path.as_deref() != Some(&parsed_file.path)
-                            {
-                                format!(
-                                    "{} -> {}",
-                                    parsed_file.previous_path.as_deref().unwrap_or(""),
-                                    parsed_file.path
-                                )
-                            } else {
-                                parsed_file.path.clone()
-                            },
-                        ),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .gap(px(6.0))
-                .when_some(file, |el, file| {
-                    el.child(render_change_type_chip(&file.change_type))
-                        .child(badge(&format!("+{} / -{}", file.additions, file.deletions)))
-                })
-                .when(parsed_file.is_binary, |el| el.child(badge("binary"))),
-        )
+    let mut props = file
+        .map(ReviewFileHeaderProps::from_pull_request_file)
+        .unwrap_or_else(|| ReviewFileHeaderProps::from_path(parsed_file.path.clone()));
+    props.previous_path = parsed_file.previous_path.clone();
+    props.binary = parsed_file.is_binary;
+    div().mb(px(12.0)).child(render_review_file_header(props))
 }
 
 fn render_tour_diff_preview(
@@ -11289,6 +12602,7 @@ fn render_tour_diff_preview(
                 state,
                 gutter_layout,
                 parsed_file_index,
+                None,
                 None,
                 None,
                 highlighted_hunks.as_deref(),
@@ -11394,8 +12708,15 @@ fn build_tour_diff_preview_items(
     rows: &[DiffRenderRow],
     selected_anchor: Option<&DiffAnchor>,
 ) -> TourDiffPreviewItems {
-    let full_items =
-        build_diff_view_items(file, Some(parsed_file), prepared_file, rows, None, None);
+    let full_items = build_diff_view_items(
+        file,
+        Some(parsed_file),
+        prepared_file,
+        rows,
+        None,
+        None,
+        None,
+    );
     if full_items.len() <= TOUR_PREVIEW_MAX_ITEMS {
         return TourDiffPreviewItems {
             items: full_items,
@@ -11591,11 +12912,13 @@ fn label_for_change_type(change_type: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use crate::diff::parse_unified_diff;
     use crate::state::StructuralDiffFileState;
 
     use super::{
-        should_apply_structural_diff_update, should_reuse_structural_diff_state,
-        structural_diff_state_terminal_status, StructuralDiffTerminalStatus,
+        build_normal_side_by_side_diff_file, should_apply_structural_diff_update,
+        should_reuse_structural_diff_state, structural_diff_state_terminal_status,
+        StructuralDiffTerminalStatus,
     };
 
     #[test]
@@ -11661,5 +12984,29 @@ mod tests {
             Some("request-old"),
             "request-a",
         ));
+    }
+
+    #[test]
+    fn normal_side_by_side_pairs_changed_lines() {
+        let parsed = parse_unified_diff(
+            "diff --git a/src/lib.rs b/src/lib.rs\n\
+             --- a/src/lib.rs\n\
+             +++ b/src/lib.rs\n\
+             @@ -1,3 +1,3 @@\n\
+              fn main() {\n\
+             -    let value = 1;\n\
+             +    let value = 2;\n\
+              }\n",
+        );
+        let side_by_side = build_normal_side_by_side_diff_file(&parsed[0]);
+        let rows = &side_by_side.hunks[0].rows;
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].left_line_index, Some(0));
+        assert_eq!(rows[0].right_line_index, Some(0));
+        assert_eq!(rows[1].left_line_index, Some(1));
+        assert_eq!(rows[1].right_line_index, Some(2));
+        assert!(side_by_side.line_map[0][1].unwrap().primary);
+        assert!(!side_by_side.line_map[0][2].unwrap().primary);
     }
 }

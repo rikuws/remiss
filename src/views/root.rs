@@ -12,7 +12,7 @@ use crate::theme::*;
 use super::ai_tour::refresh_active_tour;
 use super::diff_view::{
     ensure_active_review_focus_loaded, ensure_structural_diff_warmup_started, enter_files_surface,
-    enter_stack_review_mode, warm_structural_diffs_flow,
+    enter_stack_review_mode, switch_review_code_mode, warm_structural_diffs_flow,
 };
 use super::palette::render_palette;
 use super::pr_detail::render_pr_workspace;
@@ -593,12 +593,13 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                         "Diff",
                         active_code_lens == ReviewCenterMode::SemanticDiff,
                         false,
-                        move |_, _, cx| {
-                            state_for_diff_lens.update(cx, |state, cx| {
-                                state.set_review_center_mode(ReviewCenterMode::SemanticDiff);
-                                state.persist_active_review_session();
-                                cx.notify();
-                            });
+                        move |_, window, cx| {
+                            switch_review_code_mode(
+                                &state_for_diff_lens,
+                                ReviewCenterMode::SemanticDiff,
+                                window,
+                                cx,
+                            );
                         },
                     ),
                     chrome_segment(
@@ -606,13 +607,9 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                         active_code_lens == ReviewCenterMode::StructuralDiff,
                         false,
                         move |_, window, cx| {
-                            state_for_structural_lens.update(cx, |state, cx| {
-                                state.set_review_center_mode(ReviewCenterMode::StructuralDiff);
-                                state.persist_active_review_session();
-                                cx.notify();
-                            });
-                            ensure_active_review_focus_loaded(
+                            switch_review_code_mode(
                                 &state_for_structural_lens,
+                                ReviewCenterMode::StructuralDiff,
                                 window,
                                 cx,
                             );
@@ -623,12 +620,12 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                         active_code_lens == ReviewCenterMode::SourceBrowser,
                         false,
                         move |_, window, cx| {
-                            state_for_source_lens.update(cx, |state, cx| {
-                                state.set_review_center_mode(ReviewCenterMode::SourceBrowser);
-                                state.persist_active_review_session();
-                                cx.notify();
-                            });
-                            ensure_active_review_focus_loaded(&state_for_source_lens, window, cx);
+                            switch_review_code_mode(
+                                &state_for_source_lens,
+                                ReviewCenterMode::SourceBrowser,
+                                window,
+                                cx,
+                            );
                         },
                     ),
                 ]))

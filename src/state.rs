@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -7,7 +8,7 @@ use crate::code_tour::{
     self, build_tour_request_key, CodeTourProvider, CodeTourProviderStatus, CodeTourSettings,
     DiffAnchor, GeneratedCodeTour,
 };
-use crate::diff::DiffRenderRow;
+use crate::diff::{find_parsed_diff_file, DiffRenderRow, ParsedDiffFile};
 use crate::difftastic::AdaptedDifftasticDiffFile;
 use crate::github::{
     PullRequestDetail, PullRequestDetailSnapshot, PullRequestQueue, PullRequestSummary,
@@ -20,8 +21,9 @@ use crate::notifications;
 use crate::review_queue::{default_review_file, ReviewQueue};
 use crate::review_session::{
     add_waymark, load_review_session, location_label, push_history_location, push_route_location,
-    remove_waymark, sanitize_code_lens_mode, save_review_session, ReviewCenterMode, ReviewLocation,
-    ReviewSessionDocument, ReviewSessionState, ReviewSourceTarget, ReviewTaskRoute, ReviewWaymark,
+    remove_waymark, sanitize_code_lens_mode, save_review_session, NormalDiffLayout,
+    ReviewCenterMode, ReviewLocation, ReviewSessionDocument, ReviewSessionState,
+    ReviewSourceTarget, ReviewTaskRoute, ReviewWaymark,
 };
 use crate::semantic_diff::SemanticDiffFile;
 use crate::stacks::model::{ReviewStack, StackDiffMode, StackPullRequestRef};
@@ -501,6 +503,7 @@ pub struct DiffFileViewState {
     pub parsed_file_index: Option<usize>,
     pub highlighted_hunks: Option<Arc<Vec<Vec<DiffLineHighlight>>>>,
     pub list_state: ListState,
+    pub last_focus_key: Rc<RefCell<Option<String>>>,
 }
 
 impl DiffFileViewState {
@@ -516,8 +519,80 @@ impl DiffFileViewState {
             parsed_file_index,
             highlighted_hunks,
             list_state: ListState::new(0, ListAlignment::Top, px(400.0)),
+            last_focus_key: Rc::new(RefCell::new(None)),
         }
     }
+}
+
+#[derive(Clone)]
+pub struct SourceBrowserViewState {
+    pub list_state: ListState,
+    pub last_focus_key: Rc<RefCell<Option<String>>>,
+}
+
+impl SourceBrowserViewState {
+    pub fn new() -> Self {
+        Self {
+            list_state: ListState::new(0, ListAlignment::Top, px(400.0)),
+            last_focus_key: Rc::new(RefCell::new(None)),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct CombinedDiffViewState {
+    pub list_state: ListState,
+    pub last_focus_key: Rc<RefCell<Option<String>>>,
+}
+
+impl CombinedDiffViewState {
+    pub fn new() -> Self {
+        Self {
+            list_state: ListState::new(0, ListAlignment::Top, px(400.0)),
+            last_focus_key: Rc::new(RefCell::new(None)),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ReviewModeFocus {
+    mode: ReviewCenterMode,
+    file_path: String,
+    line: Option<usize>,
+    side: Option<String>,
+    anchor: Option<DiffAnchor>,
+}
+
+fn diff_anchor_for_line(
+    parsed: &ParsedDiffFile,
+    line_number: i64,
+    preferred_side: Option<&str>,
+) -> Option<DiffAnchor> {
+    let preferred_side = preferred_side.filter(|side| *side == "LEFT" || *side == "RIGHT");
+    let sides = match preferred_side {
+        Some("LEFT") => ["LEFT", "RIGHT"],
+        _ => ["RIGHT", "LEFT"],
+    };
+
+    for side in sides {
+        for hunk in &parsed.hunks {
+            if hunk.lines.iter().any(|line| match side {
+                "LEFT" => line.left_line_number == Some(line_number),
+                "RIGHT" => line.right_line_number == Some(line_number),
+                _ => false,
+            }) {
+                return Some(DiffAnchor {
+                    file_path: parsed.path.clone(),
+                    hunk_header: Some(hunk.header.clone()),
+                    line: Some(line_number),
+                    side: Some(side.to_string()),
+                    thread_id: None,
+                });
+            }
+        }
+    }
+
+    None
 }
 
 #[derive(Clone)]
@@ -596,6 +671,7 @@ pub struct AppState {
     // Selected file in diff view
     pub selected_file_path: Option<String>,
     pub selected_diff_anchor: Option<DiffAnchor>,
+    review_scroll_focus: Option<ReviewModeFocus>,
     pub diff_view_states: RefCell<std::collections::HashMap<String, DiffFileViewState>>,
     pub review_queue_cache: RefCell<std::collections::HashMap<String, CachedReviewQueue>>,
     pub semantic_diff_cache: RefCell<std::collections::HashMap<String, CachedSemanticDiffFile>>,
@@ -603,7 +679,10 @@ pub struct AppState {
     pub review_stack_cache: RefCell<std::collections::HashMap<String, CachedReviewStack>>,
     pub review_file_tree_list_states: RefCell<std::collections::HashMap<String, ListState>>,
     pub review_nav_list_states: RefCell<std::collections::HashMap<String, ListState>>,
-    pub source_browser_list_states: RefCell<std::collections::HashMap<String, ListState>>,
+    pub combined_diff_view_states:
+        RefCell<std::collections::HashMap<String, CombinedDiffViewState>>,
+    pub source_browser_list_states:
+        RefCell<std::collections::HashMap<String, SourceBrowserViewState>>,
     pub temp_source_window: TempSourceWindowState,
     pub hovered_temp_source_target: Option<TempSourceTarget>,
     // Review form
@@ -691,6 +770,7 @@ impl AppState {
             notification_drawer_open: false,
             selected_file_path: None,
             selected_diff_anchor: None,
+            review_scroll_focus: None,
             diff_view_states: RefCell::new(std::collections::HashMap::new()),
             review_queue_cache: RefCell::new(std::collections::HashMap::new()),
             semantic_diff_cache: RefCell::new(std::collections::HashMap::new()),
@@ -698,6 +778,7 @@ impl AppState {
             review_stack_cache: RefCell::new(std::collections::HashMap::new()),
             review_file_tree_list_states: RefCell::new(std::collections::HashMap::new()),
             review_nav_list_states: RefCell::new(std::collections::HashMap::new()),
+            combined_diff_view_states: RefCell::new(std::collections::HashMap::new()),
             source_browser_list_states: RefCell::new(std::collections::HashMap::new()),
             temp_source_window: TempSourceWindowState::default(),
             hovered_temp_source_target: None,
@@ -1199,6 +1280,134 @@ impl AppState {
             .unwrap_or(false)
     }
 
+    fn current_review_mode_focus(&self) -> Option<ReviewModeFocus> {
+        let session = self.active_review_session();
+        if let Some(scroll_focus) = self.review_scroll_focus.as_ref().filter(|focus| {
+            session
+                .map(|session| session.center_mode == focus.mode)
+                .unwrap_or(false)
+        }) {
+            return Some(scroll_focus.clone());
+        }
+
+        if let Some(source_target) = session.and_then(|session| {
+            (session.center_mode == ReviewCenterMode::SourceBrowser)
+                .then(|| session.source_target.clone())
+                .flatten()
+        }) {
+            return Some(ReviewModeFocus {
+                mode: ReviewCenterMode::SourceBrowser,
+                file_path: source_target.path,
+                line: source_target.line,
+                side: Some("RIGHT".to_string()),
+                anchor: None,
+            });
+        }
+
+        let file_path = self
+            .selected_diff_anchor
+            .as_ref()
+            .map(|anchor| anchor.file_path.clone())
+            .or_else(|| self.selected_file_path.clone())?;
+        let anchor = self.selected_diff_anchor.clone();
+        let line = anchor
+            .as_ref()
+            .and_then(|anchor| anchor.line)
+            .and_then(|line| usize::try_from(line).ok())
+            .filter(|line| *line > 0);
+        let side = anchor.as_ref().and_then(|anchor| anchor.side.clone());
+
+        Some(ReviewModeFocus {
+            mode: session
+                .map(|session| session.center_mode)
+                .unwrap_or(ReviewCenterMode::SemanticDiff),
+            file_path,
+            line,
+            side,
+            anchor,
+        })
+    }
+
+    fn changed_file_path_for_focus(&self, file_path: &str) -> Option<String> {
+        self.active_detail().and_then(|detail| {
+            detail
+                .files
+                .iter()
+                .find(|file| file.path == file_path)
+                .map(|file| file.path.clone())
+                .or_else(|| {
+                    find_parsed_diff_file(&detail.parsed_diff, file_path)
+                        .map(|parsed| parsed.path.clone())
+                })
+        })
+    }
+
+    fn anchor_for_focus(&self, focus: &ReviewModeFocus) -> Option<DiffAnchor> {
+        let line_number = i64::try_from(focus.line?).ok()?;
+        let detail = self.active_detail()?;
+        let parsed = find_parsed_diff_file(&detail.parsed_diff, &focus.file_path)?;
+        diff_anchor_for_line(parsed, line_number, focus.side.as_deref())
+    }
+
+    pub fn set_review_center_mode_preserving_focus(&mut self, mode: ReviewCenterMode) {
+        let focus = self.current_review_mode_focus();
+        let target_anchor = match mode {
+            ReviewCenterMode::SemanticDiff | ReviewCenterMode::StructuralDiff => {
+                focus.as_ref().and_then(|focus| {
+                    focus
+                        .anchor
+                        .clone()
+                        .or_else(|| self.anchor_for_focus(focus))
+                })
+            }
+            _ => None,
+        };
+        let target_file_path = focus
+            .as_ref()
+            .and_then(|focus| self.changed_file_path_for_focus(&focus.file_path))
+            .or_else(|| self.selected_file_path.clone());
+        let target_source = (mode == ReviewCenterMode::SourceBrowser)
+            .then(|| {
+                focus.as_ref().map(|focus| ReviewSourceTarget {
+                    path: focus.file_path.clone(),
+                    line: focus.line,
+                    reason: Some("Current review focus".to_string()),
+                })
+            })
+            .flatten();
+
+        self.set_review_center_mode(mode);
+
+        match mode {
+            ReviewCenterMode::SemanticDiff | ReviewCenterMode::StructuralDiff => {
+                if let Some(path) = target_file_path {
+                    self.selected_file_path = Some(path);
+                }
+                if target_anchor.is_some()
+                    || focus
+                        .as_ref()
+                        .map(|focus| focus.anchor.is_none())
+                        .unwrap_or(false)
+                {
+                    self.selected_diff_anchor = target_anchor;
+                }
+            }
+            ReviewCenterMode::SourceBrowser => {
+                if let Some(target) = target_source {
+                    self.selected_file_path = self
+                        .changed_file_path_for_focus(&target.path)
+                        .or_else(|| self.selected_file_path.clone());
+                    if let Some(session) = self.active_review_session_mut() {
+                        session.source_target = Some(target);
+                    }
+                }
+            }
+            ReviewCenterMode::AiTour | ReviewCenterMode::Stack => {}
+        }
+
+        self.reset_review_focus_scroll();
+    }
+
     pub fn set_review_center_mode(&mut self, mode: ReviewCenterMode) {
         if let Some(session) = self.active_review_session_mut() {
             session.center_mode = mode;
@@ -1216,9 +1425,51 @@ impl AppState {
         }
     }
 
+    pub fn reset_review_focus_scroll(&mut self) {
+        self.review_scroll_focus = None;
+        for view_state in self.diff_view_states.borrow().values() {
+            *view_state.last_focus_key.borrow_mut() = None;
+        }
+        for view_state in self.source_browser_list_states.borrow().values() {
+            *view_state.last_focus_key.borrow_mut() = None;
+        }
+        for view_state in self.combined_diff_view_states.borrow().values() {
+            *view_state.last_focus_key.borrow_mut() = None;
+        }
+    }
+
+    pub fn set_review_scroll_focus(
+        &mut self,
+        mode: ReviewCenterMode,
+        file_path: impl Into<String>,
+        line: Option<usize>,
+        side: Option<String>,
+        anchor: Option<DiffAnchor>,
+    ) -> bool {
+        let next = ReviewModeFocus {
+            mode,
+            file_path: file_path.into(),
+            line,
+            side,
+            anchor,
+        };
+        if self.review_scroll_focus.as_ref() == Some(&next) {
+            return false;
+        }
+
+        self.review_scroll_focus = Some(next);
+        true
+    }
+
     pub fn set_review_file_tree_visible(&mut self, visible: bool) {
         if let Some(session) = self.active_review_session_mut() {
             session.show_file_tree = visible;
+        }
+    }
+
+    pub fn set_normal_diff_layout(&mut self, layout: NormalDiffLayout) {
+        if let Some(session) = self.active_review_session_mut() {
+            session.normal_diff_layout = layout;
         }
     }
 
@@ -1238,7 +1489,7 @@ impl AppState {
 
     pub fn enter_code_review_mode(&mut self) {
         let mode = sanitize_code_lens_mode(self.active_code_lens_mode());
-        self.set_review_center_mode(mode);
+        self.set_review_center_mode_preserving_focus(mode);
     }
 
     pub fn set_selected_stack_layer(&mut self, layer_id: Option<String>) {
@@ -1361,4 +1612,55 @@ fn parse_debug_pull_request_target(target: &str) -> Option<(String, i64)> {
     let (repository, number) = target.trim().rsplit_once('#')?;
     let number = number.parse::<i64>().ok()?;
     Some((repository.to_string(), number))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk, ParsedDiffLine};
+
+    use super::diff_anchor_for_line;
+
+    #[test]
+    fn diff_anchor_for_line_preserves_requested_side() {
+        let parsed = ParsedDiffFile {
+            path: "src/lib.rs".to_string(),
+            previous_path: Some("src/lib.rs".to_string()),
+            is_binary: false,
+            hunks: vec![ParsedDiffHunk {
+                header: "@@ -1,2 +1,2 @@".to_string(),
+                lines: vec![
+                    ParsedDiffLine {
+                        kind: DiffLineKind::Context,
+                        prefix: " ".to_string(),
+                        left_line_number: Some(1),
+                        right_line_number: Some(1),
+                        content: "fn main() {".to_string(),
+                    },
+                    ParsedDiffLine {
+                        kind: DiffLineKind::Deletion,
+                        prefix: "-".to_string(),
+                        left_line_number: Some(2),
+                        right_line_number: None,
+                        content: "    old();".to_string(),
+                    },
+                    ParsedDiffLine {
+                        kind: DiffLineKind::Addition,
+                        prefix: "+".to_string(),
+                        left_line_number: None,
+                        right_line_number: Some(2),
+                        content: "    new();".to_string(),
+                    },
+                ],
+            }],
+        };
+
+        let right = diff_anchor_for_line(&parsed, 2, Some("RIGHT"))
+            .expect("right line anchor should resolve");
+        let left = diff_anchor_for_line(&parsed, 2, Some("LEFT"))
+            .expect("left line anchor should resolve");
+
+        assert_eq!(right.side.as_deref(), Some("RIGHT"));
+        assert_eq!(right.hunk_header.as_deref(), Some("@@ -1,2 +1,2 @@"));
+        assert_eq!(left.side.as_deref(), Some("LEFT"));
+    }
 }

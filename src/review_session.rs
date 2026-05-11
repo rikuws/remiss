@@ -33,6 +33,14 @@ impl ReviewCenterMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NormalDiffLayout {
+    #[default]
+    Unified,
+    SideBySide,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewSourceTarget {
@@ -176,6 +184,8 @@ pub struct ReviewSessionDocument {
     pub center_mode: ReviewCenterMode,
     #[serde(default)]
     pub code_lens_mode: ReviewCenterMode,
+    #[serde(default)]
+    pub normal_diff_layout: NormalDiffLayout,
     #[serde(default = "default_true")]
     pub show_file_tree: bool,
     #[serde(default)]
@@ -212,6 +222,7 @@ pub struct ReviewSessionState {
     pub error: Option<String>,
     pub center_mode: ReviewCenterMode,
     pub code_lens_mode: ReviewCenterMode,
+    pub normal_diff_layout: NormalDiffLayout,
     pub show_file_tree: bool,
     pub source_target: Option<ReviewSourceTarget>,
     pub waymarks: Vec<ReviewWaymark>,
@@ -235,6 +246,7 @@ impl Default for ReviewSessionState {
             error: None,
             center_mode: ReviewCenterMode::SemanticDiff,
             code_lens_mode: ReviewCenterMode::SemanticDiff,
+            normal_diff_layout: NormalDiffLayout::Unified,
             show_file_tree: true,
             source_target: None,
             waymarks: Vec::new(),
@@ -276,6 +288,7 @@ impl ReviewSessionState {
             error: None,
             center_mode,
             code_lens_mode,
+            normal_diff_layout: document.normal_diff_layout,
             show_file_tree: document.show_file_tree,
             source_target: document.source_target,
             waymarks: document.waymarks,
@@ -303,6 +316,7 @@ impl ReviewSessionState {
             selected_diff_anchor: selected_diff_anchor.cloned(),
             center_mode: self.center_mode,
             code_lens_mode: sanitize_code_lens_mode(self.code_lens_mode),
+            normal_diff_layout: self.normal_diff_layout,
             show_file_tree: self.show_file_tree,
             source_target: self.source_target.clone(),
             waymarks: self.waymarks.clone(),
@@ -475,7 +489,8 @@ mod tests {
 
     use super::{
         add_waymark, location_label, push_history_location, push_route_location,
-        sanitize_code_lens_mode, ReviewCenterMode, ReviewLocation, ReviewSessionState,
+        sanitize_code_lens_mode, NormalDiffLayout, ReviewCenterMode, ReviewLocation,
+        ReviewSessionState,
     };
 
     #[test]
@@ -587,6 +602,24 @@ mod tests {
         assert_eq!(
             restored.active_code_lens_mode(),
             ReviewCenterMode::SemanticDiff
+        );
+    }
+
+    #[test]
+    fn review_session_persists_normal_diff_layout() {
+        let document: super::ReviewSessionDocument = serde_json::from_str(
+            r#"{
+                "normalDiffLayout": "sideBySide"
+            }"#,
+        )
+        .expect("normal diff layout should deserialize");
+
+        let restored = ReviewSessionState::from_document(document);
+
+        assert_eq!(restored.normal_diff_layout, NormalDiffLayout::SideBySide);
+        assert_eq!(
+            restored.to_document(None, None).normal_diff_layout,
+            NormalDiffLayout::SideBySide
         );
     }
 }
