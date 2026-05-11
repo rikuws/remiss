@@ -38,7 +38,8 @@ impl LocalRepositoryStatus {
     }
 
     pub fn should_prefer_worktree_contents(&self) -> bool {
-        self.ready_for_snapshot_features() && self.is_worktree_clean
+        self.ready_for_snapshot_features()
+            && (self.is_worktree_clean || self.source == "local-review")
     }
 }
 

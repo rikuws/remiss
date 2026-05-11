@@ -499,6 +499,15 @@ pub fn build_tour_request_key(detail: &PullRequestDetail, provider: CodeTourProv
 }
 
 pub fn tour_code_version_key(detail: &PullRequestDetail) -> String {
+    if crate::local_review::is_local_review_detail(detail) {
+        return format!(
+            "local-base-{}-head-{}-diff-{}",
+            detail.base_ref_oid.as_deref().unwrap_or_default(),
+            detail.head_ref_oid.as_deref().unwrap_or_default(),
+            hash_text(&detail.raw_diff)
+        );
+    }
+
     detail
         .head_ref_oid
         .as_deref()
@@ -1424,6 +1433,19 @@ mod tests {
         assert_ne!(
             build_tour_request_key(&first, CodeTourProvider::Codex),
             build_tour_request_key(&changed, CodeTourProvider::Codex),
+        );
+    }
+
+    #[test]
+    fn build_tour_request_key_hashes_local_review_diff_even_when_head_matches() {
+        let mut first = detail("local-one", Some("head123"), "diff --git a/a b/a\n+one\n");
+        first.id = "local:acme/api:feature:base123:head123:worktree-one".to_string();
+        let mut second = detail("local-two", Some("head123"), "diff --git a/a b/a\n+two\n");
+        second.id = "local:acme/api:feature:base123:head123:worktree-two".to_string();
+
+        assert_ne!(
+            build_tour_request_key(&first, CodeTourProvider::Codex),
+            build_tour_request_key(&second, CodeTourProvider::Codex),
         );
     }
 

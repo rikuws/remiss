@@ -411,11 +411,16 @@ fn layer_rationale(role: ChangeRole, confidence: Confidence, atoms: &[&ChangeAto
 
 fn virtual_stack_id(selected_pr: &PullRequestDetail, source: StackSource) -> String {
     let mut hasher = Sha1::new();
+    let head_identity = if crate::local_review::is_local_review_detail(selected_pr) {
+        selected_pr.id.as_str()
+    } else {
+        selected_pr.head_ref_oid.as_deref().unwrap_or_default()
+    };
     for part in [
         selected_pr.repository.as_str(),
         &selected_pr.number.to_string(),
         selected_pr.base_ref_oid.as_deref().unwrap_or_default(),
-        selected_pr.head_ref_oid.as_deref().unwrap_or_default(),
+        head_identity,
         source.label(),
         STACK_GENERATOR_VERSION,
     ] {

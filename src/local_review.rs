@@ -1,10 +1,12 @@
 use std::{
     collections::HashMap,
+    fs,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
+use sha1::{Digest, Sha1};
 
 use crate::{
     app_storage,
@@ -170,37 +172,40 @@ pub fn inspect_working_checkout(path: &Path, fetch: bool) -> Result<LocalReviewI
     let clean = worktree_is_clean(&root)?;
     let (base_ref_name, base_oid) = resolve_review_base(&root)?;
     let commits_count = rev_list_count(&root, &base_oid, &head_oid)?;
-    let key = local_review_key(&repository, &branch, &base_oid, &head_oid);
+    let raw_diff = if clean {
+        if commits_count == 0 {
+            String::new()
+        } else {
+            diff_between(&root, &base_oid, &head_oid)?
+        }
+    } else {
+        diff_worktree(&root, &base_oid)?
+    };
+    let key = local_review_key(
+        &repository,
+        &branch,
+        &base_oid,
+        &local_review_head_identity(&head_oid, clean, &raw_diff),
+    );
 
-    let (status, message, raw_diff, parsed_diff, files) = if !clean {
-        (
-            LocalReviewStatusKind::Blocked,
-            "This working checkout has local changes. Commit or stash them before reviewing local branch commits."
-                .to_string(),
-            String::new(),
-            Vec::new(),
-            Vec::new(),
-        )
-    } else if commits_count == 0 {
+    let (status, message, parsed_diff, files) = if raw_diff.trim().is_empty() {
         (
             LocalReviewStatusKind::NoDiff,
-            "No committed branch changes are ahead of the selected base.".to_string(),
-            String::new(),
+            if clean {
+                "No local changes are ahead of the selected base.".to_string()
+            } else {
+                "No reviewable local changes were found after comparing the working tree to the selected base."
+                    .to_string()
+            },
             Vec::new(),
             Vec::new(),
         )
     } else {
-        let raw_diff = diff_between(&root, &base_oid, &head_oid)?;
         let parsed_diff = parse_unified_diff(&raw_diff);
         let files = files_from_diff(&raw_diff, &parsed_diff);
         (
             LocalReviewStatusKind::Ready,
-            format!(
-                "{} committed change{} ready for local review.",
-                commits_count,
-                if commits_count == 1 { "" } else { "s" }
-            ),
-            raw_diff,
+            local_review_ready_message(clean, commits_count),
             parsed_diff,
             files,
         )
@@ -218,7 +223,7 @@ pub fn inspect_working_checkout(path: &Path, fetch: bool) -> Result<LocalReviewI
         expected_head_oid: Some(head_oid.clone()),
         matches_expected_head: true,
         is_worktree_clean: clean,
-        ready_for_local_features: clean,
+        ready_for_local_features: true,
         message: message.clone(),
     };
     let detail = synthetic_detail(SyntheticDetailInput {
@@ -275,7 +280,7 @@ pub fn detail_snapshot_from_inspection(
 fn synthetic_detail(input: SyntheticDetailInput) -> PullRequestDetail {
     let title = match input.status {
         LocalReviewStatusKind::NoDiff => {
-            format!("Local review: {} has no unpushed commits", input.branch)
+            format!("Local review: {} has no local changes", input.branch)
         }
         LocalReviewStatusKind::Blocked => {
             format!("Local review blocked: {}", input.branch)
@@ -607,7 +612,138 @@ fn diff_between(path: &Path, base_oid: &str, head_oid: &str) -> Result<String, S
         return Err(process_error(output, "Failed to build local review diff"));
     }
 
-    Ok(output.stdout)
+    Ok(command_stdout_text(&output))
+}
+
+fn diff_worktree(path: &Path, base_oid: &str) -> Result<String, String> {
+    let output = run_git(
+        path,
+        [
+            "diff",
+            "--binary",
+            "--find-renames",
+            "--find-copies",
+            base_oid,
+            "--",
+        ],
+    )?;
+    if output.exit_code != Some(0) {
+        return Err(process_error(
+            output,
+            "Failed to build local review working tree diff",
+        ));
+    }
+
+    let mut raw_diff = command_stdout_text(&output);
+    for untracked_path in untracked_paths(path)? {
+        append_diff(&mut raw_diff, &diff_untracked_file(path, &untracked_path)?);
+    }
+
+    Ok(raw_diff)
+}
+
+fn untracked_paths(path: &Path) -> Result<Vec<String>, String> {
+    let output = run_git(path, ["ls-files", "--others", "--exclude-standard", "-z"])?;
+    if output.exit_code != Some(0) {
+        return Err(process_error(
+            output,
+            "Failed to list untracked files for local review",
+        ));
+    }
+
+    output
+        .stdout_bytes
+        .split(|byte| *byte == 0)
+        .filter(|bytes| !bytes.is_empty())
+        .map(|bytes| {
+            String::from_utf8(bytes.to_vec()).map_err(|_| {
+                "Git returned a non-UTF-8 untracked path for local review.".to_string()
+            })
+        })
+        .collect()
+}
+
+fn diff_untracked_file(root: &Path, relative_path: &str) -> Result<String, String> {
+    let full_path = root.join(relative_path);
+    if fs::metadata(&full_path)
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false)
+    {
+        return Ok(String::new());
+    }
+
+    let output = run_git(
+        root,
+        [
+            "diff",
+            "--no-index",
+            "--binary",
+            "--",
+            "/dev/null",
+            relative_path,
+        ],
+    )?;
+    match output.exit_code {
+        Some(0) | Some(1) => Ok(command_stdout_text(&output)),
+        _ => Err(process_error(
+            output,
+            "Failed to build local review diff for untracked file",
+        )),
+    }
+}
+
+fn append_diff(raw_diff: &mut String, addition: &str) {
+    if addition.trim().is_empty() {
+        return;
+    }
+    if !raw_diff.is_empty() && !raw_diff.ends_with('\n') {
+        raw_diff.push('\n');
+    }
+    raw_diff.push_str(addition);
+    if !raw_diff.ends_with('\n') {
+        raw_diff.push('\n');
+    }
+}
+
+fn local_review_head_identity(head_oid: &str, clean: bool, raw_diff: &str) -> String {
+    if clean {
+        return head_oid.to_string();
+    }
+
+    format!("{head_oid}:worktree-{}", short_hash(raw_diff))
+}
+
+fn local_review_ready_message(clean: bool, commits_count: i64) -> String {
+    if clean {
+        return format!(
+            "{} committed change{} ready for local review.",
+            commits_count,
+            if commits_count == 1 { "" } else { "s" }
+        );
+    }
+
+    if commits_count == 0 {
+        "Working tree changes ready for local review.".to_string()
+    } else {
+        format!(
+            "Working tree changes and {} committed change{} ready for local review.",
+            commits_count,
+            if commits_count == 1 { "" } else { "s" }
+        )
+    }
+}
+
+fn short_hash(input: &str) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(input.as_bytes());
+    format!("{:x}", hasher.finalize())
+        .chars()
+        .take(16)
+        .collect()
+}
+
+fn command_stdout_text(output: &CommandOutput) -> String {
+    String::from_utf8_lossy(&output.stdout_bytes).to_string()
 }
 
 fn files_from_diff(raw_diff: &str, parsed_diff: &[ParsedDiffFile]) -> Vec<PullRequestFile> {
@@ -994,7 +1130,7 @@ mod tests {
     }
 
     #[test]
-    fn dirty_worktree_blocks_local_review() {
+    fn dirty_worktree_reviews_uncommitted_tracked_changes() {
         let fixture = GitFixture::new("openai/example");
         fixture.set_file("src/lib.rs", "pub fn value() -> i32 { 1 }\n");
         fixture.commit_all("initial");
@@ -1004,10 +1140,52 @@ mod tests {
 
         let inspection = inspect_working_checkout(&fixture.root, false).expect("inspection");
 
-        assert_eq!(inspection.status, LocalReviewStatusKind::Blocked);
+        assert_eq!(inspection.status, LocalReviewStatusKind::Ready);
         assert!(!inspection.local_repository_status.is_worktree_clean);
-        assert!(inspection.detail.files.is_empty());
-        assert!(inspection.message.contains("Commit or stash"));
+        assert!(inspection.local_repository_status.ready_for_local_features);
+        assert_eq!(inspection.detail.files.len(), 1);
+        assert_eq!(inspection.detail.files[0].path, "src/lib.rs");
+        assert_eq!(inspection.detail.files[0].additions, 1);
+        assert_eq!(inspection.detail.files[0].deletions, 1);
+        assert!(inspection.message.contains("Working tree changes"));
+        assert!(inspection.key.contains(":worktree-"));
+    }
+
+    #[test]
+    fn dirty_worktree_reviews_untracked_files() {
+        let fixture = GitFixture::new("openai/example");
+        fixture.set_file("src/lib.rs", "pub fn value() -> i32 { 1 }\n");
+        fixture.commit_all("initial");
+        fixture.push_main();
+        fixture.checkout_branch("feature");
+        fixture.set_file("src/new.rs", "pub fn new_value() -> i32 { 2 }\n");
+
+        let inspection = inspect_working_checkout(&fixture.root, false).expect("inspection");
+
+        assert_eq!(inspection.status, LocalReviewStatusKind::Ready);
+        assert!(!inspection.local_repository_status.is_worktree_clean);
+        assert_eq!(inspection.detail.files.len(), 1);
+        assert_eq!(inspection.detail.files[0].path, "src/new.rs");
+        assert_eq!(inspection.detail.files[0].change_type, "ADDED");
+        assert_eq!(inspection.detail.files[0].additions, 1);
+        assert_eq!(inspection.detail.files[0].deletions, 0);
+    }
+
+    #[test]
+    fn dirty_worktree_key_changes_when_diff_changes() {
+        let fixture = GitFixture::new("openai/example");
+        fixture.set_file("src/lib.rs", "pub fn value() -> i32 { 1 }\n");
+        fixture.commit_all("initial");
+        fixture.push_main();
+        fixture.checkout_branch("feature");
+        fixture.set_file("src/lib.rs", "pub fn value() -> i32 { 2 }\n");
+        let first = inspect_working_checkout(&fixture.root, false).expect("first inspection");
+
+        fixture.set_file("src/lib.rs", "pub fn value() -> i32 { 3 }\n");
+        let second = inspect_working_checkout(&fixture.root, false).expect("second inspection");
+
+        assert_ne!(first.key, second.key);
+        assert_eq!(first.head_oid, second.head_oid);
     }
 
     #[test]

@@ -445,7 +445,10 @@ async fn inspect_and_open_local_review(
                         &state.local_review_repositories,
                     );
 
-                    state.open_tabs.retain(|tab| summary_key(tab) != detail_key);
+                    state.open_tabs.retain(|tab| {
+                        summary_key(tab) != detail_key
+                            && !(tab.local_key.is_some() && tab.repository == summary.repository)
+                    });
                     state.open_tabs.insert(0, summary.clone());
                     state.active_pr_key = Some(detail_key.clone());
                     state.active_surface = PullRequestSurface::Files;
@@ -806,7 +809,7 @@ fn render_local_review_sidebar_section(state: &Entity<AppState>, cx: &App) -> im
                     .text_size(px(11.0))
                     .line_height(px(15.0))
                     .text_color(fg_muted())
-                    .child("Add a working checkout to review committed branch changes."),
+                    .child("Add a working checkout to review local changes on disk."),
             )
         })
         .children(repositories.into_iter().map(|repository| {
@@ -920,7 +923,7 @@ fn local_review_sidebar_row(
 
 fn local_review_status_label(status: LocalReviewStatusKind) -> &'static str {
     match status {
-        LocalReviewStatusKind::Ready => "ahead",
+        LocalReviewStatusKind::Ready => "ready",
         LocalReviewStatusKind::NoDiff => "no diff",
         LocalReviewStatusKind::Blocked => "blocked",
         LocalReviewStatusKind::Error => "error",

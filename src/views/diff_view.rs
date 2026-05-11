@@ -6002,6 +6002,7 @@ struct StructuralDiffSideRequest {
     path: String,
     reference: String,
     fetch: bool,
+    prefer_worktree: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -6112,8 +6113,18 @@ fn build_structural_diff_request(
     let old_path = previous_path.clone().unwrap_or_else(|| file.path.clone());
     let old_fetch = file.change_type != "ADDED";
     let new_fetch = file.change_type != "DELETED";
-    let cache_key =
-        structural_diff_cache_key(detail, &head_reference, file, previous_path.as_deref());
+    let is_local_review = crate::local_review::is_local_review_detail(detail);
+    let cache_head_reference = if is_local_review {
+        detail.id.clone()
+    } else {
+        head_reference.clone()
+    };
+    let cache_key = structural_diff_cache_key(
+        detail,
+        &cache_head_reference,
+        file,
+        previous_path.as_deref(),
+    );
 
     Some(StructuralDiffRequest {
         path: file.path.clone(),
@@ -6122,11 +6133,13 @@ fn build_structural_diff_request(
             path: old_path,
             reference: base_reference.clone(),
             fetch: old_fetch,
+            prefer_worktree: false,
         },
         new_side: StructuralDiffSideRequest {
             path: file.path.clone(),
             reference: head_reference.clone(),
             fetch: new_fetch,
+            prefer_worktree: is_local_review && new_fetch,
         },
         request_key: cache_key.clone(),
         cache_key,
@@ -6149,7 +6162,7 @@ fn load_structural_side_text(
         checkout_root,
         &side.reference,
         &side.path,
-        false,
+        side.prefer_worktree,
     )
     .map_err(StructuralDiffBuildError::Transient)?;
     if document.is_binary {
@@ -6173,9 +6186,14 @@ fn checkout_head_oid(status: &local_repo::LocalRepositoryStatus) -> Option<Strin
 }
 
 fn structural_diff_warmup_request_key(detail: &PullRequestDetail, head_oid: &str) -> String {
+    let identity = if crate::local_review::is_local_review_detail(detail) {
+        detail.id.as_str()
+    } else {
+        head_oid
+    };
     format!(
         "structural-diff-warmup-v1:{}:{}:{}",
-        detail.repository, detail.number, head_oid
+        detail.repository, detail.number, identity
     )
 }
 
@@ -6717,17 +6735,12 @@ fn render_local_review_empty_state(
     let state_for_refresh = state.clone();
     let title = if local_repo_loading {
         "Refreshing local review"
-    } else if local_repo_status
-        .map(|status| !status.is_worktree_clean)
-        .unwrap_or(false)
-    {
-        "Working checkout has local changes"
     } else {
-        "No unpushed commits"
+        "No local changes"
     };
     let message = local_repo_error
         .or_else(|| local_repo_status.map(|status| status.message.as_str()))
-        .unwrap_or("This branch has no committed changes ahead of the selected base.");
+        .unwrap_or("This checkout has no reviewable changes ahead of the selected base.");
     let base = detail.base_ref_oid.as_deref().unwrap_or("unknown");
     let head = detail.head_ref_oid.as_deref().unwrap_or("unknown");
 
