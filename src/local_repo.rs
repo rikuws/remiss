@@ -639,6 +639,7 @@ fn ensure_managed_repository(repository: &str, log: &CheckoutLog) -> Result<Path
                 ));
             }
 
+            configure_managed_repository_git_credentials(&root, log);
             log.event(format!(
                 "base managed repository is valid at {}",
                 root.display()
@@ -699,6 +700,7 @@ fn ensure_managed_repository(repository: &str, log: &CheckoutLog) -> Result<Path
     let root = resolve_git_root(&target)?.ok_or_else(|| {
         "The app-managed checkout was created but is not a git repository.".to_string()
     })?;
+    configure_managed_repository_git_credentials(&root, log);
     log.event(format!(
         "base managed repository clone resolved git root {}",
         root.display()
@@ -1059,6 +1061,57 @@ fn git_commit_exists(path: &Path, oid: &str) -> Result<bool, String> {
     Ok(output.exit_code == Some(0))
 }
 
+fn configure_managed_repository_git_credentials(root: &Path, log: &CheckoutLog) {
+    configure_managed_repository_git_config(
+        root,
+        log,
+        "configure managed git credential helper",
+        [
+            "config",
+            "--local",
+            "--replace-all",
+            "credential.https://github.com.helper",
+            "!gh auth git-credential",
+        ],
+    );
+    configure_managed_repository_git_config(
+        root,
+        log,
+        "configure managed git credential path scope",
+        [
+            "config",
+            "--local",
+            "--replace-all",
+            "credential.https://github.com.useHttpPath",
+            "true",
+        ],
+    );
+}
+
+fn configure_managed_repository_git_config<const N: usize>(
+    root: &Path,
+    log: &CheckoutLog,
+    label: &str,
+    args: [&str; N],
+) {
+    match run_git_logged(log, label, root, args) {
+        Ok(output) if output.exit_code == Some(0) => {
+            log.event(format!("{label}: ok"));
+        }
+        Ok(output) => {
+            log.event(format!(
+                "{label}: skipped; exit={:?}; stderr=\"{}\"; stdout=\"{}\"",
+                output.exit_code,
+                shorten_for_log(&output.stderr),
+                shorten_for_log(&output.stdout),
+            ));
+        }
+        Err(error) => {
+            log.event(format!("{label}: skipped; error={error}"));
+        }
+    }
+}
+
 fn run_gh_logged(
     log: &CheckoutLog,
     args: Vec<String>,
@@ -1103,7 +1156,10 @@ fn run_git(
 ) -> Result<gh::CommandOutput, String> {
     let mut command_args = vec!["-C".to_string(), path.display().to_string()];
     command_args.extend(args.into_iter().map(Into::into));
-    let output = CommandRunner::new("git").args(command_args).run()?;
+    let output = CommandRunner::new("git")
+        .args(command_args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .run()?;
     if output.timed_out {
         return Err("git command timed out after 120 seconds.".to_string());
     }
@@ -1124,7 +1180,10 @@ fn run_git_logged(
         None,
     );
 
-    let output = CommandRunner::new("git").args(command_args).run();
+    let output = CommandRunner::new("git")
+        .args(command_args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .run();
     match output {
         Ok(output) => {
             log.command_result(label, &output);
@@ -1290,13 +1349,36 @@ fn normalized_expected_head_oid(head_ref_oid: Option<&str>) -> Option<String> {
 }
 
 fn combine_process_error(output: gh::CommandOutput, prefix: &str) -> String {
-    if !output.stderr.is_empty() {
-        format!("{prefix}: {}", output.stderr)
+    let detail = if !output.stderr.is_empty() {
+        output.stderr
     } else if !output.stdout.is_empty() {
-        format!("{prefix}: {}", output.stdout)
+        output.stdout
     } else {
+        String::new()
+    };
+
+    if git_output_requested_credentials(&detail) {
+        let auth_message = "Git asked for GitHub credentials while preparing the app-managed checkout. Remiss tried to use your `gh` session, but background checkout updates cannot answer an interactive username/password prompt. Run `gh auth setup-git` once, or configure a Git credential helper or PAT for GitHub, then retry the checkout.";
+        if detail.is_empty() {
+            format!("{prefix}: {auth_message}")
+        } else {
+            format!("{prefix}: {auth_message} Original git output: {detail}")
+        }
+    } else if detail.is_empty() {
         prefix.to_string()
+    } else {
+        format!("{prefix}: {detail}")
     }
+}
+
+fn git_output_requested_credentials(output: &str) -> bool {
+    let lower = output.to_ascii_lowercase();
+    lower.contains("could not read username")
+        || lower.contains("could not read password")
+        || lower.contains("username for 'https://")
+        || lower.contains("password for 'https://")
+        || lower.contains("terminal prompts disabled")
+        || lower.contains("authentication failed")
 }
 
 fn normalized_remote_repository(remote_url: &str) -> Option<String> {
@@ -1339,8 +1421,9 @@ mod tests {
     use crate::cache::CacheStore;
 
     use super::{
-        ensure_local_repository_for_pull_request, load_local_repository_status_for_pull_request,
-        local_repo_link_key, managed_repository_directory_name, managed_repository_path,
+        combine_process_error, ensure_local_repository_for_pull_request,
+        load_local_repository_status_for_pull_request, local_repo_link_key,
+        managed_repository_directory_name, managed_repository_path,
         managed_repository_worktree_path, normalized_remote_repository, LocalRepositoryLink,
     };
 
@@ -1501,6 +1584,28 @@ mod tests {
     #[test]
     fn rejects_non_repository_urls() {
         assert_eq!(normalized_remote_repository("not-a-remote"), None);
+    }
+
+    #[test]
+    fn checkout_process_error_explains_git_credential_prompts() {
+        let message = combine_process_error(
+            crate::gh::CommandOutput {
+                exit_code: Some(128),
+                stdout: String::new(),
+                stderr: "fatal: could not read Username for 'https://github.com': terminal prompts disabled".to_string(),
+                stdout_bytes: Vec::new(),
+                stderr_bytes: Vec::new(),
+                timed_out: false,
+                duration_ms: 12,
+                stdout_truncated: false,
+                stderr_truncated: false,
+            },
+            "Failed to update the app-managed checkout",
+        );
+
+        assert!(message.contains("Git asked for GitHub credentials"));
+        assert!(message.contains("gh auth setup-git"));
+        assert!(message.contains("could not read Username"));
     }
 
     #[test]

@@ -12279,6 +12279,8 @@ fn render_review_thread(
             div()
                 .px(px(12.0))
                 .py(px(8.0))
+                .rounded_tl(radius_sm())
+                .rounded_tr(radius_sm())
                 .border_b(px(1.0))
                 .border_color(diff_annotation_border())
                 .bg(header_bg)
@@ -12290,7 +12292,17 @@ fn render_review_thread(
                         .flex()
                         .items_center()
                         .gap(px(6.0))
-                        .child(badge(&thread.subject_type.to_lowercase()))
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(if thread.is_resolved {
+                                    success()
+                                } else {
+                                    fg_muted()
+                                })
+                                .child("Review thread"),
+                        )
                         .when(thread.is_resolved, |el| el.child(badge_success("resolved")))
                         .when(thread.is_outdated, |el| el.child(badge("outdated"))),
                 )

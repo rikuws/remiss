@@ -152,16 +152,7 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                             .flex_wrap()
                             .items_start()
                             .gap(px(18.0))
-                            .child(div().flex_1().min_w(px(480.0)).child(
-                                overview_review_comment_briefing_panel(
-                                    review_comment_items.clone(),
-                                    workspace_loading,
-                                    workspace_error.clone(),
-                                    is_auth,
-                                    state_for_comment_items.clone(),
-                                ),
-                            ))
-                            .child(div().flex_1().min_w(px(380.0)).child(
+                            .child(div().flex_1().min_w(px(640.0)).child(
                                 overview_review_requests_panel(
                                     review_items,
                                     review_count,
@@ -170,6 +161,15 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                     workspace_error.clone(),
                                     is_auth,
                                     state_for_items.clone(),
+                                ),
+                            ))
+                            .child(div().flex_1().min_w(px(380.0)).child(
+                                overview_review_comment_briefing_panel(
+                                    review_comment_items.clone(),
+                                    workspace_loading,
+                                    workspace_error.clone(),
+                                    is_auth,
+                                    state_for_comment_items.clone(),
                                 ),
                             )),
                     )
@@ -433,77 +433,201 @@ fn overview_review_comment_briefing_panel(
 fn overview_review_requests_panel(
     review_items: Vec<github::PullRequestSummary>,
     review_count: i64,
-    queue_copy: String,
+    _queue_copy: String,
     workspace_loading: bool,
     workspace_error: Option<String>,
     is_auth: bool,
     state: Entity<AppState>,
 ) -> impl IntoElement {
-    let visible_count = review_items.len().min(5);
+    let visible_count = review_items.len().min(8);
     let remaining_count = review_count.saturating_sub(visible_count as i64);
+    let visible_items = review_items.into_iter().take(8).collect::<Vec<_>>();
 
     panel().child(
         div()
-            .p(px(20.0))
-            .px(px(22.0))
+            .p(px(10.0))
             .flex()
             .flex_col()
-            .gap(px(16.0))
+            .gap(px(8.0))
+            .child(overview_request_group_header(
+                "Review requested",
+                review_count,
+            ))
+            .when(workspace_loading, |el| {
+                el.child(
+                    div()
+                        .px(px(8.0))
+                        .child(panel_state_text("Loading review requests...")),
+                )
+            })
+            .when_some(workspace_error.clone(), |el, err| {
+                el.child(div().px(px(8.0)).child(error_text(&err)))
+            })
+            .when(
+                !workspace_loading && workspace_error.is_none() && visible_items.is_empty(),
+                |el| {
+                    el.child(div().px(px(8.0)).child(panel_state_text(if is_auth {
+                        "No pull requests are currently requesting your review."
+                    } else {
+                        "Authenticate with gh to populate the review queue."
+                    })))
+                },
+            )
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(4.0))
-                    .min_w_0()
-                    .child(eyebrow("Needs your attention"))
-                    .child(
-                        div()
-                            .text_size(px(18.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(fg_emphasis())
-                            .child("Review Requests"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .line_height(px(20.0))
-                            .text_color(fg_muted())
-                            .child(queue_copy),
-                    ),
+                    .gap(px(2.0))
+                    .children(visible_items.into_iter().map(|item| {
+                        let state = state.clone();
+                        overview_review_request_row(item, move |summary, window, cx| {
+                            open_pull_request(&state, summary, window, cx);
+                        })
+                    })),
             )
-            .when(workspace_loading, |el| {
-                el.child(panel_state_text("Loading review requests..."))
-            })
-            .when_some(workspace_error.clone(), |el, err| {
-                el.child(error_text(&err))
-            })
-            .when(
-                !workspace_loading && workspace_error.is_none() && review_items.is_empty(),
-                |el| {
-                    el.child(panel_state_text(if is_auth {
-                        "No pull requests are currently requesting your review."
-                    } else {
-                        "Authenticate with gh to populate the review queue."
-                    }))
-                },
-            )
-            .child(div().flex().flex_col().gap(px(10.0)).children(
-                review_items.into_iter().take(5).map(|item| {
-                    let state = state.clone();
-                    pr_list_row(item, move |summary, window, cx| {
-                        open_pull_request(&state, summary, window, cx);
-                    })
-                }),
-            ))
             .when(remaining_count > 0, |el| {
                 el.child(
                     div()
+                        .px(px(12.0))
+                        .pt(px(4.0))
                         .text_size(px(12.0))
                         .text_color(fg_subtle())
                         .child(format!("{remaining_count} more in the review board")),
                 )
             }),
     )
+}
+
+fn overview_request_group_header(label: &str, count: i64) -> impl IntoElement {
+    div()
+        .min_h(px(44.0))
+        .px(px(14.0))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(12.0))
+        .rounded(radius_sm())
+        .bg(bg_surface())
+        .text_color(fg_emphasis())
+        .child(
+            div()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .child(lucide_icon(LucideIcon::ListChecks, 15.0, fg_muted()))
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_size(px(15.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .line_clamp(1)
+                        .child(label.to_string()),
+                ),
+        )
+        .child(
+            div()
+                .font_family(mono_font_family())
+                .text_size(px(16.0))
+                .text_color(fg_subtle())
+                .child(count.to_string()),
+        )
+}
+
+fn overview_review_request_row(
+    item: github::PullRequestSummary,
+    on_click: impl Fn(github::PullRequestSummary, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let title = item.title.clone();
+    let repo_ref = format!("{} #{}", item.repository, item.number);
+    let author_login = item.author_login.clone();
+    let author_avatar_url = item.author_avatar_url.clone();
+    let updated = format_relative_time(&item.updated_at);
+    let summary = item.clone();
+
+    div()
+        .w_full()
+        .min_h(px(74.0))
+        .px(px(14.0))
+        .py(px(10.0))
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(transparent())
+        .flex()
+        .items_center()
+        .gap(px(14.0))
+        .cursor_pointer()
+        .hover(|style| {
+            style
+                .bg(bg_surface())
+                .border_color(border_muted())
+                .text_color(fg_emphasis())
+        })
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            on_click(summary.clone(), window, cx)
+        })
+        .child(lucide_icon(LucideIcon::GitBranch, 15.0, success()))
+        .child(
+            div()
+                .min_w_0()
+                .flex_grow()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .text_size(px(14.0))
+                        .line_height(px(18.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg_emphasis())
+                        .line_clamp(1)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .line_height(px(16.0))
+                        .text_color(fg_muted())
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .overflow_x_hidden()
+                        .child(repo_ref),
+                ),
+        )
+        .child(
+            div()
+                .w(px(148.0))
+                .flex_shrink_0()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(user_avatar(
+                    &author_login,
+                    author_avatar_url.as_deref(),
+                    17.0,
+                    false,
+                ))
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_size(px(12.0))
+                        .text_color(fg_muted())
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .overflow_x_hidden()
+                        .child(author_login),
+                ),
+        )
+        .child(
+            div()
+                .w(px(64.0))
+                .flex_shrink_0()
+                .text_align(TextAlign::Right)
+                .text_size(px(12.0))
+                .text_color(fg_subtle())
+                .child(updated),
+        )
 }
 
 fn overview_review_comment_row(
@@ -1649,108 +1773,6 @@ fn render_diff_summary(additions: i64, deletions: i64) -> impl IntoElement {
 
                     div().w(px(8.0)).h(px(4.0)).rounded(px(2.0)).bg(bg)
                 })),
-        )
-}
-
-fn pr_list_row(
-    item: github::PullRequestSummary,
-    on_click: impl Fn(github::PullRequestSummary, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    let title = item.title.clone();
-    let repo_ref = format!("{} #{}", item.repository, item.number);
-    let material_key = format!("{}-{}", item.repository, item.number);
-    let author_login = item.author_login.clone();
-    let author_avatar_url = item.author_avatar_url.clone();
-    let meta = format!("updated {}", format_relative_time(&item.updated_at));
-    let comments = item.comments_count;
-    let changed_files = item.changed_files;
-    let additions = item.additions;
-    let deletions = item.deletions;
-    let review_decision = item.review_decision.clone();
-    let summary = item.clone();
-
-    div()
-        .w_full()
-        .rounded(radius())
-        .bg(bg_overlay())
-        .border_1()
-        .border_color(transparent())
-        .shadow_sm()
-        .overflow_hidden()
-        .flex()
-        .cursor_pointer()
-        .hover(|style| style.bg(bg_surface()).text_color(fg_emphasis()))
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            on_click(summary.clone(), window, cx)
-        })
-        .child(material_surface(&material_key).w(px(10.0)).flex_shrink_0())
-        .child(
-            div()
-                .flex_grow()
-                .p(px(14.0))
-                .flex()
-                .items_start()
-                .justify_between()
-                .gap(px(16.0))
-                .child(
-                    div()
-                        .flex_grow()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(8.0))
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .font_family(mono_font_family())
-                                .text_color(fg_subtle())
-                                .child(repo_ref),
-                        )
-                        .child(
-                            div()
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(fg_emphasis())
-                                .text_size(px(14.0))
-                                .line_clamp(2)
-                                .child(title),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .text_size(px(12.0))
-                                .text_color(fg_muted())
-                                .child(user_avatar(
-                                    &author_login,
-                                    author_avatar_url.as_deref(),
-                                    18.0,
-                                    false,
-                                ))
-                                .child(
-                                    div()
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(fg_emphasis())
-                                        .child(author_login),
-                                )
-                                .child(format!("\u{2022} {meta}")),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .gap(px(6.0))
-                                .flex_wrap()
-                                .child(pull_request_state_badge(&item))
-                                .when_some(review_decision, |el, decision| {
-                                    el.child(review_decision_badge(&decision))
-                                })
-                                .when(comments > 0, |el| {
-                                    el.child(subtle_pill(&format!("{comments} comments")))
-                                })
-                                .child(subtle_pill(&format!("{changed_files} files"))),
-                        ),
-                )
-                .child(render_diff_summary(additions, deletions)),
         )
 }
 
