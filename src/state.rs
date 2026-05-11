@@ -511,6 +511,8 @@ pub struct DiffFileViewState {
     pub parsed_file_index: Option<usize>,
     pub highlighted_hunks: Option<Arc<Vec<Vec<DiffLineHighlight>>>>,
     pub list_state: ListState,
+    pub side_by_side_left_scroll: ScrollHandle,
+    pub side_by_side_right_scroll: ScrollHandle,
     pub last_focus_key: Rc<RefCell<Option<String>>>,
 }
 
@@ -527,6 +529,8 @@ impl DiffFileViewState {
             parsed_file_index,
             highlighted_hunks,
             list_state: ListState::new(0, ListAlignment::Top, px(400.0)),
+            side_by_side_left_scroll: ScrollHandle::new(),
+            side_by_side_right_scroll: ScrollHandle::new(),
             last_focus_key: Rc::new(RefCell::new(None)),
         }
     }
@@ -550,6 +554,8 @@ impl SourceBrowserViewState {
 #[derive(Clone)]
 pub struct CombinedDiffViewState {
     pub list_state: ListState,
+    pub side_by_side_left_scroll: ScrollHandle,
+    pub side_by_side_right_scroll: ScrollHandle,
     pub last_focus_key: Rc<RefCell<Option<String>>>,
 }
 
@@ -557,6 +563,8 @@ impl CombinedDiffViewState {
     pub fn new() -> Self {
         Self {
             list_state: ListState::new(0, ListAlignment::Top, px(400.0)),
+            side_by_side_left_scroll: ScrollHandle::new(),
+            side_by_side_right_scroll: ScrollHandle::new(),
             last_focus_key: Rc::new(RefCell::new(None)),
         }
     }

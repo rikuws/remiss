@@ -1,7 +1,9 @@
 use std::{
+    cell::RefCell,
     collections::{hash_map::DefaultHasher, BTreeSet, VecDeque},
     hash::{Hash, Hasher},
     path::PathBuf,
+    rc::Rc,
     sync::Arc,
     time::Duration,
 };
@@ -3735,18 +3737,25 @@ fn render_file_tree_state_message(message: String, is_error: bool) -> impl IntoE
 }
 
 const REVIEW_FILE_TREE_ROW_HEIGHT: f32 = 30.0;
-const DIFF_CONTENT_LEFT_GUTTER: f32 = 36.0;
-const DIFF_CONTENT_RIGHT_GUTTER: f32 = 16.0;
+const DIFF_CONTENT_LEFT_GUTTER: f32 = 24.0;
+const DIFF_CONTENT_RIGHT_GUTTER: f32 = DIFF_CONTENT_LEFT_GUTTER;
 const DIFF_SECTION_LEFT_MARGIN: f32 = 0.0;
 const DIFF_SECTION_RIGHT_MARGIN: f32 = 0.0;
 const DIFF_SECTION_BODY_INSET: f32 = 12.0;
 const DIFF_SECTION_BODY_LEFT_MARGIN: f32 = DIFF_SECTION_LEFT_MARGIN + DIFF_SECTION_BODY_INSET;
 const DIFF_SECTION_BODY_RIGHT_MARGIN: f32 = DIFF_SECTION_RIGHT_MARGIN + DIFF_SECTION_BODY_INSET;
+const DIFF_SECTION_HEADER_OVERHANG: f32 = DIFF_SECTION_BODY_INSET;
+const DIFF_SECTION_HEADER_LEFT_MARGIN: f32 =
+    DIFF_SECTION_BODY_LEFT_MARGIN - DIFF_SECTION_HEADER_OVERHANG;
+const DIFF_SECTION_HEADER_RIGHT_MARGIN: f32 =
+    DIFF_SECTION_BODY_RIGHT_MARGIN - DIFF_SECTION_HEADER_OVERHANG;
 const DIFF_FILE_HEADER_TOP_MARGIN_FIRST: f32 = 14.0;
 const DIFF_FILE_HEADER_TOP_MARGIN: f32 = 36.0;
 const DIFF_FILE_HEADER_BOTTOM_MARGIN: f32 = 10.0;
 const DIFF_FLOATING_FILE_HEADER_TOP_PADDING: f32 = 10.0;
 const DIFF_FLOATING_FILE_HEADER_BOTTOM_PADDING: f32 = 10.0;
+const DIFF_SCROLL_TOP_FADE_HEIGHT: f32 = 30.0;
+const DIFF_SCROLLBAR_WIDTH: f32 = 8.0;
 
 fn prepare_review_file_tree_list_state_for_scope(app_state: &AppState, scope: &str) -> ListState {
     let key = review_cache_key(app_state.active_pr_key.as_deref(), scope);
@@ -8026,6 +8035,7 @@ struct CombinedDiffFileContext {
     parsed_override: Option<Arc<ParsedDiffFile>>,
     structural_side_by_side: Option<Arc<crate::difftastic::AdaptedDifftasticDiffFile>>,
     normal_side_by_side: Option<Arc<NormalSideBySideDiffFile>>,
+    side_by_side_column_widths: Option<SideBySideColumnWidths>,
     rows: Arc<Vec<DiffRenderRow>>,
     parsed_file_index: Option<usize>,
     highlighted_hunks: Option<Arc<Vec<Vec<DiffLineHighlight>>>>,
@@ -8101,7 +8111,7 @@ fn render_combined_diff_files(
         .active_review_session()
         .map(|session| session.wrap_diff_lines)
         .unwrap_or(false);
-    let (items, horizontally_scrollable) = build_combined_diff_view_items(&contexts);
+    let (items, has_side_by_side_rows) = build_combined_diff_view_items(&contexts);
     let view_state = prepare_combined_diff_view_state(app_state, center_mode);
     reset_list_state_preserving_scroll(&view_state.list_state, items.len());
     scroll_combined_diff_list_to_focus(
@@ -8132,11 +8142,19 @@ fn render_combined_diff_files(
             )
         })
         .flatten();
+    let show_top_fade = floating_header.is_some();
     let state = state.clone();
     let render_state = state.clone();
     let items = Arc::new(items);
     let contexts = Arc::new(contexts);
     let list_state = view_state.list_state.clone();
+    let scrollbar_list_state = view_state.list_state.clone();
+    let side_by_side_scroll_handles = SideBySideScrollHandles {
+        left: view_state.side_by_side_left_scroll.clone(),
+        right: view_state.side_by_side_right_scroll.clone(),
+    };
+    let render_side_by_side_scroll_handles = side_by_side_scroll_handles.clone();
+    let item_count = items.len();
     let rows = list(list_state, move |ix, _window, cx| {
         render_combined_diff_view_item(
             &render_state,
@@ -8144,6 +8162,7 @@ fn render_combined_diff_files(
             items[ix].clone(),
             ix,
             wrap_diff_lines,
+            &render_side_by_side_scroll_handles,
             cx,
         )
     })
@@ -8151,25 +8170,24 @@ fn render_combined_diff_files(
     .flex_grow()
     .min_h_0();
 
-    let body = if !wrap_diff_lines {
-        let min_width = if horizontally_scrollable {
-            DIFF_SIDE_BY_SIDE_MIN_WIDTH
-        } else {
-            DIFF_UNIFIED_MIN_WIDTH
-        };
-        div()
-            .flex()
-            .flex_col()
-            .flex_grow()
-            .min_h_0()
-            .min_w_0()
+    let use_whole_diff_horizontal_scroll = !wrap_diff_lines && !has_side_by_side_rows;
+    let body = if use_whole_diff_horizontal_scroll {
+        restrict_diff_scroll_to_axis(div().flex().flex_col().flex_grow().min_h_0().min_w_0())
             .id("combined-diff-horizontal-scroll")
             .overflow_x_scroll()
-            .child(rows.min_w(px(min_width)))
+            .scrollbar_width(px(DIFF_SCROLLBAR_WIDTH))
+            .child(rows.min_w(px(DIFF_UNIFIED_MIN_WIDTH)))
             .into_any_element()
     } else {
         rows.into_any_element()
     };
+    let body = render_diff_scroll_body(
+        body,
+        &scrollbar_list_state,
+        item_count,
+        (!wrap_diff_lines && has_side_by_side_rows).then_some(&side_by_side_scroll_handles),
+        show_top_fade,
+    );
 
     div()
         .flex()
@@ -8189,6 +8207,353 @@ fn render_combined_diff_files(
             ))
         })
         .child(body)
+        .into_any_element()
+}
+
+fn render_diff_scroll_body(
+    body: AnyElement,
+    list_state: &ListState,
+    item_count: usize,
+    side_by_side_scroll_handles: Option<&SideBySideScrollHandles>,
+    show_top_fade: bool,
+) -> AnyElement {
+    let side_by_side_scrollbars =
+        side_by_side_scroll_handles.and_then(render_side_by_side_horizontal_scrollbars);
+    let has_side_by_side_scrollbars = side_by_side_scrollbars.is_some();
+
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .flex_grow()
+        .min_h_0()
+        .min_w_0()
+        .when(has_side_by_side_scrollbars, |el| {
+            el.pb(px(DIFF_SCROLLBAR_WIDTH + 4.0))
+        })
+        .child(body)
+        .when(show_top_fade, |el| el.child(render_diff_scroll_top_fade()))
+        .when_some(
+            render_diff_vertical_scrollbar(list_state, item_count),
+            |el, scrollbar| el.child(scrollbar),
+        )
+        .when_some(side_by_side_scrollbars, |el, scrollbar| el.child(scrollbar))
+        .into_any_element()
+}
+
+fn render_diff_scroll_top_fade() -> AnyElement {
+    div()
+        .absolute()
+        .top(px(0.0))
+        .left(px(0.0))
+        .right(px(0.0))
+        .h(px(DIFF_SCROLL_TOP_FADE_HEIGHT))
+        .bg(linear_gradient(
+            180.0,
+            linear_color_stop(with_alpha(diff_editor_bg(), 0.96), 0.0),
+            linear_color_stop(with_alpha(diff_editor_bg(), 0.0), 1.0),
+        ))
+        .into_any_element()
+}
+
+fn restrict_diff_scroll_to_axis(mut element: Div) -> Div {
+    element.style().restrict_scroll_to_axis = Some(true);
+    element
+}
+
+#[derive(Clone)]
+struct DiffVerticalScrollbarDrag {
+    id: String,
+    list_state: ListState,
+    start_pointer_y: Rc<RefCell<Option<Pixels>>>,
+    start_scroll_offset: f32,
+    max_scroll_offset: f32,
+    thumb_travel: f32,
+}
+
+impl DiffVerticalScrollbarDrag {
+    fn new(
+        id: String,
+        list_state: ListState,
+        start_scroll_offset: f32,
+        max_scroll_offset: f32,
+        thumb_travel: f32,
+    ) -> Self {
+        Self {
+            id,
+            list_state,
+            start_pointer_y: Rc::new(RefCell::new(None)),
+            start_scroll_offset,
+            max_scroll_offset,
+            thumb_travel,
+        }
+    }
+
+    fn drag_to(&self, pointer_y: Pixels, window: &mut Window) {
+        if self.thumb_travel <= 0.0 || self.max_scroll_offset <= 0.0 {
+            return;
+        }
+
+        let start_pointer_y = {
+            let mut start_pointer_y = self.start_pointer_y.borrow_mut();
+            *start_pointer_y.get_or_insert(pointer_y)
+        };
+        let delta = f32::from(pointer_y - start_pointer_y);
+        let scroll_offset = (self.start_scroll_offset
+            + delta / self.thumb_travel * self.max_scroll_offset)
+            .clamp(0.0, self.max_scroll_offset);
+        self.list_state
+            .set_offset_from_scrollbar(point(px(0.0), px(-scroll_offset)));
+        window.refresh();
+    }
+}
+
+#[derive(Clone)]
+struct DiffHorizontalScrollbarDrag {
+    id: String,
+    scroll_handle: ScrollHandle,
+    start_pointer_x: Rc<RefCell<Option<Pixels>>>,
+    start_scroll_offset: f32,
+    max_scroll_offset: f32,
+    thumb_travel: f32,
+}
+
+impl DiffHorizontalScrollbarDrag {
+    fn new(
+        id: String,
+        scroll_handle: ScrollHandle,
+        start_scroll_offset: f32,
+        max_scroll_offset: f32,
+        thumb_travel: f32,
+    ) -> Self {
+        Self {
+            id,
+            scroll_handle,
+            start_pointer_x: Rc::new(RefCell::new(None)),
+            start_scroll_offset,
+            max_scroll_offset,
+            thumb_travel,
+        }
+    }
+
+    fn drag_to(&self, pointer_x: Pixels, window: &mut Window) {
+        if self.thumb_travel <= 0.0 || self.max_scroll_offset <= 0.0 {
+            return;
+        }
+
+        let start_pointer_x = {
+            let mut start_pointer_x = self.start_pointer_x.borrow_mut();
+            *start_pointer_x.get_or_insert(pointer_x)
+        };
+        let delta = f32::from(pointer_x - start_pointer_x);
+        let scroll_offset = (self.start_scroll_offset
+            + delta / self.thumb_travel * self.max_scroll_offset)
+            .clamp(0.0, self.max_scroll_offset);
+        let current_offset = self.scroll_handle.offset();
+        self.scroll_handle
+            .set_offset(point(px(-scroll_offset), current_offset.y));
+        window.refresh();
+    }
+}
+
+struct DiffScrollbarDragPreview;
+
+impl Render for DiffScrollbarDragPreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<'_, Self>) -> impl IntoElement {
+        div().w(px(0.0)).h(px(0.0))
+    }
+}
+
+fn render_diff_vertical_scrollbar(list_state: &ListState, item_count: usize) -> Option<AnyElement> {
+    if item_count <= 1 {
+        return None;
+    }
+
+    let viewport_height = f32::from(list_state.viewport_bounds().size.height);
+    let max_offset = f32::from(list_state.max_offset_for_scrollbar().height);
+    if viewport_height <= 0.0 || max_offset <= 0.0 {
+        return None;
+    }
+
+    let content_height = viewport_height + max_offset;
+    let thumb_height =
+        (viewport_height * (viewport_height / content_height)).clamp(36.0, viewport_height);
+    let scroll_offset =
+        (-f32::from(list_state.scroll_px_offset_for_scrollbar().y)).clamp(0.0, max_offset);
+    let thumb_top = if max_offset <= 0.0 {
+        0.0
+    } else {
+        scroll_offset / max_offset * (viewport_height - thumb_height)
+    };
+    let track_color: Hsla = with_alpha(fg_subtle(), 0.08).into();
+    let thumb_color: Hsla = with_alpha(fg_muted(), 0.38).into();
+    let drag_id = "diff-vertical-scrollbar-thumb".to_string();
+    let drag = DiffVerticalScrollbarDrag::new(
+        drag_id.clone(),
+        list_state.clone(),
+        scroll_offset,
+        max_offset,
+        viewport_height - thumb_height,
+    );
+    let drag_id_for_move = drag_id.clone();
+
+    Some(
+        div()
+            .absolute()
+            .top(px(0.0))
+            .right(px(2.0))
+            .w(px(8.0))
+            .h(px(viewport_height))
+            .child(
+                div()
+                    .absolute()
+                    .top(px(4.0))
+                    .bottom(px(4.0))
+                    .right(px(3.0))
+                    .w(px(2.0))
+                    .rounded(px(1.0))
+                    .bg(track_color),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(thumb_top))
+                    .right(px(0.0))
+                    .w(px(8.0))
+                    .h(px(thumb_height))
+                    .id(ElementId::Name(drag_id.into()))
+                    .cursor(CursorStyle::ResizeUpDown)
+                    .on_drag(drag, |_, _, _, cx| cx.new(|_| DiffScrollbarDragPreview))
+                    .on_drag_move(
+                        move |event: &DragMoveEvent<DiffVerticalScrollbarDrag>, window, cx| {
+                            let drag = event.drag(cx);
+                            if drag.id != drag_id_for_move {
+                                return;
+                            }
+                            drag.drag_to(event.event.position.y, window);
+                        },
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .right(px(2.0))
+                            .w(px(4.0))
+                            .h_full()
+                            .rounded(px(2.0))
+                            .bg(thumb_color),
+                    ),
+            )
+            .into_any_element(),
+    )
+}
+
+fn render_side_by_side_horizontal_scrollbars(
+    handles: &SideBySideScrollHandles,
+) -> Option<AnyElement> {
+    let left_has_scroll = handles.left_has_horizontal_scroll();
+    let right_has_scroll = handles.right_has_horizontal_scroll();
+    if !left_has_scroll && !right_has_scroll {
+        return None;
+    }
+
+    Some(
+        div()
+            .absolute()
+            .left(px(DIFF_SECTION_BODY_LEFT_MARGIN))
+            .right(px(DIFF_SECTION_BODY_RIGHT_MARGIN))
+            .bottom(px(2.0))
+            .h(px(DIFF_SCROLLBAR_WIDTH))
+            .flex()
+            .child(render_side_by_side_horizontal_scrollbar_lane(
+                SideBySideDiffSide::Left,
+                handles.handle_for(SideBySideDiffSide::Left),
+                left_has_scroll,
+            ))
+            .child(render_side_by_side_horizontal_scrollbar_lane(
+                SideBySideDiffSide::Right,
+                handles.handle_for(SideBySideDiffSide::Right),
+                right_has_scroll,
+            ))
+            .into_any_element(),
+    )
+}
+
+fn render_side_by_side_horizontal_scrollbar_lane(
+    side: SideBySideDiffSide,
+    handle: &ScrollHandle,
+    visible: bool,
+) -> AnyElement {
+    if !visible {
+        return div().flex_1().min_w_0().into_any_element();
+    }
+
+    let viewport_width = f32::from(handle.bounds().size.width);
+    let max_offset = f32::from(handle.max_offset().width);
+    if viewport_width <= 0.0 || max_offset <= 0.0 {
+        return div().flex_1().min_w_0().into_any_element();
+    }
+
+    let content_width = viewport_width + max_offset;
+    let thumb_width =
+        (viewport_width * (viewport_width / content_width)).clamp(36.0, viewport_width);
+    let scroll_offset = (-f32::from(handle.offset().x)).clamp(0.0, max_offset);
+    let thumb_left = scroll_offset / max_offset * (viewport_width - thumb_width);
+    let track_color: Hsla = with_alpha(fg_subtle(), 0.08).into();
+    let thumb_color: Hsla = with_alpha(fg_muted(), 0.38).into();
+    let drag_id = format!("diff-side-by-side-horizontal-scrollbar-{}", side.id_label());
+    let drag = DiffHorizontalScrollbarDrag::new(
+        drag_id.clone(),
+        handle.clone(),
+        scroll_offset,
+        max_offset,
+        viewport_width - thumb_width,
+    );
+    let drag_id_for_move = drag_id.clone();
+
+    div()
+        .relative()
+        .flex_1()
+        .min_w_0()
+        .h(px(DIFF_SCROLLBAR_WIDTH))
+        .child(
+            div()
+                .absolute()
+                .left(px(4.0))
+                .right(px(4.0))
+                .top(px(3.0))
+                .h(px(2.0))
+                .rounded(px(1.0))
+                .bg(track_color),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(px(thumb_left))
+                .top(px(0.0))
+                .w(px(thumb_width))
+                .h(px(DIFF_SCROLLBAR_WIDTH))
+                .id(ElementId::Name(drag_id.into()))
+                .cursor(CursorStyle::ResizeLeftRight)
+                .on_drag(drag, |_, _, _, cx| cx.new(|_| DiffScrollbarDragPreview))
+                .on_drag_move(
+                    move |event: &DragMoveEvent<DiffHorizontalScrollbarDrag>, window, cx| {
+                        let drag = event.drag(cx);
+                        if drag.id != drag_id_for_move {
+                            return;
+                        }
+                        drag.drag_to(event.event.position.x, window);
+                    },
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(2.0))
+                        .w_full()
+                        .h(px(4.0))
+                        .rounded(px(2.0))
+                        .bg(thumb_color),
+                ),
+        )
         .into_any_element()
 }
 
@@ -8293,6 +8658,17 @@ fn prepare_combined_diff_file_context(
     let stack_visibility =
         stack_filter.map(|filter| stack_file_visibility(review_stack, filter, &file.path));
     let gutter_layout = diff_gutter_layout(file, parsed.as_deref(), reserve_waypoint_slot);
+    let wrap_diff_lines = app_state
+        .active_review_session()
+        .map(|session| session.wrap_diff_lines)
+        .unwrap_or(false);
+    let side_by_side_column_widths = side_by_side_column_widths_for_file(
+        parsed.as_deref(),
+        structural_side_by_side.as_deref(),
+        normal_side_by_side.as_deref(),
+        gutter_layout.reserve_waypoint_slot,
+        wrap_diff_lines,
+    );
     let file_lsp_context =
         build_diff_file_lsp_context(state, file.path.as_str(), prepared_file, cx);
     let selected_anchor = selected_anchor
@@ -8332,6 +8708,7 @@ fn prepare_combined_diff_file_context(
         parsed_override,
         structural_side_by_side,
         normal_side_by_side,
+        side_by_side_column_widths,
         rows,
         parsed_file_index,
         highlighted_hunks,
@@ -8348,7 +8725,7 @@ fn build_combined_diff_view_items(
     contexts: &[CombinedDiffFileContext],
 ) -> (Vec<CombinedDiffViewItem>, bool) {
     let mut items = Vec::new();
-    let mut horizontally_scrollable = false;
+    let mut has_side_by_side_rows = false;
 
     for (file_index, context) in contexts.iter().enumerate() {
         items.push(CombinedDiffViewItem::Header(file_index));
@@ -8367,12 +8744,12 @@ fn build_combined_diff_view_items(
             }));
         }
         items.push(CombinedDiffViewItem::Footer);
-        horizontally_scrollable = horizontally_scrollable
+        has_side_by_side_rows = has_side_by_side_rows
             || context.structural_side_by_side.is_some()
             || context.normal_side_by_side.is_some();
     }
 
-    (items, horizontally_scrollable)
+    (items, has_side_by_side_rows)
 }
 
 fn prepare_combined_diff_view_state(
@@ -8510,6 +8887,7 @@ fn render_combined_diff_view_item(
     item: CombinedDiffViewItem,
     item_ix: usize,
     wrap_diff_lines: bool,
+    side_by_side_scroll_handles: &SideBySideScrollHandles,
     cx: &App,
 ) -> AnyElement {
     match item {
@@ -8517,14 +8895,14 @@ fn render_combined_diff_view_item(
             .get(file_index)
             .map(|context| {
                 div()
-                    .ml(px(DIFF_SECTION_LEFT_MARGIN))
-                    .mr(px(DIFF_SECTION_RIGHT_MARGIN))
-                    .mt(if item_ix == 0 {
+                    .ml(px(DIFF_SECTION_HEADER_LEFT_MARGIN))
+                    .mr(px(DIFF_SECTION_HEADER_RIGHT_MARGIN))
+                    .pt(if item_ix == 0 {
                         px(DIFF_FILE_HEADER_TOP_MARGIN_FIRST)
                     } else {
                         px(DIFF_FILE_HEADER_TOP_MARGIN)
                     })
-                    .mb(px(DIFF_FILE_HEADER_BOTTOM_MARGIN))
+                    .pb(px(DIFF_FILE_HEADER_BOTTOM_MARGIN))
                     .child(render_diff_file_header_row(
                         state,
                         context.header.clone(),
@@ -8554,7 +8932,9 @@ fn render_combined_diff_view_item(
             .unwrap_or_else(|| div().into_any_element()),
         CombinedDiffViewItem::Row { file_index, item } => contexts
             .get(file_index)
-            .map(|context| render_combined_diff_row_item(state, context, item, cx))
+            .map(|context| {
+                render_combined_diff_row_item(state, context, item, side_by_side_scroll_handles, cx)
+            })
             .unwrap_or_else(|| div().into_any_element()),
         CombinedDiffViewItem::Footer => div().h(px(12.0)).into_any_element(),
     }
@@ -8564,6 +8944,7 @@ fn render_combined_diff_row_item(
     state: &Entity<AppState>,
     context: &CombinedDiffFileContext,
     item: DiffViewItem,
+    side_by_side_scroll_handles: &SideBySideScrollHandles,
     cx: &App,
 ) -> AnyElement {
     let row = match item {
@@ -8589,6 +8970,8 @@ fn render_combined_diff_row_item(
                     context.file_lsp_context.as_ref(),
                     row,
                     context.selected_anchor.as_ref(),
+                    side_by_side_scroll_handles,
+                    context.side_by_side_column_widths,
                     cx,
                 )
                 .into_any_element()
@@ -8601,12 +8984,20 @@ fn render_combined_diff_row_item(
 
 fn render_combined_diff_body_row(child: AnyElement) -> AnyElement {
     div()
-        .ml(px(DIFF_SECTION_BODY_LEFT_MARGIN))
-        .mr(px(DIFF_SECTION_BODY_RIGHT_MARGIN))
-        .border_l(px(1.0))
-        .border_r(px(1.0))
-        .border_color(diff_annotation_border())
-        .child(child)
+        .w_full()
+        .min_w_0()
+        .pl(px(DIFF_SECTION_BODY_LEFT_MARGIN))
+        .pr(px(DIFF_SECTION_BODY_RIGHT_MARGIN))
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .border_l(px(1.0))
+                .border_r(px(1.0))
+                .border_color(diff_annotation_border())
+                .overflow_hidden()
+                .child(child),
+        )
         .into_any_element()
 }
 
@@ -8748,6 +9139,8 @@ fn render_floating_diff_file_header(
     wrap_diff_lines: bool,
 ) -> impl IntoElement {
     div()
+        .ml(px(DIFF_SECTION_HEADER_LEFT_MARGIN))
+        .mr(px(DIFF_SECTION_HEADER_RIGHT_MARGIN))
         .pt(px(DIFF_FLOATING_FILE_HEADER_TOP_PADDING))
         .pb(px(DIFF_FLOATING_FILE_HEADER_BOTTOM_PADDING))
         .bg(diff_editor_bg())
@@ -8945,6 +9338,10 @@ fn render_file_diff(
     let gutter_layout = diff_gutter_layout(file, parsed, reserve_waypoint_slot);
     let selected_anchor = selected_anchor.cloned();
     let list_state = diff_view_state.list_state.clone();
+    let side_by_side_scroll_handles = SideBySideScrollHandles {
+        left: diff_view_state.side_by_side_left_scroll.clone(),
+        right: diff_view_state.side_by_side_right_scroll.clone(),
+    };
     let prepared_file = prepared_file.cloned();
     let file_lsp_context =
         build_diff_file_lsp_context(state, file.path.as_str(), prepared_file.as_ref(), cx);
@@ -8956,6 +9353,13 @@ fn render_file_diff(
         .then(|| parsed.filter(|parsed| !parsed.hunks.is_empty() && !parsed.is_binary))
         .flatten()
         .map(|parsed| Arc::new(build_normal_side_by_side_diff_file(parsed)));
+    let side_by_side_column_widths = side_by_side_column_widths_for_file(
+        parsed,
+        structural_side_by_side.as_deref(),
+        normal_side_by_side.as_deref(),
+        gutter_layout.reserve_waypoint_slot,
+        wrap_diff_lines,
+    );
 
     let items = build_diff_view_items(
         file,
@@ -9075,6 +9479,8 @@ fn render_file_diff(
                         list_state,
                         items,
                         wrap_diff_lines,
+                        side_by_side_scroll_handles,
+                        side_by_side_column_widths,
                     )
                     .into_any_element(),
                 ),
@@ -9095,10 +9501,14 @@ fn render_virtualized_diff_rows(
     list_state: ListState,
     items: Arc<Vec<DiffViewItem>>,
     wrap_diff_lines: bool,
+    side_by_side_scroll_handles: SideBySideScrollHandles,
+    side_by_side_column_widths: Option<SideBySideColumnWidths>,
 ) -> AnyElement {
     let state = state.clone();
-    let horizontally_scrollable =
-        structural_side_by_side.is_some() || normal_side_by_side.is_some();
+    let has_side_by_side_rows = structural_side_by_side.is_some() || normal_side_by_side.is_some();
+    let scrollbar_list_state = list_state.clone();
+    let render_side_by_side_scroll_handles = side_by_side_scroll_handles.clone();
+    let item_count = items.len();
 
     let rows = list(list_state, move |ix, _window, cx| match items[ix] {
         DiffViewItem::Gap(gap) => render_diff_gap_row(gap, gutter_layout).into_any_element(),
@@ -9117,6 +9527,8 @@ fn render_virtualized_diff_rows(
             file_lsp_context.as_ref(),
             &rows[row_ix],
             selected_anchor.as_ref(),
+            &render_side_by_side_scroll_handles,
+            side_by_side_column_widths,
             cx,
         )
         .into_any_element(),
@@ -9125,25 +9537,25 @@ fn render_virtualized_diff_rows(
     .flex_grow()
     .min_h_0();
 
-    if !wrap_diff_lines {
-        let min_width = if horizontally_scrollable {
-            DIFF_SIDE_BY_SIDE_MIN_WIDTH
-        } else {
-            DIFF_UNIFIED_MIN_WIDTH
-        };
-        div()
-            .flex()
-            .flex_col()
-            .flex_grow()
-            .min_h_0()
-            .min_w_0()
+    let use_whole_diff_horizontal_scroll = !wrap_diff_lines && !has_side_by_side_rows;
+    let body = if use_whole_diff_horizontal_scroll {
+        restrict_diff_scroll_to_axis(div().flex().flex_col().flex_grow().min_h_0().min_w_0())
             .id("diff-horizontal-scroll")
             .overflow_x_scroll()
-            .child(rows.min_w(px(min_width)))
+            .scrollbar_width(px(DIFF_SCROLLBAR_WIDTH))
+            .child(rows.min_w(px(DIFF_UNIFIED_MIN_WIDTH)))
             .into_any_element()
     } else {
         rows.into_any_element()
-    }
+    };
+
+    render_diff_scroll_body(
+        body,
+        &scrollbar_list_state,
+        item_count,
+        (!wrap_diff_lines && has_side_by_side_rows).then_some(&side_by_side_scroll_handles),
+        false,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -10498,6 +10910,8 @@ fn render_virtualized_diff_row(
     file_lsp_context: Option<&DiffFileLspContext>,
     row: &DiffRenderRow,
     selected_anchor: Option<&DiffAnchor>,
+    side_by_side_scroll_handles: &SideBySideScrollHandles,
+    side_by_side_column_widths: Option<SideBySideColumnWidths>,
     cx: &App,
 ) -> impl IntoElement {
     let s = state.read(cx);
@@ -10601,10 +11015,20 @@ fn render_virtualized_diff_row(
                                     detail,
                                     parsed,
                                     path,
+                                    *hunk_index,
                                     hunk.header.as_str(),
+                                    line_map.row_index,
                                     side_by_side_row,
                                     selected_anchor,
                                     file_lsp_context,
+                                    side_by_side_scroll_handles,
+                                    side_by_side_column_widths.unwrap_or_else(|| {
+                                        structural_side_by_side_column_widths(
+                                            side_by_side,
+                                            gutter_layout.reserve_waypoint_slot,
+                                            false,
+                                        )
+                                    }),
                                     cx,
                                 )
                                 .into_any_element()
@@ -10634,12 +11058,23 @@ fn render_virtualized_diff_row(
                                     detail,
                                     parsed,
                                     path,
+                                    *hunk_index,
                                     hunk.header.as_str(),
+                                    line_map.row_index,
                                     hunk,
                                     highlighted_hunks.and_then(|hunks| hunks.get(*hunk_index)),
                                     side_by_side_row,
                                     selected_anchor,
                                     file_lsp_context,
+                                    side_by_side_scroll_handles,
+                                    side_by_side_column_widths.unwrap_or_else(|| {
+                                        normal_side_by_side_column_widths(
+                                            parsed,
+                                            side_by_side,
+                                            gutter_layout.reserve_waypoint_slot,
+                                            false,
+                                        )
+                                    }),
                                     cx,
                                 )
                                 .into_any_element()
@@ -10699,38 +11134,199 @@ enum SideBySideDiffSide {
     Right,
 }
 
+impl SideBySideDiffSide {
+    fn id_label(self) -> &'static str {
+        match self {
+            SideBySideDiffSide::Left => "left",
+            SideBySideDiffSide::Right => "right",
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SideBySideScrollHandles {
+    left: ScrollHandle,
+    right: ScrollHandle,
+}
+
+impl SideBySideScrollHandles {
+    fn new() -> Self {
+        Self {
+            left: ScrollHandle::new(),
+            right: ScrollHandle::new(),
+        }
+    }
+
+    fn handle_for(&self, side: SideBySideDiffSide) -> &ScrollHandle {
+        match side {
+            SideBySideDiffSide::Left => &self.left,
+            SideBySideDiffSide::Right => &self.right,
+        }
+    }
+
+    fn left_has_horizontal_scroll(&self) -> bool {
+        self.left.max_offset().width > px(0.0)
+    }
+
+    fn right_has_horizontal_scroll(&self) -> bool {
+        self.right.max_offset().width > px(0.0)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SideBySideColumnWidths {
+    left: f32,
+    right: f32,
+}
+
+impl SideBySideColumnWidths {
+    fn width_for(self, side: SideBySideDiffSide) -> f32 {
+        match side {
+            SideBySideDiffSide::Left => self.left,
+            SideBySideDiffSide::Right => self.right,
+        }
+    }
+}
+
+fn side_by_side_column_widths_for_file(
+    parsed: Option<&ParsedDiffFile>,
+    structural_side_by_side: Option<&crate::difftastic::AdaptedDifftasticDiffFile>,
+    normal_side_by_side: Option<&NormalSideBySideDiffFile>,
+    reserve_waypoint_slot: bool,
+    wrap_diff_lines: bool,
+) -> Option<SideBySideColumnWidths> {
+    structural_side_by_side
+        .map(|side_by_side| {
+            structural_side_by_side_column_widths(
+                side_by_side,
+                reserve_waypoint_slot,
+                wrap_diff_lines,
+            )
+        })
+        .or_else(|| {
+            parsed.and_then(|parsed| {
+                normal_side_by_side.map(|side_by_side| {
+                    normal_side_by_side_column_widths(
+                        parsed,
+                        side_by_side,
+                        reserve_waypoint_slot,
+                        wrap_diff_lines,
+                    )
+                })
+            })
+        })
+}
+
+fn normal_side_by_side_column_widths(
+    parsed: &ParsedDiffFile,
+    side_by_side: &NormalSideBySideDiffFile,
+    reserve_waypoint_slot: bool,
+    wrap_diff_lines: bool,
+) -> SideBySideColumnWidths {
+    let left_layout = side_by_side_gutter_layout(SideBySideDiffSide::Left, reserve_waypoint_slot);
+    let right_layout = side_by_side_gutter_layout(SideBySideDiffSide::Right, reserve_waypoint_slot);
+    let mut widths = SideBySideColumnWidths {
+        left: side_by_side_cell_min_width(left_layout, None, wrap_diff_lines),
+        right: side_by_side_cell_min_width(right_layout, None, wrap_diff_lines),
+    };
+
+    for (hunk_ix, hunk) in parsed.hunks.iter().enumerate() {
+        let Some(side_by_side_hunk) = side_by_side.hunks.get(hunk_ix) else {
+            continue;
+        };
+        for row in &side_by_side_hunk.rows {
+            if let Some(line) = row
+                .left_line_index
+                .and_then(|line_ix| hunk.lines.get(line_ix))
+            {
+                widths.left = widths.left.max(side_by_side_cell_min_width(
+                    left_layout,
+                    Some(line.content.as_str()),
+                    wrap_diff_lines,
+                ));
+            }
+            if let Some(line) = row
+                .right_line_index
+                .and_then(|line_ix| hunk.lines.get(line_ix))
+            {
+                widths.right = widths.right.max(side_by_side_cell_min_width(
+                    right_layout,
+                    Some(line.content.as_str()),
+                    wrap_diff_lines,
+                ));
+            }
+        }
+    }
+
+    widths
+}
+
+fn structural_side_by_side_column_widths(
+    side_by_side: &crate::difftastic::AdaptedDifftasticDiffFile,
+    reserve_waypoint_slot: bool,
+    wrap_diff_lines: bool,
+) -> SideBySideColumnWidths {
+    let left_layout = side_by_side_gutter_layout(SideBySideDiffSide::Left, reserve_waypoint_slot);
+    let right_layout = side_by_side_gutter_layout(SideBySideDiffSide::Right, reserve_waypoint_slot);
+    let mut widths = SideBySideColumnWidths {
+        left: side_by_side_cell_min_width(left_layout, None, wrap_diff_lines),
+        right: side_by_side_cell_min_width(right_layout, None, wrap_diff_lines),
+    };
+
+    for hunk in &side_by_side.side_by_side_hunks {
+        for row in &hunk.rows {
+            if let Some(cell) = row.left.as_ref() {
+                widths.left = widths.left.max(side_by_side_cell_min_width(
+                    left_layout,
+                    Some(cell.line.content.as_str()),
+                    wrap_diff_lines,
+                ));
+            }
+            if let Some(cell) = row.right.as_ref() {
+                widths.right = widths.right.max(side_by_side_cell_min_width(
+                    right_layout,
+                    Some(cell.line.content.as_str()),
+                    wrap_diff_lines,
+                ));
+            }
+        }
+    }
+
+    widths
+}
+
 fn render_normal_side_by_side_diff_row(
     state: &Entity<AppState>,
     reserve_waypoint_slot: bool,
     detail: Option<&PullRequestDetail>,
     parsed_file: &ParsedDiffFile,
     file_path: &str,
+    hunk_index: usize,
     hunk_header: &str,
+    row_index: usize,
     hunk: &ParsedDiffHunk,
     highlighted_hunk: Option<&Vec<DiffLineHighlight>>,
     row: &NormalSideBySideRow,
     selected_anchor: Option<&DiffAnchor>,
     file_lsp_context: Option<&DiffFileLspContext>,
+    side_by_side_scroll_handles: &SideBySideScrollHandles,
+    column_widths: SideBySideColumnWidths,
     cx: &App,
 ) -> impl IntoElement {
-    let wrap_diff_lines = state
-        .read(cx)
-        .active_review_session()
-        .map(|session| session.wrap_diff_lines)
-        .unwrap_or(false);
+    let row_scroll_key = format!("normal-side-by-side-scroll:{file_path}:{hunk_index}:{row_index}");
     div()
         .flex()
         .w_full()
-        .min_w(px(if wrap_diff_lines {
-            0.0
-        } else {
-            DIFF_SIDE_BY_SIDE_MIN_WIDTH
-        }))
+        .min_w_0()
+        .overflow_hidden()
         .bg(diff_editor_bg())
         .child(render_normal_side_by_side_cell(
             state,
             SideBySideDiffSide::Left,
             reserve_waypoint_slot,
+            row_scroll_key.as_str(),
+            side_by_side_scroll_handles.handle_for(SideBySideDiffSide::Left),
+            column_widths.width_for(SideBySideDiffSide::Left),
             file_path,
             hunk_header,
             hunk,
@@ -10746,6 +11342,9 @@ fn render_normal_side_by_side_diff_row(
             state,
             SideBySideDiffSide::Right,
             reserve_waypoint_slot,
+            row_scroll_key.as_str(),
+            side_by_side_scroll_handles.handle_for(SideBySideDiffSide::Right),
+            column_widths.width_for(SideBySideDiffSide::Right),
             file_path,
             hunk_header,
             hunk,
@@ -10763,6 +11362,9 @@ fn render_normal_side_by_side_cell(
     state: &Entity<AppState>,
     side: SideBySideDiffSide,
     reserve_waypoint_slot: bool,
+    row_scroll_key: &str,
+    scroll_handle: &ScrollHandle,
+    column_width: f32,
     file_path: &str,
     hunk_header: &str,
     hunk: &ParsedDiffHunk,
@@ -10782,11 +11384,11 @@ fn render_normal_side_by_side_cell(
         .unwrap_or(false);
     let line_entry =
         line_index.and_then(|line_index| hunk.lines.get(line_index).map(|line| (line_index, line)));
-    let cell_min_width = side_by_side_cell_min_width(
+    let cell_min_width = column_width.max(side_by_side_cell_min_width(
         gutter_layout,
         line_entry.map(|(_, line)| line.content.as_str()),
         wrap_diff_lines,
-    );
+    ));
     let content = line_entry
         .map(|(line_index, line)| {
             let highlight = highlighted_hunk
@@ -10828,14 +11430,14 @@ fn render_normal_side_by_side_cell(
             .into_any_element()
         });
 
-    div()
-        .flex_1()
-        .min_w(px(cell_min_width))
-        .when(side == SideBySideDiffSide::Left, |el| {
-            el.border_r(px(1.0)).border_color(diff_gutter_separator())
-        })
-        .child(content)
-        .into_any_element()
+    render_side_by_side_cell_container(
+        side,
+        row_scroll_key,
+        scroll_handle,
+        content,
+        cell_min_width,
+        wrap_diff_lines,
+    )
 }
 
 fn render_structural_side_by_side_diff_row(
@@ -10844,30 +11446,31 @@ fn render_structural_side_by_side_diff_row(
     detail: Option<&PullRequestDetail>,
     parsed_file: &ParsedDiffFile,
     file_path: &str,
+    hunk_index: usize,
     hunk_header: &str,
+    row_index: usize,
     row: &crate::difftastic::AdaptedDifftasticSideBySideRow,
     selected_anchor: Option<&DiffAnchor>,
     file_lsp_context: Option<&DiffFileLspContext>,
+    side_by_side_scroll_handles: &SideBySideScrollHandles,
+    column_widths: SideBySideColumnWidths,
     cx: &App,
 ) -> impl IntoElement {
-    let wrap_diff_lines = state
-        .read(cx)
-        .active_review_session()
-        .map(|session| session.wrap_diff_lines)
-        .unwrap_or(false);
+    let row_scroll_key =
+        format!("structural-side-by-side-scroll:{file_path}:{hunk_index}:{row_index}");
     div()
         .flex()
         .w_full()
-        .min_w(px(if wrap_diff_lines {
-            0.0
-        } else {
-            DIFF_SIDE_BY_SIDE_MIN_WIDTH
-        }))
+        .min_w_0()
+        .overflow_hidden()
         .bg(diff_editor_bg())
         .child(render_structural_side_by_side_cell(
             state,
             SideBySideDiffSide::Left,
             gutter_layout.reserve_waypoint_slot,
+            row_scroll_key.as_str(),
+            side_by_side_scroll_handles.handle_for(SideBySideDiffSide::Left),
+            column_widths.width_for(SideBySideDiffSide::Left),
             file_path,
             hunk_header,
             row.left.as_ref(),
@@ -10881,6 +11484,9 @@ fn render_structural_side_by_side_diff_row(
             state,
             SideBySideDiffSide::Right,
             gutter_layout.reserve_waypoint_slot,
+            row_scroll_key.as_str(),
+            side_by_side_scroll_handles.handle_for(SideBySideDiffSide::Right),
+            column_widths.width_for(SideBySideDiffSide::Right),
             file_path,
             hunk_header,
             row.right.as_ref(),
@@ -10896,6 +11502,9 @@ fn render_structural_side_by_side_cell(
     state: &Entity<AppState>,
     side: SideBySideDiffSide,
     reserve_waypoint_slot: bool,
+    row_scroll_key: &str,
+    scroll_handle: &ScrollHandle,
+    column_width: f32,
     file_path: &str,
     hunk_header: &str,
     cell: Option<&crate::difftastic::AdaptedDifftasticSideBySideCell>,
@@ -10911,11 +11520,11 @@ fn render_structural_side_by_side_cell(
         .active_review_session()
         .map(|session| session.wrap_diff_lines)
         .unwrap_or(false);
-    let cell_min_width = side_by_side_cell_min_width(
+    let cell_min_width = column_width.max(side_by_side_cell_min_width(
         gutter_layout,
         cell.map(|cell| cell.line.content.as_str()),
         wrap_diff_lines,
-    );
+    ));
     let content = cell
         .map(|cell| {
             let line_lsp_context = (side == SideBySideDiffSide::Right)
@@ -10953,9 +11562,41 @@ fn render_structural_side_by_side_cell(
             .into_any_element()
         });
 
+    render_side_by_side_cell_container(
+        side,
+        row_scroll_key,
+        scroll_handle,
+        content,
+        cell_min_width,
+        wrap_diff_lines,
+    )
+}
+
+fn render_side_by_side_cell_container(
+    side: SideBySideDiffSide,
+    row_scroll_key: &str,
+    scroll_handle: &ScrollHandle,
+    content: AnyElement,
+    cell_min_width: f32,
+    wrap_diff_lines: bool,
+) -> AnyElement {
+    let content = if wrap_diff_lines {
+        content
+    } else {
+        restrict_diff_scroll_to_axis(div().w_full().min_w_0())
+            .id(ElementId::Name(
+                format!("{row_scroll_key}:{}", side.id_label()).into(),
+            ))
+            .overflow_x_scroll()
+            .track_scroll(scroll_handle)
+            .child(div().min_w(px(cell_min_width)).child(content))
+            .into_any_element()
+    };
+
     div()
         .flex_1()
-        .min_w(px(cell_min_width))
+        .min_w_0()
+        .overflow_hidden()
         .when(side == SideBySideDiffSide::Left, |el| {
             el.border_r(px(1.0)).border_color(diff_gutter_separator())
         })
@@ -11119,9 +11760,10 @@ fn render_raw_diff_fallback(raw_diff: &str) -> impl IntoElement {
                 .child("No diff returned.".to_string())
                 .into_any_element()
         } else {
-            div()
+            restrict_diff_scroll_to_axis(div())
                 .id("raw-diff-horizontal-scroll")
                 .overflow_x_scroll()
+                .scrollbar_width(px(DIFF_SCROLLBAR_WIDTH))
                 .child(
                     div()
                         .min_w(px(DIFF_UNIFIED_MIN_WIDTH))
@@ -13027,6 +13669,7 @@ fn render_tour_diff_preview(
             selected_anchor,
         )
     };
+    let side_by_side_scroll_handles = SideBySideScrollHandles::new();
 
     let elements: Vec<AnyElement> = preview_items
         .items
@@ -13045,6 +13688,8 @@ fn render_tour_diff_preview(
                 file_lsp_context.as_ref(),
                 &rows[*row_ix],
                 selected_anchor,
+                &side_by_side_scroll_handles,
+                None,
                 cx,
             )
             .into_any_element(),
@@ -13157,14 +13802,12 @@ fn render_tour_diff_rows_container(
             .child(rows)
             .into_any_element()
     } else {
-        div()
+        restrict_diff_scroll_to_axis(div().flex().flex_col().bg(diff_editor_bg()))
             .id(ElementId::Name(
                 format!("tour-diff-horizontal-scroll-{id_key}").into(),
             ))
-            .flex()
-            .flex_col()
-            .bg(diff_editor_bg())
             .overflow_x_scroll()
+            .scrollbar_width(px(DIFF_SCROLLBAR_WIDTH))
             .child(rows)
             .into_any_element()
     }
