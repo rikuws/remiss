@@ -7,7 +7,7 @@ description: Designs and refines production-quality GPUI interfaces for Remiss. 
 
 ## Overview
 
-Build production-quality GPUI interfaces that feel soft, precise, native, and useful for long code review sessions. The target is a roomy bright workbench with an equally polished dark theme: command-driven, sans-first, blue-focused, and shaped around real review workflows.
+Build production-quality GPUI interfaces that feel soft, precise, native, and useful for long code review sessions. The target is a roomy bright workbench with an equally polished dark theme: command-driven, sans-first, and shaped around real review workflows.
 
 ## When To Use
 
@@ -59,9 +59,9 @@ Keep long-running work outside rendering. Loading, error, empty, and ready state
 
 Pull colors, radii, and sizing from `src/theme.rs` before inventing anything new.
 
-- Use `bg_canvas()`, `bg_surface()`, `bg_overlay()`, `bg_inset()`, `bg_selected()`, and `hover_bg()`
+- Use `bg_canvas()`, `bg_surface()`, `bg_overlay()`, `bg_inset()`, `bg_selected()`, `bg_emphasis()`, and `hover_bg()`
 - Use `fg_emphasis()`, `fg_default()`, `fg_muted()`, and `fg_subtle()`
-- Use `focus()`, `focus_muted()`, `success()`, `warning()`, `danger()`, and `info()` sparingly and semantically
+- Use `focus()`, `focus_muted()`, `focus_border()`, `success()`, `warning()`, `danger()`, and `info()` sparingly and semantically
 - Use `radius()`, `radius_sm()`, and `radius_lg()` instead of ad hoc corner values
 - Do not hardcode raw colors in views unless you are extending the theme
 
@@ -70,11 +70,12 @@ Pull colors, radii, and sizing from `src/theme.rs` before inventing anything new
 Remiss now uses a bright workbench design language:
 
 - soft neutral surfaces with thin borders and subtle depth
-- blue-tinted selected and focused states
+- neutral selected and emphasis surfaces, with blue reserved for focus, routing, and attention edges
 - roomy shells, palettes, panels, and queue rows
 - practical density for code, diff, source, and file tree surfaces
 - small semantic color signals rather than decorative color everywhere
 - real product copy instead of placeholder dashboard language
+- no new shader or material accents; phase out existing ones when touching a surface unless they serve a clear workflow role
 
 ### Spacing And Layout
 
@@ -108,9 +109,10 @@ Use `topbar_height()`, `sidebar_width()`, `file_tree_width()`, and `detail_side_
 | Accent-colored everything | It makes the screen compete for attention | Neutral surfaces with semantic color signals |
 | Uniform card grids | They ignore how review tooling is scanned | Lists, lanes, split panes, and inspector layouts |
 | Texture behind code | It hurts review readability | Plain high-contrast code surfaces |
+| Shader or material accents in new UI | They pull the app toward decorative identity instead of a native workbench | Theme-role surfaces, semantic edges, and explicit focus treatment |
 | Raw hex colors in views | It creates visual drift | Theme helpers from `src/theme.rs` |
 | Generic dashboard stats and copy | It feels templated | Content-first layouts with review language |
-| Hidden keyboard focus | It weakens command-first workflows | Visible blue focus and selected states |
+| Hidden keyboard focus | It weakens command-first workflows | Visible focus treatment and neutral selected states |
 
 ## Desktop-First Resilience
 
@@ -161,6 +163,7 @@ This is a native desktop UI, so think in terms of window pressure rather than mo
 - Texture or decorative imagery behind code
 - Oversized whitespace that slows review work
 - Uniform card grids where lists, lanes, or split views would scan better
+- New shader or material treatments that do not support a workflow
 - Multiple competing emphasis colors in the same surface
 - Missing empty, error, loading, disabled, or sync states
 - Long pages that should be split into sidebar/detail or lane-based layouts
@@ -176,4 +179,5 @@ After designing or updating a GPUI surface:
 - [ ] Works in narrow and wide desktop windows without awkward overflow or broken hierarchy
 - [ ] Gives hover, selected, disabled, loading, empty, and error states intentional visual treatment
 - [ ] Keeps keyboard interaction clear and usable
+- [ ] Uses neutral selection and reserves blue for focus, routing, and attention
 - [ ] Avoids generic AI styling and unnecessary decoration

@@ -17,6 +17,8 @@ use super::workspace_sync::trigger_sync_workspace;
 use std::{collections::BTreeMap, time::Duration};
 
 const DETAIL_AUTO_REFRESH_TTL_MS: i64 = 5 * 60 * 1000;
+const KANBAN_LANE_WIDTH: f32 = 320.0;
+const KANBAN_LANE_SCROLLBAR_WIDTH: f32 = 8.0;
 
 pub fn render_section_workspace(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let s = state.read(cx);
@@ -1793,7 +1795,7 @@ fn kanban_lane(
     let mute_repo = lane_id.to_string();
 
     div()
-        .w(px(320.0))
+        .w(px(KANBAN_LANE_WIDTH))
         .flex_shrink_0()
         .flex()
         .flex_col()
@@ -1890,16 +1892,23 @@ fn kanban_lane(
                                 .min_h_0()
                                 .id(SharedString::from(format!("lane-scroll-{lane_id}")))
                                 .overflow_y_scroll()
+                                .scrollbar_width(px(KANBAN_LANE_SCROLLBAR_WIDTH))
                                 .px(px(10.0))
                                 .pb(px(10.0))
-                                .child(div().flex().flex_col().gap(px(8.0)).children(
-                                    items.into_iter().map(|item| {
-                                        let state = state.clone();
-                                        kanban_card(item, move |summary, window, cx| {
-                                            open_pull_request(&state, summary, window, cx);
-                                        })
-                                    }),
-                                )),
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(8.0))
+                                        .children(items.into_iter().map(|item| {
+                                            let state = state.clone();
+                                            kanban_card(item, move |summary, window, cx| {
+                                                open_pull_request(&state, summary, window, cx);
+                                            })
+                                        })),
+                                ),
                         ),
                 ),
         )
@@ -1932,6 +1941,8 @@ fn kanban_card(
     let summary = item.clone();
 
     div()
+        .w_full()
+        .min_w_0()
         .rounded(radius())
         .bg(bg_surface())
         .border_1()

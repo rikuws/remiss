@@ -20,7 +20,7 @@ use crate::{
         discover_review_stack,
         model::{Confidence, RepoContext, ReviewStack, StackDiscoveryOptions},
     },
-    state::AppState,
+    state::{AppState, DetailState},
 };
 
 static REVIEW_INTELLIGENCE_JOB_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
@@ -154,6 +154,33 @@ pub(crate) async fn run_review_intelligence_flow(
             if detail_state.review_intelligence_loading
                 && detail_state.review_intelligence_request_key.as_deref() == Some(&request_key)
             {
+                if force {
+                    if scope.includes_stack() {
+                        detail_state.ai_stack_state.loading = false;
+                        detail_state.ai_stack_state.generating = true;
+                        detail_state.ai_stack_state.error = None;
+                        detail_state.ai_stack_state.message =
+                            Some("Generation is already in progress.".to_string());
+                        detail_state.ai_stack_state.success = false;
+                    }
+
+                    if scope.includes_tour() {
+                        set_tour_pipeline_progress(
+                            detail_state,
+                            provider,
+                            &tour_request_key,
+                            false,
+                            true,
+                            "Generation already in progress",
+                            &format!(
+                                "{} is already preparing intelligence for this pull request.",
+                                provider.label()
+                            ),
+                        );
+                    }
+
+                    cx.notify();
+                }
                 return false;
             }
 
@@ -193,8 +220,8 @@ pub(crate) async fn run_review_intelligence_flow(
                 if force || tour_request_changed {
                     tour_state.document = None;
                 }
-                tour_state.loading = true;
-                tour_state.generating = false;
+                tour_state.loading = !force;
+                tour_state.generating = force;
                 tour_state.progress_summary = Some(if scope.includes_stack() {
                     "Preparing AI tour and stack".to_string()
                 } else {
@@ -329,6 +356,8 @@ pub(crate) async fn run_review_intelligence_flow(
             &local_repo_status,
             open_pull_requests,
             force,
+            scope.includes_tour(),
+            &tour_request_key,
             cx,
         )
         .await;
@@ -364,6 +393,8 @@ async fn generate_or_load_stack(
     local_repo_status: &local_repo::LocalRepositoryStatus,
     open_pull_requests: Vec<crate::stacks::model::StackPullRequestRef>,
     force: bool,
+    reflect_tour_progress: bool,
+    tour_request_key: &str,
     cx: &mut AsyncWindowContext,
 ) {
     if !force {
@@ -396,6 +427,24 @@ async fn generate_or_load_stack(
                 cx,
             )
             .await;
+            if reflect_tour_progress {
+                model
+                    .update(cx, |state, cx| {
+                        if let Some(detail_state) = state.detail_states.get_mut(detail_key) {
+                            set_tour_pipeline_progress(
+                                detail_state,
+                                provider,
+                                tour_request_key,
+                                true,
+                                false,
+                                "Loaded cached AI stack review",
+                                "Starting the AI tour generation step.",
+                            );
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+            }
             return;
         }
     }
@@ -421,6 +470,21 @@ async fn generate_or_load_stack(
                     detail_state.ai_stack_state.generating = true;
                     detail_state.ai_stack_state.message =
                         Some("Generating AI stack review.".to_string());
+                }
+
+                if reflect_tour_progress {
+                    set_tour_pipeline_progress(
+                        detail_state,
+                        provider,
+                        tour_request_key,
+                        false,
+                        true,
+                        "Generating AI stack review",
+                        &format!(
+                            "{} is planning review layers first. The AI tour starts after that phase finishes.",
+                            provider.label()
+                        ),
+                    );
                 }
             }
             cx.notify();
@@ -663,6 +727,34 @@ async fn finish_request(
         .ok();
 }
 
+fn set_tour_pipeline_progress(
+    detail_state: &mut DetailState,
+    provider: CodeTourProvider,
+    tour_request_key: &str,
+    loading: bool,
+    generating: bool,
+    summary: &str,
+    detail: &str,
+) {
+    let tour_state = detail_state.tour_states.entry(provider).or_default();
+    if tour_state
+        .request_key
+        .as_deref()
+        .is_some_and(|current| current != tour_request_key)
+    {
+        return;
+    }
+
+    tour_state.request_key = Some(tour_request_key.to_string());
+    tour_state.loading = loading;
+    tour_state.generating = generating;
+    tour_state.progress_summary = Some(summary.to_string());
+    tour_state.progress_detail = Some(detail.to_string());
+    tour_state.error = None;
+    tour_state.message = None;
+    tour_state.success = false;
+}
+
 pub fn review_intelligence_request_key(
     detail: &PullRequestDetail,
     provider: CodeTourProvider,
@@ -713,8 +805,8 @@ fn ai_stack_for_error(detail: &PullRequestDetail, message: &str) -> ReviewStack 
 
 #[cfg(test)]
 mod tests {
-    use super::review_intelligence_request_key;
-    use crate::{code_tour::CodeTourProvider, github::PullRequestDetail};
+    use super::{review_intelligence_request_key, set_tour_pipeline_progress};
+    use crate::{code_tour::CodeTourProvider, github::PullRequestDetail, state::DetailState};
 
     #[test]
     fn review_intelligence_request_key_ignores_metadata_updates_when_head_matches() {
@@ -735,6 +827,65 @@ mod tests {
             review_intelligence_request_key(&detail, CodeTourProvider::Codex),
             review_intelligence_request_key(&detail, CodeTourProvider::Copilot)
         );
+    }
+
+    #[test]
+    fn tour_pipeline_progress_marks_visible_generation_state() {
+        let mut detail_state = DetailState::default();
+
+        set_tour_pipeline_progress(
+            &mut detail_state,
+            CodeTourProvider::Copilot,
+            "tour-key",
+            false,
+            true,
+            "Generating AI stack review",
+            "Copilot is planning review layers first.",
+        );
+
+        let tour_state = detail_state
+            .tour_states
+            .get(&CodeTourProvider::Copilot)
+            .expect("tour state should be created");
+        assert_eq!(tour_state.request_key.as_deref(), Some("tour-key"));
+        assert!(!tour_state.loading);
+        assert!(tour_state.generating);
+        assert_eq!(
+            tour_state.progress_summary.as_deref(),
+            Some("Generating AI stack review")
+        );
+        assert_eq!(
+            tour_state.progress_detail.as_deref(),
+            Some("Copilot is planning review layers first.")
+        );
+    }
+
+    #[test]
+    fn tour_pipeline_progress_ignores_stale_tour_request() {
+        let mut detail_state = DetailState::default();
+        detail_state
+            .tour_states
+            .entry(CodeTourProvider::Copilot)
+            .or_default()
+            .request_key = Some("newer-tour-key".to_string());
+
+        set_tour_pipeline_progress(
+            &mut detail_state,
+            CodeTourProvider::Copilot,
+            "older-tour-key",
+            false,
+            true,
+            "Generating AI stack review",
+            "Copilot is planning review layers first.",
+        );
+
+        let tour_state = detail_state
+            .tour_states
+            .get(&CodeTourProvider::Copilot)
+            .expect("tour state should exist");
+        assert_eq!(tour_state.request_key.as_deref(), Some("newer-tour-key"));
+        assert!(!tour_state.generating);
+        assert!(tour_state.progress_summary.is_none());
     }
 
     fn detail(updated_at: &str, head_ref_oid: Option<&str>, raw_diff: &str) -> PullRequestDetail {

@@ -31,12 +31,12 @@ Do not add raw hex colors in views unless you are extending the theme itself.
 
 Shared primitives should express the same state language everywhere:
 
-- Primary action: calm filled button with focus blue or selected surface treatment.
+- Primary action: calm ink or inverse filled button with `focus_border()` when focused.
 - Secondary action: white or elevated surface with a muted border.
 - Ghost action: quiet surface, visible hover, no raw text-only controls unless the context is obvious.
 - Badge: small semantic chip, not the main visual focus.
-- List row: stable height, title plus metadata, blue selected state, subtle hover.
-- Command row: grouped result with selected wash and keyboard hint.
+- List row: stable height, title plus metadata, `bg_selected()` or `bg_emphasis()` for selection, `hover_bg()` for hover.
+- Command row: grouped result with neutral selected surface, keyboard hint, and `focus_border()` for active keyboard focus.
 - Inspector panel: label/value structure with clear separators and stable empty/loading/error states.
 
 When a pattern repeats in three or more places, move the visual treatment into a helper rather than restyling each view by hand.
@@ -66,7 +66,7 @@ Every interactive component needs:
 - empty
 - error
 
-Selected/focused state should be blue-tinted and readable in both themes. Do not rely on color alone for review status; pair color with labels, icons, or badges.
+Selected state should use neutral theme roles such as `bg_selected()` or `bg_emphasis()` and stay readable in both themes. Blue belongs to explicit focus, active routing, and attention edges through `focus()`, `focus_muted()`, or `focus_border()`. Do not rely on color alone for review status; pair color with labels, icons, or badges.
 
 ## Migration Checklist
 
@@ -75,6 +75,7 @@ For each touched screen:
 - Replace raw colors with theme roles.
 - Replace old compact-only spacing with roomy workbench spacing where it helps scanning.
 - Remove decorative surfaces that do not support the workflow.
+- Do not introduce shader or material treatments in new views; remove existing ones when touched unless they serve a clear workflow role.
 - Use sans for normal UI and mono only for technical text.
 - Check both light and dark themes.
 - Check long titles, long repository names, empty states, sync errors, and loading states.

@@ -8385,7 +8385,6 @@ fn render_diff_vertical_scrollbar(list_state: &ListState, item_count: usize) -> 
     } else {
         scroll_offset / max_offset * (viewport_height - thumb_height)
     };
-    let track_color: Hsla = with_alpha(fg_subtle(), 0.08).into();
     let thumb_color: Hsla = with_alpha(fg_muted(), 0.38).into();
     let drag_id = "diff-vertical-scrollbar-thumb".to_string();
     let drag = DiffVerticalScrollbarDrag::new(
@@ -8404,16 +8403,6 @@ fn render_diff_vertical_scrollbar(list_state: &ListState, item_count: usize) -> 
             .right(px(2.0))
             .w(px(8.0))
             .h(px(viewport_height))
-            .child(
-                div()
-                    .absolute()
-                    .top(px(4.0))
-                    .bottom(px(4.0))
-                    .right(px(3.0))
-                    .w(px(2.0))
-                    .rounded(px(1.0))
-                    .bg(track_color),
-            )
             .child(
                 div()
                     .absolute()
@@ -8498,7 +8487,6 @@ fn render_side_by_side_horizontal_scrollbar_lane(
         (viewport_width * (viewport_width / content_width)).clamp(36.0, viewport_width);
     let scroll_offset = (-f32::from(handle.offset().x)).clamp(0.0, max_offset);
     let thumb_left = scroll_offset / max_offset * (viewport_width - thumb_width);
-    let track_color: Hsla = with_alpha(fg_subtle(), 0.08).into();
     let thumb_color: Hsla = with_alpha(fg_muted(), 0.38).into();
     let drag_id = format!("diff-side-by-side-horizontal-scrollbar-{}", side.id_label());
     let drag = DiffHorizontalScrollbarDrag::new(
@@ -8515,16 +8503,6 @@ fn render_side_by_side_horizontal_scrollbar_lane(
         .flex_1()
         .min_w_0()
         .h(px(DIFF_SCROLLBAR_WIDTH))
-        .child(
-            div()
-                .absolute()
-                .left(px(4.0))
-                .right(px(4.0))
-                .top(px(3.0))
-                .h(px(2.0))
-                .rounded(px(1.0))
-                .bg(track_color),
-        )
         .child(
             div()
                 .absolute()

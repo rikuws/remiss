@@ -11,7 +11,7 @@ The style is:
 - ink-forward for primary actions, with blue reserved for focus and active routing
 - roomy around the shell and panels
 - practical and dense inside code, diff, and source views
-- colorful where material accents identify work objects or semantic state
+- colorful only where semantic state, focus, routing, or attention needs it
 
 The interface should feel useful before it feels decorative. Most screens should make it obvious what changed, where the reviewer is, and what action is available next.
 
@@ -33,15 +33,17 @@ Use:
 - medium-radius panels and list rows
 - compact radii for code-adjacent controls
 - low-contrast borders
-- selected rows with a visible blue wash
+- neutral selected and emphasis surfaces, with blue reserved for explicit focus edges or active route attention
 
 Avoid heavy outlines, hard black dividers, sharp stacked boxes, and nested panel clutter.
 
-### 3. Material Objects
+### 3. Workflow Objects
 
-Important workflow objects should feel like compact physical cards: a vivid material cap or edge, a clean white body, soft shadow, and a clear action. Use abstract material only on PR cards, queue summaries, overview strips, and semantic review groups.
+Important workflow objects should feel like compact native workbench surfaces: a clear title, subdued metadata, calm grouping, and an obvious action. Prefer neutral surfaces, subtle depth, stable spacing, and small semantic edges over decorative treatment.
 
-Avoid using borders as the primary way to make everything visible. Key objects should hold together through surface, shadow, spacing, and one bounded material region.
+Legacy abstract material or shader accents may still exist in older overview surfaces, but they are transitional. Do not introduce them in new UI, and remove them when touching an existing surface unless the accent has a clear workflow role that cannot be expressed with normal theme roles.
+
+Avoid using borders as the primary way to make everything visible. Key objects should hold together through surface, shadow, spacing, and restrained emphasis.
 
 ### 4. Blue Is Focus
 
@@ -64,11 +66,11 @@ Use mono only for code, paths, shortcuts, counts, hashes, technical identifiers,
 
 A serif may appear in rare brand moments, but not in normal workflow controls or dense review surfaces.
 
-### 6. Texture Is Structural
+### 6. Texture Is Legacy
 
-Abstract color accents are allowed when they are part of a component's structure: a card cap, lane header, summary edge, or review group strip.
+Abstract color, texture, and shader treatments are legacy accents, not a core identity for new Remiss surfaces. New UI should use theme roles first: neutral fills, semantic chips, active-route edges, and explicit focus treatment.
 
-Do not place image texture behind code, diff hunks, source browsing, file trees, or dense side panels. Work surfaces should remain readable in both themes.
+Do not place image texture, shader surfaces, or decorative material behind code, diff hunks, source browsing, file trees, or dense side panels. Work surfaces should remain readable in both themes.
 
 ## Theme Roles
 
@@ -79,7 +81,7 @@ The theme should expose roles, not one-off colors:
 - `surface_elevated`: command palette, popovers, focused panels
 - `inset`: code-adjacent or recessed regions
 - `subtle`: quiet grouped areas
-- `selected`: selected row or active route wash
+- `selected`: neutral selected row or active route surface
 - `hover`: pointer hover wash
 - `border_default`: visible frame
 - `border_muted`: low-contrast separator
@@ -95,7 +97,7 @@ Both light and dark themes must use the same roles. Dark theme should feel like 
 ## Surface Rules
 
 - App shell: quiet rail, clear active section, low visual noise.
-- Command palette: large soft shell, prominent search, grouped results, strong selected row, visible shortcut hints.
+- Command palette: large soft shell, prominent search, grouped results, neutral selected row, visible focus and shortcut hints.
 - Queues and lists: roomy fixed-height rows, clear titles, subdued metadata, small status chips.
 - PR workspace: compact work header when reviewing, softer expanded overview when entering a PR.
 - Diff workspace: practical density, high code contrast, restrained chrome, no decorative backgrounds behind code.
@@ -118,7 +120,7 @@ Avoid bounce, overshoot, long delays, and decorative motion that slows typing, n
 - generic AI app styling
 - marketing-page layouts inside the desktop app
 - rainbow badges without semantic meaning
-- texture or imagery behind code
+- texture, shaders, or imagery behind code
 - uniform card grids where lists or panes scan better
 - raw colors in views when a theme token should exist
 - serif-heavy workflow screens
