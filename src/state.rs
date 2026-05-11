@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cache::CacheStore;
 use crate::code_tour::{
@@ -64,16 +63,6 @@ impl SectionId {
             SectionId::Settings,
         ]
     }
-}
-
-fn random_overview_greeting_index() -> usize {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos() as u64)
-        .unwrap_or(0);
-    let mixed = nanos ^ nanos.rotate_left(13) ^ nanos.rotate_right(7);
-
-    mixed as usize
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -665,7 +654,6 @@ pub struct AppState {
     pub local_review_loading: bool,
     pub local_review_error: Option<String>,
     pub muted_repos: std::collections::HashSet<String>,
-    pub overview_greeting_index: usize,
 
     // Workspace data
     pub workspace: Option<WorkspaceSnapshot>,
@@ -779,7 +767,6 @@ impl AppState {
             local_review_loading: false,
             local_review_error: None,
             muted_repos: std::collections::HashSet::new(),
-            overview_greeting_index: random_overview_greeting_index(),
             workspace: None,
             workspace_loading: true,
             workspace_syncing: false,
@@ -850,9 +837,6 @@ impl AppState {
     }
 
     pub fn set_active_section(&mut self, section: SectionId) {
-        if section == SectionId::Overview {
-            self.overview_greeting_index = random_overview_greeting_index();
-        }
         self.active_section = section;
     }
 

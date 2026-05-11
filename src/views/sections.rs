@@ -4,8 +4,7 @@ use gpui::*;
 use crate::icons::{lucide_icon, LucideIcon};
 use crate::review_session::{load_review_session, location_label};
 use crate::shader_surface::{
-    opengl_shader_surface_variant_with_corner_mask, opengl_shader_surface_with_corner_mask,
-    OverviewShaderVariant, ShaderCornerMask,
+    opengl_shader_surface_variant_with_corner_mask, OverviewShaderVariant, ShaderCornerMask,
 };
 use crate::state::*;
 use crate::theme::*;
@@ -35,31 +34,18 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let viewer_name = s.viewer_name().to_string();
     let is_auth = s.is_authenticated();
     let review_count = s.review_queue().map(|q| q.total_count).unwrap_or(0);
-    let authored_count = s.authored_queue().map(|q| q.total_count).unwrap_or(0);
-    let open_tab_count = s.open_tabs.len() as i64;
+    let pull_count = s.section_count(SectionId::Pulls);
+    let issue_count = s.section_count(SectionId::Issues);
     let review_items: Vec<_> = s
         .review_queue()
         .map(|q| q.items.clone())
         .unwrap_or_default();
     let workspace_loading = s.workspace_loading;
     let workspace_error = s.workspace_error.clone();
-    let first_open_tab = s.open_tabs.first().cloned();
-    let overview_greeting_index = s.overview_greeting_index;
     let review_comment_items = overview_review_comment_items(&s, &review_items);
 
-    let welcome_greeting =
-        overview_welcome_greeting(&viewer_name, is_auth, overview_greeting_index).to_string();
-    let queue_copy = if workspace_loading {
-        "Loading the latest review requests from the workspace snapshot.".to_string()
-    } else if workspace_error.is_some() {
-        "Workspace sync needs attention before the queue can refresh.".to_string()
-    } else if is_auth {
-        "Pull requests currently waiting on your attention.".to_string()
-    } else {
-        "Authenticate with gh to populate the review queue.".to_string()
-    };
-    let state_for_open_pull_requests = state.clone();
-    let state_for_authored = state.clone();
+    let welcome_greeting = overview_welcome_greeting(&viewer_name, is_auth);
+    let state_for_pull_requests = state.clone();
     let state_for_review_requests = state.clone();
     let state_for_items = state.clone();
     let state_for_comment_items = state.clone();
@@ -79,7 +65,7 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
         .min_h_0()
         .h_full()
         .overflow_hidden()
-        .child(overview_ambient_strip(welcome_greeting))
+        .child(overview_header(welcome_greeting))
         .child(
             div()
                 .id("overview-scroll")
@@ -98,37 +84,26 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                         .child(overview_metric_card(
                             LucideIcon::GitPullRequest,
                             "Open Pull Requests",
-                            open_tab_count,
-                            OverviewShaderVariant::Bands,
-                            first_open_tab.is_some(),
-                            {
-                                let state = state_for_open_pull_requests.clone();
-                                let summary = first_open_tab.clone();
-                                move |_, window, cx| {
-                                    if let Some(summary) = summary.clone() {
-                                        open_pull_request(&state, summary, window, cx);
-                                    }
-                                }
-                            },
-                        ))
-                        .child(overview_metric_card(
-                            LucideIcon::GitPullRequestCreate,
-                            "My Pull Requests",
-                            authored_count,
-                            OverviewShaderVariant::Flow,
+                            pull_count,
                             is_auth,
                             {
-                                let state = state_for_authored.clone();
+                                let state = state_for_pull_requests.clone();
                                 move |_, _, cx| {
                                     activate_queue(&state, SectionId::Pulls, "authored", cx);
                                 }
                             },
                         ))
                         .child(overview_metric_card(
+                            LucideIcon::Inbox,
+                            "Open Issues",
+                            issue_count,
+                            false,
+                            |_, _, _| {},
+                        ))
+                        .child(overview_metric_card(
                             LucideIcon::MessageSquareCheck,
                             "Review Requests",
                             review_count,
-                            OverviewShaderVariant::Bands,
                             is_auth,
                             {
                                 let state = state_for_review_requests.clone();
@@ -158,7 +133,6 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                 overview_review_requests_panel(
                                     review_items,
                                     review_count,
-                                    queue_copy,
                                     workspace_loading,
                                     workspace_error.clone(),
                                     is_auth,
@@ -192,52 +166,23 @@ struct OverviewReviewCommentItem {
     is_outdated: bool,
 }
 
-fn overview_ambient_strip(welcome_greeting: String) -> impl IntoElement {
+fn overview_header(welcome_greeting: String) -> impl IntoElement {
     div()
-        .relative()
         .w_full()
-        .min_h(px(128.0))
         .flex()
+        .items_center()
         .flex_shrink_0()
-        .rounded(radius())
-        .border_1()
-        .border_color(border_muted())
-        .overflow_hidden()
-        .child(
-            opengl_shader_surface_with_corner_mask(
-                "overview-attention",
-                radius(),
-                bg_canvas(),
-                ShaderCornerMask::LEFT,
-            )
-            .w(px(188.0))
-            .h_full()
-            .flex_shrink_0(),
-        )
+        .py(px(4.0))
+        .min_h(px(40.0))
         .child(
             div()
-                .relative()
-                .min_h(px(128.0))
-                .h_full()
-                .flex_grow()
-                .bg(bg_overlay())
-                .rounded_r(radius())
-                .p(px(24.0))
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(24.0))
-                .child(
-                    div().min_w_0().flex().flex_col().gap(px(0.0)).child(
-                        div()
-                            .text_size(px(28.0))
-                            .line_height(px(32.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(fg_emphasis())
-                            .line_clamp(2)
-                            .child(welcome_greeting),
-                    ),
-                ),
+                .min_w_0()
+                .text_size(px(27.0))
+                .line_height(px(32.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_emphasis())
+                .line_clamp(1)
+                .child(welcome_greeting),
         )
 }
 
@@ -245,81 +190,58 @@ fn overview_metric_card(
     icon: LucideIcon,
     label: &str,
     count: i64,
-    shader_variant: OverviewShaderVariant,
     interactive: bool,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let material_key = format!("metric-{label}");
-
     div()
         .flex_1()
-        .min_w(px(190.0))
-        .min_h(px(84.0))
+        .min_w(px(220.0))
+        .min_h(px(70.0))
         .flex()
         .items_center()
-        .justify_between()
-        .gap(px(0.0))
+        .gap(px(14.0))
         .rounded(radius())
-        .overflow_hidden()
-        .border_1()
-        .border_color(border_muted())
+        .bg(bg_overlay())
+        .px(px(18.0))
+        .py(px(14.0))
         .when(interactive, |el| {
             el.cursor_pointer()
-                .hover(|style| style.border_color(border_muted()))
+                .hover(|style| style.bg(bg_emphasis()).text_color(fg_emphasis()))
                 .on_mouse_down(MouseButton::Left, on_click)
         })
         .child(
-            opengl_shader_surface_variant_with_corner_mask(
-                material_key.clone(),
-                shader_variant,
-                radius(),
-                bg_canvas(),
-                ShaderCornerMask::LEFT,
-            )
-            .w(px(72.0))
-            .h_full()
-            .flex_shrink_0()
-            .child(
-                div()
-                    .absolute()
-                    .left(px(20.0))
-                    .top(px(25.0))
-                    .w(px(32.0))
-                    .h(px(32.0))
-                    .rounded(px(999.0))
-                    .bg(white().opacity(0.72))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(lucide_icon(icon, 17.0, fg_emphasis())),
-            ),
+            div()
+                .w(px(24.0))
+                .h(px(24.0))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(lucide_icon(icon, 22.0, fg_muted())),
         )
         .child(
             div()
                 .min_w_0()
                 .flex()
                 .flex_col()
-                .gap(px(7.0))
-                .p(px(14.0))
-                .px(px(16.0))
+                .gap(px(2.0))
                 .flex_grow()
-                .bg(bg_surface())
-                .rounded_r(radius())
                 .child(
                     div()
-                        .text_size(px(10.0))
-                        .font_family(mono_font_family())
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(fg_subtle())
-                        .child(label.to_uppercase()),
-                )
-                .child(
-                    div()
-                        .text_size(px(27.0))
-                        .line_height(px(29.0))
+                        .text_size(px(16.0))
+                        .line_height(px(18.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(fg_emphasis())
                         .child(count.to_string()),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .line_height(px(17.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(fg_muted())
+                        .line_clamp(1)
+                        .child(label.to_string()),
                 ),
         )
 }
@@ -435,7 +357,6 @@ fn overview_review_comment_briefing_panel(
 fn overview_review_requests_panel(
     review_items: Vec<github::PullRequestSummary>,
     review_count: i64,
-    _queue_copy: String,
     workspace_loading: bool,
     workspace_error: Option<String>,
     is_auth: bool,
@@ -1594,20 +1515,7 @@ pub fn meta_row(label: &str, value: &str) -> impl IntoElement {
         )
 }
 
-fn welcome_greeting_count(is_authenticated: bool) -> usize {
-    if is_authenticated {
-        4
-    } else {
-        3
-    }
-}
-
-fn overview_welcome_greeting(
-    viewer_name: &str,
-    is_authenticated: bool,
-    greeting_index: usize,
-) -> String {
-    let index = greeting_index % welcome_greeting_count(is_authenticated);
+fn overview_welcome_greeting(viewer_name: &str, is_authenticated: bool) -> String {
     let viewer_name = viewer_name.trim();
     let viewer_name = if viewer_name.is_empty() {
         "there"
@@ -1616,18 +1524,9 @@ fn overview_welcome_greeting(
     };
 
     if is_authenticated {
-        match index {
-            0 => format!("Welcome back, {viewer_name}"),
-            1 => format!("Ready for review, {viewer_name}?"),
-            2 => "The review queue is live.".to_string(),
-            _ => "Let's clear what needs attention.".to_string(),
-        }
+        format!("Welcome back, {viewer_name}")
     } else {
-        match index {
-            0 => "Connect GitHub".to_string(),
-            1 => "Authenticate with gh".to_string(),
-            _ => "Bring your reviews into focus.".to_string(),
-        }
+        "Connect GitHub".to_string()
     }
 }
 

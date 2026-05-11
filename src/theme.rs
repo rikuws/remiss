@@ -26,19 +26,19 @@ const LIGHT_TEXT_SUBTLE: u32 = 0x98a2b3;
 const LIGHT_BORDER: u32 = 0xd6dee8;
 const LIGHT_BORDER_MUTED: u32 = 0xe5ebf2;
 
-const DARK_CANVAS: u32 = 0x0b1118;
-const DARK_SURFACE: u32 = 0x111821;
-const DARK_ELEVATED: u32 = 0x151f2b;
-const DARK_INSET: u32 = 0x080d14;
-const DARK_SUBTLE: u32 = 0x151d28;
-const DARK_EMPHASIS: u32 = 0x1d2939;
-const DARK_SELECTED: u32 = 0x1a2431;
-const DARK_TEXT_EMPHASIS: u32 = 0xf3f7fb;
-const DARK_TEXT: u32 = 0xd6dee8;
-const DARK_TEXT_MUTED: u32 = 0x9aa8ba;
-const DARK_TEXT_SUBTLE: u32 = 0x728196;
-const DARK_BORDER: u32 = 0x2b3848;
-const DARK_BORDER_MUTED: u32 = 0x202b38;
+const DARK_CANVAS: u32 = 0x0c0c0c;
+const DARK_SURFACE: u32 = 0x101112;
+const DARK_ELEVATED: u32 = 0x131313;
+const DARK_INSET: u32 = 0x0b0d10;
+const DARK_SUBTLE: u32 = 0x171717;
+const DARK_EMPHASIS: u32 = 0x242424;
+const DARK_SELECTED: u32 = 0x1d1d1d;
+const DARK_TEXT_EMPHASIS: u32 = 0xf3f4f6;
+const DARK_TEXT: u32 = 0xd4d4d4;
+const DARK_TEXT_MUTED: u32 = 0xa3a3a3;
+const DARK_TEXT_SUBTLE: u32 = 0x737373;
+const DARK_BORDER: u32 = 0x303030;
+const DARK_BORDER_MUTED: u32 = 0x252525;
 
 const LIGHT_FOCUS: u32 = 0x2563eb;
 const DARK_FOCUS: u32 = 0x7db4ff;
@@ -365,15 +365,15 @@ pub fn border_muted() -> Rgba {
 }
 
 pub fn diff_editor_bg() -> Rgba {
-    theme_hex(0xf8fafc, 0x0c0c0c)
+    theme_hex(0xf8fafc, DARK_CANVAS)
 }
 
 pub fn diff_editor_chrome() -> Rgba {
-    theme_hex(0xffffff, 0x131313)
+    theme_hex(0xffffff, DARK_ELEVATED)
 }
 
 pub fn diff_editor_surface() -> Rgba {
-    theme_hex(0xffffff, 0x0b0d10)
+    theme_hex(0xffffff, DARK_INSET)
 }
 
 pub fn diff_annotation_bg() -> Rgba {
@@ -509,7 +509,7 @@ pub fn waypoint_icon_core() -> Rgba {
 }
 
 pub fn hover_bg() -> Rgba {
-    theme_hex(0xf2f5f8, 0x1b2531)
+    theme_hex(0xf2f5f8, 0x202020)
 }
 
 pub fn material_gradient(seed: &str) -> Background {
@@ -568,7 +568,7 @@ fn material_index(seed: &str) -> usize {
 }
 
 pub fn palette_backdrop() -> Rgba {
-    theme_rgba((0.05, 0.09, 0.16, 0.18), (0.01, 0.02, 0.04, 0.72))
+    theme_rgba((0.05, 0.09, 0.16, 0.18), (0.0, 0.0, 0.0, 0.72))
 }
 
 pub fn topbar_height() -> Pixels {
