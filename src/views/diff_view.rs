@@ -1610,88 +1610,83 @@ fn render_ai_tour_nav_row(
 ) -> impl IntoElement {
     let metrics = ai_tour_section_metrics(tour, section);
 
-    div()
-        .mb(px(6.0))
-        .px(px(8.0))
-        .py(px(8.0))
-        .rounded(radius_sm())
-        .border_1()
-        .border_color(border_muted())
-        .bg(bg_surface())
-        .cursor_pointer()
-        .hover(|style| style.bg(hover_bg()).border_color(border_default()))
-        .on_mouse_down(MouseButton::Left, move |_, _, _| {
-            list_state.scroll_to(ListOffset {
-                item_ix: target_index,
-                offset_in_item: px(0.0),
-            });
-        })
-        .child(
-            div()
-                .flex()
-                .items_start()
-                .gap(px(8.0))
-                .min_w_0()
-                .child(render_ai_tour_category_icon(section.category, 24.0, 13.0))
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_grow()
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.0))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .min_w_0()
-                                .child(
-                                    div()
-                                        .text_size(px(11.0))
-                                        .font_family(mono_font_family())
-                                        .text_color(fg_subtle())
-                                        .child(format!("{:02}", section_ix + 1)),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .text_size(px(12.0))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(fg_emphasis())
-                                        .whitespace_nowrap()
-                                        .overflow_x_hidden()
-                                        .text_ellipsis()
-                                        .child(section.title.clone()),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .line_height(px(16.0))
-                                .text_color(fg_muted())
-                                .line_clamp(2)
-                                .child(section.summary.clone()),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(4.0))
-                                .flex_wrap()
-                                .child(ai_tour_metric_chip(&format!(
-                                    "{} file{}",
-                                    metrics.file_count,
-                                    if metrics.file_count == 1 { "" } else { "s" }
-                                )))
-                                .child(ai_tour_metric_chip(&format!(
-                                    "+{} / -{}",
-                                    metrics.additions, metrics.deletions
-                                )))
-                                .child(render_ai_tour_priority_chip(section.priority)),
-                        ),
-                ),
-        )
+    div().pb(px(10.0)).child(
+        div()
+            .px(px(8.0))
+            .py(px(8.0))
+            .rounded(radius_sm())
+            .border_1()
+            .border_color(border_muted())
+            .bg(bg_surface())
+            .cursor_pointer()
+            .hover(|style| style.bg(hover_bg()).border_color(border_default()))
+            .on_mouse_down(MouseButton::Left, move |_, _, _| {
+                list_state.scroll_to(ListOffset {
+                    item_ix: target_index,
+                    offset_in_item: px(0.0),
+                });
+            })
+            .flex()
+            .items_start()
+            .gap(px(8.0))
+            .min_w_0()
+            .child(render_ai_tour_category_icon(section.category, 24.0, 13.0))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_grow()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .font_family(mono_font_family())
+                                    .text_color(fg_subtle())
+                                    .child(format!("{:02}", section_ix + 1)),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .text_size(px(12.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(fg_emphasis())
+                                    .whitespace_nowrap()
+                                    .overflow_x_hidden()
+                                    .text_ellipsis()
+                                    .child(section.title.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .line_height(px(16.0))
+                            .text_color(fg_muted())
+                            .line_clamp(2)
+                            .child(section.summary.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .flex_wrap()
+                            .child(ai_tour_metric_text(&format!(
+                                "{} file{}",
+                                metrics.file_count,
+                                if metrics.file_count == 1 { "" } else { "s" }
+                            )))
+                            .child(ai_tour_delta_metric(metrics.additions, metrics.deletions))
+                            .child(render_ai_tour_priority_chip(section.priority)),
+                    ),
+            ),
+    )
 }
 
 fn render_stack_navigation_pane(
@@ -7407,13 +7402,13 @@ fn render_ai_tour_semantic_overview(
                         .justify_end()
                         .gap(px(8.0))
                         .flex_wrap()
-                        .child(badge(&format!(
+                        .child(ai_tour_metric_text(&format!(
                             "{} group{}",
                             tour.sections.len(),
                             if tour.sections.len() == 1 { "" } else { "s" }
                         )))
                         .when(!tour.open_questions.is_empty(), |el| {
-                            el.child(badge(&format!(
+                            el.child(ai_tour_metric_text(&format!(
                                 "{} open question{}",
                                 tour.open_questions.len(),
                                 if tour.open_questions.len() == 1 {
@@ -7424,18 +7419,18 @@ fn render_ai_tour_semantic_overview(
                             )))
                         })
                         .when(!tour.warnings.is_empty(), |el| {
-                            el.child(badge(&format!(
+                            el.child(ai_tour_metric_text(&format!(
                                 "{} warning{}",
                                 tour.warnings.len(),
                                 if tour.warnings.len() == 1 { "" } else { "s" }
                             )))
                         })
-                        .child(badge(provider.label()))
+                        .child(ai_tour_metric_text(provider.label()))
                         .when_some(provider_status, |el, status| {
-                            el.child(badge(ai_tour_provider_status_label(status)))
+                            el.child(ai_tour_metric_text(ai_tour_provider_status_label(status)))
                         })
                         .when(local_repo_loading, |el| {
-                            el.child(badge("Preparing checkout"))
+                            el.child(ai_tour_metric_text("Preparing checkout"))
                         })
                         .child(review_button(generate_label, on_generate)),
                 ),
@@ -7544,12 +7539,12 @@ fn render_ai_tour_section_metrics(metrics: AiTourSectionMetrics) -> impl IntoEle
         .gap(px(6.0))
         .flex_wrap()
         .max_w(px(280.0))
-        .child(ai_tour_metric_chip(&format!(
+        .child(ai_tour_metric_text(&format!(
             "{} file{}",
             metrics.file_count,
             if metrics.file_count == 1 { "" } else { "s" }
         )))
-        .child(ai_tour_metric_chip(&format!(
+        .child(ai_tour_metric_text(&format!(
             "{} thread{}",
             metrics.unresolved_thread_count,
             if metrics.unresolved_thread_count == 1 {
@@ -7558,10 +7553,7 @@ fn render_ai_tour_section_metrics(metrics: AiTourSectionMetrics) -> impl IntoEle
                 "s"
             }
         )))
-        .child(ai_tour_metric_chip(&format!(
-            "+{} / -{}",
-            metrics.additions, metrics.deletions
-        )))
+        .child(ai_tour_delta_metric(metrics.additions, metrics.deletions))
 }
 
 fn render_ai_tour_category_icon(
@@ -7603,19 +7595,26 @@ fn render_ai_tour_priority_chip(priority: TourSectionPriority) -> impl IntoEleme
         .child(priority.label())
 }
 
-fn ai_tour_metric_chip(text: &str) -> impl IntoElement {
+fn ai_tour_metric_text(text: &str) -> impl IntoElement {
     div()
-        .px(px(7.0))
-        .py(px(2.0))
-        .rounded(px(999.0))
-        .bg(bg_subtle())
-        .border_1()
-        .border_color(border_muted())
-        .text_size(px(10.0))
+        .text_size(px(11.0))
         .font_family(mono_font_family())
         .text_color(fg_muted())
         .whitespace_nowrap()
         .child(text.to_string())
+}
+
+fn ai_tour_delta_metric(additions: i64, deletions: i64) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .text_size(px(11.0))
+        .font_family(mono_font_family())
+        .whitespace_nowrap()
+        .child(div().text_color(success()).child(format!("+{additions}")))
+        .child(div().text_color(fg_subtle()).child("/"))
+        .child(div().text_color(danger()).child(format!("-{deletions}")))
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -7793,19 +7792,15 @@ fn render_ai_tour_section(
                         .flex()
                         .items_center()
                         .justify_end()
-                        .gap(px(6.0))
+                        .gap(px(8.0))
                         .flex_wrap()
                         .child(render_ai_tour_priority_chip(section.priority))
-                        .child(badge(&section.badge))
-                        .child(ai_tour_metric_chip(&format!(
+                        .child(ai_tour_metric_text(&format!(
                             "{} file{}",
                             metrics.file_count,
                             if metrics.file_count == 1 { "" } else { "s" }
                         )))
-                        .child(ai_tour_metric_chip(&format!(
-                            "+{} / -{}",
-                            metrics.additions, metrics.deletions
-                        ))),
+                        .child(ai_tour_delta_metric(metrics.additions, metrics.deletions)),
                 ),
         )
         .child(
@@ -7914,12 +7909,12 @@ fn render_ai_tour_step_diff(
                 .child(
                     div()
                         .flex()
-                        .gap(px(6.0))
+                        .items_center()
+                        .gap(px(8.0))
                         .flex_wrap()
-                        .child(badge(&format!("+{}", step.additions)))
-                        .child(badge(&format!("-{}", step.deletions)))
+                        .child(ai_tour_delta_metric(step.additions, step.deletions))
                         .when(step.unresolved_thread_count > 0, |el| {
-                            el.child(badge(&format!(
+                            el.child(ai_tour_metric_text(&format!(
                                 "{} thread{}",
                                 step.unresolved_thread_count,
                                 if step.unresolved_thread_count == 1 {
