@@ -684,6 +684,7 @@ fn render_waypoint_spotlight(state: &Entity<AppState>, cx: &App) -> impl IntoEle
     div()
         .absolute()
         .inset_0()
+        .occlude()
         .flex()
         .justify_center()
         .pt(px(88.0))
@@ -691,6 +692,7 @@ fn render_waypoint_spotlight(state: &Entity<AppState>, cx: &App) -> impl IntoEle
             div()
                 .absolute()
                 .inset_0()
+                .occlude()
                 .bg(palette_backdrop())
                 .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                     close_waypoint_spotlight(&state_for_backdrop, cx);
@@ -706,6 +708,7 @@ fn render_waypoint_spotlight(state: &Entity<AppState>, cx: &App) -> impl IntoEle
                 .border_color(border_default())
                 .bg(bg_overlay())
                 .shadow_sm()
+                .occlude()
                 .overflow_hidden()
                 .child(
                     div()
@@ -2622,16 +2625,10 @@ fn render_review_queue_row(
         .px(px(10.0))
         .py(px(9.0))
         .rounded(radius_sm())
-        .border_1()
-        .border_color(if is_selected {
-            transparent()
-        } else {
-            border_muted()
-        })
         .bg(if is_selected {
             bg_emphasis()
         } else {
-            bg_surface()
+            bg_overlay()
         })
         .cursor_pointer()
         .hover(move |style| {
@@ -2729,9 +2726,7 @@ fn render_semantic_outline_row(
         .px(px(10.0))
         .py(px(8.0))
         .rounded(radius_sm())
-        .bg(bg_surface())
-        .border_1()
-        .border_color(border_muted())
+        .bg(bg_overlay())
         .child(
             div()
                 .flex()
@@ -2798,9 +2793,7 @@ fn render_task_route_stop_row(
         .px(px(10.0))
         .py(px(8.0))
         .rounded(radius_sm())
-        .bg(bg_surface())
-        .border_1()
-        .border_color(border_muted())
+        .bg(bg_overlay())
         .cursor_pointer()
         .hover(|style| style.bg(hover_bg()))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
@@ -2854,9 +2847,7 @@ fn render_recent_location_row(
         .px(px(10.0))
         .py(px(8.0))
         .rounded(radius_sm())
-        .bg(bg_surface())
-        .border_1()
-        .border_color(border_muted())
+        .bg(bg_overlay())
         .cursor_pointer()
         .hover(|style| style.bg(hover_bg()))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
@@ -2891,9 +2882,7 @@ fn render_waymark_row(
         .px(px(10.0))
         .py(px(8.0))
         .rounded(radius_sm())
-        .bg(bg_surface())
-        .border_1()
-        .border_color(border_muted())
+        .bg(bg_overlay())
         .cursor_pointer()
         .hover(|style| style.bg(hover_bg()))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
@@ -3182,8 +3171,6 @@ fn render_stack_rail(
                     .py(px(6.0))
                     .rounded(radius_sm())
                     .bg(warning_muted())
-                    .border_1()
-                    .border_color(warning())
                     .child(
                         div()
                             .min_w_0()
@@ -3215,9 +3202,7 @@ fn render_stack_rail(
                     .px(px(8.0))
                     .py(px(6.0))
                     .rounded(radius_sm())
-                    .bg(bg_subtle())
-                    .border_1()
-                    .border_color(border_muted())
+                    .bg(bg_overlay())
                     .text_size(px(11.0))
                     .line_height(px(16.0))
                     .text_color(fg_muted())
@@ -7416,9 +7401,7 @@ fn render_ai_tour_semantic_overview(
 ) -> impl IntoElement {
     div()
         .rounded(radius())
-        .bg(bg_surface())
-        .border_1()
-        .border_color(border_muted())
+        .bg(bg_overlay())
         .child(
             div()
                 .px(px(18.0))
@@ -7522,11 +7505,9 @@ fn render_ai_tour_semantic_overview_row(
         .min_h(px(72.0))
         .rounded(radius_sm())
         .bg(bg_overlay())
-        .border_1()
-        .border_color(border_muted())
         .flex()
         .cursor_pointer()
-        .hover(|style| style.bg(bg_subtle()).border_color(border_default()))
+        .hover(|style| style.bg(bg_subtle()))
         .on_mouse_down(MouseButton::Left, move |_, _, _| {
             list_state.scroll_to(ListOffset {
                 item_ix: target_index,
@@ -11989,6 +11970,8 @@ impl Render for StaticTooltipView {
 
 fn render_waypoint_pill(label: &str, active: bool) -> impl IntoElement {
     div()
+        .max_w(px(280.0))
+        .flex_shrink_0()
         .px(px(9.0))
         .py(px(4.0))
         .rounded(px(999.0))
@@ -12003,13 +11986,18 @@ fn render_waypoint_pill(label: &str, active: bool) -> impl IntoElement {
         } else {
             waypoint_bg()
         })
-        .shadow_sm()
         .child(
             div()
                 .flex()
                 .items_center()
                 .gap(px(6.0))
-                .child(div().w(px(8.0)).h(px(8.0)).rounded(px(999.0)).bg(warning()))
+                .child(
+                    div()
+                        .w(px(8.0))
+                        .h(px(8.0))
+                        .rounded(px(999.0))
+                        .bg(waypoint_icon_core()),
+                )
                 .child(
                     div()
                         .max_w(px(220.0))

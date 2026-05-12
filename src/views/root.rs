@@ -2169,12 +2169,12 @@ fn pr_tab(
         .last()
         .unwrap_or(repository)
         .to_string();
-    let pr_number = if is_local {
-        "local".to_string()
+    let pr_number = format!("#{number}");
+    let title = if is_local {
+        local_review_tab_title(title)
     } else {
-        format!("#{number}")
+        title.to_string()
     };
-    let title = title.to_string();
     let additions_label = format!("+{additions}");
     let deletions_label = format!("-{deletions}");
 
@@ -2219,14 +2219,16 @@ fn pr_tab(
                         .flex_shrink_0()
                         .child(repo_short),
                 )
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .font_family(mono_font_family())
-                        .text_color(if active { fg_default() } else { fg_subtle() })
-                        .flex_shrink_0()
-                        .child(pr_number),
-                )
+                .when(!is_local, |el| {
+                    el.child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_family(mono_font_family())
+                            .text_color(if active { fg_default() } else { fg_subtle() })
+                            .flex_shrink_0()
+                            .child(pr_number),
+                    )
+                })
                 .child(
                     div()
                         .min_w_0()
@@ -2263,6 +2265,16 @@ fn pr_tab(
                 el.bg(mix_rgba(transparent(), bg_emphasis(), progress))
             },
         )
+}
+
+fn local_review_tab_title(title: &str) -> String {
+    let title = title.trim();
+    for prefix in ["Local review blocked: ", "Local review: "] {
+        if let Some(stripped) = title.strip_prefix(prefix) {
+            return stripped.to_string();
+        }
+    }
+    title.to_string()
 }
 
 fn compact_close_button(

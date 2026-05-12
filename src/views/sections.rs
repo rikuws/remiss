@@ -571,15 +571,8 @@ fn overview_review_comment_row(
         .p(px(16.0))
         .rounded(radius())
         .bg(bg_overlay())
-        .border_1()
-        .border_color(border_muted())
         .cursor_pointer()
-        .hover(|style| {
-            style
-                .bg(hover_bg())
-                .border_color(focus_border())
-                .text_color(fg_emphasis())
-        })
+        .hover(|style| style.bg(hover_bg()).text_color(fg_emphasis()))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             open_pull_request(&state, summary.clone(), window, cx);
         })
@@ -1328,22 +1321,11 @@ fn material_seed_index(seed: &str) -> usize {
 }
 
 pub fn panel() -> Div {
-    div()
-        .rounded(radius())
-        .bg(bg_overlay())
-        .border_1()
-        .border_color(border_muted())
-        .shadow_sm()
-        .overflow_hidden()
+    div().rounded(radius()).bg(bg_overlay()).overflow_hidden()
 }
 
 pub fn nested_panel() -> Div {
-    div()
-        .p(px(20.0))
-        .rounded(radius())
-        .bg(bg_surface())
-        .border_1()
-        .border_color(border_muted())
+    div().p(px(20.0)).rounded(radius()).bg(bg_overlay())
 }
 
 pub fn eyebrow(text: &str) -> impl IntoElement {
@@ -2052,13 +2034,10 @@ fn kanban_card(
         .w_full()
         .min_w_0()
         .rounded(radius())
-        .bg(bg_surface())
-        .border_1()
-        .border_color(border_muted())
-        .shadow_sm()
+        .bg(bg_overlay())
         .p(px(14.0))
         .cursor_pointer()
-        .hover(|s| s.bg(bg_overlay()).shadow_md())
+        .hover(|s| s.bg(bg_emphasis()))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             on_click(summary.clone(), window, cx)
         })

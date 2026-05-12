@@ -905,23 +905,23 @@ pub fn danger_muted() -> Rgba {
 }
 
 pub fn waypoint_bg() -> Rgba {
-    warning_muted()
+    accent_muted()
 }
 
 pub fn waypoint_active_bg() -> Rgba {
-    theme_hex_alpha((LIGHT_WARNING, 0.18), (DARK_WARNING, 0.24))
+    theme_hex_alpha((LIGHT_FOCUS, 0.16), (DARK_FOCUS, 0.22))
 }
 
 pub fn waypoint_border() -> Rgba {
-    theme_hex_alpha((LIGHT_WARNING, 0.34), (DARK_WARNING, 0.38))
+    theme_hex_alpha((LIGHT_FOCUS, 0.30), (DARK_FOCUS, 0.40))
 }
 
 pub fn waypoint_fg() -> Rgba {
-    warning()
+    accent()
 }
 
 pub fn waypoint_icon_bg() -> Rgba {
-    warning_muted()
+    accent_muted()
 }
 
 pub fn waypoint_icon_border() -> Rgba {
@@ -929,7 +929,7 @@ pub fn waypoint_icon_border() -> Rgba {
 }
 
 pub fn waypoint_icon_core() -> Rgba {
-    warning()
+    accent()
 }
 
 pub fn hover_bg() -> Rgba {

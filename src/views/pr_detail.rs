@@ -9,6 +9,7 @@ use crate::github::{
     self, PullRequestComment, PullRequestReview, PullRequestReviewComment, PullRequestReviewThread,
     ReviewAction,
 };
+use crate::icons::{lucide_icon, LucideIcon};
 use crate::markdown::render_markdown;
 use crate::notifications;
 use crate::review_session::ReviewCenterMode;
@@ -632,9 +633,6 @@ fn render_overview_surface(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
         .map(|sn| sn.loaded_from_cache)
         .unwrap_or(false);
     let syncing = detail_state.map(|d| d.syncing).unwrap_or(false);
-    let fetched_at_ms = detail_state
-        .and_then(|d| d.snapshot.as_ref())
-        .and_then(|sn| sn.fetched_at_ms);
     let viewer_login = viewer_login(&s);
     let is_local_review = crate::local_review::is_local_review_detail(detail);
     let is_own_pull_request = viewer_login
@@ -713,17 +711,15 @@ fn render_overview_surface(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
         )
         .child(
             div()
-                .flex_1()
+                .w(detail_side_width())
                 .min_w(px(240.0))
                 .max_w(detail_side_width())
                 .flex_shrink_0()
-                .flex()
-                .flex_col()
-                .gap(px(16.0))
-                .child(render_details_panel(detail, fetched_at_ms))
-                .child(render_reviewers_panel(detail, &review_status))
-                .child(render_participants_panel(&participants))
-                .child(render_labels_panel(&detail.labels)),
+                .child(render_brief_details_view(
+                    detail,
+                    &review_status,
+                    &participants,
+                )),
         )
         .into_any_element()
 }
@@ -998,9 +994,7 @@ fn render_snapshot_stat(value: String, label: &str, hint: &str, color: Rgba) -> 
     div()
         .p(px(14.0))
         .rounded(radius())
-        .bg(bg_subtle())
-        .border_1()
-        .border_color(border_muted())
+        .bg(bg_overlay())
         .min_w(px(150.0))
         .max_w(px(188.0))
         .child(
@@ -1043,9 +1037,7 @@ fn render_thread_focus_panel(
             .min_w_0()
             .p(px(16.0))
             .rounded(radius())
-            .bg(bg_subtle())
-            .border_1()
-            .border_color(border_muted())
+            .bg(bg_overlay())
             .child(eyebrow("Needs your attention"))
             .when(own_pr_feedback.is_empty(), |el| {
                 el.child(panel_state_text("No reviewer comments yet."))
@@ -1084,9 +1076,7 @@ fn render_thread_focus_panel(
             .min_w_0()
             .p(px(16.0))
             .rounded(radius())
-            .bg(bg_subtle())
-            .border_1()
-            .border_color(border_muted())
+            .bg(bg_overlay())
             .child(eyebrow("Comment threads"))
             .when(thread_digest.is_empty(), |el| {
                 el.child(panel_state_text("No review threads yet."))
@@ -1135,8 +1125,6 @@ fn render_own_feedback_card(
         .p(px(14.0))
         .rounded(radius_sm())
         .bg(bg_overlay())
-        .border_1()
-        .border_color(border_muted())
         .cursor_pointer()
         .hover(|style| style.bg(hover_bg()))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
@@ -1241,8 +1229,6 @@ fn render_thread_digest_card(
         .p(px(14.0))
         .rounded(radius_sm())
         .bg(bg_overlay())
-        .border_1()
-        .border_color(border_muted())
         .cursor_pointer()
         .hover(|style| style.bg(hover_bg()))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
@@ -1421,9 +1407,7 @@ fn render_activity_card(item: &ActivityItem, state: &Entity<AppState>) -> impl I
         .min_w_0()
         .p(px(16.0))
         .rounded(radius())
-        .bg(bg_subtle())
-        .border_1()
-        .border_color(border_muted())
+        .bg(bg_overlay())
         .when(clickable, |el| {
             el.cursor_pointer()
                 .hover(|style| style.bg(hover_bg()))
@@ -1935,343 +1919,282 @@ fn render_submit_review_panel(
         )
 }
 
-fn render_details_panel(
+fn render_brief_details_view(
     detail: &github::PullRequestDetail,
-    fetched_at_ms: Option<i64>,
+    review_status: &ReviewStatusSummary,
+    participants: &[ParticipantItem],
 ) -> impl IntoElement {
-    let review_decision = detail.review_decision.as_deref().unwrap_or("PENDING");
-    let completeness_warnings = if detail.data_completeness.is_complete() {
-        Vec::new()
-    } else {
-        detail.data_completeness.warnings()
-    };
+    div()
+        .w_full()
+        .px(px(2.0))
+        .pt(px(6.0))
+        .pb(px(12.0))
+        .flex()
+        .flex_col()
+        .gap(px(30.0))
+        .child(render_brief_labels_section(&detail.labels))
+        .child(render_brief_reviewers_section(detail, review_status))
+        .child(render_brief_participants_section(participants))
+        .child(render_brief_metadata_section(detail))
+}
 
-    nested_panel()
-        .child(
-            div()
-                .text_size(px(13.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(fg_emphasis())
-                .mb(px(12.0))
-                .child("Details"),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(10.0))
-                .child(detail_row(
-                    "State",
-                    detail_state_badge(&detail.state, detail.is_draft),
-                ))
-                .child(detail_row(
-                    "Decision",
-                    detail_review_decision_badge(review_decision),
-                ))
-                .child(detail_row(
-                    "Created",
-                    detail_value_text(&format_relative_time(&detail.created_at)),
-                ))
-                .child(detail_row(
-                    "Updated",
-                    detail_value_text(&format_relative_time(&detail.updated_at)),
-                ))
-                .child(detail_row(
-                    "Comments",
-                    detail_value_text(&detail.comments_count.to_string()),
-                ))
-                .child(detail_row(
-                    "Threads",
-                    detail_value_text(&detail.review_threads.len().to_string()),
-                ))
-                .child(detail_row(
-                    "Files",
-                    detail_value_text(&detail.changed_files.to_string()),
-                ))
-                .when_some(fetched_at_ms, |el, ms| {
-                    el.child(detail_row("Cached at", detail_value_text(&format_ms(ms))))
-                }),
-        )
-        .when(!completeness_warnings.is_empty(), |el| {
+fn render_brief_labels_section(labels: &[String]) -> impl IntoElement {
+    brief_section_shell("Labels", true)
+        .when(labels.is_empty(), |el| {
+            el.child(brief_empty_text("No labels"))
+        })
+        .when(!labels.is_empty(), |el| {
             el.child(
-                div().mt(px(12.0)).flex().flex_col().gap(px(6.0)).children(
-                    completeness_warnings
-                        .into_iter()
-                        .map(|warning| error_text(&warning)),
-                ),
+                div()
+                    .flex()
+                    .gap(px(5.0))
+                    .flex_wrap()
+                    .children(labels.iter().map(|label| brief_label_chip(label))),
             )
         })
 }
 
-fn detail_row(label: &str, value: AnyElement) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(12.0))
-        .child(
-            div()
-                .w(px(88.0))
-                .flex_shrink_0()
-                .text_color(fg_subtle())
-                .font_family(mono_font_family())
-                .text_size(px(10.0))
-                .child(label.to_uppercase()),
-        )
-        .child(
-            div()
-                .flex_grow()
-                .min_w_0()
-                .flex()
-                .items_center()
-                .child(value),
-        )
-}
-
-fn detail_value_text(value: &str) -> AnyElement {
-    div()
-        .text_color(fg_emphasis())
-        .font_weight(FontWeight::MEDIUM)
-        .font_family(mono_font_family())
-        .text_size(px(11.0))
-        .whitespace_normal()
-        .child(value.to_string())
-        .into_any_element()
-}
-
-fn detail_badge(label: &str, fg: Rgba, bg: Rgba, _border: Rgba) -> AnyElement {
-    div()
-        .px(px(8.0))
-        .py(px(2.0))
-        .rounded(px(999.0))
-        .bg(bg)
-        .text_size(px(11.0))
-        .font_family(mono_font_family())
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(fg)
-        .child(label.to_string())
-        .into_any_element()
-}
-
-fn detail_state_badge(state: &str, is_draft: bool) -> AnyElement {
-    let label = humanize_pull_request_state(state, is_draft);
-    let (fg, bg, border) = pull_request_state_colors(state, is_draft);
-    detail_badge(&label, fg, bg, border)
-}
-
-fn detail_review_decision_badge(decision: &str) -> AnyElement {
-    let label = humanize_review_state(decision);
-    let (fg, bg, border) = review_state_colors(decision);
-    detail_badge(&label, fg, bg, border)
-}
-
-fn render_reviewers_panel(
+fn render_brief_reviewers_section(
     detail: &github::PullRequestDetail,
     review_status: &ReviewStatusSummary,
 ) -> impl IntoElement {
-    nested_panel()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .mb(px(12.0))
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(fg_emphasis())
-                        .child("Reviewers"),
-                )
-                .child(badge(&detail.reviewers.len().to_string())),
-        )
+    brief_section_shell("Reviewers", true)
         .when(detail.reviewers.is_empty(), |el| {
-            el.child(panel_state_text("No reviewers requested."))
+            el.child(brief_empty_text("No reviewers requested"))
         })
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .children(detail.reviewers.iter().map(|reviewer| {
-                    let avatar_url = detail
-                        .reviewer_avatar_urls
-                        .get(reviewer)
-                        .map(String::as_str);
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(10.0))
-                        .min_w_0()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(10.0))
-                                .flex_grow()
-                                .min_w_0()
-                                .child(user_avatar(reviewer, avatar_url, 28.0, false))
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .text_size(px(13.0))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(fg_emphasis())
-                                        .text_ellipsis()
-                                        .whitespace_nowrap()
-                                        .overflow_x_hidden()
-                                        .child(participant_display_name(reviewer)),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .child(reviewer_status_badge(reviewer, review_status)),
-                        )
-                })),
-        )
-}
-
-fn render_participants_panel(participants: &[ParticipantItem]) -> impl IntoElement {
-    let has_more = participants.len() > 8;
-
-    nested_panel()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .mb(px(12.0))
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(fg_emphasis())
-                        .child("Participants"),
-                )
-                .child(badge(&participants.len().to_string())),
-        )
-        .when(participants.is_empty(), |el| {
-            el.child(panel_state_text("No participant activity yet."))
-        })
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .children(participants.iter().take(8).map(render_participant_row)),
-        )
-        .when(has_more, |el| {
+        .when(!detail.reviewers.is_empty(), |el| {
             el.child(
                 div()
-                    .mt(px(10.0))
-                    .text_size(px(12.0))
-                    .text_color(fg_muted())
-                    .child(format!("+{} more participants", participants.len() - 8)),
+                    .flex()
+                    .flex_col()
+                    .gap(px(7.0))
+                    .children(detail.reviewers.iter().map(|reviewer| {
+                        let avatar_url = detail
+                            .reviewer_avatar_urls
+                            .get(reviewer)
+                            .map(String::as_str);
+                        brief_reviewer_row(reviewer, avatar_url, review_status)
+                    })),
             )
         })
 }
 
-fn render_participant_row(participant: &ParticipantItem) -> impl IntoElement {
+fn render_brief_participants_section(participants: &[ParticipantItem]) -> impl IntoElement {
+    let visible_count = 8usize;
+
+    brief_section_shell("Participants", false)
+        .when(participants.is_empty(), |el| {
+            el.child(brief_empty_text("No participant activity yet"))
+        })
+        .when(!participants.is_empty(), |el| {
+            el.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(3.0))
+                    .children(participants.iter().take(visible_count).map(|participant| {
+                        user_avatar(
+                            &participant.login,
+                            participant.avatar_url.as_deref(),
+                            22.0,
+                            participant.is_author,
+                        )
+                    }))
+                    .when(participants.len() > visible_count, |el| {
+                        el.child(
+                            div()
+                                .ml(px(3.0))
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(fg_muted())
+                                .child(format!("+{}", participants.len() - visible_count)),
+                        )
+                    }),
+            )
+        })
+}
+
+fn render_brief_metadata_section(detail: &github::PullRequestDetail) -> impl IntoElement {
+    let review_comment_count = detail
+        .review_threads
+        .iter()
+        .map(|thread| thread.comments.len())
+        .sum::<usize>();
+
+    brief_section_shell("Details", false).child(
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(9.0))
+            .child(brief_detail_row(
+                LucideIcon::Calendar,
+                "Created",
+                format_relative_time(&detail.created_at),
+            ))
+            .child(brief_detail_row(
+                LucideIcon::Clock,
+                "Updated",
+                format_relative_time(&detail.updated_at),
+            ))
+            .child(brief_detail_row(
+                LucideIcon::MessageSquare,
+                "Comments",
+                detail.comments_count.to_string(),
+            ))
+            .child(brief_detail_row(
+                LucideIcon::MessagesSquare,
+                "Review comments",
+                review_comment_count.to_string(),
+            )),
+    )
+}
+
+fn brief_section_shell(title: &str, show_add: bool) -> Div {
     div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap(px(14.0))
+        .child(brief_section_header(title, show_add))
+}
+
+fn brief_section_header(title: &str, show_add: bool) -> impl IntoElement {
+    div()
+        .h(px(16.0))
         .flex()
         .items_center()
         .justify_between()
-        .gap(px(10.0))
+        .child(
+            div()
+                .font_family(mono_font_family())
+                .text_size(px(12.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_muted())
+                .child(title.to_uppercase()),
+        )
+        .when(show_add, |el| {
+            el.child(
+                div()
+                    .size(px(20.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(fg_muted())
+                    .opacity(0.85)
+                    .child(lucide_icon(LucideIcon::Plus, 15.0, fg_muted())),
+            )
+        })
+}
+
+fn brief_empty_text(text: &str) -> impl IntoElement {
+    div()
+        .text_size(px(14.0))
+        .line_height(px(20.0))
+        .text_color(fg_muted())
+        .child(text.to_string())
+}
+
+fn brief_reviewer_row(
+    reviewer: &str,
+    avatar_url: Option<&str>,
+    review_status: &ReviewStatusSummary,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
         .min_w_0()
+        .child(user_avatar(reviewer, avatar_url, 22.0, false))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(px(13.0))
+                .text_color(fg_default())
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .overflow_x_hidden()
+                .child(participant_display_name(reviewer)),
+        )
+        .child(brief_review_status_dot(reviewer, review_status))
+}
+
+fn brief_review_status_dot(login: &str, review_status: &ReviewStatusSummary) -> impl IntoElement {
+    let color = if review_status
+        .approved
+        .iter()
+        .any(|reviewer| reviewer == login)
+    {
+        success()
+    } else if review_status
+        .changes_requested
+        .iter()
+        .any(|reviewer| reviewer == login)
+    {
+        danger()
+    } else if review_status
+        .commented
+        .iter()
+        .any(|reviewer| reviewer == login)
+    {
+        accent()
+    } else {
+        fg_subtle()
+    };
+
+    div()
+        .size(px(6.0))
+        .rounded(px(999.0))
+        .bg(color)
+        .flex_shrink_0()
+}
+
+fn brief_label_chip(label: &str) -> impl IntoElement {
+    div()
+        .px(px(8.0))
+        .py(px(3.0))
+        .rounded(px(999.0))
+        .bg(bg_emphasis())
+        .text_size(px(12.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(fg_default())
+        .child(label.to_string())
+}
+
+fn brief_detail_row(icon: LucideIcon, label: &str, value: String) -> impl IntoElement {
+    div()
+        .h(px(20.0))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(12.0))
         .child(
             div()
                 .flex()
                 .items_center()
-                .gap(px(10.0))
-                .flex_grow()
+                .gap(px(8.0))
                 .min_w_0()
-                .child(user_avatar(
-                    &participant.login,
-                    participant.avatar_url.as_deref(),
-                    28.0,
-                    participant.is_author,
-                ))
+                .child(lucide_icon(icon, 14.0, fg_muted()))
                 .child(
                     div()
                         .min_w_0()
                         .text_size(px(13.0))
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(fg_emphasis())
+                        .text_color(fg_muted())
                         .text_ellipsis()
                         .whitespace_nowrap()
                         .overflow_x_hidden()
-                        .child(participant_display_name(&participant.login)),
+                        .child(label.to_string()),
                 ),
         )
         .child(
             div()
-                .flex()
-                .gap(px(4.0))
-                .flex_wrap()
-                .justify_end()
                 .flex_shrink_0()
-                .when(participant.is_author, |el| {
-                    el.child(tone_badge("author", accent(), accent_muted(), accent()))
-                })
-                .when(
-                    participant.is_requested
-                        && !participant.approved
-                        && !participant.changes_requested,
-                    |el| el.child(subtle_badge("requested")),
-                )
-                .when(participant.approved, |el| {
-                    el.child(tone_badge(
-                        "approved",
-                        success(),
-                        success_muted(),
-                        diff_add_border(),
-                    ))
-                })
-                .when(participant.changes_requested, |el| {
-                    el.child(tone_badge(
-                        "changes",
-                        danger(),
-                        danger_muted(),
-                        diff_remove_border(),
-                    ))
-                })
-                .when(
-                    participant.commented
-                        && !participant.approved
-                        && !participant.changes_requested,
-                    |el| el.child(subtle_badge("commented")),
-                ),
-        )
-}
-
-fn render_labels_panel(labels: &[String]) -> impl IntoElement {
-    nested_panel()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .mb(px(8.0))
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(fg_emphasis())
-                        .child("Labels"),
-                )
-                .child(badge(&labels.len().to_string())),
-        )
-        .when(labels.is_empty(), |el| {
-            el.child(panel_state_text("No labels."))
-        })
-        .child(
-            div()
-                .flex()
-                .gap(px(4.0))
-                .flex_wrap()
-                .mt(px(6.0))
-                .children(labels.iter().map(|label| badge(label))),
+                .text_size(px(13.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(fg_emphasis())
+                .whitespace_nowrap()
+                .child(value),
         )
 }
 
@@ -2372,25 +2295,6 @@ fn review_decision_badge(decision: &str) -> AnyElement {
     let label = humanize_review_state(decision);
     let (fg, bg, border) = review_state_colors(decision);
     tone_badge(&label, fg, bg, border).into_any_element()
-}
-
-fn reviewer_status_badge(login: &str, review_status: &ReviewStatusSummary) -> AnyElement {
-    if review_status.approved.iter().any(|name| name == login) {
-        return tone_badge("approved", success(), success_muted(), diff_add_border())
-            .into_any_element();
-    }
-    if review_status
-        .changes_requested
-        .iter()
-        .any(|name| name == login)
-    {
-        return tone_badge("changes", danger(), danger_muted(), diff_remove_border())
-            .into_any_element();
-    }
-    if review_status.commented.iter().any(|name| name == login) {
-        return tone_badge("commented", accent(), accent_muted(), accent()).into_any_element();
-    }
-    subtle_badge("waiting").into_any_element()
 }
 
 fn humanize_pull_request_state(state: &str, is_draft: bool) -> String {
@@ -2952,13 +2856,6 @@ fn open_pull_request_in_browser(repository: &str, number: i64, window: &mut Wind
                 .await;
         })
         .detach();
-}
-
-fn format_ms(ms: i64) -> String {
-    let secs = ms / 1000;
-    let hours = (secs / 3600) % 24;
-    let minutes = (secs / 60) % 60;
-    format!("{hours:02}:{minutes:02}")
 }
 
 #[cfg(test)]

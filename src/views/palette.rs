@@ -10,10 +10,16 @@ use gpui::*;
 use crate::app_assets::APP_MARK_ASSET;
 use crate::branding::APP_NAME;
 use crate::icons::{lucide_icon, LucideIcon};
+use crate::review_session::ReviewCenterMode;
 use crate::selectable_text::{AppTextFieldKind, AppTextInput};
 use crate::state::*;
 use crate::theme::*;
 
+use super::ai_tour::refresh_active_tour;
+use super::diff_view::{
+    ensure_active_review_focus_loaded, enter_files_surface, enter_stack_review_mode,
+    switch_review_code_mode,
+};
 use super::sections::{badge, open_pull_request, panel_state_text};
 use super::settings::{
     decrease_code_font_size_preference, increase_code_font_size_preference, prepare_settings_view,
@@ -503,14 +509,25 @@ enum CommandItemRole {
 #[derive(Clone)]
 struct CommandItem {
     label: String,
+    search_text: String,
     action: CommandAction,
     role: CommandItemRole,
 }
 
 impl CommandItem {
     fn normal(label: impl Into<String>, action: CommandAction) -> Self {
+        Self::normal_with_keywords(label, action, &[])
+    }
+
+    fn normal_with_keywords(
+        label: impl Into<String>,
+        action: CommandAction,
+        keywords: &[&str],
+    ) -> Self {
+        let label = label.into();
         Self {
-            label: label.into(),
+            search_text: command_search_text(&label, keywords),
+            label,
             action,
             role: CommandItemRole::Normal,
         }
@@ -519,14 +536,20 @@ impl CommandItem {
     fn code_theme_parent(expanded: bool) -> Self {
         Self {
             label: CODE_THEME_COMMAND_LABEL.to_string(),
+            search_text: command_search_text(
+                CODE_THEME_COMMAND_LABEL,
+                &["color", "syntax", "highlight", "diff"],
+            ),
             action: CommandAction::ToggleCodeThemeSubmenu,
             role: CommandItemRole::CodeThemeParent { expanded },
         }
     }
 
     fn code_theme_option(theme: DiffColorThemePreference) -> Self {
+        let label = theme.label().to_string();
         Self {
-            label: theme.label().to_string(),
+            search_text: command_search_text(&label, &["color", "syntax", "highlight"]),
+            label,
             action: CommandAction::CommitCodeTheme(theme),
             role: CommandItemRole::CodeThemeOption(theme),
         }
@@ -537,6 +560,11 @@ impl CommandItem {
 enum CommandAction {
     GoToSection(SectionId),
     OpenPullRequest(crate::github::PullRequestSummary),
+    ShowPullRequestSurface(PullRequestSurface),
+    EnterCodeReview,
+    EnterCodeLens(ReviewCenterMode),
+    EnterAiTour,
+    EnterStack,
     SyncWorkspace,
     IncreaseCodeFontSize,
     DecreaseCodeFontSize,
@@ -554,43 +582,35 @@ fn build_command_items(state: &AppState) -> Vec<CommandItem> {
         .iter()
         .filter(|section| **section != SectionId::Issues)
     {
-        push_command_if_matches(
+        push_command(
             &mut items,
-            &query,
             format!("Go to {}", section.label()),
             CommandAction::GoToSection(*section),
         );
     }
 
-    push_command_if_matches(
-        &mut items,
-        &query,
-        "Sync workspace",
-        CommandAction::SyncWorkspace,
-    );
+    push_review_navigation_items(&mut items, state);
 
-    push_command_if_matches(
+    push_command(&mut items, "Sync workspace", CommandAction::SyncWorkspace);
+
+    push_command(
         &mut items,
-        &query,
         "Increase code font size",
         CommandAction::IncreaseCodeFontSize,
     );
-    push_command_if_matches(
+    push_command(
         &mut items,
-        &query,
         "Decrease code font size",
         CommandAction::DecreaseCodeFontSize,
     );
-    push_command_if_matches(
+    push_command(
         &mut items,
-        &query,
         "Reset code font size",
         CommandAction::ResetCodeFontSize,
     );
     for size in CodeFontSizePreference::all() {
-        push_command_if_matches(
+        push_command(
             &mut items,
-            &query,
             format!("Code font size: {}", size.label()),
             CommandAction::SetCodeFontSize(*size),
         );
@@ -598,9 +618,8 @@ fn build_command_items(state: &AppState) -> Vec<CommandItem> {
     push_code_theme_items(&mut items, state, &query);
 
     for tab in &state.open_tabs {
-        push_command_if_matches(
+        push_command(
             &mut items,
-            &query,
             format!("Open {} #{}", tab.repository, tab.number),
             CommandAction::OpenPullRequest(tab.clone()),
         );
@@ -609,9 +628,8 @@ fn build_command_items(state: &AppState) -> Vec<CommandItem> {
     if let Some(workspace) = &state.workspace {
         for queue in &workspace.queues {
             for item in queue.items.iter().take(5) {
-                push_command_if_matches(
+                push_command(
                     &mut items,
-                    &query,
                     format!("#{} {}", item.number, item.title),
                     CommandAction::OpenPullRequest(item.clone()),
                 );
@@ -623,61 +641,202 @@ fn build_command_items(state: &AppState) -> Vec<CommandItem> {
 }
 
 fn filtered_command_items(state: &AppState) -> Vec<CommandItem> {
-    build_command_items(state)
+    let items = build_command_items(state);
+    let query = normalized_palette_query(state);
+    let query_chars = fuzzy_query_chars(&query);
+    if query_chars.is_empty() {
+        return items;
+    }
+
+    ranked_command_items(items, &query_chars)
 }
 
 fn normalized_palette_query(state: &AppState) -> String {
     state.palette_query.trim().to_lowercase()
 }
 
-fn command_matches_query(label: &str, query: &str) -> bool {
-    query.is_empty() || label.to_lowercase().contains(query)
+fn push_command(items: &mut Vec<CommandItem>, label: impl Into<String>, action: CommandAction) {
+    items.push(CommandItem::normal(label, action));
 }
 
-fn push_command_if_matches(
-    items: &mut Vec<CommandItem>,
-    query: &str,
-    label: impl Into<String>,
-    action: CommandAction,
-) {
-    let label = label.into();
-    if command_matches_query(&label, query) {
-        items.push(CommandItem::normal(label, action));
-    }
-}
-
-fn push_code_theme_items(items: &mut Vec<CommandItem>, state: &AppState, query: &str) {
-    let parent_matches = command_matches_query(CODE_THEME_COMMAND_LABEL, query);
-    let matching_themes = DiffColorThemePreference::all()
-        .iter()
-        .copied()
-        .enumerate()
-        .filter(|(_, theme)| command_matches_query(theme.label(), query))
-        .collect::<Vec<_>>();
-    let query_matches_theme = !query.is_empty() && !matching_themes.is_empty();
-    if !parent_matches && !query_matches_theme {
+fn push_review_navigation_items(items: &mut Vec<CommandItem>, state: &AppState) {
+    if state.active_detail().is_none() {
         return;
     }
 
-    let expanded = state.palette_code_theme_expanded || query_matches_theme;
+    if !state.active_is_local_review() {
+        items.push(CommandItem::normal_with_keywords(
+            "Show PR briefing",
+            CommandAction::ShowPullRequestSurface(PullRequestSurface::Overview),
+            &["overview", "summary", "pull request"],
+        ));
+    }
+
+    items.push(CommandItem::normal_with_keywords(
+        "Open review files",
+        CommandAction::ShowPullRequestSurface(PullRequestSurface::Files),
+        &["review", "files", "changed files", "code"],
+    ));
+    items.push(CommandItem::normal_with_keywords(
+        "Switch to Code",
+        CommandAction::EnterCodeReview,
+        &["review", "files", "diff", "source", "structural"],
+    ));
+    items.push(CommandItem::normal_with_keywords(
+        "Switch to Diff",
+        CommandAction::EnterCodeLens(ReviewCenterMode::SemanticDiff),
+        &["semantic", "normal", "unified", "code", "review"],
+    ));
+    items.push(CommandItem::normal_with_keywords(
+        "Switch to Structural Diff",
+        CommandAction::EnterCodeLens(ReviewCenterMode::StructuralDiff),
+        &["struct", "difftastic", "syntax", "ast", "code", "review"],
+    ));
+    items.push(CommandItem::normal_with_keywords(
+        "Switch to Source",
+        CommandAction::EnterCodeLens(ReviewCenterMode::SourceBrowser),
+        &["source browser", "repository", "full tree", "files", "code"],
+    ));
+    items.push(CommandItem::normal_with_keywords(
+        "Switch to AI Tour",
+        CommandAction::EnterAiTour,
+        &["ai", "tour", "guide", "generated review"],
+    ));
+    items.push(CommandItem::normal_with_keywords(
+        "Switch to Stack",
+        CommandAction::EnterStack,
+        &["ai stack", "virtual stack", "layers", "review plan"],
+    ));
+}
+
+fn push_code_theme_items(items: &mut Vec<CommandItem>, state: &AppState, query: &str) {
+    let expanded = state.palette_code_theme_expanded || !query.is_empty();
     items.push(CommandItem::code_theme_parent(expanded));
 
     if expanded {
-        let themes = if query_matches_theme {
-            matching_themes
-        } else {
+        items.extend(
             DiffColorThemePreference::all()
                 .iter()
                 .copied()
-                .enumerate()
-                .collect::<Vec<_>>()
-        };
-        items.extend(
-            themes
-                .into_iter()
-                .map(|(_, theme)| CommandItem::code_theme_option(theme)),
+                .map(CommandItem::code_theme_option),
         );
     }
+}
+
+fn command_search_text(label: &str, keywords: &[&str]) -> String {
+    let mut search_text = String::with_capacity(
+        label.len()
+            + keywords
+                .iter()
+                .map(|keyword| keyword.len() + 1)
+                .sum::<usize>(),
+    );
+    push_lowercase(&mut search_text, label);
+    for keyword in keywords {
+        search_text.push(' ');
+        push_lowercase(&mut search_text, keyword);
+    }
+    search_text
+}
+
+fn push_lowercase(output: &mut String, text: &str) {
+    for ch in text.chars() {
+        output.extend(ch.to_lowercase());
+    }
+}
+
+fn fuzzy_query_chars(query: &str) -> Vec<char> {
+    query
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn ranked_command_items(items: Vec<CommandItem>, query_chars: &[char]) -> Vec<CommandItem> {
+    let mut ranked = items
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            fuzzy_match_score(&item.search_text, query_chars).map(|score| (score, index, item))
+        })
+        .collect::<Vec<_>>();
+
+    ranked.sort_by(
+        |(left_score, left_index, _), (right_score, right_index, _)| {
+            right_score
+                .cmp(left_score)
+                .then_with(|| left_index.cmp(right_index))
+        },
+    );
+
+    ranked.into_iter().map(|(_, _, item)| item).collect()
+}
+
+fn fuzzy_match_score(search_text: &str, query_chars: &[char]) -> Option<i64> {
+    if query_chars.is_empty() {
+        return Some(0);
+    }
+
+    let mut score = 0_i64;
+    let mut query_ix = 0;
+    let mut first_match_ix = 0_usize;
+    let mut last_match_ix = None;
+    let mut at_word_start = true;
+
+    for (char_ix, ch) in search_text.chars().enumerate() {
+        if query_ix >= query_chars.len() {
+            break;
+        }
+
+        if ch == query_chars[query_ix] {
+            if query_ix == 0 {
+                first_match_ix = char_ix;
+            }
+
+            score += 12;
+            if at_word_start {
+                score += 10;
+            }
+
+            if let Some(last_ix) = last_match_ix {
+                let gap = char_ix.saturating_sub(last_ix + 1);
+                if gap == 0 {
+                    score += 16;
+                } else {
+                    score -= gap.min(12) as i64;
+                }
+            }
+
+            last_match_ix = Some(char_ix);
+            query_ix += 1;
+        }
+
+        at_word_start = is_palette_word_separator(ch);
+    }
+
+    if query_ix != query_chars.len() {
+        return None;
+    }
+
+    let compact_query = query_chars.iter().collect::<String>();
+    if search_text.contains(compact_query.as_str()) {
+        score += 64 + (compact_query.chars().count().min(16) as i64 * 4);
+    }
+    if search_text
+        .split(is_palette_word_separator)
+        .any(|word| word.starts_with(compact_query.as_str()))
+    {
+        score += 32;
+    }
+
+    score -= first_match_ix.min(48) as i64;
+    score -= search_text.chars().count().min(160) as i64 / 40;
+    Some(score)
+}
+
+fn is_palette_word_separator(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '/' | '-' | '_' | ':' | '#' | '.' | '(' | ')')
 }
 
 fn apply_command_action(
@@ -701,6 +860,69 @@ fn apply_command_action(
         CommandAction::OpenPullRequest(pr) => {
             close_palette(state, cx);
             open_pull_request(state, pr, window, cx);
+        }
+        CommandAction::ShowPullRequestSurface(surface) => {
+            close_palette(state, cx);
+            match surface {
+                PullRequestSurface::Overview => {
+                    state.update(cx, |s, cx| {
+                        if s.active_detail().is_none() || s.active_is_local_review() {
+                            return;
+                        }
+                        s.active_surface = PullRequestSurface::Overview;
+                        s.pr_header_compact = false;
+                        s.persist_active_review_session();
+                        cx.notify();
+                    });
+                }
+                PullRequestSurface::Files => {
+                    enter_files_surface(state, window, cx);
+                }
+            }
+        }
+        CommandAction::EnterCodeReview => {
+            close_palette(state, cx);
+            state.update(cx, |s, cx| {
+                if s.active_detail().is_none() {
+                    return;
+                }
+                s.active_surface = PullRequestSurface::Files;
+                s.pr_header_compact = false;
+                s.enter_code_review_mode();
+                s.persist_active_review_session();
+                cx.notify();
+            });
+            ensure_active_review_focus_loaded(state, window, cx);
+        }
+        CommandAction::EnterCodeLens(mode) => {
+            close_palette(state, cx);
+            state.update(cx, |s, cx| {
+                if s.active_detail().is_none() {
+                    return;
+                }
+                s.active_surface = PullRequestSurface::Files;
+                s.pr_header_compact = false;
+                cx.notify();
+            });
+            switch_review_code_mode(state, mode, window, cx);
+        }
+        CommandAction::EnterAiTour => {
+            close_palette(state, cx);
+            state.update(cx, |s, cx| {
+                if s.active_detail().is_none() {
+                    return;
+                }
+                s.active_surface = PullRequestSurface::Files;
+                s.pr_header_compact = false;
+                s.set_review_center_mode(ReviewCenterMode::AiTour);
+                s.persist_active_review_session();
+                cx.notify();
+            });
+            refresh_active_tour(state, window, cx, true);
+        }
+        CommandAction::EnterStack => {
+            close_palette(state, cx);
+            enter_stack_review_mode(state, window, cx);
         }
         CommandAction::SyncWorkspace => {
             trigger_sync_workspace(state, window, cx);
@@ -760,7 +982,14 @@ fn selected_command_index(state: &AppState, items: &[CommandItem]) -> usize {
     }
 
     let query = normalized_palette_query(state);
-    if query.is_empty() || command_matches_query(CODE_THEME_COMMAND_LABEL, &query) {
+    let query_chars = fuzzy_query_chars(&query);
+    if query_chars.is_empty()
+        || fuzzy_match_score(
+            &command_search_text(CODE_THEME_COMMAND_LABEL, &[]),
+            &query_chars,
+        )
+        .is_some()
+    {
         return clamped;
     }
 
@@ -1010,4 +1239,63 @@ fn lerp_f32(from: f32, to: f32, progress: f32) -> f32 {
 
 fn ease_out_sine(progress: f32) -> f32 {
     (progress.clamp(0.0, 1.0) * std::f32::consts::FRAC_PI_2).sin()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        fuzzy_match_score, fuzzy_query_chars, ranked_command_items, CommandAction, CommandItem,
+    };
+
+    #[test]
+    fn fuzzy_match_accepts_abbreviated_navigation_queries() {
+        assert!(fuzzy_match_score(
+            "switch to structural diff struct difftastic syntax",
+            &fuzzy_query_chars("str")
+        )
+        .is_some());
+        assert!(fuzzy_match_score("switch to ai tour guide", &fuzzy_query_chars("ai")).is_some());
+        assert!(
+            fuzzy_match_score("switch to source source browser", &fuzzy_query_chars("src"))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn ranked_command_items_prefers_tighter_fuzzy_matches() {
+        let items = vec![
+            CommandItem::normal_with_keywords(
+                "Switch to Source",
+                CommandAction::SyncWorkspace,
+                &["source browser"],
+            ),
+            CommandItem::normal_with_keywords(
+                "Switch to Structural Diff",
+                CommandAction::SyncWorkspace,
+                &["struct difftastic"],
+            ),
+            CommandItem::normal_with_keywords(
+                "Switch to AI Tour",
+                CommandAction::SyncWorkspace,
+                &["ai guide"],
+            ),
+        ];
+
+        let ranked = ranked_command_items(items, &fuzzy_query_chars("str"));
+
+        assert_eq!(ranked[0].label, "Switch to Structural Diff");
+    }
+
+    #[test]
+    fn fuzzy_match_uses_command_keywords() {
+        let items = vec![CommandItem::normal_with_keywords(
+            "Switch to Stack",
+            CommandAction::SyncWorkspace,
+            &["ai stack virtual layers"],
+        )];
+
+        let ranked = ranked_command_items(items, &fuzzy_query_chars("ai"));
+
+        assert_eq!(ranked[0].label, "Switch to Stack");
+    }
 }
