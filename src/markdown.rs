@@ -8,8 +8,10 @@ use crate::theme::*;
 
 /// Render a markdown string into GPUI elements.
 pub fn render_markdown(id_prefix: &str, text: &str) -> impl IntoElement {
-    let options =
-        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
+    let options = Options::ENABLE_GFM
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TABLES
+        | Options::ENABLE_TASKLISTS;
     let parser = Parser::new_ext(text, options);
 
     let mut builder = MarkdownBuilder::new(id_prefix);

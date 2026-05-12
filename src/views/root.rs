@@ -798,11 +798,25 @@ fn render_local_review_sidebar_section(state: &Entity<AppState>, cx: &App) -> im
         })
         .children(repositories.into_iter().map(|repository| {
             let state = state.clone();
+            let state_for_close = state.clone();
             let path = PathBuf::from(repository.path.clone());
+            let repository_key = repository.repository.clone();
             let active = active_local_repository.as_deref() == Some(repository.repository.as_str());
-            local_review_sidebar_row(repository, active, move |_, window, cx| {
-                open_local_review_from_path(&state, path.clone(), false, window, cx);
-            })
+            local_review_sidebar_row(
+                repository,
+                active,
+                move |_, window, cx| {
+                    open_local_review_from_path(&state, path.clone(), false, window, cx);
+                },
+                move |_, window, cx| {
+                    close_local_review_sidebar_repository(
+                        &state_for_close,
+                        repository_key.clone(),
+                        window,
+                        cx,
+                    );
+                },
+            )
         }))
         .when_some(error, |el, error| {
             el.child(
@@ -823,6 +837,7 @@ fn local_review_sidebar_row(
     repository: RememberedLocalRepository,
     active: bool,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+    on_close: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let repository_label = repository
         .repository
@@ -836,6 +851,10 @@ fn local_review_sidebar_row(
         .unwrap_or_else(|| "unknown".to_string());
     let status_label = local_review_status_label(repository.last_status);
     let status_color = local_review_status_color(repository.last_status);
+    let close_id = SharedString::from(format!(
+        "local-review-sidebar-close-{}",
+        repository.repository
+    ));
     div()
         .h(px(48.0))
         .px(px(9.0))
@@ -903,6 +922,11 @@ fn local_review_sidebar_row(
                         ),
                 ),
         )
+        .child(compact_close_button(
+            close_id,
+            "Remove local review",
+            on_close,
+        ))
 }
 
 fn local_review_status_label(status: LocalReviewStatusKind) -> &'static str {
@@ -1270,6 +1294,9 @@ fn render_workspace_tabs(
             let is_local = tab.local_key.is_some();
             let is_active = active_pr_key.as_deref() == Some(&key);
             let state = state.clone();
+            let state_for_close = state.clone();
+            let key_for_select = key.clone();
+            let key_for_close = key.clone();
             pr_tab(
                 &tab.repository,
                 tab.number,
@@ -1283,23 +1310,128 @@ fn render_workspace_tabs(
                 move |_, window, cx| {
                     let cached_review_session = {
                         let cache = state.read(cx).cache.clone();
-                        load_review_session(cache.as_ref(), &key).ok().flatten()
+                        load_review_session(cache.as_ref(), &key_for_select)
+                            .ok()
+                            .flatten()
                     };
                     state.update(cx, |s, cx| {
-                        s.active_pr_key = Some(key.clone());
+                        s.active_pr_key = Some(key_for_select.clone());
                         s.set_active_section(SectionId::Pulls);
                         s.palette_open = false;
                         s.palette_selected_index = 0;
-                        s.detail_states.entry(key.clone()).or_default();
-                        s.apply_review_session_document(&key, cached_review_session.clone());
+                        s.detail_states.entry(key_for_select.clone()).or_default();
+                        s.apply_review_session_document(
+                            &key_for_select,
+                            cached_review_session.clone(),
+                        );
                         s.ensure_active_selected_file_is_valid();
                         cx.notify();
                     });
                     ensure_active_review_focus_loaded(&state, window, cx);
                     ensure_structural_diff_warmup_started(&state, window, cx);
                 },
+                move |_, window, cx| {
+                    close_workspace_tab(&state_for_close, key_for_close.clone(), window, cx);
+                },
             )
         }))
+}
+
+fn close_workspace_tab(state: &Entity<AppState>, key: String, window: &mut Window, cx: &mut App) {
+    let next_active_key = state.update(cx, |s, cx| {
+        let Some(index) = s.open_tabs.iter().position(|tab| summary_key(tab) == key) else {
+            return None;
+        };
+        let closed_active = s.active_pr_key.as_deref() == Some(key.as_str());
+
+        s.open_tabs.remove(index);
+        s.detail_states.remove(&key);
+
+        if !closed_active {
+            cx.notify();
+            return None;
+        }
+
+        let next_key = s
+            .open_tabs
+            .get(index)
+            .or_else(|| {
+                index
+                    .checked_sub(1)
+                    .and_then(|previous| s.open_tabs.get(previous))
+            })
+            .map(summary_key);
+
+        s.active_pr_key = next_key.clone();
+        s.palette_open = false;
+        s.palette_selected_index = 0;
+        s.pr_header_compact = false;
+        s.review_body.clear();
+        s.review_editor_active = false;
+        s.review_message = None;
+        s.review_success = false;
+
+        if let Some(next_key) = next_key.as_deref() {
+            s.set_active_section(SectionId::Pulls);
+            if local_review::is_local_review_key(next_key) {
+                s.active_surface = PullRequestSurface::Files;
+            }
+            s.detail_states.entry(next_key.to_string()).or_default();
+        } else {
+            s.selected_file_path = None;
+            s.selected_diff_anchor = None;
+            s.active_surface = PullRequestSurface::Overview;
+        }
+
+        cx.notify();
+        next_key
+    });
+
+    if let Some(next_key) = next_active_key {
+        let cached_review_session = {
+            let cache = state.read(cx).cache.clone();
+            load_review_session(cache.as_ref(), &next_key)
+                .ok()
+                .flatten()
+        };
+        state.update(cx, |s, cx| {
+            if s.active_pr_key.as_deref() == Some(next_key.as_str()) {
+                s.apply_review_session_document(&next_key, cached_review_session);
+                cx.notify();
+            }
+        });
+        ensure_active_review_focus_loaded(state, window, cx);
+        ensure_structural_diff_warmup_started(state, window, cx);
+    }
+}
+
+fn close_local_review_sidebar_repository(
+    state: &Entity<AppState>,
+    repository: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let local_tab_keys = state
+        .read(cx)
+        .open_tabs
+        .iter()
+        .filter(|tab| tab.local_key.is_some() && tab.repository == repository)
+        .map(summary_key)
+        .collect::<Vec<_>>();
+
+    for key in local_tab_keys {
+        close_workspace_tab(state, key, window, cx);
+    }
+
+    state.update(cx, |s, cx| {
+        s.local_review_repositories
+            .retain(|item| item.repository != repository);
+        let _ = local_review::save_remembered_repositories(
+            s.cache.as_ref(),
+            &s.local_review_repositories,
+        );
+        cx.notify();
+    });
 }
 
 fn render_workspace_body(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
@@ -1904,11 +2036,13 @@ fn pr_tab(
     is_local: bool,
     active: bool,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+    on_close: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let animation_id = SharedString::from(format!(
         "pr-tab-{repository}-{number}-{}",
         usize::from(active)
     ));
+    let close_id = SharedString::from(format!("pr-tab-close-{repository}-{number}"));
     let tab_bg = if active { bg_emphasis() } else { transparent() };
     let tab_hover_bg = if active { bg_emphasis() } else { bg_selected() };
     let icon_color = pr_tab_state_color(pr_state, is_draft);
@@ -2003,6 +2137,7 @@ fn pr_tab(
                         .child(deletions_label),
                 ),
         )
+        .child(compact_close_button(close_id, "Close tab", on_close))
         .with_animation(
             animation_id,
             Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
@@ -2011,6 +2146,31 @@ fn pr_tab(
                 el.bg(mix_rgba(transparent(), bg_emphasis(), progress))
             },
         )
+}
+
+fn compact_close_button(
+    id: SharedString,
+    tooltip: &'static str,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .w(px(20.0))
+        .h(px(20.0))
+        .flex_shrink_0()
+        .rounded(px(5.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .text_color(fg_subtle())
+        .hover(|style| style.bg(bg_selected()).text_color(fg_emphasis()))
+        .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
+        .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+            cx.stop_propagation();
+            on_click(event, window, cx);
+        })
+        .child(lucide_icon(LucideIcon::X, 12.0, fg_subtle()))
 }
 
 fn pr_tab_state_color(pr_state: &str, is_draft: bool) -> Rgba {

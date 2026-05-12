@@ -221,10 +221,10 @@ fn feedback_location_label(
 }
 
 fn summarize_feedback_preview(comment: &PullRequestReviewComment) -> String {
-    truncate_markdown_preview(&comment.body, 320)
+    full_markdown_comment_body(&comment.body)
 }
 
-fn truncate_markdown_preview(body: &str, limit: usize) -> String {
+fn full_markdown_comment_body(body: &str) -> String {
     let trimmed = body.trim();
     if trimmed.is_empty() {
         return "No comment body.".to_string();
@@ -249,13 +249,7 @@ fn truncate_markdown_preview(body: &str, limit: usize) -> String {
     }
     let collapsed = collapsed.trim_end().to_string();
 
-    if collapsed.chars().count() <= limit {
-        collapsed
-    } else {
-        let mut out: String = collapsed.chars().take(limit).collect();
-        out.push('…');
-        out
-    }
+    collapsed
 }
 
 fn viewer_login(state: &AppState) -> Option<String> {
@@ -2973,8 +2967,8 @@ mod tests {
 
     use super::{
         apply_submitted_review_to_detail, humanize_review_state, participant_display_name,
-        summarize_own_pr_feedback, summarize_participants, summarize_recent_activity,
-        summarize_review_status, ActivityItemKind,
+        summarize_feedback_preview, summarize_own_pr_feedback, summarize_participants,
+        summarize_recent_activity, summarize_review_status, ActivityItemKind,
     };
     use crate::github::{
         PullRequestComment, PullRequestDetail, PullRequestFile, PullRequestReview,
@@ -3110,6 +3104,25 @@ mod tests {
         assert_eq!(items[1].status_code.as_deref(), Some("APPROVED"));
         assert!(items[1].preview.is_empty());
         assert_eq!(items[2].kind, ActivityItemKind::Conversation);
+    }
+
+    #[test]
+    fn summarize_feedback_preview_preserves_complete_markdown_comments() {
+        let explanation = (0..30)
+            .map(|_| "Sonar explanation.")
+            .collect::<Vec<_>>()
+            .join(" ");
+        let body = format!(
+            "# [Questionable](https://sonarcloud.io/project/issues?id=remiss-ui&open=abc)\n\n{}",
+            explanation
+        );
+        let review_comment = comment("sonarcloud", &body, "2026-04-14T09:00:00Z");
+
+        let preview = summarize_feedback_preview(&review_comment);
+
+        assert_eq!(preview, body);
+        assert!(preview.contains("Sonar explanation."));
+        assert!(!preview.ends_with('…'));
     }
 
     #[test]
