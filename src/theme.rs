@@ -42,6 +42,8 @@ const DARK_BORDER_MUTED: u32 = 0x252525;
 
 const LIGHT_FOCUS: u32 = 0x2563eb;
 const DARK_FOCUS: u32 = 0x7db4ff;
+const LIGHT_BRAND_ACCENT: u32 = 0x006b5b;
+const DARK_BRAND_ACCENT: u32 = 0x39dcc7;
 const LIGHT_SUCCESS: u32 = 0x16a34a;
 const DARK_SUCCESS: u32 = 0x6ee7a5;
 const LIGHT_WARNING: u32 = 0xd97706;
@@ -749,11 +751,11 @@ pub fn fg_on_primary_action() -> Rgba {
 }
 
 pub fn accent() -> Rgba {
-    focus()
+    theme_hex(LIGHT_BRAND_ACCENT, DARK_BRAND_ACCENT)
 }
 
 pub fn accent_muted() -> Rgba {
-    focus_muted()
+    theme_hex_alpha((LIGHT_BRAND_ACCENT, 0.12), (DARK_BRAND_ACCENT, 0.18))
 }
 
 pub fn warning() -> Rgba {
@@ -773,11 +775,11 @@ pub fn info_muted() -> Rgba {
 }
 
 pub fn brand_accent() -> Rgba {
-    theme_hex(0x6d5dfc, 0xa7a2ff)
+    accent()
 }
 
 pub fn brand_accent_muted() -> Rgba {
-    theme_hex_alpha((0x6d5dfc, 0.10), (0xa7a2ff, 0.16))
+    accent_muted()
 }
 
 pub fn border_default() -> Rgba {
@@ -909,11 +911,11 @@ pub fn waypoint_bg() -> Rgba {
 }
 
 pub fn waypoint_active_bg() -> Rgba {
-    theme_hex_alpha((LIGHT_FOCUS, 0.16), (DARK_FOCUS, 0.22))
+    theme_hex_alpha((LIGHT_BRAND_ACCENT, 0.16), (DARK_BRAND_ACCENT, 0.22))
 }
 
 pub fn waypoint_border() -> Rgba {
-    theme_hex_alpha((LIGHT_FOCUS, 0.30), (DARK_FOCUS, 0.40))
+    theme_hex_alpha((LIGHT_BRAND_ACCENT, 0.30), (DARK_BRAND_ACCENT, 0.40))
 }
 
 pub fn waypoint_fg() -> Rgba {

@@ -61,7 +61,7 @@ Pull colors, radii, and sizing from `src/theme.rs` before inventing anything new
 
 - Use `bg_canvas()`, `bg_surface()`, `bg_overlay()`, `bg_inset()`, `bg_selected()`, `bg_emphasis()`, and `hover_bg()`
 - Use `fg_emphasis()`, `fg_default()`, `fg_muted()`, and `fg_subtle()`
-- Use `focus()`, `focus_muted()`, `focus_border()`, `success()`, `warning()`, `danger()`, and `info()` sparingly and semantically
+- Use `accent()`, `accent_muted()`, `focus()`, `focus_muted()`, `focus_border()`, `success()`, `warning()`, `danger()`, and `info()` sparingly and semantically
 - Use `radius()`, `radius_sm()`, and `radius_lg()` instead of ad hoc corner values
 - Do not hardcode raw colors in views unless you are extending the theme
 
@@ -70,7 +70,7 @@ Pull colors, radii, and sizing from `src/theme.rs` before inventing anything new
 Remiss now uses a bright workbench design language:
 
 - soft neutral surfaces with thin borders and subtle depth
-- neutral selected and emphasis surfaces, with blue reserved for focus, routing, and attention edges
+- neutral selected and emphasis surfaces, with phthalo reserved for brand accents and blue reserved for keyboard focus
 - roomy shells, palettes, panels, and queue rows
 - practical density for code, diff, source, and file tree surfaces
 - small semantic color signals rather than decorative color everywhere
@@ -179,5 +179,5 @@ After designing or updating a GPUI surface:
 - [ ] Works in narrow and wide desktop windows without awkward overflow or broken hierarchy
 - [ ] Gives hover, selected, disabled, loading, empty, and error states intentional visual treatment
 - [ ] Keeps keyboard interaction clear and usable
-- [ ] Uses neutral selection and reserves blue for focus, routing, and attention
+- [ ] Uses neutral selection, reserves phthalo for brand accents, and reserves blue for keyboard focus
 - [ ] Avoids generic AI styling and unnecessary decoration

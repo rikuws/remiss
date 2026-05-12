@@ -806,6 +806,7 @@ fn render_prepared_code_line_content(
             };
             navigate_to_prepared_file_lsp_definition(query, window, cx);
         })
+        .require_platform_modifier_for_click()
         .on_hover(move |index, _event, window, cx| {
             let Some(index) = index else {
                 return;
@@ -815,8 +816,9 @@ fn render_prepared_code_line_content(
             };
             request_prepared_file_lsp_details(query, window, cx);
         })
-        .tooltip_with_key(move |index, _window, cx| {
+        .tooltip_with_key(move |index, window, cx| {
             let query = tooltip_context.query_for_index(index, tooltip_tokens.as_ref())?;
+            request_prepared_file_lsp_details(query.clone(), window, cx);
             Some((
                 query.query_key.clone(),
                 build_lsp_hover_tooltip_view(

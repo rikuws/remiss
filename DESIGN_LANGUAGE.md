@@ -8,7 +8,7 @@ The style is:
 
 - light-first, with an equally polished dark theme
 - sans-first, with rare brand title moments
-- ink-forward for primary actions, with blue reserved for focus and active routing
+- ink-forward for primary actions, with phthalo reserved for brand accents and blue reserved for keyboard focus
 - roomy around the shell and panels
 - practical and dense inside code, diff, and source views
 - colorful only where semantic state, focus, routing, or attention needs it
@@ -33,7 +33,7 @@ Use:
 - medium-radius panels and list rows
 - compact radii for code-adjacent controls
 - low-contrast borders
-- neutral selected and emphasis surfaces, with blue reserved for explicit focus edges or active route attention
+- neutral selected and emphasis surfaces, with phthalo reserved for brand accents and blue reserved for explicit focus edges
 
 Avoid heavy outlines, hard black dividers, sharp stacked boxes, and nested panel clutter.
 
@@ -45,9 +45,11 @@ Legacy abstract material or shader accents may still exist in older overview sur
 
 Avoid using borders as the primary way to make everything visible. Key objects should hold together through surface, shadow, spacing, and restrained emphasis.
 
-### 4. Blue Is Focus
+### 4. Phthalo Is Brand, Blue Is Focus
 
-Blue is an interaction color, not the product color. It means keyboard focus, active routing, and current attention.
+Phthalo green is the product accent. Use it for identity, local-review accents, waypoint treatment, and occasional non-semantic emphasis where the app should feel distinctly Remiss.
+
+Blue is an interaction color, not the product color. It means keyboard focus and current keyboard attention.
 
 Semantic colors are separate:
 
@@ -56,7 +58,7 @@ Semantic colors are separate:
 - amber for warnings, queued attention, and medium priority
 - cyan or violet only for category signals where needed
 
-Primary commands use ink or its inverse. Do not make every badge, icon, selected row, or CTA blue. Color should help a reviewer find state quickly.
+Primary commands use ink or its inverse. Do not make every badge, icon, selected row, or CTA phthalo. Color should help a reviewer find state quickly.
 
 ### 5. Sans First
 
@@ -89,7 +91,8 @@ The theme should expose roles, not one-off colors:
 - `text_default`: standard body text
 - `text_muted`: secondary text
 - `text_subtle`: labels and disabled-adjacent metadata
-- `focus`: blue active and keyboard focus color
+- `accent`: phthalo brand accent for non-semantic emphasis
+- `focus`: blue keyboard focus color
 - `success`, `warning`, `danger`, `info`: semantic signals
 
 Both light and dark themes must use the same roles. Dark theme should feel like the same product, not a separate skin.

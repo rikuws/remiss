@@ -6,7 +6,6 @@ use gpui::{AssetSource, Result, SharedString};
 use lucide_icons::LUCIDE_FONT_BYTES;
 
 pub const APP_MARK_ASSET: &str = "brand/app-icon.png";
-pub const BRAND_HERO_LANDSCAPE_ASSET: &str = "brand/hero_landscape.png";
 
 pub struct AppAssets {
     base: PathBuf,

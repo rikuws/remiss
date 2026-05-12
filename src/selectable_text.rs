@@ -133,8 +133,10 @@ pub struct SelectableText {
     selection_id: String,
     raw_text: SharedString,
     text: StyledText,
-    click_listener:
-        Option<Box<dyn Fn(&[Range<usize>], SelectableTextClickEvent, &mut Window, &mut App)>>,
+    click_listener: Option<
+        Box<dyn Fn(&[Range<usize>], SelectableTextClickEvent, &mut Window, &mut App) -> bool>,
+    >,
+    click_requires_platform_modifier: bool,
     unmatched_click_listener: Option<Box<dyn Fn(&mut Window, &mut App)>>,
     hover_listener: Option<Box<dyn Fn(Option<usize>, MouseMoveEvent, &mut Window, &mut App)>>,
     tooltip_builder: Option<Rc<dyn Fn(usize, &mut Window, &mut App) -> Option<(String, AnyView)>>>,
@@ -154,6 +156,7 @@ impl SelectableText {
             text: StyledText::new(raw_text.clone()),
             raw_text,
             click_listener: None,
+            click_requires_platform_modifier: false,
             unmatched_click_listener: None,
             hover_listener: None,
             tooltip_builder: None,
@@ -177,10 +180,17 @@ impl SelectableText {
                 if range.contains(&event.mouse_down_index) && range.contains(&event.mouse_up_index)
                 {
                     listener(range_ix, window, cx);
+                    return true;
                 }
             }
+            false
         }));
         self.clickable_ranges = ranges;
+        self
+    }
+
+    pub fn require_platform_modifier_for_click(mut self) -> Self {
+        self.click_requires_platform_modifier = true;
         self
     }
 
@@ -260,7 +270,7 @@ impl Element for SelectableText {
                     .prepaint(None, inspector_id, bounds, state, window, cx);
                 let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
 
-                if let Some(tooltip_builder) = self.tooltip_builder.clone() {
+                if self.tooltip_builder.is_some() {
                     let selection_state = selectable_state
                         .as_ref()
                         .map(|state| state.selection.clone())
@@ -269,63 +279,13 @@ impl Element for SelectableText {
                         .as_ref()
                         .map(|state| state.tooltip.clone())
                         .unwrap_or_default();
-                    let mouse_position = window.mouse_position();
                     if selection_state.borrow().selecting {
                         tooltip_state.borrow_mut().clear();
-                    } else if hitbox.is_hovered(window) {
-                        let mut has_tooltip_for_hover = false;
-                        if let Ok(index) = self.text.layout().index_for_position(mouse_position) {
-                            if let Some((key, view)) = tooltip_builder(index, window, cx) {
-                                has_tooltip_for_hover = true;
-                                if !tooltip_state.borrow().has_key(&key) {
-                                    let show_task = window.spawn(cx, {
-                                        let tooltip_state = tooltip_state.clone();
-                                        let key = key.clone();
-                                        let view = view.clone();
-                                        async move |cx| {
-                                            cx.background_executor()
-                                                .timer(TEXT_TOOLTIP_SHOW_DELAY)
-                                                .await;
-                                            cx.update(|window, _cx| {
-                                                let mut state = tooltip_state.borrow_mut();
-                                                let should_show = state
-                                                    .pending
-                                                    .as_ref()
-                                                    .map(|tooltip| tooltip.key == key)
-                                                    .unwrap_or(false);
-                                                if should_show {
-                                                    state.active = Some(VisibleTextTooltip {
-                                                        key,
-                                                        mouse_position,
-                                                        view,
-                                                    });
-                                                    state.pending = None;
-                                                    window.refresh();
-                                                }
-                                            })
-                                            .ok();
-                                        }
-                                    });
-
-                                    let mut state = tooltip_state.borrow_mut();
-                                    state.active = None;
-                                    state.pending = Some(PendingTextTooltip {
-                                        key,
-                                        _show_task: show_task,
-                                    });
-                                }
-                            }
-                        }
-                        if !has_tooltip_for_hover {
-                            tooltip_state.borrow_mut().pending = None;
-                        }
-                    } else {
-                        tooltip_state.borrow_mut().pending = None;
                     }
 
                     let active_tooltip = tooltip_state.borrow().active.clone();
                     if let Some(active_tooltip) = active_tooltip {
-                        let source_hitbox = hitbox.clone();
+                        let source_bounds = bounds;
                         let selection_state = selection_state.clone();
                         let tooltip_state = tooltip_state.clone();
                         let tooltip_key = active_tooltip.key.clone();
@@ -336,7 +296,7 @@ impl Element for SelectableText {
                                 move |tooltip_bounds, window, _cx| {
                                     let mouse_position = window.mouse_position();
                                     let visible = !selection_state.borrow().selecting
-                                        && (source_hitbox.is_hovered(window)
+                                        && (source_bounds.contains(&mouse_position)
                                             || tooltip_bounds.contains(&mouse_position));
 
                                     if !visible {
@@ -417,6 +377,91 @@ impl Element for SelectableText {
                     });
                 }
 
+                if let Some(tooltip_builder) = self.tooltip_builder.clone() {
+                    let tooltip_selection = selection_state.clone();
+                    let tooltip_state = selectable_state.tooltip.clone();
+                    let tooltip_hitbox = hitbox.clone();
+                    let tooltip_layout = text_layout.clone();
+                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                        if phase != DispatchPhase::Bubble {
+                            return;
+                        }
+
+                        if tooltip_selection.borrow().selecting {
+                            let had_active = tooltip_state.borrow().active.is_some();
+                            tooltip_state.borrow_mut().clear();
+                            if had_active {
+                                window.refresh();
+                            }
+                            return;
+                        }
+
+                        if !tooltip_hitbox.is_hovered(window) {
+                            tooltip_state.borrow_mut().pending = None;
+                            return;
+                        }
+
+                        let Ok(index) = tooltip_layout.index_for_position(event.position) else {
+                            let had_active = tooltip_state.borrow().active.is_some();
+                            tooltip_state.borrow_mut().clear();
+                            if had_active {
+                                window.refresh();
+                            }
+                            return;
+                        };
+
+                        let Some((key, view)) = tooltip_builder(index, window, cx) else {
+                            let had_active = tooltip_state.borrow().active.is_some();
+                            tooltip_state.borrow_mut().clear();
+                            if had_active {
+                                window.refresh();
+                            }
+                            return;
+                        };
+
+                        if tooltip_state.borrow().has_key(&key) {
+                            return;
+                        }
+
+                        let mouse_position = event.position;
+                        let show_task = window.spawn(cx, {
+                            let tooltip_state = tooltip_state.clone();
+                            let key = key.clone();
+                            let view = view.clone();
+                            async move |cx| {
+                                cx.background_executor()
+                                    .timer(TEXT_TOOLTIP_SHOW_DELAY)
+                                    .await;
+                                cx.update(|window, _cx| {
+                                    let mut state = tooltip_state.borrow_mut();
+                                    let should_show = state
+                                        .pending
+                                        .as_ref()
+                                        .map(|tooltip| tooltip.key == key)
+                                        .unwrap_or(false);
+                                    if should_show {
+                                        state.active = Some(VisibleTextTooltip {
+                                            key,
+                                            mouse_position,
+                                            view,
+                                        });
+                                        state.pending = None;
+                                        window.refresh();
+                                    }
+                                })
+                                .ok();
+                            }
+                        });
+
+                        let mut state = tooltip_state.borrow_mut();
+                        state.active = None;
+                        state.pending = Some(PendingTextTooltip {
+                            key,
+                            _show_task: show_task,
+                        });
+                    });
+                }
+
                 let clear_selection_hitbox = hitbox.clone();
                 let clear_selection_id = selection_id.clone();
                 let clear_selection_state = selection_state.clone();
@@ -488,6 +533,8 @@ impl Element for SelectableText {
 
                 let mouse_up_selection = selection_state.clone();
                 let mouse_up_layout = text_layout.clone();
+                let cursor_click_ranges = self.clickable_ranges.clone();
+                let click_requires_platform_modifier = self.click_requires_platform_modifier;
                 let click_ranges = mem::take(&mut self.clickable_ranges);
                 let click_listener = self.click_listener.take();
                 let unmatched_click_listener = self.unmatched_click_listener.take();
@@ -523,27 +570,20 @@ impl Element for SelectableText {
                             .map(|range| range.is_empty())
                             .unwrap_or(false);
                         if collapsed {
-                            let mut matched_range = false;
-                            for range in &click_ranges {
-                                if range.contains(&mouse_down_index)
-                                    && range.contains(&mouse_up_index)
-                                {
-                                    matched_range = true;
-                                    break;
-                                }
-                            }
+                            let click_allowed = !click_requires_platform_modifier
+                                || platform_click_modifier(event.modifiers);
+                            let handled_click = click_allowed
+                                && listener(
+                                    &click_ranges,
+                                    SelectableTextClickEvent {
+                                        mouse_down_index,
+                                        mouse_up_index,
+                                    },
+                                    window,
+                                    cx,
+                                );
 
-                            listener(
-                                &click_ranges,
-                                SelectableTextClickEvent {
-                                    mouse_down_index,
-                                    mouse_up_index,
-                                },
-                                window,
-                                cx,
-                            );
-
-                            if !matched_range {
+                            if !handled_click {
                                 if let Some(listener) = unmatched_click_listener.as_ref() {
                                     listener(window, cx);
                                 }
@@ -597,10 +637,11 @@ impl Element for SelectableText {
 
                 let hovered_index = selection_state.borrow().hovered_index;
                 if let Some(index) = hovered_index {
-                    if self
-                        .clickable_ranges
+                    if cursor_click_ranges
                         .iter()
                         .any(|range| range.contains(&index))
+                        && (!click_requires_platform_modifier
+                            || platform_click_modifier(window.modifiers()))
                     {
                         window.set_cursor_style(gpui::CursorStyle::PointingHand, hitbox);
                     } else {
@@ -1399,6 +1440,14 @@ fn next_boundary(text: &str, offset: usize) -> usize {
 
 fn platform_primary_modifier(modifiers: gpui::Modifiers) -> bool {
     modifiers.platform
+}
+
+fn platform_click_modifier(modifiers: gpui::Modifiers) -> bool {
+    modifiers.platform
+        && !modifiers.control
+        && !modifiers.alt
+        && !modifiers.shift
+        && !modifiers.function
 }
 
 fn set_active_text_target(id: String) {

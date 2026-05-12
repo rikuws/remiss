@@ -11,7 +11,7 @@ Use `src/theme.rs` as the only source for product colors, radii, and durable lay
 Prefer role helpers:
 
 - Backgrounds: `bg_canvas()`, `bg_surface()`, `bg_overlay()`, `bg_inset()`, `bg_subtle()`, `bg_emphasis()`
-- States: `bg_selected()`, `hover_bg()`, `focus()`, `focus_muted()`
+- States: `bg_selected()`, `hover_bg()`, `accent()`, `accent_muted()`, `focus()`, `focus_muted()`
 - Borders and focus text: `border_default()`, `border_muted()`, `focus_border()`, `fg_on_focus()`
 - Text: `fg_emphasis()`, `fg_default()`, `fg_muted()`, `fg_subtle()`
 - Semantics: `success()`, `warning()`, `danger()`, `info()` and their muted variants
@@ -66,7 +66,7 @@ Every interactive component needs:
 - empty
 - error
 
-Selected state should use neutral theme roles such as `bg_selected()` or `bg_emphasis()` and stay readable in both themes. Blue belongs to explicit focus, active routing, and attention edges through `focus()`, `focus_muted()`, or `focus_border()`. Do not rely on color alone for review status; pair color with labels, icons, or badges.
+Selected state should use neutral theme roles such as `bg_selected()` or `bg_emphasis()` and stay readable in both themes. Phthalo belongs to brand accents through `accent()` and `accent_muted()`. Blue belongs to explicit keyboard focus through `focus()`, `focus_muted()`, or `focus_border()`. Do not rely on color alone for review status; pair color with labels, icons, or badges.
 
 ## Migration Checklist
 
