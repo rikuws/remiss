@@ -1,4 +1,7 @@
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use gpui::prelude::*;
 use gpui::*;
@@ -25,6 +28,8 @@ use super::workspace_sync::{
 
 pub struct RootView {
     state: Entity<AppState>,
+    workspace_route_key: Option<WorkspaceRouteKey>,
+    workspace_route_animation_started_at: Option<Instant>,
 }
 
 const APP_SIDEBAR_EXPANDED_WIDTH: f32 = 216.0;
@@ -39,6 +44,23 @@ const APP_TITLEBAR_TOGGLE_GAP: f32 = 4.0;
 const APP_CHROME_HIDDEN_LEFT_INSET: f32 = 206.0;
 const APP_SIDEBAR_ANIMATION_MS: u64 = 220;
 const NOTIFICATION_DRAWER_ANIMATION_MS: u64 = 160;
+const WORKSPACE_ROUTE_ANIMATION_MS: u64 = 160;
+const WORKSPACE_ROUTE_INITIAL_CONTENT_OPACITY: f32 = 0.58;
+const WORKSPACE_ROUTE_INITIAL_VEIL_ALPHA: f32 = 0.22;
+
+#[derive(Clone, Debug, PartialEq)]
+struct WorkspaceRouteKey {
+    active_section: SectionId,
+    active_pr_key: Option<String>,
+    active_surface: PullRequestSurface,
+    active_center_mode: ReviewCenterMode,
+    active_code_lens_mode: ReviewCenterMode,
+}
+
+#[derive(Clone, Copy)]
+struct WorkspaceRouteTransition {
+    progress: f32,
+}
 
 impl RootView {
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -164,7 +186,50 @@ impl RootView {
 
         refresh_local_review_repositories(&state, window, cx);
 
-        Self { state }
+        Self {
+            state,
+            workspace_route_key: None,
+            workspace_route_animation_started_at: None,
+        }
+    }
+
+    fn workspace_route_transition(
+        &mut self,
+        window: &mut Window,
+        cx: &App,
+    ) -> WorkspaceRouteTransition {
+        let current_key = {
+            let state = self.state.read(cx);
+            workspace_route_key(&state)
+        };
+
+        match &self.workspace_route_key {
+            None => {
+                self.workspace_route_key = Some(current_key);
+            }
+            Some(previous_key) if *previous_key != current_key => {
+                self.workspace_route_key = Some(current_key);
+                self.workspace_route_animation_started_at = Some(Instant::now());
+            }
+            Some(_) => {}
+        }
+
+        let progress = self
+            .workspace_route_animation_started_at
+            .map(|started_at| {
+                let duration = Duration::from_millis(WORKSPACE_ROUTE_ANIMATION_MS).as_secs_f32();
+                let raw_progress = (started_at.elapsed().as_secs_f32() / duration).clamp(0.0, 1.0);
+                if raw_progress < 1.0 {
+                    window.request_animation_frame();
+                    ease_in_out(raw_progress).clamp(0.0, 1.0)
+                } else {
+                    self.workspace_route_animation_started_at = None;
+                    1.0
+                }
+            })
+            .unwrap_or(1.0);
+
+        WorkspaceRouteTransition { progress }
     }
 }
 
@@ -549,7 +614,8 @@ fn mark_local_review_path_inspecting(state: &Entity<AppState>, path: &PathBuf, c
 }
 
 impl Render for RootView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let workspace_route_transition = self.workspace_route_transition(window, cx);
         let state = self.state.read(cx);
         let palette_visible = state.palette_open || state.palette_closing;
         let notification_drawer_open = state.notification_drawer_open;
@@ -564,7 +630,11 @@ impl Render for RootView {
             .text_size(px(14.0))
             .font_family(ui_font_family())
             .child(render_app_sidebar(&self.state, cx))
-            .child(render_main_column(&self.state, cx))
+            .child(render_main_column(
+                &self.state,
+                workspace_route_transition,
+                cx,
+            ))
             .child(render_titlebar_panel_toggles(&self.state, cx))
             .when(notification_drawer_open, |el| {
                 el.child(render_notification_drawer(&self.state, cx))
@@ -951,7 +1021,11 @@ fn local_review_status_color(status: LocalReviewStatusKind) -> Rgba {
     }
 }
 
-fn render_main_column(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
+fn render_main_column(
+    state: &Entity<AppState>,
+    workspace_route_transition: WorkspaceRouteTransition,
+    cx: &App,
+) -> impl IntoElement {
     div()
         .flex_grow()
         .min_w_0()
@@ -959,7 +1033,7 @@ fn render_main_column(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
         .flex()
         .flex_col()
         .child(render_workspace_chrome(state, cx))
-        .child(render_workspace_body(state, cx))
+        .child(render_workspace_body(state, workspace_route_transition, cx))
 }
 
 fn render_titlebar_panel_toggles(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
@@ -1434,19 +1508,58 @@ fn close_local_review_sidebar_repository(
     });
 }
 
-fn render_workspace_body(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
+fn workspace_route_key(state: &AppState) -> WorkspaceRouteKey {
+    let active_center_mode = state
+        .active_review_session()
+        .map(|session| session.center_mode)
+        .unwrap_or(ReviewCenterMode::SemanticDiff);
+
+    WorkspaceRouteKey {
+        active_section: state.active_section,
+        active_pr_key: state.active_pr_key.clone(),
+        active_surface: state.active_surface,
+        active_center_mode,
+        active_code_lens_mode: state.active_code_lens_mode(),
+    }
+}
+
+fn render_workspace_body(
+    state: &Entity<AppState>,
+    workspace_route_transition: WorkspaceRouteTransition,
+    cx: &App,
+) -> impl IntoElement {
     let s = state.read(cx);
     let has_active_pr = s.active_pr_key.is_some();
+    let progress = workspace_route_transition.progress;
+    let content_opacity = lerp_f32(WORKSPACE_ROUTE_INITIAL_CONTENT_OPACITY, 1.0, progress);
+    let veil_alpha = lerp_f32(WORKSPACE_ROUTE_INITIAL_VEIL_ALPHA, 0.0, progress);
 
     div()
+        .relative()
         .flex_grow()
         .min_h_0()
         .flex()
         .flex_col()
-        .child(if has_active_pr {
-            render_pr_workspace(state, cx).into_any_element()
-        } else {
-            render_section_workspace(state, cx).into_any_element()
+        .child(
+            div()
+                .flex_grow()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .opacity(content_opacity)
+                .child(if has_active_pr {
+                    render_pr_workspace(state, cx).into_any_element()
+                } else {
+                    render_section_workspace(state, cx).into_any_element()
+                }),
+        )
+        .when(veil_alpha > 0.0, |el| {
+            el.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .bg(with_alpha(bg_canvas(), veil_alpha)),
+            )
         })
 }
 
@@ -1786,6 +1899,10 @@ fn sidebar_hidden_progress(hidden: bool, delta: f32) -> f32 {
 
 fn lerp_px(from: f32, to: f32, progress: f32) -> Pixels {
     px(from + (to - from) * progress)
+}
+
+fn lerp_f32(from: f32, to: f32, progress: f32) -> f32 {
+    from + (to - from) * progress
 }
 
 fn build_static_tooltip(text: &'static str, cx: &mut App) -> AnyView {
