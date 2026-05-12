@@ -3953,18 +3953,54 @@ fn flatten_review_file_tree(
     depth: usize,
     rows: &mut Vec<ReviewFileTreeRow>,
 ) {
-    if depth > 0 {
-        rows.push(ReviewFileTreeRow::Directory {
-            name: node.name.clone(),
-            depth,
-        });
+    if depth == 0 {
+        for child in node.children.values() {
+            flatten_review_file_tree_directory(child, 1, rows);
+        }
+
+        push_review_file_tree_files(node, 0, rows);
+        return;
     }
+
+    flatten_review_file_tree_directory(node, depth, rows);
+}
+
+fn flatten_review_file_tree_directory(
+    node: &ReviewFileTreeNode,
+    depth: usize,
+    rows: &mut Vec<ReviewFileTreeRow>,
+) {
+    let (name, node) = compact_review_file_tree_directory(node);
+    rows.push(ReviewFileTreeRow::Directory { name, depth });
 
     for child in node.children.values() {
-        flatten_review_file_tree(child, depth + 1, rows);
+        flatten_review_file_tree_directory(child, depth + 1, rows);
     }
 
-    let file_depth = if depth == 0 { 0 } else { depth + 1 };
+    push_review_file_tree_files(node, depth + 1, rows);
+}
+
+fn compact_review_file_tree_directory(mut node: &ReviewFileTreeNode) -> (String, &ReviewFileTreeNode) {
+    let mut name = node.name.clone();
+    while node.files.is_empty() && node.children.len() == 1 {
+        let child = node
+            .children
+            .values()
+            .next()
+            .expect("single child directory should have a child");
+        name.push('/');
+        name.push_str(&child.name);
+        node = child;
+    }
+
+    (name, node)
+}
+
+fn push_review_file_tree_files(
+    node: &ReviewFileTreeNode,
+    file_depth: usize,
+    rows: &mut Vec<ReviewFileTreeRow>,
+) {
     for file in &node.files {
         if let ReviewFileTreeRow::File {
             path,
