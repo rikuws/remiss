@@ -226,16 +226,20 @@ async fn maybe_bootstrap_debug_pull_request(
 
     model
         .update(cx, |state, cx| {
-            if !state
+            let opens_new_tab = !state
                 .open_tabs
                 .iter()
-                .any(|tab| pr_key(&tab.repository, tab.number) == detail_key)
-            {
+                .any(|tab| pr_key(&tab.repository, tab.number) == detail_key);
+            if opens_new_tab {
                 state.open_tabs.insert(0, summary);
             }
 
             state.set_active_section(SectionId::Pulls);
-            state.active_surface = PullRequestSurface::Files;
+            state.active_surface = if opens_new_tab {
+                PullRequestSurface::Overview
+            } else {
+                PullRequestSurface::Files
+            };
             state.active_pr_key = Some(detail_key.clone());
             state.pr_header_compact = false;
             state.review_body.clear();
@@ -589,15 +593,6 @@ fn render_app_sidebar(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     } else {
         "Sync workspace"
     };
-    let status_label = if workspace_syncing {
-        "Syncing now"
-    } else if workspace_error.is_some() {
-        "Sync issue"
-    } else if is_authenticated {
-        "GitHub connected"
-    } else {
-        "gh needs auth"
-    };
     let sync_color = if workspace_syncing {
         accent()
     } else if workspace_error.is_some() {
@@ -628,7 +623,6 @@ fn render_app_sidebar(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                 .min_h_0()
                 .flex()
                 .flex_col()
-                .justify_between()
                 .opacity(if hidden { 0.0 } else { 1.0 })
                 .child(
                     div()
@@ -668,6 +662,7 @@ fn render_app_sidebar(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                 }),
                         ),
                 )
+                .child(div().flex_grow().min_h(px(16.0)))
                 .child(render_local_review_sidebar_section(state, cx))
                 .child(
                     div()
@@ -679,19 +674,6 @@ fn render_app_sidebar(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                         .flex()
                         .flex_col()
                         .gap(px(8.0))
-                        .child(
-                            div()
-                                .px(px(8.0))
-                                .py(px(7.0))
-                                .rounded(radius_sm())
-                                .bg(bg_surface())
-                                .border_1()
-                                .border_color(border_muted())
-                                .text_size(px(11.0))
-                                .font_family(mono_font_family())
-                                .text_color(sync_color)
-                                .child(status_label),
-                        )
                         .child(
                             div()
                                 .flex()

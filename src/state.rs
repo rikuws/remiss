@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cache::CacheStore;
 use crate::code_tour::{
@@ -64,16 +63,6 @@ impl SectionId {
             SectionId::Settings,
         ]
     }
-}
-
-fn random_overview_greeting_index() -> usize {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos() as u64)
-        .unwrap_or(0);
-    let mixed = nanos ^ nanos.rotate_left(13) ^ nanos.rotate_right(7);
-
-    mixed as usize
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -350,12 +339,28 @@ impl StructuralDiffWarmupState {
             return None;
         }
 
-        let mut text = format!("Structural diffs {}/{} ready", self.completed, self.total);
+        let processed = self.completed + self.failed;
+        if !self.loading && self.failed == 0 && processed >= self.total {
+            return None;
+        }
+
+        let mut text = if self.loading {
+            format!(
+                "Preparing structural diffs {}/{}",
+                processed.min(self.total),
+                self.total
+            )
+        } else {
+            format!(
+                "Structural diffs {}/{} prepared",
+                self.completed.min(self.total),
+                self.total
+            )
+        };
         if self.failed > 0 {
             text.push_str(&format!(", {} unavailable", self.failed));
         }
         if self.loading {
-            let processed = self.completed + self.failed;
             if processed < self.total {
                 text.push_str(&format!(", {} queued", self.total - processed));
             }
@@ -665,7 +670,8 @@ pub struct AppState {
     pub local_review_loading: bool,
     pub local_review_error: Option<String>,
     pub muted_repos: std::collections::HashSet<String>,
-    pub overview_greeting_index: usize,
+    pub pr_swimlane_shader_debug: bool,
+    pub pr_swimlane_shader_debug_offset: usize,
 
     // Workspace data
     pub workspace: Option<WorkspaceSnapshot>,
@@ -779,7 +785,8 @@ impl AppState {
             local_review_loading: false,
             local_review_error: None,
             muted_repos: std::collections::HashSet::new(),
-            overview_greeting_index: random_overview_greeting_index(),
+            pr_swimlane_shader_debug: false,
+            pr_swimlane_shader_debug_offset: 0,
             workspace: None,
             workspace_loading: true,
             workspace_syncing: false,
@@ -792,7 +799,7 @@ impl AppState {
             bootstrap_loading: true,
             theme_preference,
             window_appearance: WindowAppearance::Light,
-            app_sidebar_collapsed: true,
+            app_sidebar_collapsed: false,
             notification_drawer_open: false,
             selected_file_path: None,
             selected_diff_anchor: None,
@@ -850,9 +857,6 @@ impl AppState {
     }
 
     pub fn set_active_section(&mut self, section: SectionId) {
-        if section == SectionId::Overview {
-            self.overview_greeting_index = random_overview_greeting_index();
-        }
         self.active_section = section;
     }
 
@@ -1635,7 +1639,7 @@ impl AppState {
 
         self.open_tabs.insert(0, summary);
         self.set_active_section(SectionId::Pulls);
-        self.active_surface = PullRequestSurface::Files;
+        self.active_surface = PullRequestSurface::Overview;
         self.active_pr_key = Some(detail_key.clone());
         self.detail_states
             .entry(detail_key.clone())
@@ -1658,7 +1662,7 @@ fn parse_debug_pull_request_target(target: &str) -> Option<(String, i64)> {
 mod tests {
     use crate::diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk, ParsedDiffLine};
 
-    use super::diff_anchor_for_line;
+    use super::{diff_anchor_for_line, StructuralDiffWarmupState};
 
     #[test]
     fn diff_anchor_for_line_preserves_requested_side() {
@@ -1702,5 +1706,33 @@ mod tests {
         assert_eq!(right.side.as_deref(), Some("RIGHT"));
         assert_eq!(right.hunk_header.as_deref(), Some("@@ -1,2 +1,2 @@"));
         assert_eq!(left.side.as_deref(), Some("LEFT"));
+    }
+
+    #[test]
+    fn structural_diff_warmup_hides_complete_ready_status() {
+        let state = StructuralDiffWarmupState {
+            request_key: Some("pr:head".to_string()),
+            total: 4,
+            completed: 4,
+            failed: 0,
+            loading: false,
+        };
+
+        assert_eq!(state.status_text(), None);
+    }
+
+    #[test]
+    fn structural_diff_warmup_status_avoids_ready_copy() {
+        let state = StructuralDiffWarmupState {
+            request_key: Some("pr:head".to_string()),
+            total: 4,
+            completed: 2,
+            failed: 1,
+            loading: true,
+        };
+
+        let text = state.status_text().expect("loading status is visible");
+        assert!(text.starts_with("Preparing structural diffs 3/4"));
+        assert!(!text.contains("ready"));
     }
 }

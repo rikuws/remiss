@@ -7,6 +7,35 @@ pub enum OverviewShaderVariant {
     Ember,
     Lagoon,
     Aurora,
+    Ribbon,
+    Glow,
+    Interference,
+}
+
+impl OverviewShaderVariant {
+    pub const ALL: [Self; 8] = [
+        Self::Flow,
+        Self::Bands,
+        Self::Ember,
+        Self::Lagoon,
+        Self::Aurora,
+        Self::Ribbon,
+        Self::Glow,
+        Self::Interference,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Flow => "Flow",
+            Self::Bands => "Bands",
+            Self::Ember => "Ember",
+            Self::Lagoon => "Lagoon",
+            Self::Aurora => "Aurora",
+            Self::Ribbon => "Ribbon",
+            Self::Glow => "Glow",
+            Self::Interference => "Interference",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
@@ -373,6 +402,110 @@ kernel vec4 overviewShader(float iTime, vec2 iResolution) {
 }
 "#;
 
+    const RIBBON_CORE_IMAGE_SHADER: &str = r#"
+kernel vec4 overviewShader(float iTime, vec2 iResolution) {
+    vec2 uv = destCoord() / iResolution;
+    float x = uv.x;
+    float y = uv.y;
+    float t = iTime * 0.18;
+
+    float sweep = 0.5 + 0.5 * sin((x * 0.82 + y * 0.18 - t * 0.34) * 6.2831853);
+    vec3 col = vec3(0.58, 0.76, 1.0) + (vec3(0.00, 0.94, 0.80) - vec3(0.58, 0.76, 1.0)) * sweep;
+
+    float c1 = 0.33 + 0.15 * sin((x * 1.12 - t) * 6.2831853) + 0.04 * sin((x * 3.40 + t * 1.10) * 6.2831853);
+    float c2 = 0.64 + 0.17 * sin((x * 0.96 + t * 0.74) * 6.2831853) + 0.05 * sin((x * 2.85 - t * 1.35) * 6.2831853);
+    float c3 = 0.08 + 0.13 * sin((x * 1.42 - t * 0.82) * 6.2831853);
+
+    float band1 = 1.0 - smoothstep(0.045, 0.180, abs(y - c1));
+    float band2 = 1.0 - smoothstep(0.055, 0.210, abs(y - c2));
+    float band3 = 1.0 - smoothstep(0.030, 0.135, abs(y - c3));
+    float bands = min(max(band1 * 0.72 + band2 * 0.84 + band3 * 0.42, 0.0), 1.0);
+
+    col = col + (vec3(0.92, 0.90, 1.00) - col) * bands;
+
+    float mintEdge = 1.0 - smoothstep(0.000, 0.032, abs(y - c2 + 0.125));
+    float limeEdge = 1.0 - smoothstep(0.000, 0.026, abs(y - c1 - 0.145));
+    col = col + (vec3(0.62, 1.00, 0.62) - col) * min(max(mintEdge * 0.58 + limeEdge * 0.36, 0.0), 1.0);
+
+    float rightGlow = 1.0 - smoothstep(0.0, 0.45, length((uv - vec2(1.03, 0.37 + 0.10 * sin(t * 6.2831853))) * vec2(0.9, 1.5)));
+    col = col + (vec3(0.56, 1.00, 0.68) - col) * (rightGlow * 0.38);
+    col = min(max(col, vec3(0.0)), vec3(1.0));
+
+    return vec4(col, 1.0);
+}
+"#;
+
+    const GLOW_CORE_IMAGE_SHADER: &str = r#"
+kernel vec4 overviewShader(float iTime, vec2 iResolution) {
+    vec2 uv = destCoord() / iResolution;
+    float x = uv.x;
+    float y = uv.y;
+    float t = iTime * 0.11;
+
+    vec3 col = vec3(0.68, 0.72, 1.0);
+    float baseSweep = min(max(x * 0.68 + y * 0.28, 0.0), 1.0);
+    col = col + (vec3(1.00, 0.32, 0.76) - col) * (baseSweep * 0.62);
+
+    vec2 p = uv - vec2(0.86 + 0.05 * sin(t * 6.2831853), 0.62 + 0.05 * cos(t * 4.6));
+    float magenta = 1.0 - smoothstep(0.0, 0.74, length(p * vec2(1.10, 0.85)));
+    col = col + (vec3(1.00, 0.18, 0.58) - col) * (magenta * 0.82);
+
+    p = uv - vec2(0.30 + 0.06 * sin(t * 4.1), 0.28 + 0.05 * cos(t * 5.0));
+    float orange = 1.0 - smoothstep(0.0, 0.62, length(p * vec2(1.35, 0.82)));
+    col = col + (vec3(1.00, 0.55, 0.18) - col) * (orange * 0.58);
+
+    p = uv - vec2(0.04 + 0.04 * cos(t * 5.5), 0.82);
+    float violet = 1.0 - smoothstep(0.0, 0.55, length(p * vec2(0.95, 1.10)));
+    col = col + (vec3(0.66, 0.64, 1.0) - col) * (violet * 0.70);
+
+    float diagonal = 1.0 - smoothstep(0.035, 0.220, abs(y - (0.12 + x * 0.56 + 0.08 * sin((x * 1.60 - t) * 6.2831853))));
+    col = col + (vec3(1.00, 0.74, 0.48) - col) * (diagonal * 0.28);
+
+    float softShade = 0.08 * sin((x * 2.0 + y * 1.4 + t * 1.7) * 6.2831853);
+    col += vec3(softShade, softShade * 0.38, softShade * 0.72);
+    col = min(max(col, vec3(0.0)), vec3(1.0));
+
+    return vec4(col, 1.0);
+}
+"#;
+
+    const INTERFERENCE_CORE_IMAGE_SHADER: &str = r#"
+kernel vec4 overviewShader(float iTime, vec2 iResolution) {
+    vec2 uv = destCoord() / iResolution;
+    float x = uv.x;
+    float y = uv.y;
+    float t = iTime * 0.16;
+
+    vec3 col = vec3(0.30, 0.72, 0.95);
+
+    vec2 p = uv - vec2(0.78 + 0.05 * sin(t * 4.4), 0.62 + 0.08 * cos(t * 3.2));
+    float redGlow = 1.0 - smoothstep(0.0, 0.74, length(p * vec2(1.00, 1.24)));
+    col = col + (vec3(1.00, 0.22, 0.18) - col) * (redGlow * 0.82);
+
+    p = uv - vec2(0.34 + 0.04 * cos(t * 5.1), 0.24 + 0.05 * sin(t * 4.7));
+    float goldGlow = 1.0 - smoothstep(0.0, 0.64, length(p * vec2(1.18, 0.90)));
+    col = col + (vec3(1.00, 0.66, 0.16) - col) * (goldGlow * 0.64);
+
+    float wave = x * 25.5 + 0.44 * sin(y * 6.4 + t * 6.2831853) + 0.10 * sin(y * 18.0 - t * 8.0);
+    float stripe = 0.5 + 0.5 * cos(wave * 6.2831853);
+    stripe = stripe * stripe * stripe * stripe;
+
+    float curtain = smoothstep(0.06, 0.82, stripe);
+    float reach = 0.58 + 0.42 * sin((y * 1.65 - x * 0.52 + t * 0.90) * 6.2831853);
+    curtain *= 0.72 + 0.28 * reach;
+
+    float coolStripe = smoothstep(0.28, 0.95, 1.0 - stripe);
+    col = col + (vec3(0.23, 0.70, 0.96) - col) * (coolStripe * 0.34);
+    col = col + (vec3(1.00, 0.72, 0.20) - col) * (curtain * 0.54);
+
+    float diagonalHeat = 1.0 - smoothstep(0.06, 0.34, abs(y - (0.16 + x * 0.52 + 0.05 * sin((x * 2.0 + t) * 6.2831853))));
+    col = col + (vec3(1.00, 0.35, 0.20) - col) * (diagonalHeat * 0.36);
+    col = min(max(col, vec3(0.0)), vec3(1.0));
+
+    return vec4(col, 1.0);
+}
+"#;
+
     thread_local! {
         static TARGETS: RefCell<HashMap<ShaderTargetKey, ShaderTarget>> = RefCell::new(HashMap::new());
     }
@@ -392,6 +525,9 @@ kernel vec4 overviewShader(float iTime, vec2 iResolution) {
         ember_kernel: Retained<CIColorKernel>,
         lagoon_kernel: Retained<CIColorKernel>,
         aurora_kernel: Retained<CIColorKernel>,
+        ribbon_kernel: Retained<CIColorKernel>,
+        glow_kernel: Retained<CIColorKernel>,
+        interference_kernel: Retained<CIColorKernel>,
     }
 
     struct ShaderTarget {
@@ -510,6 +646,9 @@ kernel vec4 overviewShader(float iTime, vec2 iResolution) {
             let ember_source = NSString::from_str(EMBER_CORE_IMAGE_SHADER);
             let lagoon_source = NSString::from_str(LAGOON_CORE_IMAGE_SHADER);
             let aurora_source = NSString::from_str(AURORA_CORE_IMAGE_SHADER);
+            let ribbon_source = NSString::from_str(RIBBON_CORE_IMAGE_SHADER);
+            let glow_source = NSString::from_str(GLOW_CORE_IMAGE_SHADER);
+            let interference_source = NSString::from_str(INTERFERENCE_CORE_IMAGE_SHADER);
             #[allow(deprecated)]
             let flow_kernel = unsafe { CIColorKernel::kernelWithString(&flow_source) }
                 .expect("overview flow shader must compile as a Core Image GPU kernel");
@@ -525,6 +664,16 @@ kernel vec4 overviewShader(float iTime, vec2 iResolution) {
             #[allow(deprecated)]
             let aurora_kernel = unsafe { CIColorKernel::kernelWithString(&aurora_source) }
                 .expect("overview aurora shader must compile as a Core Image GPU kernel");
+            #[allow(deprecated)]
+            let ribbon_kernel = unsafe { CIColorKernel::kernelWithString(&ribbon_source) }
+                .expect("overview ribbon shader must compile as a Core Image GPU kernel");
+            #[allow(deprecated)]
+            let glow_kernel = unsafe { CIColorKernel::kernelWithString(&glow_source) }
+                .expect("overview glow shader must compile as a Core Image GPU kernel");
+            #[allow(deprecated)]
+            let interference_kernel =
+                unsafe { CIColorKernel::kernelWithString(&interference_source) }
+                    .expect("overview interference shader must compile as a Core Image GPU kernel");
             let context = unsafe { CIContext::contextWithOptions(Some(&options)) };
 
             ShaderGpu {
@@ -534,6 +683,9 @@ kernel vec4 overviewShader(float iTime, vec2 iResolution) {
                 ember_kernel,
                 lagoon_kernel,
                 aurora_kernel,
+                ribbon_kernel,
+                glow_kernel,
+                interference_kernel,
             }
         })
     }
@@ -574,6 +726,36 @@ kernel vec4 overviewShader(float iTime, vec2 iResolution) {
                 OverviewShaderVariant::Ember => &self.ember_kernel,
                 OverviewShaderVariant::Lagoon => &self.lagoon_kernel,
                 OverviewShaderVariant::Aurora => &self.aurora_kernel,
+                OverviewShaderVariant::Ribbon => &self.ribbon_kernel,
+                OverviewShaderVariant::Glow => &self.glow_kernel,
+                OverviewShaderVariant::Interference => &self.interference_kernel,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use objc2_core_image::CIColorKernel;
+        use objc2_foundation::NSString;
+
+        #[::core::prelude::v1::test]
+        fn overview_shader_kernels_compile() {
+            let shaders = [
+                ("flow", super::FLOW_CORE_IMAGE_SHADER),
+                ("bands", super::BANDS_CORE_IMAGE_SHADER),
+                ("ember", super::EMBER_CORE_IMAGE_SHADER),
+                ("lagoon", super::LAGOON_CORE_IMAGE_SHADER),
+                ("aurora", super::AURORA_CORE_IMAGE_SHADER),
+                ("ribbon", super::RIBBON_CORE_IMAGE_SHADER),
+                ("glow", super::GLOW_CORE_IMAGE_SHADER),
+                ("interference", super::INTERFERENCE_CORE_IMAGE_SHADER),
+            ];
+
+            for (name, source) in shaders {
+                let source = NSString::from_str(source);
+                #[allow(deprecated)]
+                let kernel = unsafe { CIColorKernel::kernelWithString(&source) };
+                assert!(kernel.is_some(), "{name} shader should compile");
             }
         }
     }

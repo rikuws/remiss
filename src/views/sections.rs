@@ -4,8 +4,7 @@ use gpui::*;
 use crate::icons::{lucide_icon, LucideIcon};
 use crate::review_session::{load_review_session, location_label};
 use crate::shader_surface::{
-    opengl_shader_surface_variant_with_corner_mask, opengl_shader_surface_with_corner_mask,
-    OverviewShaderVariant, ShaderCornerMask,
+    opengl_shader_surface_variant_with_corner_mask, OverviewShaderVariant, ShaderCornerMask,
 };
 use crate::state::*;
 use crate::theme::*;
@@ -35,31 +34,18 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let viewer_name = s.viewer_name().to_string();
     let is_auth = s.is_authenticated();
     let review_count = s.review_queue().map(|q| q.total_count).unwrap_or(0);
-    let authored_count = s.authored_queue().map(|q| q.total_count).unwrap_or(0);
-    let open_tab_count = s.open_tabs.len() as i64;
+    let pull_count = s.section_count(SectionId::Pulls);
+    let issue_count = s.section_count(SectionId::Issues);
     let review_items: Vec<_> = s
         .review_queue()
         .map(|q| q.items.clone())
         .unwrap_or_default();
     let workspace_loading = s.workspace_loading;
     let workspace_error = s.workspace_error.clone();
-    let first_open_tab = s.open_tabs.first().cloned();
-    let overview_greeting_index = s.overview_greeting_index;
     let review_comment_items = overview_review_comment_items(&s, &review_items);
 
-    let welcome_greeting =
-        overview_welcome_greeting(&viewer_name, is_auth, overview_greeting_index).to_string();
-    let queue_copy = if workspace_loading {
-        "Loading the latest review requests from the workspace snapshot.".to_string()
-    } else if workspace_error.is_some() {
-        "Workspace sync needs attention before the queue can refresh.".to_string()
-    } else if is_auth {
-        "Pull requests currently waiting on your attention.".to_string()
-    } else {
-        "Authenticate with gh to populate the review queue.".to_string()
-    };
-    let state_for_open_pull_requests = state.clone();
-    let state_for_authored = state.clone();
+    let welcome_greeting = overview_welcome_greeting(&viewer_name, is_auth);
+    let state_for_pull_requests = state.clone();
     let state_for_review_requests = state.clone();
     let state_for_items = state.clone();
     let state_for_comment_items = state.clone();
@@ -79,7 +65,7 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
         .min_h_0()
         .h_full()
         .overflow_hidden()
-        .child(overview_ambient_strip(welcome_greeting))
+        .child(overview_header(welcome_greeting))
         .child(
             div()
                 .id("overview-scroll")
@@ -98,37 +84,26 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                         .child(overview_metric_card(
                             LucideIcon::GitPullRequest,
                             "Open Pull Requests",
-                            open_tab_count,
-                            OverviewShaderVariant::Bands,
-                            first_open_tab.is_some(),
-                            {
-                                let state = state_for_open_pull_requests.clone();
-                                let summary = first_open_tab.clone();
-                                move |_, window, cx| {
-                                    if let Some(summary) = summary.clone() {
-                                        open_pull_request(&state, summary, window, cx);
-                                    }
-                                }
-                            },
-                        ))
-                        .child(overview_metric_card(
-                            LucideIcon::GitPullRequestCreate,
-                            "My Pull Requests",
-                            authored_count,
-                            OverviewShaderVariant::Flow,
+                            pull_count,
                             is_auth,
                             {
-                                let state = state_for_authored.clone();
+                                let state = state_for_pull_requests.clone();
                                 move |_, _, cx| {
                                     activate_queue(&state, SectionId::Pulls, "authored", cx);
                                 }
                             },
                         ))
                         .child(overview_metric_card(
+                            LucideIcon::Inbox,
+                            "Open Issues",
+                            issue_count,
+                            false,
+                            |_, _, _| {},
+                        ))
+                        .child(overview_metric_card(
                             LucideIcon::MessageSquareCheck,
                             "Review Requests",
                             review_count,
-                            OverviewShaderVariant::Bands,
                             is_auth,
                             {
                                 let state = state_for_review_requests.clone();
@@ -158,7 +133,6 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                 overview_review_requests_panel(
                                     review_items,
                                     review_count,
-                                    queue_copy,
                                     workspace_loading,
                                     workspace_error.clone(),
                                     is_auth,
@@ -192,52 +166,23 @@ struct OverviewReviewCommentItem {
     is_outdated: bool,
 }
 
-fn overview_ambient_strip(welcome_greeting: String) -> impl IntoElement {
+fn overview_header(welcome_greeting: String) -> impl IntoElement {
     div()
-        .relative()
         .w_full()
-        .min_h(px(128.0))
         .flex()
+        .items_center()
         .flex_shrink_0()
-        .rounded(radius())
-        .border_1()
-        .border_color(border_muted())
-        .overflow_hidden()
-        .child(
-            opengl_shader_surface_with_corner_mask(
-                "overview-attention",
-                radius(),
-                bg_canvas(),
-                ShaderCornerMask::LEFT,
-            )
-            .w(px(188.0))
-            .h_full()
-            .flex_shrink_0(),
-        )
+        .py(px(4.0))
+        .min_h(px(40.0))
         .child(
             div()
-                .relative()
-                .min_h(px(128.0))
-                .h_full()
-                .flex_grow()
-                .bg(bg_overlay())
-                .rounded_r(radius())
-                .p(px(24.0))
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(24.0))
-                .child(
-                    div().min_w_0().flex().flex_col().gap(px(0.0)).child(
-                        div()
-                            .text_size(px(28.0))
-                            .line_height(px(32.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(fg_emphasis())
-                            .line_clamp(2)
-                            .child(welcome_greeting),
-                    ),
-                ),
+                .min_w_0()
+                .text_size(px(27.0))
+                .line_height(px(32.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_emphasis())
+                .line_clamp(1)
+                .child(welcome_greeting),
         )
 }
 
@@ -245,81 +190,58 @@ fn overview_metric_card(
     icon: LucideIcon,
     label: &str,
     count: i64,
-    shader_variant: OverviewShaderVariant,
     interactive: bool,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let material_key = format!("metric-{label}");
-
     div()
         .flex_1()
-        .min_w(px(190.0))
-        .min_h(px(84.0))
+        .min_w(px(220.0))
+        .min_h(px(70.0))
         .flex()
         .items_center()
-        .justify_between()
-        .gap(px(0.0))
+        .gap(px(14.0))
         .rounded(radius())
-        .overflow_hidden()
-        .border_1()
-        .border_color(border_muted())
+        .bg(bg_overlay())
+        .px(px(18.0))
+        .py(px(14.0))
         .when(interactive, |el| {
             el.cursor_pointer()
-                .hover(|style| style.border_color(border_muted()))
+                .hover(|style| style.bg(bg_emphasis()).text_color(fg_emphasis()))
                 .on_mouse_down(MouseButton::Left, on_click)
         })
         .child(
-            opengl_shader_surface_variant_with_corner_mask(
-                material_key.clone(),
-                shader_variant,
-                radius(),
-                bg_canvas(),
-                ShaderCornerMask::LEFT,
-            )
-            .w(px(72.0))
-            .h_full()
-            .flex_shrink_0()
-            .child(
-                div()
-                    .absolute()
-                    .left(px(20.0))
-                    .top(px(25.0))
-                    .w(px(32.0))
-                    .h(px(32.0))
-                    .rounded(px(999.0))
-                    .bg(white().opacity(0.72))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(lucide_icon(icon, 17.0, fg_emphasis())),
-            ),
+            div()
+                .w(px(24.0))
+                .h(px(24.0))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(lucide_icon(icon, 22.0, fg_muted())),
         )
         .child(
             div()
                 .min_w_0()
                 .flex()
                 .flex_col()
-                .gap(px(7.0))
-                .p(px(14.0))
-                .px(px(16.0))
+                .gap(px(2.0))
                 .flex_grow()
-                .bg(bg_surface())
-                .rounded_r(radius())
                 .child(
                     div()
-                        .text_size(px(10.0))
-                        .font_family(mono_font_family())
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(fg_subtle())
-                        .child(label.to_uppercase()),
-                )
-                .child(
-                    div()
-                        .text_size(px(27.0))
-                        .line_height(px(29.0))
+                        .text_size(px(16.0))
+                        .line_height(px(18.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(fg_emphasis())
                         .child(count.to_string()),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .line_height(px(17.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(fg_muted())
+                        .line_clamp(1)
+                        .child(label.to_string()),
                 ),
         )
 }
@@ -435,7 +357,6 @@ fn overview_review_comment_briefing_panel(
 fn overview_review_requests_panel(
     review_items: Vec<github::PullRequestSummary>,
     review_count: i64,
-    _queue_copy: String,
     workspace_loading: bool,
     workspace_error: Option<String>,
     is_auth: bool,
@@ -964,6 +885,10 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     } else {
         0
     };
+    let shader_debug_enabled = s.pr_swimlane_shader_debug;
+    let shader_debug_offset = s.pr_swimlane_shader_debug_offset;
+    let shader_debug_label = shader_debug_button_label(shader_debug_enabled, shader_debug_offset);
+    let shader_debug_state = state.clone();
 
     // Group items into kanban lanes by repository
     let mut my_items: Vec<github::PullRequestSummary> = Vec::new();
@@ -1110,17 +1035,38 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                         }),
                                 ),
                         )
-                        .child(ghost_button(
-                            if workspace_syncing {
-                                "Syncing..."
-                            } else {
-                                "Refresh"
-                            },
-                            {
-                                let state = sync_state.clone();
-                                move |_, window, cx| trigger_sync_workspace(&state, window, cx)
-                            },
-                        )),
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(shader_debug_button(
+                                    shader_debug_label,
+                                    shader_debug_enabled,
+                                    {
+                                        let state = shader_debug_state.clone();
+                                        move |_, _, cx| {
+                                            state.update(cx, |s, cx| {
+                                                advance_swimlane_shader_debug(s);
+                                                cx.notify();
+                                            });
+                                        }
+                                    },
+                                ))
+                                .child(ghost_button(
+                                    if workspace_syncing {
+                                        "Syncing..."
+                                    } else {
+                                        "Refresh"
+                                    },
+                                    {
+                                        let state = sync_state.clone();
+                                        move |_, window, cx| {
+                                            trigger_sync_workspace(&state, window, cx)
+                                        }
+                                    },
+                                )),
+                        ),
                 )
                 .when(workspace_loading, |el| {
                     el.child(
@@ -1161,6 +1107,15 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                 .h_full()
                                 .when(has_my_items, |el| {
                                     let state = state_for_lanes.clone();
+                                    let shader_variant = swimlane_shader_variant(
+                                        "__mine__",
+                                        board_shader_offset + 2,
+                                        shader_debug_enabled,
+                                        shader_debug_offset,
+                                        0,
+                                    );
+                                    let shader_label =
+                                        shader_debug_enabled.then_some(shader_variant.label());
                                     el.child(kanban_lane(
                                         "__mine__",
                                         "My Pull Requests",
@@ -1168,27 +1123,42 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                         my_items,
                                         accent(),
                                         true,
-                                        board_shader_offset + 2,
+                                        shader_variant,
+                                        shader_label,
                                         state,
                                     ))
                                 })
-                                .children(repo_groups.into_iter().map(|(repo, items)| {
-                                    let short_name =
-                                        repo.split('/').last().unwrap_or(&repo).to_string();
-                                    let count = items.len();
-                                    let accent_color = lane_accent_color(&repo);
-                                    let state = state_for_lanes.clone();
-                                    kanban_lane(
-                                        &repo,
-                                        &short_name,
-                                        &format!("{repo} \u{00b7} {count}"),
-                                        items,
-                                        accent_color,
-                                        false,
-                                        board_shader_offset,
-                                        state,
-                                    )
-                                })),
+                                .children(repo_groups.into_iter().enumerate().map(
+                                    |(index, (repo, items))| {
+                                        let short_name =
+                                            repo.split('/').last().unwrap_or(&repo).to_string();
+                                        let count = items.len();
+                                        let subtitle = repo_lane_subtitle(&repo, count);
+                                        let accent_color = lane_accent_color(&repo);
+                                        let state = state_for_lanes.clone();
+                                        let lane_index = index + usize::from(has_my_items);
+                                        let shader_variant = swimlane_shader_variant(
+                                            &repo,
+                                            board_shader_offset,
+                                            shader_debug_enabled,
+                                            shader_debug_offset,
+                                            lane_index,
+                                        );
+                                        let shader_label =
+                                            shader_debug_enabled.then_some(shader_variant.label());
+                                        kanban_lane(
+                                            &repo,
+                                            &short_name,
+                                            &subtitle,
+                                            items,
+                                            accent_color,
+                                            false,
+                                            shader_variant,
+                                            shader_label,
+                                            state,
+                                        )
+                                    },
+                                )),
                         ),
                 ),
         )
@@ -1269,16 +1239,6 @@ pub fn material_surface(seed: &str) -> Div {
     )
 }
 
-fn material_surface_with_corner_radius(
-    seed: &str,
-    variant_offset: usize,
-    corners: ShaderCornerMask,
-    mask_color: Rgba,
-    corner_radius: Pixels,
-) -> Div {
-    shader_material_surface(seed, variant_offset, corners, mask_color, corner_radius)
-}
-
 fn shader_material_surface(
     seed: &str,
     variant_offset: usize,
@@ -1287,9 +1247,18 @@ fn shader_material_surface(
     corner_radius: Pixels,
 ) -> Div {
     let seed = seed.to_string();
-    let shader_seed = format!("review-material-{seed}");
     let variant = material_shader_variant(&seed, variant_offset);
+    shader_material_surface_variant(&seed, variant, corners, mask_color, corner_radius)
+}
 
+fn shader_material_surface_variant(
+    seed: &str,
+    variant: OverviewShaderVariant,
+    corners: ShaderCornerMask,
+    mask_color: Rgba,
+    corner_radius: Pixels,
+) -> Div {
+    let shader_seed = format!("review-material-{seed}");
     opengl_shader_surface_variant_with_corner_mask(
         shader_seed,
         variant,
@@ -1301,9 +1270,53 @@ fn shader_material_surface(
 
 fn material_shader_variant(seed: &str, offset: usize) -> OverviewShaderVariant {
     match (material_seed_index(seed) + offset) % 3 {
-        0 => OverviewShaderVariant::Ember,
-        1 => OverviewShaderVariant::Lagoon,
-        _ => OverviewShaderVariant::Aurora,
+        0 => OverviewShaderVariant::Ribbon,
+        1 => OverviewShaderVariant::Glow,
+        _ => OverviewShaderVariant::Interference,
+    }
+}
+
+fn swimlane_shader_variant(
+    seed: &str,
+    normal_offset: usize,
+    debug_enabled: bool,
+    debug_offset: usize,
+    lane_index: usize,
+) -> OverviewShaderVariant {
+    if debug_enabled {
+        let variants = OverviewShaderVariant::ALL;
+        variants[(lane_index + debug_offset) % variants.len()]
+    } else {
+        material_shader_variant(seed, normal_offset + 1)
+    }
+}
+
+fn shader_debug_button_label(enabled: bool, offset: usize) -> String {
+    if enabled {
+        format!(
+            "Shader debug {}/{}",
+            (offset % OverviewShaderVariant::ALL.len()) + 1,
+            OverviewShaderVariant::ALL.len()
+        )
+    } else {
+        "Shader debug".to_string()
+    }
+}
+
+fn advance_swimlane_shader_debug(state: &mut AppState) {
+    let variant_count = OverviewShaderVariant::ALL.len();
+    if !state.pr_swimlane_shader_debug {
+        state.pr_swimlane_shader_debug = true;
+        state.pr_swimlane_shader_debug_offset = 0;
+        return;
+    }
+
+    let next_offset = state.pr_swimlane_shader_debug_offset + 1;
+    if next_offset >= variant_count {
+        state.pr_swimlane_shader_debug = false;
+        state.pr_swimlane_shader_debug_offset = 0;
+    } else {
+        state.pr_swimlane_shader_debug_offset = next_offset;
     }
 }
 
@@ -1365,6 +1378,52 @@ pub fn ghost_button(
         })
         .on_mouse_down(MouseButton::Left, on_click)
         .child(label.to_string())
+}
+
+fn shader_debug_button(
+    label: String,
+    active: bool,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .px(px(12.0))
+        .py(px(7.0))
+        .rounded(radius_sm())
+        .bg(if active {
+            control_selected_bg()
+        } else {
+            control_button_bg()
+        })
+        .border_1()
+        .border_color(if active {
+            focus_border()
+        } else {
+            border_muted()
+        })
+        .text_color(if active { fg_emphasis() } else { fg_default() })
+        .text_size(px(13.0))
+        .font_weight(FontWeight::MEDIUM)
+        .cursor_pointer()
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .hover(move |style| {
+            style
+                .bg(control_button_hover_bg())
+                .border_color(if active {
+                    focus_border()
+                } else {
+                    border_default()
+                })
+                .text_color(fg_emphasis())
+        })
+        .on_mouse_down(MouseButton::Left, on_click)
+        .child(lucide_icon(
+            LucideIcon::Palette,
+            13.0,
+            if active { focus() } else { fg_muted() },
+        ))
+        .child(label)
 }
 
 pub fn review_button(
@@ -1594,20 +1653,7 @@ pub fn meta_row(label: &str, value: &str) -> impl IntoElement {
         )
 }
 
-fn welcome_greeting_count(is_authenticated: bool) -> usize {
-    if is_authenticated {
-        4
-    } else {
-        3
-    }
-}
-
-fn overview_welcome_greeting(
-    viewer_name: &str,
-    is_authenticated: bool,
-    greeting_index: usize,
-) -> String {
-    let index = greeting_index % welcome_greeting_count(is_authenticated);
+fn overview_welcome_greeting(viewer_name: &str, is_authenticated: bool) -> String {
     let viewer_name = viewer_name.trim();
     let viewer_name = if viewer_name.is_empty() {
         "there"
@@ -1616,18 +1662,9 @@ fn overview_welcome_greeting(
     };
 
     if is_authenticated {
-        match index {
-            0 => format!("Welcome back, {viewer_name}"),
-            1 => format!("Ready for review, {viewer_name}?"),
-            2 => "The review queue is live.".to_string(),
-            _ => "Let's clear what needs attention.".to_string(),
-        }
+        format!("Welcome back, {viewer_name}")
     } else {
-        match index {
-            0 => "Connect GitHub".to_string(),
-            1 => "Authenticate with gh".to_string(),
-            _ => "Bring your reviews into focus.".to_string(),
-        }
+        "Connect GitHub".to_string()
     }
 }
 
@@ -1778,6 +1815,34 @@ fn render_diff_summary(additions: i64, deletions: i64) -> impl IntoElement {
         )
 }
 
+fn lane_header_scrim() -> Rgba {
+    match active_theme() {
+        ActiveTheme::Light => with_alpha(white().into(), 0.03),
+        ActiveTheme::Dark => with_alpha(bg_canvas(), 0.18),
+    }
+}
+
+fn lane_header_control_bg() -> Rgba {
+    match active_theme() {
+        ActiveTheme::Light => with_alpha(white().into(), 0.62),
+        ActiveTheme::Dark => with_alpha(bg_canvas(), 0.56),
+    }
+}
+
+fn lane_header_control_hover_bg() -> Rgba {
+    match active_theme() {
+        ActiveTheme::Light => with_alpha(white().into(), 0.78),
+        ActiveTheme::Dark => with_alpha(bg_overlay(), 0.92),
+    }
+}
+
+fn lane_header_control_border() -> Rgba {
+    match active_theme() {
+        ActiveTheme::Light => with_alpha(white().into(), 0.42),
+        ActiveTheme::Dark => with_alpha(white().into(), 0.18),
+    }
+}
+
 fn kanban_lane(
     lane_id: &str,
     label: &str,
@@ -1785,14 +1850,22 @@ fn kanban_lane(
     items: Vec<github::PullRequestSummary>,
     _accent: Rgba,
     is_mine: bool,
-    shader_offset: usize,
+    shader_variant: OverviewShaderVariant,
+    shader_debug_label: Option<&'static str>,
     state: Entity<AppState>,
 ) -> impl IntoElement {
     let label = label.to_string();
-    let subtitle = subtitle.to_string();
+    let subtitle = match shader_debug_label {
+        Some(shader_label) => format!("{subtitle} \u{00b7} shader {shader_label}"),
+        None => subtitle.to_string(),
+    };
     let count = items.len();
     let mute_state = state.clone();
     let mute_repo = lane_id.to_string();
+    let show_repo_in_card_meta = is_mine;
+    let lane_radius = radius_lg();
+    let shader_visible_height = px(70.0);
+    let shader_backplate_height = shader_visible_height + lane_radius;
 
     div()
         .w(px(KANBAN_LANE_WIDTH))
@@ -1806,23 +1879,32 @@ fn kanban_lane(
                 .flex_col()
                 .min_h_0()
                 .flex_grow()
-                .rounded(radius_lg())
+                .rounded(lane_radius)
                 .bg(transparent())
                 .shadow_md()
                 .child(
-                    material_surface_with_corner_radius(
+                    shader_material_surface_variant(
                         lane_id,
-                        shader_offset + 1,
+                        shader_variant,
                         ShaderCornerMask::TOP,
                         bg_canvas(),
-                        radius_lg(),
+                        lane_radius,
                     )
-                    .h(px(70.0))
+                    .h(shader_backplate_height)
                     .flex()
                     .items_center()
                     .justify_between()
-                    .p(px(16.0))
+                    .px(px(16.0))
+                    .pt(px(16.0))
+                    .pb(px(16.0) + lane_radius)
                     .text_color(fg_emphasis())
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .size_full()
+                            .bg(lane_header_scrim()),
+                    )
                     .child(
                         div()
                             .flex()
@@ -1830,6 +1912,12 @@ fn kanban_lane(
                             .gap(px(10.0))
                             .child(
                                 div()
+                                    .px(px(8.0))
+                                    .py(px(4.0))
+                                    .rounded(radius_sm())
+                                    .bg(lane_header_control_bg())
+                                    .border_1()
+                                    .border_color(lane_header_control_border())
                                     .text_size(px(14.0))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(fg_emphasis())
@@ -1840,7 +1928,9 @@ fn kanban_lane(
                                     .px(px(8.0))
                                     .py(px(2.0))
                                     .rounded(px(999.0))
-                                    .bg(white().opacity(0.62))
+                                    .bg(lane_header_control_bg())
+                                    .border_1()
+                                    .border_color(lane_header_control_border())
                                     .text_size(px(11.0))
                                     .font_family(mono_font_family())
                                     .text_color(fg_emphasis())
@@ -1856,8 +1946,12 @@ fn kanban_lane(
                                 .text_size(px(11.0))
                                 .text_color(fg_emphasis())
                                 .cursor_pointer()
-                                .bg(white().opacity(0.46))
-                                .hover(|s| s.bg(white().opacity(0.68)).text_color(danger()))
+                                .bg(lane_header_control_bg())
+                                .border_1()
+                                .border_color(lane_header_control_border())
+                                .hover(|s| {
+                                    s.bg(lane_header_control_hover_bg()).text_color(danger())
+                                })
                                 .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                                     mute_state.update(cx, |s, cx| {
                                         s.muted_repos.insert(mute_repo.clone());
@@ -1874,8 +1968,9 @@ fn kanban_lane(
                         .flex_col()
                         .flex_grow()
                         .min_h_0()
+                        .mt(px(-f32::from(lane_radius)))
                         .bg(bg_overlay())
-                        .rounded_b(radius_lg())
+                        .rounded(lane_radius)
                         .overflow_hidden()
                         .child(
                             div()
@@ -1904,9 +1999,13 @@ fn kanban_lane(
                                         .gap(px(8.0))
                                         .children(items.into_iter().map(|item| {
                                             let state = state.clone();
-                                            kanban_card(item, move |summary, window, cx| {
-                                                open_pull_request(&state, summary, window, cx);
-                                            })
+                                            kanban_card(
+                                                item,
+                                                show_repo_in_card_meta,
+                                                move |summary, window, cx| {
+                                                    open_pull_request(&state, summary, window, cx);
+                                                },
+                                            )
                                         })),
                                 ),
                         ),
@@ -1916,6 +2015,7 @@ fn kanban_lane(
 
 fn kanban_card(
     item: github::PullRequestSummary,
+    show_repo_in_meta: bool,
     on_click: impl Fn(github::PullRequestSummary, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let title = item.title.clone();
@@ -1927,12 +2027,20 @@ fn kanban_card(
         .to_string();
     let author_login = item.author_login.clone();
     let author_avatar_url = item.author_avatar_url.clone();
-    let meta = format!(
-        "{} #{} \u{00b7} {}",
-        repo_label,
-        item.number,
-        format_relative_time(&item.updated_at)
-    );
+    let meta = if show_repo_in_meta {
+        format!(
+            "{} #{} \u{00b7} {}",
+            repo_label,
+            item.number,
+            format_relative_time(&item.updated_at)
+        )
+    } else {
+        format!(
+            "#{} \u{00b7} {}",
+            item.number,
+            format_relative_time(&item.updated_at)
+        )
+    };
     let additions = item.additions;
     let deletions = item.deletions;
     let comments = item.comments_count;
@@ -2030,6 +2138,16 @@ fn kanban_card(
         )
 }
 
+fn repo_lane_subtitle(repo: &str, count: usize) -> String {
+    let count_label = format!("{count} open");
+    match repo.split_once('/') {
+        Some((owner, _)) if !owner.trim().is_empty() => {
+            format!("{owner} \u{00b7} {count_label}")
+        }
+        _ => count_label,
+    }
+}
+
 fn muted_repo_pill(
     repo: &str,
     on_unmute: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
@@ -2088,6 +2206,17 @@ pub fn open_pull_request(
     let key = pr_key(&summary.repository, summary.number);
     let repository = summary.repository.clone();
     let number = summary.number;
+    let opens_new_tab = {
+        let s = state.read(cx);
+        !s.open_tabs
+            .iter()
+            .any(|t| pr_key(&t.repository, t.number) == key)
+    };
+    let initial_surface = if opens_new_tab && summary.local_key.is_none() {
+        PullRequestSurface::Overview
+    } else {
+        PullRequestSurface::Files
+    };
     let cached_review_session = {
         let cache = state.read(cx).cache.clone();
         load_review_session(cache.as_ref(), &key).ok().flatten()
@@ -2106,7 +2235,7 @@ pub fn open_pull_request(
             s.open_tabs.insert(0, summary);
         }
         s.set_active_section(SectionId::Pulls);
-        s.active_surface = PullRequestSurface::Files;
+        s.active_surface = initial_surface;
         s.active_pr_key = Some(key.clone());
         s.palette_open = false;
         s.palette_selected_index = 0;
