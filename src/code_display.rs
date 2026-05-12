@@ -84,29 +84,66 @@ struct PreparedFileLspQuery {
     request: lsp::LspTextDocumentRequest,
 }
 
-pub fn code_text_runs(spans: &[SyntaxSpan]) -> Option<Vec<TextRun>> {
-    if spans.is_empty() {
+pub fn code_text_runs(
+    text: &str,
+    spans: &[SyntaxSpan],
+    fallback_color: Rgba,
+) -> Option<Vec<TextRun>> {
+    if text.is_empty() || spans.is_empty() {
         return None;
     }
 
     let mut runs = Vec::with_capacity(spans.len());
+    let mut byte_offsets = text.char_indices().map(|(ix, _)| ix).collect::<Vec<_>>();
+    byte_offsets.push(text.len());
+    let mut current_byte = 0usize;
 
     for span in spans {
-        if span.text.is_empty() {
+        let span_start = column_to_byte_offset(&byte_offsets, span.column_start);
+        let span_end = column_to_byte_offset(&byte_offsets, span.column_end);
+        if span_end <= span_start || span_end <= current_byte {
             continue;
         }
 
-        runs.push(TextRun {
-            len: span.text.len(),
-            font: mono_code_font(),
-            color: span.color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        });
+        let span_start = span_start.max(current_byte);
+        push_code_text_run(
+            &mut runs,
+            span_start.saturating_sub(current_byte),
+            fallback_color.into(),
+        );
+        push_code_text_run(&mut runs, span_end.saturating_sub(span_start), span.color);
+        current_byte = span_end;
     }
 
+    push_code_text_run(
+        &mut runs,
+        text.len().saturating_sub(current_byte),
+        fallback_color.into(),
+    );
+
     (!runs.is_empty()).then_some(runs)
+}
+
+fn column_to_byte_offset(byte_offsets: &[usize], column: usize) -> usize {
+    let offset_ix = column
+        .saturating_sub(1)
+        .min(byte_offsets.len().saturating_sub(1));
+    byte_offsets.get(offset_ix).copied().unwrap_or_default()
+}
+
+fn push_code_text_run(runs: &mut Vec<TextRun>, len: usize, color: Hsla) {
+    if len == 0 {
+        return;
+    }
+
+    runs.push(TextRun {
+        len,
+        font: mono_code_font(),
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    });
 }
 
 fn styled_selectable_code_text(
@@ -115,7 +152,7 @@ fn styled_selectable_code_text(
     spans: &[SyntaxSpan],
 ) -> SelectableText {
     let text = text.to_string();
-    if let Some(runs) = code_text_runs(spans) {
+    if let Some(runs) = code_text_runs(text.as_str(), spans, fg_default()) {
         SelectableText::new(id, text).with_runs(runs)
     } else {
         SelectableText::new(id, text)
@@ -623,7 +660,7 @@ fn render_code_line_content(
         .line_height(px(CODE_LINE_HEIGHT))
         .font_weight(FontWeight::MEDIUM);
 
-    if let Some(runs) = code_text_runs(&spans) {
+    if let Some(runs) = code_text_runs(line.as_str(), &spans, fg_default()) {
         code_div.child(
             SelectableText::new(format!("code-block-{block_id}-line-{line_ix}"), line)
                 .with_runs(runs),
@@ -1335,10 +1372,62 @@ fn prepared_excerpt_range(
 
 #[cfg(test)]
 mod tests {
+    use gpui::{hsla, rgb, TextRun};
+
+    use crate::syntax::SyntaxSpan;
+
     use super::{
-        build_interactive_code_tokens, prepared_code_block_element_id, prepared_excerpt_range,
-        prepared_lsp_text_id,
+        build_interactive_code_tokens, code_text_runs, prepared_code_block_element_id,
+        prepared_excerpt_range, prepared_lsp_text_id,
     };
+
+    fn total_run_len(runs: &[TextRun]) -> usize {
+        runs.iter().map(|run| run.len).sum()
+    }
+
+    #[test]
+    fn code_text_runs_fill_unstyled_gaps() {
+        let text = "    let value";
+        let runs = code_text_runs(
+            text,
+            &[SyntaxSpan {
+                text: "let".to_string(),
+                color: hsla(0.5, 0.5, 0.5, 1.0),
+                column_start: 5,
+                column_end: 8,
+            }],
+            rgb(0x111111),
+        )
+        .expect("runs");
+
+        assert_eq!(total_run_len(&runs), text.len());
+        assert_eq!(
+            runs.iter().map(|run| run.len).collect::<Vec<_>>(),
+            vec![4, 3, 6]
+        );
+    }
+
+    #[test]
+    fn code_text_runs_use_utf8_byte_lengths() {
+        let text = "å fn";
+        let runs = code_text_runs(
+            text,
+            &[SyntaxSpan {
+                text: "fn".to_string(),
+                color: hsla(0.5, 0.5, 0.5, 1.0),
+                column_start: 3,
+                column_end: 5,
+            }],
+            rgb(0x111111),
+        )
+        .expect("runs");
+
+        assert_eq!(total_run_len(&runs), text.len());
+        assert_eq!(
+            runs.iter().map(|run| run.len).collect::<Vec<_>>(),
+            vec![3, 2]
+        );
+    }
 
     #[test]
     fn prepared_excerpt_range_clamps_to_available_lines() {

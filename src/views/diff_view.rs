@@ -12595,7 +12595,7 @@ fn render_syntax_content(
         line.kind.clone(),
         fallback_color,
     )
-    .or_else(|| code_text_runs(spans));
+    .or_else(|| code_text_runs(content, spans, fallback_color));
 
     let selection_id = format!(
         "diff-line:{}:{}:{}",
