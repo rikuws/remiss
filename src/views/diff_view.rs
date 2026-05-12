@@ -3980,7 +3980,9 @@ fn flatten_review_file_tree_directory(
     push_review_file_tree_files(node, depth + 1, rows);
 }
 
-fn compact_review_file_tree_directory(mut node: &ReviewFileTreeNode) -> (String, &ReviewFileTreeNode) {
+fn compact_review_file_tree_directory(
+    mut node: &ReviewFileTreeNode,
+) -> (String, &ReviewFileTreeNode) {
     let mut name = node.name.clone();
     while node.files.is_empty() && node.children.len() == 1 {
         let child = node
@@ -4061,6 +4063,11 @@ fn render_file_tree_directory_icon() -> impl IntoElement {
 }
 
 fn render_file_tree_directory_row(name: String, depth: usize) -> impl IntoElement {
+    let name_for_tooltip = name.clone();
+    let directory_name_id = name.bytes().fold(depth, |acc, byte| {
+        acc.wrapping_mul(33).wrapping_add(byte as usize)
+    });
+
     div()
         .w_full()
         .flex_shrink_0()
@@ -4086,6 +4093,7 @@ fn render_file_tree_directory_row(name: String, depth: usize) -> impl IntoElemen
                         .child(render_file_tree_directory_icon())
                         .child(
                             div()
+                                .id(("file-tree-directory-name", directory_name_id))
                                 .text_size(px(10.0))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(fg_default())
@@ -4093,6 +4101,12 @@ fn render_file_tree_directory_row(name: String, depth: usize) -> impl IntoElemen
                                 .text_ellipsis()
                                 .whitespace_nowrap()
                                 .overflow_x_hidden()
+                                .tooltip(move |_, cx| {
+                                    build_text_tooltip(
+                                        SharedString::from(name_for_tooltip.clone()),
+                                        cx,
+                                    )
+                                })
                                 .child(name),
                         ),
                 ),
@@ -14043,12 +14057,12 @@ fn label_for_change_type(change_type: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use crate::diff::parse_unified_diff;
-    use crate::state::StructuralDiffFileState;
+    use crate::state::{ReviewFileTreeRow, StructuralDiffFileState};
 
     use super::{
-        build_normal_side_by_side_diff_file, should_apply_structural_diff_update,
-        should_reuse_structural_diff_state, structural_diff_state_terminal_status,
-        StructuralDiffTerminalStatus,
+        build_file_tree_rows, build_normal_side_by_side_diff_file,
+        should_apply_structural_diff_update, should_reuse_structural_diff_state,
+        structural_diff_state_terminal_status, ReviewFileTreeEntry, StructuralDiffTerminalStatus,
     };
 
     #[test]
@@ -14117,6 +14131,69 @@ mod tests {
     }
 
     #[test]
+    fn file_tree_compacts_single_child_directory_chains() {
+        let rows = build_file_tree_rows(vec![ReviewFileTreeEntry {
+            path: "app/src/main/kotlin/com/acme/product/Feature.kt".to_string(),
+            additions: 3,
+            deletions: 1,
+        }]);
+
+        assert_eq!(rows.len(), 2);
+        assert_directory_row(&rows[0], "app/src/main/kotlin/com/acme/product", 1);
+        assert_file_row(
+            &rows[1],
+            "app/src/main/kotlin/com/acme/product/Feature.kt",
+            "Feature.kt",
+            2,
+            3,
+            1,
+        );
+    }
+
+    #[test]
+    fn file_tree_preserves_branch_points_inside_compact_folders() {
+        let rows = build_file_tree_rows(vec![
+            ReviewFileTreeEntry {
+                path: "app/src/main/kotlin/com/acme/product/Feature.kt".to_string(),
+                additions: 2,
+                deletions: 0,
+            },
+            ReviewFileTreeEntry {
+                path: "app/src/test/kotlin/com/acme/product/FeatureTest.kt".to_string(),
+                additions: 4,
+                deletions: 1,
+            },
+            ReviewFileTreeEntry {
+                path: "README.md".to_string(),
+                additions: 1,
+                deletions: 0,
+            },
+        ]);
+
+        assert_eq!(rows.len(), 6);
+        assert_directory_row(&rows[0], "app/src", 1);
+        assert_directory_row(&rows[1], "main/kotlin/com/acme/product", 2);
+        assert_file_row(
+            &rows[2],
+            "app/src/main/kotlin/com/acme/product/Feature.kt",
+            "Feature.kt",
+            3,
+            2,
+            0,
+        );
+        assert_directory_row(&rows[3], "test/kotlin/com/acme/product", 2);
+        assert_file_row(
+            &rows[4],
+            "app/src/test/kotlin/com/acme/product/FeatureTest.kt",
+            "FeatureTest.kt",
+            3,
+            4,
+            1,
+        );
+        assert_file_row(&rows[5], "README.md", "README.md", 0, 1, 0);
+    }
+
+    #[test]
     fn normal_side_by_side_pairs_changed_lines() {
         let parsed = parse_unified_diff(
             "diff --git a/src/lib.rs b/src/lib.rs\n\
@@ -14138,5 +14215,41 @@ mod tests {
         assert_eq!(rows[1].right_line_index, Some(2));
         assert!(side_by_side.line_map[0][1].unwrap().primary);
         assert!(!side_by_side.line_map[0][2].unwrap().primary);
+    }
+
+    fn assert_directory_row(row: &ReviewFileTreeRow, expected_name: &str, expected_depth: usize) {
+        match row {
+            ReviewFileTreeRow::Directory { name, depth } => {
+                assert_eq!(name, expected_name);
+                assert_eq!(*depth, expected_depth);
+            }
+            other => panic!("expected directory row, got {other:?}"),
+        }
+    }
+
+    fn assert_file_row(
+        row: &ReviewFileTreeRow,
+        expected_path: &str,
+        expected_name: &str,
+        expected_depth: usize,
+        expected_additions: i64,
+        expected_deletions: i64,
+    ) {
+        match row {
+            ReviewFileTreeRow::File {
+                path,
+                name,
+                depth,
+                additions,
+                deletions,
+            } => {
+                assert_eq!(path, expected_path);
+                assert_eq!(name, expected_name);
+                assert_eq!(*depth, expected_depth);
+                assert_eq!(*additions, expected_additions);
+                assert_eq!(*deletions, expected_deletions);
+            }
+            other => panic!("expected file row, got {other:?}"),
+        }
     }
 }
