@@ -1170,6 +1170,13 @@ fn set_input_text_for_field(state: &mut AppState, field: AppTextFieldKind, value
         AppTextFieldKind::PaletteQuery => {
             state.palette_query = value;
             state.palette_selected_index = 0;
+            state.palette_scroll_animation_generation =
+                state.palette_scroll_animation_generation.wrapping_add(1);
+            state.palette_scroll_animation_active = false;
+            state.palette_last_scroll_navigation_at = None;
+            state
+                .palette_scroll_handle
+                .set_offset(point(px(0.0), px(0.0)));
         }
         AppTextFieldKind::ReviewBody => {
             state.review_body = value;

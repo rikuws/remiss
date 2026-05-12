@@ -74,7 +74,6 @@ use super::sections::{
     badge, badge_success, error_text, eyebrow, ghost_button, nested_panel, panel_state_text,
     review_button, success_text, user_avatar,
 };
-
 pub fn enter_files_surface(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
     state.update(cx, |s, cx| {
         s.active_surface = PullRequestSurface::Files;

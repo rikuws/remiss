@@ -17,3 +17,7 @@ pub use palette::{
 };
 pub use pr_detail::{blur_review_editor, trigger_submit_review};
 pub(crate) use root::{RootView, APP_CHROME_HEIGHT};
+pub use settings::{
+    cycle_diff_color_theme_preference, decrease_code_font_size_preference,
+    increase_code_font_size_preference, reset_code_font_size_preference,
+};

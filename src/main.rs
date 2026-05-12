@@ -76,8 +76,10 @@ use temp_source_window::{
 };
 use views::{
     blur_review_editor, close_palette, close_review_line_action, close_waypoint_spotlight,
-    execute_palette_selection, execute_waypoint_spotlight_selection, move_palette_selection,
-    move_waypoint_spotlight_selection, toggle_palette, toggle_waypoint_spotlight,
+    cycle_diff_color_theme_preference, decrease_code_font_size_preference,
+    execute_palette_selection, execute_waypoint_spotlight_selection,
+    increase_code_font_size_preference, move_palette_selection, move_waypoint_spotlight_selection,
+    reset_code_font_size_preference, toggle_palette, toggle_waypoint_spotlight,
     trigger_add_waypoint_shortcut, trigger_submit_inline_comment, trigger_submit_review, RootView,
     APP_CHROME_HEIGHT,
 };
@@ -158,6 +160,26 @@ fn start_app(cx: &mut App) -> Result<(), String> {
                 "enter" => execute_palette_selection(&app_state_for_keys, window, cx),
                 _ => {}
             }
+            return;
+        }
+
+        if (is_platform_plain || is_platform_shift) && matches!(keystroke.key.as_str(), "=" | "+") {
+            increase_code_font_size_preference(&app_state_for_keys, window, cx);
+            return;
+        }
+
+        if (is_platform_plain || is_platform_shift) && matches!(keystroke.key.as_str(), "-" | "_") {
+            decrease_code_font_size_preference(&app_state_for_keys, window, cx);
+            return;
+        }
+
+        if is_platform_plain && keystroke.key == "0" {
+            reset_code_font_size_preference(&app_state_for_keys, window, cx);
+            return;
+        }
+
+        if is_platform_shift && keystroke.key == "t" {
+            cycle_diff_color_theme_preference(&app_state_for_keys, window, cx);
             return;
         }
 

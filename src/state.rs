@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::cache::CacheStore;
 use crate::code_tour::{
@@ -28,7 +29,7 @@ use crate::review_session::{
 use crate::semantic_diff::SemanticDiffFile;
 use crate::stacks::model::{ReviewStack, StackDiffMode, StackPullRequestRef};
 use crate::syntax::{self, SyntaxSpan};
-use crate::theme::{self, FontSizePreference, ThemePreference};
+use crate::theme::{self, CodeFontSizePreference, DiffColorThemePreference, ThemePreference};
 use gpui::{
     px, AnyWindowHandle, ListAlignment, ListState, Pixels, Point, ScrollHandle, WindowAppearance,
 };
@@ -689,7 +690,8 @@ pub struct AppState {
     pub cache_path: String,
     pub bootstrap_loading: bool,
     pub theme_preference: ThemePreference,
-    pub font_size_preference: FontSizePreference,
+    pub code_font_size_preference: CodeFontSizePreference,
+    pub diff_color_theme_preference: DiffColorThemePreference,
     pub window_appearance: WindowAppearance,
     pub app_sidebar_collapsed: bool,
     pub notification_drawer_open: bool,
@@ -733,6 +735,13 @@ pub struct AppState {
     pub palette_close_generation: u64,
     pub palette_query: String,
     pub palette_selected_index: usize,
+    pub palette_scroll_handle: ScrollHandle,
+    pub palette_scroll_animation_generation: u64,
+    pub palette_scroll_animation_active: bool,
+    pub palette_last_scroll_navigation_at: Option<Instant>,
+    pub palette_code_theme_expanded: bool,
+    pub palette_code_theme_preview_original: Option<DiffColorThemePreference>,
+    pub palette_code_theme_preview: Option<DiffColorThemePreference>,
     pub waypoint_spotlight_open: bool,
     pub waypoint_spotlight_query: String,
     pub waypoint_spotlight_selected_index: usize,
@@ -753,12 +762,14 @@ impl AppState {
     pub fn new(cache: CacheStore) -> Self {
         let theme_settings = theme::load_theme_settings(&cache).unwrap_or_default();
         let theme_preference = theme_settings.preference;
-        let font_size_preference = theme_settings.font_size;
+        let code_font_size_preference = theme_settings.code_font_size;
+        let diff_color_theme_preference = theme_settings.diff_color_theme;
         theme::set_active_theme(theme::resolve_theme(
             theme_preference,
             WindowAppearance::Light,
         ));
-        theme::set_active_font_size(font_size_preference);
+        theme::set_active_code_font_size(code_font_size_preference);
+        theme::set_active_diff_color_theme(diff_color_theme_preference);
         let cache_path = cache.path().display().to_string();
         let unread_review_comment_ids =
             notifications::load_unread_review_comment_ids(&cache).unwrap_or_default();
@@ -800,7 +811,8 @@ impl AppState {
             cache_path,
             bootstrap_loading: true,
             theme_preference,
-            font_size_preference,
+            code_font_size_preference,
+            diff_color_theme_preference,
             window_appearance: WindowAppearance::Light,
             app_sidebar_collapsed: false,
             notification_drawer_open: false,
@@ -837,6 +849,13 @@ impl AppState {
             palette_close_generation: 0,
             palette_query: String::new(),
             palette_selected_index: 0,
+            palette_scroll_handle: ScrollHandle::new(),
+            palette_scroll_animation_generation: 0,
+            palette_scroll_animation_active: false,
+            palette_last_scroll_navigation_at: None,
+            palette_code_theme_expanded: false,
+            palette_code_theme_preview_original: None,
+            palette_code_theme_preview: None,
             waypoint_spotlight_open: false,
             waypoint_spotlight_query: String::new(),
             waypoint_spotlight_selected_index: 0,
@@ -869,9 +888,14 @@ impl AppState {
         self.apply_theme_change(previous);
     }
 
-    pub fn set_font_size_preference(&mut self, preference: FontSizePreference) {
-        self.font_size_preference = preference;
-        theme::set_active_font_size(preference);
+    pub fn set_code_font_size_preference(&mut self, preference: CodeFontSizePreference) {
+        self.code_font_size_preference = preference;
+        theme::set_active_code_font_size(preference);
+    }
+
+    pub fn set_diff_color_theme_preference(&mut self, preference: DiffColorThemePreference) {
+        self.diff_color_theme_preference = preference;
+        theme::set_active_diff_color_theme(preference);
     }
 
     pub fn set_window_appearance(&mut self, appearance: WindowAppearance) {

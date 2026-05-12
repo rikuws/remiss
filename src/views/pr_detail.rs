@@ -2825,7 +2825,7 @@ pub fn surface_tab(
         .px(px(14.0))
         .py(px(6.0))
         .rounded(radius_sm())
-        .text_size(ui_text_size(12.0))
+        .text_size(px(12.0))
         .border_1()
         .border_color(transparent())
         .cursor_pointer()

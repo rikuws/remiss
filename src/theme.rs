@@ -81,7 +81,7 @@ impl ThemePreference {
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum FontSizePreference {
+pub enum CodeFontSizePreference {
     Compact = 0,
     #[default]
     Default = 1,
@@ -89,7 +89,7 @@ pub enum FontSizePreference {
     ExtraLarge = 3,
 }
 
-impl FontSizePreference {
+impl CodeFontSizePreference {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Compact => "Compact",
@@ -99,13 +99,31 @@ impl FontSizePreference {
         }
     }
 
-    pub fn all() -> &'static [FontSizePreference] {
+    pub fn all() -> &'static [CodeFontSizePreference] {
         &[
-            FontSizePreference::Compact,
-            FontSizePreference::Default,
-            FontSizePreference::Large,
-            FontSizePreference::ExtraLarge,
+            CodeFontSizePreference::Compact,
+            CodeFontSizePreference::Default,
+            CodeFontSizePreference::Large,
+            CodeFontSizePreference::ExtraLarge,
         ]
+    }
+
+    pub fn smaller(self) -> Self {
+        match self {
+            Self::Compact => Self::Compact,
+            Self::Default => Self::Compact,
+            Self::Large => Self::Default,
+            Self::ExtraLarge => Self::Large,
+        }
+    }
+
+    pub fn larger(self) -> Self {
+        match self {
+            Self::Compact => Self::Default,
+            Self::Default => Self::Large,
+            Self::Large => Self::ExtraLarge,
+            Self::ExtraLarge => Self::ExtraLarge,
+        }
     }
 
     pub fn scale(&self) -> f32 {
@@ -115,6 +133,58 @@ impl FontSizePreference {
             Self::Large => 1.12,
             Self::ExtraLarge => 1.24,
         }
+    }
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DiffColorThemePreference {
+    #[default]
+    Graphite = 0,
+    GitHub = 1,
+    VsCode = 2,
+    Solarized = 3,
+    Nord = 4,
+    Gruvbox = 5,
+    Monokai = 6,
+    HighContrast = 7,
+}
+
+impl DiffColorThemePreference {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Graphite => "Graphite",
+            Self::GitHub => "GitHub",
+            Self::VsCode => "VS Code",
+            Self::Solarized => "Solarized",
+            Self::Nord => "Nord",
+            Self::Gruvbox => "Gruvbox",
+            Self::Monokai => "Monokai",
+            Self::HighContrast => "High contrast",
+        }
+    }
+
+    pub fn all() -> &'static [DiffColorThemePreference] {
+        &[
+            DiffColorThemePreference::Graphite,
+            DiffColorThemePreference::GitHub,
+            DiffColorThemePreference::VsCode,
+            DiffColorThemePreference::Solarized,
+            DiffColorThemePreference::Nord,
+            DiffColorThemePreference::Gruvbox,
+            DiffColorThemePreference::Monokai,
+            DiffColorThemePreference::HighContrast,
+        ]
+    }
+
+    pub fn next(self) -> Self {
+        let themes = Self::all();
+        let current_index = themes
+            .iter()
+            .position(|candidate| *candidate == self)
+            .unwrap_or(0);
+        themes[(current_index + 1) % themes.len()]
     }
 }
 
@@ -140,12 +210,15 @@ impl ActiveTheme {
 pub struct ThemeSettings {
     #[serde(default)]
     pub preference: ThemePreference,
+    #[serde(default, alias = "fontSize")]
+    pub code_font_size: CodeFontSizePreference,
     #[serde(default)]
-    pub font_size: FontSizePreference,
+    pub diff_color_theme: DiffColorThemePreference,
 }
 
 static ACTIVE_THEME: AtomicU8 = AtomicU8::new(ActiveTheme::Light as u8);
-static ACTIVE_FONT_SIZE: AtomicU8 = AtomicU8::new(FontSizePreference::Default as u8);
+static ACTIVE_CODE_FONT_SIZE: AtomicU8 = AtomicU8::new(CodeFontSizePreference::Default as u8);
+static ACTIVE_DIFF_COLOR_THEME: AtomicU8 = AtomicU8::new(DiffColorThemePreference::Graphite as u8);
 
 fn color(r: f32, g: f32, b: f32, a: f32) -> Rgba {
     Rgba { r, g, b, a }
@@ -205,6 +278,254 @@ fn theme_hex(light: u32, dark: u32) -> Rgba {
     }
 }
 
+fn theme_pair_color(pair: (u32, u32)) -> Rgba {
+    match active_theme() {
+        ActiveTheme::Light => hex(pair.0),
+        ActiveTheme::Dark => hex(pair.1),
+    }
+}
+
+fn theme_pair_alpha(pair: ((u32, f32), (u32, f32))) -> Rgba {
+    let ((light_hex, light_alpha), (dark_hex, dark_alpha)) = pair;
+    match active_theme() {
+        ActiveTheme::Light => hex_alpha(light_hex, light_alpha),
+        ActiveTheme::Dark => hex_alpha(dark_hex, dark_alpha),
+    }
+}
+
+type ThemeColorPair = (u32, u32);
+type ThemeAlphaPair = ((u32, f32), (u32, f32));
+
+#[derive(Clone, Copy)]
+struct DiffThemePalette {
+    editor_bg: ThemeColorPair,
+    editor_chrome: ThemeColorPair,
+    editor_surface: ThemeColorPair,
+    annotation_bg: ThemeColorPair,
+    annotation_border: ThemeAlphaPair,
+    line_hover_bg: ThemeAlphaPair,
+    selected_edge: ThemeAlphaPair,
+    gutter_separator: ThemeAlphaPair,
+    hunk_bg: ThemeColorPair,
+    hunk_fg: ThemeColorPair,
+    context_bg: ThemeColorPair,
+    context_gutter_bg: ThemeColorPair,
+    meta_bg: ThemeColorPair,
+    add_bg: ThemeColorPair,
+    add_gutter_bg: ThemeColorPair,
+    add_emphasis_bg: ThemeAlphaPair,
+    add_border: ThemeAlphaPair,
+    remove_bg: ThemeColorPair,
+    remove_gutter_bg: ThemeColorPair,
+    remove_emphasis_bg: ThemeAlphaPair,
+    remove_border: ThemeAlphaPair,
+}
+
+const GRAPHITE_DIFF_THEME: DiffThemePalette = DiffThemePalette {
+    editor_bg: (0xf8fafc, DARK_CANVAS),
+    editor_chrome: (0xffffff, DARK_ELEVATED),
+    editor_surface: (0xffffff, DARK_INSET),
+    annotation_bg: (0xf2f6fb, 0x101417),
+    annotation_border: ((LIGHT_BORDER_MUTED, 0.72), (0x2a3035, 0.58)),
+    line_hover_bg: ((0xe6edf6, 0.58), (0xffffff, 0.045)),
+    selected_edge: ((LIGHT_FOCUS, 0.58), (DARK_FOCUS, 0.72)),
+    gutter_separator: ((LIGHT_BORDER_MUTED, 0.64), (0x163022, 0.82)),
+    hunk_bg: (0xf1f6fb, 0x0f1518),
+    hunk_fg: (0x315f8f, 0x7f8d9f),
+    context_bg: (0xffffff, 0x0d1110),
+    context_gutter_bg: (0xf4f7fa, 0x111818),
+    meta_bg: (0xf1f6fb, 0x0f1518),
+    add_bg: (0xeaf9ef, 0x12221c),
+    add_gutter_bg: (0xd7f0df, 0x174530),
+    add_emphasis_bg: ((LIGHT_SUCCESS, 0.18), (DARK_SUCCESS, 0.24)),
+    add_border: ((LIGHT_SUCCESS, 0.18), (0x1f6f48, 0.42)),
+    remove_bg: (0xfff0f0, 0x231616),
+    remove_gutter_bg: (0xf9dddd, 0x4a1e24),
+    remove_emphasis_bg: ((LIGHT_DANGER, 0.17), (DARK_DANGER, 0.23)),
+    remove_border: ((LIGHT_DANGER, 0.18), (0x8b3038, 0.42)),
+};
+
+const GITHUB_DIFF_THEME: DiffThemePalette = DiffThemePalette {
+    editor_bg: (0xffffff, 0x0d1117),
+    editor_chrome: (0xf6f8fa, 0x161b22),
+    editor_surface: (0xffffff, 0x0d1117),
+    annotation_bg: (0xf6f8fa, 0x161b22),
+    annotation_border: ((0xd0d7de, 0.72), (0x30363d, 0.74)),
+    line_hover_bg: ((0xd8ecff, 0.52), (0x58a6ff, 0.10)),
+    selected_edge: ((0x0969da, 0.62), (0x58a6ff, 0.72)),
+    gutter_separator: ((0xd0d7de, 0.64), (0x30363d, 0.82)),
+    hunk_bg: (0xddf4ff, 0x1f2d3d),
+    hunk_fg: (0x0969da, 0x79c0ff),
+    context_bg: (0xffffff, 0x0d1117),
+    context_gutter_bg: (0xf6f8fa, 0x161b22),
+    meta_bg: (0xddf4ff, 0x1f2d3d),
+    add_bg: (0xdafbe1, 0x0f2a1d),
+    add_gutter_bg: (0xaceebb, 0x173a28),
+    add_emphasis_bg: ((0x1a7f37, 0.18), (0x3fb950, 0.24)),
+    add_border: ((0x1a7f37, 0.22), (0x3fb950, 0.40)),
+    remove_bg: (0xffebe9, 0x2d171a),
+    remove_gutter_bg: (0xffd7d5, 0x4d1f24),
+    remove_emphasis_bg: ((0xcf222e, 0.17), (0xf85149, 0.24)),
+    remove_border: ((0xcf222e, 0.22), (0xf85149, 0.40)),
+};
+
+const VSCODE_DIFF_THEME: DiffThemePalette = DiffThemePalette {
+    editor_bg: (0xffffff, 0x1e1e1e),
+    editor_chrome: (0xf3f3f3, 0x252526),
+    editor_surface: (0xffffff, 0x1e1e1e),
+    annotation_bg: (0xf5f5f5, 0x252526),
+    annotation_border: ((0xd4d4d4, 0.72), (0x3c3c3c, 0.78)),
+    line_hover_bg: ((0xe8f2ff, 0.55), (0x2a2d2e, 0.88)),
+    selected_edge: ((0x007acc, 0.68), (0x007acc, 0.82)),
+    gutter_separator: ((0xd4d4d4, 0.58), (0x3c3c3c, 0.82)),
+    hunk_bg: (0xeaf4ff, 0x263238),
+    hunk_fg: (0x006ab1, 0x4fc1ff),
+    context_bg: (0xffffff, 0x1e1e1e),
+    context_gutter_bg: (0xf3f3f3, 0x252526),
+    meta_bg: (0xeaf4ff, 0x263238),
+    add_bg: (0xe6ffed, 0x16301f),
+    add_gutter_bg: (0xcdffd8, 0x1f4d2b),
+    add_emphasis_bg: ((0x22863a, 0.18), (0x4ec981, 0.25)),
+    add_border: ((0x22863a, 0.22), (0x4ec981, 0.42)),
+    remove_bg: (0xffebe9, 0x351b1f),
+    remove_gutter_bg: (0xffd5d1, 0x5a2228),
+    remove_emphasis_bg: ((0xcb2431, 0.17), (0xf48771, 0.25)),
+    remove_border: ((0xcb2431, 0.22), (0xf48771, 0.42)),
+};
+
+const SOLARIZED_DIFF_THEME: DiffThemePalette = DiffThemePalette {
+    editor_bg: (0xfdf6e3, 0x002b36),
+    editor_chrome: (0xeee8d5, 0x073642),
+    editor_surface: (0xfdf6e3, 0x002b36),
+    annotation_bg: (0xeee8d5, 0x073642),
+    annotation_border: ((0x93a1a1, 0.42), (0x586e75, 0.58)),
+    line_hover_bg: ((0xeee8d5, 0.72), (0x839496, 0.12)),
+    selected_edge: ((0x268bd2, 0.68), (0x268bd2, 0.76)),
+    gutter_separator: ((0x93a1a1, 0.38), (0x586e75, 0.62)),
+    hunk_bg: (0xeee8d5, 0x073642),
+    hunk_fg: (0x268bd2, 0x2aa198),
+    context_bg: (0xfdf6e3, 0x002b36),
+    context_gutter_bg: (0xeee8d5, 0x073642),
+    meta_bg: (0xeee8d5, 0x073642),
+    add_bg: (0xe7f2d0, 0x163a35),
+    add_gutter_bg: (0xd7e8b2, 0x1f4a40),
+    add_emphasis_bg: ((0x859900, 0.20), (0x859900, 0.28)),
+    add_border: ((0x859900, 0.22), (0x859900, 0.44)),
+    remove_bg: (0xf6ded8, 0x3b242c),
+    remove_gutter_bg: (0xecc9c1, 0x573038),
+    remove_emphasis_bg: ((0xdc322f, 0.18), (0xdc322f, 0.28)),
+    remove_border: ((0xdc322f, 0.22), (0xdc322f, 0.44)),
+};
+
+const NORD_DIFF_THEME: DiffThemePalette = DiffThemePalette {
+    editor_bg: (0xf8fafc, 0x2e3440),
+    editor_chrome: (0xeceff4, 0x3b4252),
+    editor_surface: (0xffffff, 0x2e3440),
+    annotation_bg: (0xeceff4, 0x3b4252),
+    annotation_border: ((0xd8dee9, 0.70), (0x4c566a, 0.78)),
+    line_hover_bg: ((0xd8dee9, 0.62), (0x434c5e, 0.64)),
+    selected_edge: ((0x5e81ac, 0.70), (0x88c0d0, 0.82)),
+    gutter_separator: ((0xd8dee9, 0.58), (0x4c566a, 0.82)),
+    hunk_bg: (0xe6eef8, 0x344052),
+    hunk_fg: (0x5e81ac, 0x88c0d0),
+    context_bg: (0xffffff, 0x2e3440),
+    context_gutter_bg: (0xeceff4, 0x3b4252),
+    meta_bg: (0xe6eef8, 0x344052),
+    add_bg: (0xedf7ed, 0x26392f),
+    add_gutter_bg: (0xd8ead7, 0x2f4f3b),
+    add_emphasis_bg: ((0x6a8f42, 0.18), (0xa3be8c, 0.24)),
+    add_border: ((0x6a8f42, 0.22), (0xa3be8c, 0.42)),
+    remove_bg: (0xf8eeee, 0x3f2a31),
+    remove_gutter_bg: (0xebdada, 0x5a3039),
+    remove_emphasis_bg: ((0xbf616a, 0.18), (0xbf616a, 0.28)),
+    remove_border: ((0xbf616a, 0.22), (0xbf616a, 0.44)),
+};
+
+const GRUVBOX_DIFF_THEME: DiffThemePalette = DiffThemePalette {
+    editor_bg: (0xfbf1c7, 0x282828),
+    editor_chrome: (0xebdbb2, 0x3c3836),
+    editor_surface: (0xfdf4c1, 0x282828),
+    annotation_bg: (0xebdbb2, 0x3c3836),
+    annotation_border: ((0xd5c4a1, 0.62), (0x665c54, 0.78)),
+    line_hover_bg: ((0xebdbb2, 0.64), (0x504945, 0.68)),
+    selected_edge: ((0x458588, 0.70), (0x83a598, 0.82)),
+    gutter_separator: ((0xd5c4a1, 0.54), (0x665c54, 0.82)),
+    hunk_bg: (0xebdbb2, 0x3c3836),
+    hunk_fg: (0x458588, 0x83a598),
+    context_bg: (0xfbf1c7, 0x282828),
+    context_gutter_bg: (0xebdbb2, 0x3c3836),
+    meta_bg: (0xebdbb2, 0x3c3836),
+    add_bg: (0xe6efd1, 0x30371f),
+    add_gutter_bg: (0xd5dfb8, 0x3c4b23),
+    add_emphasis_bg: ((0x98971a, 0.20), (0xb8bb26, 0.28)),
+    add_border: ((0x98971a, 0.24), (0xb8bb26, 0.44)),
+    remove_bg: (0xf4ded8, 0x402020),
+    remove_gutter_bg: (0xe6c2b8, 0x5c2a25),
+    remove_emphasis_bg: ((0xcc241d, 0.18), (0xfb4934, 0.28)),
+    remove_border: ((0xcc241d, 0.24), (0xfb4934, 0.44)),
+};
+
+const MONOKAI_DIFF_THEME: DiffThemePalette = DiffThemePalette {
+    editor_bg: (0xf8f8f2, 0x272822),
+    editor_chrome: (0xefefe8, 0x1f201b),
+    editor_surface: (0xfffffb, 0x272822),
+    annotation_bg: (0xefefe8, 0x1f201b),
+    annotation_border: ((0xd8d8ce, 0.66), (0x49483e, 0.78)),
+    line_hover_bg: ((0xe8e8df, 0.66), (0x3e3d32, 0.68)),
+    selected_edge: ((0x008aa1, 0.70), (0x66d9ef, 0.82)),
+    gutter_separator: ((0xd8d8ce, 0.56), (0x49483e, 0.84)),
+    hunk_bg: (0xeef0e8, 0x3e3d32),
+    hunk_fg: (0x008aa1, 0x66d9ef),
+    context_bg: (0xf8f8f2, 0x272822),
+    context_gutter_bg: (0xefefe8, 0x1f201b),
+    meta_bg: (0xeef0e8, 0x3e3d32),
+    add_bg: (0xeaffd9, 0x253b2f),
+    add_gutter_bg: (0xd8f7b8, 0x365327),
+    add_emphasis_bg: ((0x6f9a00, 0.20), (0xa6e22e, 0.28)),
+    add_border: ((0x6f9a00, 0.24), (0xa6e22e, 0.44)),
+    remove_bg: (0xffe7ef, 0x45242e),
+    remove_gutter_bg: (0xffccd9, 0x622b3c),
+    remove_emphasis_bg: ((0xd51b62, 0.18), (0xf92672, 0.30)),
+    remove_border: ((0xd51b62, 0.24), (0xf92672, 0.46)),
+};
+
+const HIGH_CONTRAST_DIFF_THEME: DiffThemePalette = DiffThemePalette {
+    editor_bg: (0xffffff, 0x000000),
+    editor_chrome: (0xf5f5f5, 0x0a0a0a),
+    editor_surface: (0xffffff, 0x000000),
+    annotation_bg: (0xf2f2f2, 0x111111),
+    annotation_border: ((0x000000, 0.28), (0xffffff, 0.34)),
+    line_hover_bg: ((0x005cc5, 0.12), (0xffff00, 0.16)),
+    selected_edge: ((0x005cc5, 0.86), (0xffff00, 0.92)),
+    gutter_separator: ((0x000000, 0.26), (0xffffff, 0.34)),
+    hunk_bg: (0xe7f0ff, 0x001a3d),
+    hunk_fg: (0x003f8c, 0x79b8ff),
+    context_bg: (0xffffff, 0x000000),
+    context_gutter_bg: (0xf2f2f2, 0x111111),
+    meta_bg: (0xe7f0ff, 0x001a3d),
+    add_bg: (0xddffdd, 0x002b12),
+    add_gutter_bg: (0xbaffba, 0x00441f),
+    add_emphasis_bg: ((0x008000, 0.24), (0x00ff66, 0.28)),
+    add_border: ((0x008000, 0.36), (0x00ff66, 0.58)),
+    remove_bg: (0xffe0e0, 0x3a0000),
+    remove_gutter_bg: (0xffb8b8, 0x5a0000),
+    remove_emphasis_bg: ((0xcc0000, 0.24), (0xff4d4d, 0.32)),
+    remove_border: ((0xcc0000, 0.36), (0xff4d4d, 0.58)),
+};
+
+fn active_diff_palette() -> &'static DiffThemePalette {
+    match active_diff_color_theme() {
+        DiffColorThemePreference::Graphite => &GRAPHITE_DIFF_THEME,
+        DiffColorThemePreference::GitHub => &GITHUB_DIFF_THEME,
+        DiffColorThemePreference::VsCode => &VSCODE_DIFF_THEME,
+        DiffColorThemePreference::Solarized => &SOLARIZED_DIFF_THEME,
+        DiffColorThemePreference::Nord => &NORD_DIFF_THEME,
+        DiffColorThemePreference::Gruvbox => &GRUVBOX_DIFF_THEME,
+        DiffColorThemePreference::Monokai => &MONOKAI_DIFF_THEME,
+        DiffColorThemePreference::HighContrast => &HIGH_CONTRAST_DIFF_THEME,
+    }
+}
+
 fn theme_hex_alpha(light: (u32, f32), dark: (u32, f32)) -> Rgba {
     match active_theme() {
         ActiveTheme::Light => hex_alpha(light.0, light.1),
@@ -248,8 +569,12 @@ pub fn set_active_theme(theme: ActiveTheme) {
     ACTIVE_THEME.store(theme as u8, Ordering::Relaxed);
 }
 
-pub fn set_active_font_size(preference: FontSizePreference) {
-    ACTIVE_FONT_SIZE.store(preference as u8, Ordering::Relaxed);
+pub fn set_active_code_font_size(preference: CodeFontSizePreference) {
+    ACTIVE_CODE_FONT_SIZE.store(preference as u8, Ordering::Relaxed);
+}
+
+pub fn set_active_diff_color_theme(preference: DiffColorThemePreference) {
+    ACTIVE_DIFF_COLOR_THEME.store(preference as u8, Ordering::Relaxed);
 }
 
 pub fn active_theme() -> ActiveTheme {
@@ -259,33 +584,56 @@ pub fn active_theme() -> ActiveTheme {
     }
 }
 
-pub fn active_font_size() -> FontSizePreference {
-    match ACTIVE_FONT_SIZE.load(Ordering::Relaxed) {
-        value if value == FontSizePreference::Compact as u8 => FontSizePreference::Compact,
-        value if value == FontSizePreference::Large as u8 => FontSizePreference::Large,
-        value if value == FontSizePreference::ExtraLarge as u8 => FontSizePreference::ExtraLarge,
-        _ => FontSizePreference::Default,
+pub fn active_code_font_size() -> CodeFontSizePreference {
+    match ACTIVE_CODE_FONT_SIZE.load(Ordering::Relaxed) {
+        value if value == CodeFontSizePreference::Compact as u8 => CodeFontSizePreference::Compact,
+        value if value == CodeFontSizePreference::Large as u8 => CodeFontSizePreference::Large,
+        value if value == CodeFontSizePreference::ExtraLarge as u8 => {
+            CodeFontSizePreference::ExtraLarge
+        }
+        _ => CodeFontSizePreference::Default,
     }
 }
 
-pub fn ui_text_size(base: f32) -> Pixels {
-    px(base * active_font_size().scale())
+pub fn active_diff_color_theme() -> DiffColorThemePreference {
+    match ACTIVE_DIFF_COLOR_THEME.load(Ordering::Relaxed) {
+        value if value == DiffColorThemePreference::GitHub as u8 => {
+            DiffColorThemePreference::GitHub
+        }
+        value if value == DiffColorThemePreference::VsCode as u8 => {
+            DiffColorThemePreference::VsCode
+        }
+        value if value == DiffColorThemePreference::Solarized as u8 => {
+            DiffColorThemePreference::Solarized
+        }
+        value if value == DiffColorThemePreference::Nord as u8 => DiffColorThemePreference::Nord,
+        value if value == DiffColorThemePreference::Gruvbox as u8 => {
+            DiffColorThemePreference::Gruvbox
+        }
+        value if value == DiffColorThemePreference::Monokai as u8 => {
+            DiffColorThemePreference::Monokai
+        }
+        value if value == DiffColorThemePreference::HighContrast as u8 => {
+            DiffColorThemePreference::HighContrast
+        }
+        _ => DiffColorThemePreference::Graphite,
+    }
 }
 
 pub fn code_text_size(base: f32) -> Pixels {
-    px(base * active_font_size().scale())
+    px(base * active_code_font_size().scale())
 }
 
 pub fn code_line_height(base: f32) -> Pixels {
-    px((base * active_font_size().scale()).ceil())
+    px((base * active_code_font_size().scale()).ceil())
 }
 
 pub fn code_row_height(base: f32) -> Pixels {
-    px((base * active_font_size().scale()).ceil())
+    px((base * active_code_font_size().scale()).ceil())
 }
 
 pub fn code_measure_width(base: f32) -> f32 {
-    base * active_font_size().scale()
+    base * active_code_font_size().scale()
 }
 
 pub fn appearance_label(appearance: WindowAppearance) -> &'static str {
@@ -441,87 +789,87 @@ pub fn border_muted() -> Rgba {
 }
 
 pub fn diff_editor_bg() -> Rgba {
-    theme_hex(0xf8fafc, DARK_CANVAS)
+    theme_pair_color(active_diff_palette().editor_bg)
 }
 
 pub fn diff_editor_chrome() -> Rgba {
-    theme_hex(0xffffff, DARK_ELEVATED)
+    theme_pair_color(active_diff_palette().editor_chrome)
 }
 
 pub fn diff_editor_surface() -> Rgba {
-    theme_hex(0xffffff, DARK_INSET)
+    theme_pair_color(active_diff_palette().editor_surface)
 }
 
 pub fn diff_annotation_bg() -> Rgba {
-    theme_hex(0xf2f6fb, 0x101417)
+    theme_pair_color(active_diff_palette().annotation_bg)
 }
 
 pub fn diff_annotation_border() -> Rgba {
-    theme_hex_alpha((LIGHT_BORDER_MUTED, 0.72), (0x2a3035, 0.58))
+    theme_pair_alpha(active_diff_palette().annotation_border)
 }
 
 pub fn diff_line_hover_bg() -> Rgba {
-    theme_hex_alpha((0xe6edf6, 0.58), (0xffffff, 0.045))
+    theme_pair_alpha(active_diff_palette().line_hover_bg)
 }
 
 pub fn diff_selected_edge() -> Rgba {
-    theme_hex_alpha((LIGHT_FOCUS, 0.58), (DARK_FOCUS, 0.72))
+    theme_pair_alpha(active_diff_palette().selected_edge)
 }
 
 pub fn diff_gutter_separator() -> Rgba {
-    theme_hex_alpha((LIGHT_BORDER_MUTED, 0.64), (0x163022, 0.82))
+    theme_pair_alpha(active_diff_palette().gutter_separator)
 }
 
 pub fn diff_hunk_bg() -> Rgba {
-    theme_hex(0xf1f6fb, 0x0f1518)
+    theme_pair_color(active_diff_palette().hunk_bg)
 }
 
 pub fn diff_hunk_fg() -> Rgba {
-    theme_hex(0x315f8f, 0x7f8d9f)
+    theme_pair_color(active_diff_palette().hunk_fg)
 }
 
 pub fn diff_context_bg() -> Rgba {
-    theme_hex(0xffffff, 0x0d1110)
+    theme_pair_color(active_diff_palette().context_bg)
 }
 
 pub fn diff_context_gutter_bg() -> Rgba {
-    theme_hex(0xf4f7fa, 0x111818)
+    theme_pair_color(active_diff_palette().context_gutter_bg)
 }
 
 pub fn diff_meta_bg() -> Rgba {
-    theme_hex(0xf1f6fb, 0x0f1518)
+    theme_pair_color(active_diff_palette().meta_bg)
 }
 
 pub fn diff_add_bg() -> Rgba {
-    theme_hex(0xeaf9ef, 0x12221c)
+    theme_pair_color(active_diff_palette().add_bg)
 }
 
 pub fn diff_add_gutter_bg() -> Rgba {
-    theme_hex(0xd7f0df, 0x174530)
+    theme_pair_color(active_diff_palette().add_gutter_bg)
 }
 
 pub fn diff_add_emphasis_bg() -> Rgba {
-    theme_hex_alpha((LIGHT_SUCCESS, 0.18), (DARK_SUCCESS, 0.24))
+    theme_pair_alpha(active_diff_palette().add_emphasis_bg)
 }
 
 pub fn diff_add_border() -> Rgba {
-    theme_hex_alpha((LIGHT_SUCCESS, 0.18), (0x1f6f48, 0.42))
+    theme_pair_alpha(active_diff_palette().add_border)
 }
 
 pub fn diff_remove_bg() -> Rgba {
-    theme_hex(0xfff0f0, 0x231616)
+    theme_pair_color(active_diff_palette().remove_bg)
 }
 
 pub fn diff_remove_gutter_bg() -> Rgba {
-    theme_hex(0xf9dddd, 0x4a1e24)
+    theme_pair_color(active_diff_palette().remove_gutter_bg)
 }
 
 pub fn diff_remove_emphasis_bg() -> Rgba {
-    theme_hex_alpha((LIGHT_DANGER, 0.17), (DARK_DANGER, 0.23))
+    theme_pair_alpha(active_diff_palette().remove_emphasis_bg)
 }
 
 pub fn diff_remove_border() -> Rgba {
-    theme_hex_alpha((LIGHT_DANGER, 0.18), (0x8b3038, 0.42))
+    theme_pair_alpha(active_diff_palette().remove_border)
 }
 
 pub fn fg_default() -> Rgba {
@@ -747,11 +1095,12 @@ mod tests {
     }
 
     #[test]
-    fn saved_theme_settings_preserve_theme_and_font_size() {
+    fn saved_theme_settings_preserve_review_appearance() {
         let cache = temp_cache();
         let settings = ThemeSettings {
             preference: ThemePreference::Dark,
-            font_size: FontSizePreference::Large,
+            code_font_size: CodeFontSizePreference::Large,
+            diff_color_theme: DiffColorThemePreference::Monokai,
         };
 
         save_theme_settings(&cache, &settings).expect("failed to save theme settings");
@@ -760,7 +1109,20 @@ mod tests {
     }
 
     #[test]
-    fn old_theme_settings_without_font_size_default_cleanly() {
+    fn diff_color_theme_cycle_visits_all_themes() {
+        let themes = DiffColorThemePreference::all();
+        let mut current = themes[0];
+
+        for expected in themes.iter().copied().skip(1) {
+            current = current.next();
+            assert_eq!(current, expected);
+        }
+
+        assert_eq!(current.next(), themes[0]);
+    }
+
+    #[test]
+    fn old_theme_settings_without_review_appearance_default_cleanly() {
         let cache = temp_cache();
         cache
             .put(
@@ -774,7 +1136,29 @@ mod tests {
             load_theme_settings(&cache).unwrap(),
             ThemeSettings {
                 preference: ThemePreference::Light,
-                font_size: FontSizePreference::Default,
+                code_font_size: CodeFontSizePreference::Default,
+                diff_color_theme: DiffColorThemePreference::Graphite,
+            }
+        );
+    }
+
+    #[test]
+    fn previous_font_size_field_migrates_to_code_font_size() {
+        let cache = temp_cache();
+        cache
+            .put(
+                THEME_SETTINGS_CACHE_KEY,
+                &serde_json::json!({ "preference": "dark", "fontSize": "extraLarge" }),
+                1,
+            )
+            .expect("failed to save previous theme settings");
+
+        assert_eq!(
+            load_theme_settings(&cache).unwrap(),
+            ThemeSettings {
+                preference: ThemePreference::Dark,
+                code_font_size: CodeFontSizePreference::ExtraLarge,
+                diff_color_theme: DiffColorThemePreference::Graphite,
             }
         );
     }
