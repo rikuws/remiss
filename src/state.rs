@@ -28,7 +28,7 @@ use crate::review_session::{
 use crate::semantic_diff::SemanticDiffFile;
 use crate::stacks::model::{ReviewStack, StackDiffMode, StackPullRequestRef};
 use crate::syntax::{self, SyntaxSpan};
-use crate::theme::{self, ThemePreference};
+use crate::theme::{self, FontSizePreference, ThemePreference};
 use gpui::{
     px, AnyWindowHandle, ListAlignment, ListState, Pixels, Point, ScrollHandle, WindowAppearance,
 };
@@ -689,6 +689,7 @@ pub struct AppState {
     pub cache_path: String,
     pub bootstrap_loading: bool,
     pub theme_preference: ThemePreference,
+    pub font_size_preference: FontSizePreference,
     pub window_appearance: WindowAppearance,
     pub app_sidebar_collapsed: bool,
     pub notification_drawer_open: bool,
@@ -750,13 +751,14 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(cache: CacheStore) -> Self {
-        let theme_preference = theme::load_theme_settings(&cache)
-            .unwrap_or_default()
-            .preference;
+        let theme_settings = theme::load_theme_settings(&cache).unwrap_or_default();
+        let theme_preference = theme_settings.preference;
+        let font_size_preference = theme_settings.font_size;
         theme::set_active_theme(theme::resolve_theme(
             theme_preference,
             WindowAppearance::Light,
         ));
+        theme::set_active_font_size(font_size_preference);
         let cache_path = cache.path().display().to_string();
         let unread_review_comment_ids =
             notifications::load_unread_review_comment_ids(&cache).unwrap_or_default();
@@ -798,6 +800,7 @@ impl AppState {
             cache_path,
             bootstrap_loading: true,
             theme_preference,
+            font_size_preference,
             window_appearance: WindowAppearance::Light,
             app_sidebar_collapsed: false,
             notification_drawer_open: false,
@@ -864,6 +867,11 @@ impl AppState {
         let previous = self.resolved_theme();
         self.theme_preference = preference;
         self.apply_theme_change(previous);
+    }
+
+    pub fn set_font_size_preference(&mut self, preference: FontSizePreference) {
+        self.font_size_preference = preference;
+        theme::set_active_font_size(preference);
     }
 
     pub fn set_window_appearance(&mut self, appearance: WindowAppearance) {

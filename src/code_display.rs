@@ -29,6 +29,22 @@ const CODE_LINE_NUMBER_FONT_SIZE: f32 = 12.5;
 const CODE_LINE_NUMBER_GUTTER_WIDTH: f32 = 56.0;
 const CODE_DIFF_MARKER_WIDTH: f32 = 16.0;
 
+fn code_row_height_px() -> Pixels {
+    code_row_height(CODE_ROW_HEIGHT)
+}
+
+fn code_font_size_px() -> Pixels {
+    code_text_size(CODE_FONT_SIZE)
+}
+
+fn code_line_height_px() -> Pixels {
+    code_line_height(CODE_LINE_HEIGHT)
+}
+
+fn code_line_number_font_size_px() -> Pixels {
+    code_text_size(CODE_LINE_NUMBER_FONT_SIZE)
+}
+
 pub fn mono_code_font() -> Font {
     let mut code_font = font(mono_font_family());
     code_font.weight = FontWeight::MEDIUM;
@@ -409,8 +425,8 @@ fn render_highlighted_code_lines(lines: Vec<HighlightedCodeLine>) -> impl IntoEl
                 .min_w_0()
                 .whitespace_nowrap()
                 .font_family(mono_font_family())
-                .text_size(px(CODE_FONT_SIZE))
-                .line_height(px(CODE_LINE_HEIGHT))
+                .text_size(code_font_size_px())
+                .line_height(code_line_height_px())
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(fg_default())
                 .flex()
@@ -517,8 +533,8 @@ fn render_prepared_code_lines(
                 .min_w_0()
                 .whitespace_nowrap()
                 .font_family(mono_font_family())
-                .text_size(px(CODE_FONT_SIZE))
-                .line_height(px(CODE_LINE_HEIGHT))
+                .text_size(code_font_size_px())
+                .line_height(code_line_height_px())
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(fg_default())
                 .flex()
@@ -565,8 +581,8 @@ fn render_virtualized_prepared_code_lines(
         .id(ElementId::Name(block_element_id.into()))
         .whitespace_nowrap()
         .font_family(mono_font_family())
-        .text_size(px(CODE_FONT_SIZE))
-        .line_height(px(CODE_LINE_HEIGHT))
+        .text_size(code_font_size_px())
+        .line_height(code_line_height_px())
         .font_weight(FontWeight::MEDIUM)
         .text_color(fg_default())
         .overflow_x_scroll()
@@ -615,7 +631,7 @@ fn render_code_line(
         .w_full()
         .min_w_0()
         .font_family(mono_font_family())
-        .line_height(px(CODE_LINE_HEIGHT))
+        .line_height(code_line_height_px())
         .font_weight(FontWeight::MEDIUM)
         .flex()
         .items_start();
@@ -630,8 +646,8 @@ fn render_code_line(
                     .flex_shrink_0()
                     .pr(px(12.0))
                     .text_align(TextAlign::Right)
-                    .text_size(px(CODE_LINE_NUMBER_FONT_SIZE))
-                    .line_height(px(CODE_LINE_HEIGHT))
+                    .text_size(code_line_number_font_size_px())
+                    .line_height(code_line_height_px())
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(fg_subtle())
                     .child(
@@ -656,8 +672,8 @@ fn render_code_line_content(
         .w_full()
         .min_w_0()
         .font_family(mono_font_family())
-        .text_size(px(CODE_FONT_SIZE))
-        .line_height(px(CODE_LINE_HEIGHT))
+        .text_size(code_font_size_px())
+        .line_height(code_line_height_px())
         .font_weight(FontWeight::MEDIUM);
 
     if let Some(runs) = code_text_runs(line.as_str(), &spans, fg_default()) {
@@ -698,10 +714,10 @@ fn render_prepared_code_line_with_diff(
     div()
         .w_full()
         .min_w_0()
-        .min_h(px(CODE_ROW_HEIGHT))
+        .min_h(code_row_height_px())
         .font_family(mono_font_family())
-        .text_size(px(CODE_FONT_SIZE))
-        .line_height(px(CODE_LINE_HEIGHT))
+        .text_size(code_font_size_px())
+        .line_height(code_line_height_px())
         .font_weight(FontWeight::MEDIUM)
         .flex()
         .bg(row_bg)
@@ -717,12 +733,12 @@ fn render_prepared_code_line_with_diff(
             div()
                 .w(px(CODE_LINE_NUMBER_GUTTER_WIDTH))
                 .flex_shrink_0()
-                .min_h(px(CODE_ROW_HEIGHT))
+                .min_h(code_row_height_px())
                 .pr(px(12.0))
                 .bg(gutter_bg)
                 .text_align(TextAlign::Right)
-                .text_size(px(CODE_LINE_NUMBER_FONT_SIZE))
-                .line_height(px(CODE_LINE_HEIGHT))
+                .text_size(code_line_number_font_size_px())
+                .line_height(code_line_height_px())
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(fg_subtle())
                 .child(line.line_number.to_string()),
@@ -732,7 +748,7 @@ fn render_prepared_code_line_with_diff(
                 div()
                     .w(px(CODE_DIFF_MARKER_WIDTH))
                     .flex_shrink_0()
-                    .min_h(px(CODE_ROW_HEIGHT))
+                    .min_h(code_row_height_px())
                     .py(px(1.0))
                     .child(marker.to_string()),
             )
@@ -753,8 +769,8 @@ fn render_prepared_code_line_content(
         .w_full()
         .min_w_0()
         .font_family(mono_font_family())
-        .text_size(px(CODE_FONT_SIZE))
-        .line_height(px(CODE_LINE_HEIGHT))
+        .text_size(code_font_size_px())
+        .line_height(code_line_height_px())
         .font_weight(FontWeight::MEDIUM);
 
     if line.text.is_empty() {

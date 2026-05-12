@@ -79,6 +79,46 @@ impl ThemePreference {
 }
 
 #[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FontSizePreference {
+    Compact = 0,
+    #[default]
+    Default = 1,
+    Large = 2,
+    ExtraLarge = 3,
+}
+
+impl FontSizePreference {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Compact => "Compact",
+            Self::Default => "Default",
+            Self::Large => "Large",
+            Self::ExtraLarge => "Extra large",
+        }
+    }
+
+    pub fn all() -> &'static [FontSizePreference] {
+        &[
+            FontSizePreference::Compact,
+            FontSizePreference::Default,
+            FontSizePreference::Large,
+            FontSizePreference::ExtraLarge,
+        ]
+    }
+
+    pub fn scale(&self) -> f32 {
+        match self {
+            Self::Compact => 0.93,
+            Self::Default => 1.0,
+            Self::Large => 1.12,
+            Self::ExtraLarge => 1.24,
+        }
+    }
+}
+
+#[repr(u8)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ActiveTheme {
     Light = 0,
@@ -100,9 +140,12 @@ impl ActiveTheme {
 pub struct ThemeSettings {
     #[serde(default)]
     pub preference: ThemePreference,
+    #[serde(default)]
+    pub font_size: FontSizePreference,
 }
 
 static ACTIVE_THEME: AtomicU8 = AtomicU8::new(ActiveTheme::Light as u8);
+static ACTIVE_FONT_SIZE: AtomicU8 = AtomicU8::new(FontSizePreference::Default as u8);
 
 fn color(r: f32, g: f32, b: f32, a: f32) -> Rgba {
     Rgba { r, g, b, a }
@@ -205,11 +248,44 @@ pub fn set_active_theme(theme: ActiveTheme) {
     ACTIVE_THEME.store(theme as u8, Ordering::Relaxed);
 }
 
+pub fn set_active_font_size(preference: FontSizePreference) {
+    ACTIVE_FONT_SIZE.store(preference as u8, Ordering::Relaxed);
+}
+
 pub fn active_theme() -> ActiveTheme {
     match ACTIVE_THEME.load(Ordering::Relaxed) {
         value if value == ActiveTheme::Light as u8 => ActiveTheme::Light,
         _ => ActiveTheme::Dark,
     }
+}
+
+pub fn active_font_size() -> FontSizePreference {
+    match ACTIVE_FONT_SIZE.load(Ordering::Relaxed) {
+        value if value == FontSizePreference::Compact as u8 => FontSizePreference::Compact,
+        value if value == FontSizePreference::Large as u8 => FontSizePreference::Large,
+        value if value == FontSizePreference::ExtraLarge as u8 => FontSizePreference::ExtraLarge,
+        _ => FontSizePreference::Default,
+    }
+}
+
+pub fn ui_text_size(base: f32) -> Pixels {
+    px(base * active_font_size().scale())
+}
+
+pub fn code_text_size(base: f32) -> Pixels {
+    px(base * active_font_size().scale())
+}
+
+pub fn code_line_height(base: f32) -> Pixels {
+    px((base * active_font_size().scale()).ceil())
+}
+
+pub fn code_row_height(base: f32) -> Pixels {
+    px((base * active_font_size().scale()).ceil())
+}
+
+pub fn code_measure_width(base: f32) -> f32 {
+    base * active_font_size().scale()
 }
 
 pub fn appearance_label(appearance: WindowAppearance) -> &'static str {
@@ -626,4 +702,80 @@ pub fn lane_accent_color(repo: &str) -> Rgba {
         ],
     };
     palette[(hash as usize) % palette.len()]
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::atomic::{AtomicUsize, Ordering},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::*;
+
+    static NEXT_TEST_ID: AtomicUsize = AtomicUsize::new(0);
+
+    fn temp_cache() -> CacheStore {
+        CacheStore::new(unique_test_path("theme-settings-cache.sqlite3"))
+            .expect("failed to create temp cache")
+    }
+
+    fn unique_test_path(file_name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_nanos();
+        let test_id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "remiss-theme-settings-{nanos}-{test_id}-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("failed to create temp directory");
+        dir.join(file_name)
+    }
+
+    #[test]
+    fn missing_cache_returns_default_theme_settings() {
+        let cache = temp_cache();
+
+        assert_eq!(
+            load_theme_settings(&cache).unwrap(),
+            ThemeSettings::default()
+        );
+    }
+
+    #[test]
+    fn saved_theme_settings_preserve_theme_and_font_size() {
+        let cache = temp_cache();
+        let settings = ThemeSettings {
+            preference: ThemePreference::Dark,
+            font_size: FontSizePreference::Large,
+        };
+
+        save_theme_settings(&cache, &settings).expect("failed to save theme settings");
+
+        assert_eq!(load_theme_settings(&cache).unwrap(), settings);
+    }
+
+    #[test]
+    fn old_theme_settings_without_font_size_default_cleanly() {
+        let cache = temp_cache();
+        cache
+            .put(
+                THEME_SETTINGS_CACHE_KEY,
+                &serde_json::json!({ "preference": "light" }),
+                1,
+            )
+            .expect("failed to save legacy theme settings");
+
+        assert_eq!(
+            load_theme_settings(&cache).unwrap(),
+            ThemeSettings {
+                preference: ThemePreference::Light,
+                font_size: FontSizePreference::Default,
+            }
+        );
+    }
 }

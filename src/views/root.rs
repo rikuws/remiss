@@ -561,7 +561,7 @@ impl Render for RootView {
             .flex_row()
             .bg(bg_canvas())
             .text_color(fg_default())
-            .text_size(px(14.0))
+            .text_size(ui_text_size(14.0))
             .font_family(ui_font_family())
             .child(render_app_sidebar(&self.state, cx))
             .child(render_main_column(&self.state, cx))

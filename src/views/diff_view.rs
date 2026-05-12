@@ -11648,12 +11648,12 @@ fn render_empty_side_by_side_cell(
         .flex()
         .w_full()
         .min_w_0()
-        .min_h(px(DIFF_ROW_HEIGHT))
+        .min_h(diff_row_height_px())
         .overflow_hidden()
         .bg(diff_context_bg())
         .font_family(mono_font_family())
-        .text_size(px(DIFF_CODE_FONT_SIZE))
-        .line_height(px(DIFF_CODE_LINE_HEIGHT))
+        .text_size(diff_code_font_size_px())
+        .line_height(diff_code_line_height_px())
         .font_weight(FontWeight::MEDIUM)
         .text_color(transparent())
         .when(striped, |el| {
@@ -11671,33 +11671,33 @@ fn render_empty_side_by_side_cell(
                     .flex()
                     .flex_shrink_0()
                     .w(px(gutter_layout.gutter_width()))
-                    .min_h(px(DIFF_ROW_HEIGHT))
+                    .min_h(diff_row_height_px())
                     .bg(diff_context_gutter_bg())
                     .border_r(px(1.0))
                     .border_color(diff_gutter_separator())
                     .when(gutter_layout.reserve_source_slot, |el| {
-                        el.child(div().w(px(DIFF_SOURCE_SLOT_WIDTH)).h_full())
+                        el.child(div().w(diff_source_slot_width_px()).h_full())
                     })
                     .when(gutter_layout.reserve_waypoint_slot, |el| {
-                        el.child(div().w(px(DIFF_WAYPOINT_SLOT_WIDTH)).h_full())
+                        el.child(div().w(diff_waypoint_slot_width_px()).h_full())
                     })
                     .child(
                         div()
-                            .w(px(DIFF_LINE_NUMBER_COLUMN_WIDTH))
+                            .w(px(diff_line_number_column_width()))
                             .px(px(DIFF_LINE_NUMBER_CELL_PADDING_X))
                             .flex()
                             .justify_end()
-                            .text_size(px(DIFF_LINE_NUMBER_FONT_SIZE))
-                            .line_height(px(DIFF_CODE_LINE_HEIGHT))
+                            .text_size(diff_line_number_font_size_px())
+                            .line_height(diff_code_line_height_px())
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(" "),
                     ),
             )
             .child(
                 div()
-                    .w(px(DIFF_MARKER_COLUMN_WIDTH))
+                    .w(px(diff_marker_column_width()))
                     .flex_shrink_0()
-                    .min_h(px(DIFF_ROW_HEIGHT))
+                    .min_h(diff_row_height_px())
                     .py(px(1.0))
                     .child(" "),
             )
@@ -12429,11 +12429,11 @@ fn render_diff_line(
             wrap_diff_lines,
         )))
         .items_start()
-        .min_h(px(DIFF_ROW_HEIGHT))
+        .min_h(diff_row_height_px())
         .bg(row_bg)
         .font_family(mono_font_family())
-        .text_size(px(DIFF_CODE_FONT_SIZE))
-        .line_height(px(DIFF_CODE_LINE_HEIGHT))
+        .text_size(diff_code_font_size_px())
+        .line_height(diff_code_line_height_px())
         .font_weight(FontWeight::MEDIUM)
         .text_color(if marker_visible {
             marker_color
@@ -12463,14 +12463,14 @@ fn render_diff_line(
                 .flex()
                 .flex_shrink_0()
                 .w(px(gutter_layout.gutter_width()))
-                .min_h(px(DIFF_ROW_HEIGHT))
+                .min_h(diff_row_height_px())
                 .bg(gutter_bg)
                 .border_r(px(1.0))
                 .border_color(diff_gutter_separator())
                 .when(gutter_layout.reserve_source_slot, |el| {
                     el.child(
                         div()
-                            .w(px(DIFF_SOURCE_SLOT_WIDTH))
+                            .w(diff_source_slot_width_px())
                             .h_full()
                             .flex()
                             .items_center()
@@ -12524,7 +12524,7 @@ fn render_diff_line(
                 .when(gutter_layout.reserve_waypoint_slot, |el| {
                     el.child(
                         div()
-                            .w(px(DIFF_WAYPOINT_SLOT_WIDTH))
+                            .w(diff_waypoint_slot_width_px())
                             .h_full()
                             .flex()
                             .items_center()
@@ -12551,12 +12551,12 @@ fn render_diff_line(
                 .when(gutter_layout.show_left_numbers, |el| {
                     el.child(
                         div()
-                            .w(px(DIFF_LINE_NUMBER_COLUMN_WIDTH))
+                            .w(px(diff_line_number_column_width()))
                             .px(px(DIFF_LINE_NUMBER_CELL_PADDING_X))
                             .flex()
                             .justify_end()
-                            .text_size(px(DIFF_LINE_NUMBER_FONT_SIZE))
-                            .line_height(px(DIFF_CODE_LINE_HEIGHT))
+                            .text_size(diff_line_number_font_size_px())
+                            .line_height(diff_code_line_height_px())
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(number_color)
                             .child(left_num),
@@ -12565,12 +12565,12 @@ fn render_diff_line(
                 .when(gutter_layout.show_right_numbers, |el| {
                     el.child(
                         div()
-                            .w(px(DIFF_LINE_NUMBER_COLUMN_WIDTH))
+                            .w(px(diff_line_number_column_width()))
                             .px(px(DIFF_LINE_NUMBER_CELL_PADDING_X))
                             .flex()
                             .justify_end()
-                            .text_size(px(DIFF_LINE_NUMBER_FONT_SIZE))
-                            .line_height(px(DIFF_CODE_LINE_HEIGHT))
+                            .text_size(diff_line_number_font_size_px())
+                            .line_height(diff_code_line_height_px())
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(number_color)
                             .child(right_num),
@@ -12579,9 +12579,9 @@ fn render_diff_line(
         )
         .child(
             div()
-                .w(px(DIFF_MARKER_COLUMN_WIDTH))
+                .w(px(diff_marker_column_width()))
                 .flex_shrink_0()
-                .min_h(px(DIFF_ROW_HEIGHT))
+                .min_h(diff_row_height_px())
                 .py(px(1.0))
                 .child(marker),
         )
@@ -12617,8 +12617,8 @@ fn render_syntax_content(
         }))
         .px(px(8.0))
         .py(px(1.0))
-        .text_size(px(DIFF_CODE_FONT_SIZE))
-        .line_height(px(DIFF_CODE_LINE_HEIGHT))
+        .text_size(diff_code_font_size_px())
+        .line_height(diff_code_line_height_px())
         .font_weight(FontWeight::MEDIUM)
         .font_family(mono_font_family())
         .when(wrap_diff_lines, |el| el.whitespace_normal())
@@ -12762,6 +12762,46 @@ const DIFF_CODE_CHAR_WIDTH: f32 = 8.4;
 const DIFF_CODE_MIN_TEXT_WIDTH: f32 = 16.0;
 const DIFF_CODE_MAX_TEXT_WIDTH: f32 = 16000.0;
 
+fn diff_row_height_px() -> Pixels {
+    code_row_height(DIFF_ROW_HEIGHT)
+}
+
+fn diff_code_font_size_px() -> Pixels {
+    code_text_size(DIFF_CODE_FONT_SIZE)
+}
+
+fn diff_code_line_height_px() -> Pixels {
+    code_line_height(DIFF_CODE_LINE_HEIGHT)
+}
+
+fn diff_line_number_font_size_px() -> Pixels {
+    code_text_size(DIFF_LINE_NUMBER_FONT_SIZE)
+}
+
+fn diff_line_number_column_width() -> f32 {
+    code_measure_width(DIFF_LINE_NUMBER_COLUMN_WIDTH)
+}
+
+fn diff_marker_column_width() -> f32 {
+    code_measure_width(DIFF_MARKER_COLUMN_WIDTH)
+}
+
+fn diff_source_slot_width_px() -> Pixels {
+    code_row_height(DIFF_SOURCE_SLOT_WIDTH)
+}
+
+fn diff_waypoint_slot_width_px() -> Pixels {
+    code_row_height(DIFF_WAYPOINT_SLOT_WIDTH)
+}
+
+fn diff_source_slot_width() -> f32 {
+    f32::from(diff_source_slot_width_px())
+}
+
+fn diff_waypoint_slot_width() -> f32 {
+    f32::from(diff_waypoint_slot_width_px())
+}
+
 #[derive(Clone, Copy)]
 struct DiffGutterLayout {
     show_left_numbers: bool,
@@ -12773,14 +12813,14 @@ struct DiffGutterLayout {
 impl DiffGutterLayout {
     fn gutter_width(self) -> f32 {
         let column_count = self.show_left_numbers as u8 + self.show_right_numbers as u8;
-        DIFF_LINE_NUMBER_COLUMN_WIDTH * f32::from(column_count.max(1))
+        diff_line_number_column_width() * f32::from(column_count.max(1))
             + if self.reserve_source_slot {
-                DIFF_SOURCE_SLOT_WIDTH
+                diff_source_slot_width()
             } else {
                 0.0
             }
             + if self.reserve_waypoint_slot {
-                DIFF_WAYPOINT_SLOT_WIDTH
+                diff_waypoint_slot_width()
             } else {
                 0.0
             }
@@ -12793,7 +12833,8 @@ impl DiffGutterLayout {
 
 fn diff_code_text_width(content: &str) -> f32 {
     let chars = content.chars().count().max(1) as f32;
-    (chars * DIFF_CODE_CHAR_WIDTH).clamp(DIFF_CODE_MIN_TEXT_WIDTH, DIFF_CODE_MAX_TEXT_WIDTH)
+    (chars * code_measure_width(DIFF_CODE_CHAR_WIDTH))
+        .clamp(DIFF_CODE_MIN_TEXT_WIDTH, DIFF_CODE_MAX_TEXT_WIDTH)
 }
 
 fn diff_line_min_width(
@@ -12805,7 +12846,7 @@ fn diff_line_min_width(
         0.0
     } else {
         gutter_layout.gutter_width()
-            + DIFF_MARKER_COLUMN_WIDTH
+            + diff_marker_column_width()
             + 16.0
             + diff_code_text_width(content)
     }
@@ -12822,7 +12863,7 @@ fn side_by_side_cell_min_width(
         let content_width = content
             .map(diff_code_text_width)
             .unwrap_or(DIFF_CODE_MIN_TEXT_WIDTH);
-        (gutter_layout.gutter_width() + DIFF_MARKER_COLUMN_WIDTH + 16.0 + content_width)
+        (gutter_layout.gutter_width() + diff_marker_column_width() + 16.0 + content_width)
             .max(DIFF_SIDE_BY_SIDE_MIN_WIDTH / 2.0)
     }
 }

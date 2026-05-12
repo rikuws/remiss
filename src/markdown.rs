@@ -346,16 +346,16 @@ impl MarkdownBuilder {
 
     fn flush_inline_paragraph(&mut self, id: &str) -> AnyElement {
         let spans = std::mem::take(&mut self.inline_buffer);
-        render_inline_block(id, &spans, px(13.0), fg_default(), false)
+        render_inline_block(id, &spans, ui_text_size(13.0), fg_default(), false)
     }
 
     fn flush_inline_heading(&mut self, id: &str, level: u8) -> AnyElement {
         let spans = std::mem::take(&mut self.inline_buffer);
         let size = match level {
-            1 => px(22.0),
-            2 => px(18.0),
-            3 => px(16.0),
-            _ => px(14.0),
+            1 => ui_text_size(22.0),
+            2 => ui_text_size(18.0),
+            3 => ui_text_size(16.0),
+            _ => ui_text_size(14.0),
         };
         render_inline_block(id, &spans, size, fg_emphasis(), true)
     }
@@ -370,9 +370,15 @@ impl MarkdownBuilder {
             .bg(bg_subtle())
             .my(px(8.0))
             .child(
-                render_inline_div(id, &spans, px(13.0), fg_muted(), FontWeight::NORMAL)
-                    .w_full()
-                    .min_w_0(),
+                render_inline_div(
+                    id,
+                    &spans,
+                    ui_text_size(13.0),
+                    fg_muted(),
+                    FontWeight::NORMAL,
+                )
+                .w_full()
+                .min_w_0(),
             )
             .into_any_element()
     }
@@ -511,15 +517,21 @@ fn render_list_item(id: &str, prefix: &str, spans: &[InlineSpan]) -> AnyElement 
         .pl(px(8.0))
         .child(
             div()
-                .text_size(px(13.0))
+                .text_size(ui_text_size(13.0))
                 .text_color(fg_muted())
                 .flex_shrink_0()
                 .child(prefix.to_string()),
         )
         .child(
-            render_inline_div(id, spans, px(13.0), fg_default(), FontWeight::NORMAL)
-                .flex_1()
-                .min_w_0(),
+            render_inline_div(
+                id,
+                spans,
+                ui_text_size(13.0),
+                fg_default(),
+                FontWeight::NORMAL,
+            )
+            .flex_1()
+            .min_w_0(),
         )
         .into_any_element()
 }
@@ -553,7 +565,7 @@ fn render_table(id: &str, rows: &[Vec<String>]) -> AnyElement {
                         .px(px(12.0))
                         .py(px(6.0))
                         .whitespace_normal()
-                        .text_size(px(12.0))
+                        .text_size(ui_text_size(12.0))
                         .text_color(if is_header {
                             fg_emphasis()
                         } else {

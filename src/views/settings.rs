@@ -215,6 +215,7 @@ pub fn update_theme_preference(
     }
 
     let cache = state.read(cx).cache.clone();
+    let font_size = state.read(cx).font_size_preference;
     state.update(cx, |state, cx| {
         state.set_theme_preference(preference);
         cx.notify();
@@ -229,7 +230,48 @@ pub fn update_theme_preference(
                     async move {
                         crate::theme::save_theme_settings(
                             &cache,
-                            &crate::theme::ThemeSettings { preference },
+                            &crate::theme::ThemeSettings {
+                                preference,
+                                font_size,
+                            },
+                        )
+                    }
+                })
+                .await;
+        })
+        .detach();
+}
+
+pub fn update_font_size_preference(
+    state: &Entity<AppState>,
+    font_size: FontSizePreference,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if state.read(cx).font_size_preference == font_size {
+        return;
+    }
+
+    let cache = state.read(cx).cache.clone();
+    let preference = state.read(cx).theme_preference;
+    state.update(cx, |state, cx| {
+        state.set_font_size_preference(font_size);
+        cx.notify();
+    });
+
+    window
+        .spawn(cx, async move |cx: &mut AsyncWindowContext| {
+            let _ = cx
+                .background_executor()
+                .spawn({
+                    let cache = cache.clone();
+                    async move {
+                        crate::theme::save_theme_settings(
+                            &cache,
+                            &crate::theme::ThemeSettings {
+                                preference,
+                                font_size,
+                            },
                         )
                     }
                 })
@@ -480,6 +522,7 @@ pub fn render_settings_view(state: &Entity<AppState>, cx: &App) -> impl IntoElem
 
 fn render_theme_settings_panel(state: &Entity<AppState>, s: &AppState) -> impl IntoElement {
     let theme_preference = s.theme_preference;
+    let font_size_preference = s.font_size_preference;
     let resolved_theme = s.resolved_theme();
     let system_appearance = appearance_label(s.window_appearance);
     let summary_copy = match theme_preference {
@@ -506,31 +549,58 @@ fn render_theme_settings_panel(state: &Entity<AppState>, s: &AppState) -> impl I
             .child(eyebrow("Settings / Appearance"))
             .child(
                 div()
-                    .text_size(px(24.0))
+                    .text_size(ui_text_size(24.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(fg_emphasis())
-                    .child("Theme"),
+                    .child("Appearance"),
             )
             .child(
                 div()
-                    .text_size(px(13.0))
+                    .text_size(ui_text_size(13.0))
                     .text_color(fg_muted())
                     .max_w(px(760.0))
                     .child(summary_copy),
             )
-            .child(div().flex().gap(px(4.0)).flex_wrap().children(
-                ThemePreference::all().iter().map(|candidate| {
-                    let candidate = *candidate;
-                    let state = state.clone();
-                    surface_tab(
-                        candidate.label(),
-                        theme_preference == candidate,
-                        move |_, window, cx| {
-                            update_theme_preference(&state, candidate, window, cx);
-                        },
-                    )
-                }),
-            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(settings_field_label("Theme"))
+                    .child(div().flex().gap(px(4.0)).flex_wrap().children(
+                        ThemePreference::all().iter().map(|candidate| {
+                            let candidate = *candidate;
+                            let state = state.clone();
+                            surface_tab(
+                                candidate.label(),
+                                theme_preference == candidate,
+                                move |_, window, cx| {
+                                    update_theme_preference(&state, candidate, window, cx);
+                                },
+                            )
+                        }),
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(settings_field_label("Font size"))
+                    .child(div().flex().gap(px(4.0)).flex_wrap().children(
+                        FontSizePreference::all().iter().map(|candidate| {
+                            let candidate = *candidate;
+                            let state = state.clone();
+                            surface_tab(
+                                candidate.label(),
+                                font_size_preference == candidate,
+                                move |_, window, cx| {
+                                    update_font_size_preference(&state, candidate, window, cx);
+                                },
+                            )
+                        }),
+                    )),
+            )
             .child(
                 div()
                     .flex()
@@ -544,9 +614,21 @@ fn render_theme_settings_panel(state: &Entity<AppState>, s: &AppState) -> impl I
                     .child(badge(&format!(
                         "system {}",
                         system_appearance.to_lowercase()
+                    )))
+                    .child(badge(&format!(
+                        "font {}",
+                        font_size_preference.label().to_lowercase()
                     ))),
             ),
     )
+}
+
+fn settings_field_label(label: &str) -> impl IntoElement {
+    div()
+        .text_size(ui_text_size(12.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(fg_emphasis())
+        .child(label.to_string())
 }
 
 fn render_code_tour_settings_panel(state: &Entity<AppState>, s: &AppState) -> impl IntoElement {
