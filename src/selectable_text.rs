@@ -2,9 +2,10 @@ use std::{cell::RefCell, mem, ops::Range, rc::Rc, time::Duration};
 
 use gpui::{
     fill, point, px, size, AnyTooltip, AnyView, App, Bounds, ClipboardItem, DispatchPhase, Element,
-    ElementId, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement,
-    KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
-    Pixels, SharedString, StyledText, Task, TextLayout, TextRun, Window, WrappedLineLayout,
+    ElementId, FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
+    IntoElement, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    PaintQuad, Pixels, SharedString, StyledText, Task, TextLayout, TextRun, Window,
+    WrappedLineLayout,
 };
 
 use crate::{
@@ -640,6 +641,7 @@ impl IntoElement for SelectableText {
 #[doc(hidden)]
 #[derive(Default)]
 pub struct AppTextInputState {
+    focus_handle: Option<FocusHandle>,
     selection: Rc<RefCell<TextSelectionState>>,
 }
 
@@ -750,7 +752,15 @@ impl Element for AppTextInput {
         window.with_optional_element_state::<AppTextInputState, _>(
             global_id,
             |input_state, window| {
-                let input_state = input_state.map(|input_state| input_state.unwrap_or_default());
+                let mut input_state =
+                    input_state.map(|input_state| input_state.unwrap_or_default());
+                if let Some(input_state) = input_state.as_mut() {
+                    let focus_handle = input_state
+                        .focus_handle
+                        .get_or_insert_with(|| cx.focus_handle())
+                        .clone();
+                    window.set_focus_handle(&focus_handle, cx);
+                }
                 self.text
                     .prepaint(None, inspector_id, bounds, state, window, cx);
                 let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
@@ -781,10 +791,14 @@ impl Element for AppTextInput {
             global_id.unwrap(),
             |input_state, window| {
                 let input_state = input_state.unwrap_or_default();
+                let focus_handle = input_state.focus_handle.clone();
                 let selection_state = input_state.selection.clone();
                 selection_state.borrow_mut().clamp(raw_text.len());
 
                 if autofocus {
+                    if let Some(focus_handle) = focus_handle.as_ref() {
+                        focus_handle.focus(window);
+                    }
                     set_active_text_target(selection_id.clone());
                 }
 
@@ -812,6 +826,7 @@ impl Element for AppTextInput {
                 let mouse_down_state = state.clone();
                 let mouse_down_id = selection_id.clone();
                 let mouse_down_text = raw_text.clone();
+                let mouse_down_focus = focus_handle.clone();
                 window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                     if phase != DispatchPhase::Capture
                         || event.button != MouseButton::Left
@@ -848,6 +863,9 @@ impl Element for AppTextInput {
                         }
                     }
 
+                    if let Some(focus_handle) = mouse_down_focus.as_ref() {
+                        focus_handle.focus(window);
+                    }
                     set_active_text_target(mouse_down_id.clone());
                     cx.stop_propagation();
                     window.refresh();
