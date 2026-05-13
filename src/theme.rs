@@ -26,19 +26,19 @@ const LIGHT_TEXT_SUBTLE: u32 = 0x98a2b3;
 const LIGHT_BORDER: u32 = 0xd6dee8;
 const LIGHT_BORDER_MUTED: u32 = 0xe5ebf2;
 
-const DARK_CANVAS: u32 = 0x0c0c0c;
-const DARK_SURFACE: u32 = 0x101112;
-const DARK_ELEVATED: u32 = 0x131313;
-const DARK_INSET: u32 = 0x0b0d10;
-const DARK_SUBTLE: u32 = 0x171717;
-const DARK_EMPHASIS: u32 = 0x242424;
-const DARK_SELECTED: u32 = 0x1d1d1d;
+const DARK_CANVAS: u32 = 0x0b0c0d;
+const DARK_SURFACE: u32 = 0x111316;
+const DARK_ELEVATED: u32 = 0x17191c;
+const DARK_INSET: u32 = 0x080a0d;
+const DARK_SUBTLE: u32 = 0x1c2024;
+const DARK_EMPHASIS: u32 = 0x2b3036;
+const DARK_SELECTED: u32 = 0x23272d;
 const DARK_TEXT_EMPHASIS: u32 = 0xf3f4f6;
 const DARK_TEXT: u32 = 0xd4d4d4;
-const DARK_TEXT_MUTED: u32 = 0xa3a3a3;
-const DARK_TEXT_SUBTLE: u32 = 0x737373;
-const DARK_BORDER: u32 = 0x303030;
-const DARK_BORDER_MUTED: u32 = 0x252525;
+const DARK_TEXT_MUTED: u32 = 0xb0b5bd;
+const DARK_TEXT_SUBTLE: u32 = 0x808791;
+const DARK_BORDER: u32 = 0x3b424a;
+const DARK_BORDER_MUTED: u32 = 0x2a3037;
 
 const LIGHT_FOCUS: u32 = 0x2563eb;
 const DARK_FOCUS: u32 = 0x7db4ff;
@@ -327,16 +327,16 @@ const GRAPHITE_DIFF_THEME: DiffThemePalette = DiffThemePalette {
     editor_bg: (0xf8fafc, DARK_CANVAS),
     editor_chrome: (0xffffff, DARK_ELEVATED),
     editor_surface: (0xffffff, DARK_INSET),
-    annotation_bg: (0xf2f6fb, 0x101417),
-    annotation_border: ((LIGHT_BORDER_MUTED, 0.72), (0x2a3035, 0.58)),
-    line_hover_bg: ((0xe6edf6, 0.58), (0xffffff, 0.045)),
+    annotation_bg: (0xf2f6fb, 0x151a1d),
+    annotation_border: ((LIGHT_BORDER_MUTED, 0.72), (0x343b42, 0.64)),
+    line_hover_bg: ((0xe6edf6, 0.58), (0xffffff, 0.065)),
     selected_edge: ((LIGHT_FOCUS, 0.58), (DARK_FOCUS, 0.72)),
-    gutter_separator: ((LIGHT_BORDER_MUTED, 0.64), (0x163022, 0.82)),
-    hunk_bg: (0xf1f6fb, 0x0f1518),
-    hunk_fg: (0x315f8f, 0x7f8d9f),
-    context_bg: (0xffffff, 0x0d1110),
-    context_gutter_bg: (0xf4f7fa, 0x111818),
-    meta_bg: (0xf1f6fb, 0x0f1518),
+    gutter_separator: ((LIGHT_BORDER_MUTED, 0.64), (0x2b3a35, 0.78)),
+    hunk_bg: (0xf1f6fb, 0x151b1f),
+    hunk_fg: (0x315f8f, 0xa6b2c2),
+    context_bg: (0xffffff, 0x0e1112),
+    context_gutter_bg: (0xf4f7fa, 0x151b1e),
+    meta_bg: (0xf1f6fb, 0x151b1f),
     add_bg: (0xeaf9ef, 0x12221c),
     add_gutter_bg: (0xd7f0df, 0x174530),
     add_emphasis_bg: ((LIGHT_SUCCESS, 0.18), (DARK_SUCCESS, 0.24)),
@@ -935,7 +935,7 @@ pub fn waypoint_icon_core() -> Rgba {
 }
 
 pub fn hover_bg() -> Rgba {
-    theme_hex(0xf2f5f8, 0x202020)
+    theme_hex(0xf2f5f8, 0x2a2f34)
 }
 
 pub fn material_gradient(seed: &str) -> Background {
