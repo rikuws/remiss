@@ -20,6 +20,11 @@ jobs:
           toolchain: 1.92.0
           components: rustfmt, clippy
 
+      - name: Ensure Metal toolchain
+        run: |
+          xcrun -sdk macosx metal -v >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+          xcrun -sdk macosx metal -v
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
