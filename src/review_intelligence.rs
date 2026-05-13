@@ -1512,6 +1512,7 @@ mod tests {
             comments: Vec::new(),
             latest_reviews: Vec::new(),
             review_threads: Vec::new(),
+            viewer_pending_review: None,
             files: Vec::new(),
             raw_diff: raw_diff.to_string(),
             parsed_diff: Vec::new(),

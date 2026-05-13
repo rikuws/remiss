@@ -88,12 +88,24 @@ pub struct PullRequestFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PullRequestReview {
+    #[serde(default)]
+    pub id: Option<String>,
     pub author_login: String,
     #[serde(default)]
     pub author_avatar_url: Option<String>,
     pub state: String,
     pub body: String,
     pub submitted_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingPullRequestReview {
+    pub id: String,
+    pub author_login: String,
+    #[serde(default)]
+    pub author_avatar_url: Option<String>,
+    pub body: String,
+    pub comments: Vec<PullRequestReviewComment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +125,10 @@ pub struct PullRequestReviewComment {
     pub updated_at: String,
     pub published_at: Option<String>,
     pub reply_to_id: Option<String>,
+    #[serde(default)]
+    pub viewer_can_update: bool,
+    #[serde(default)]
+    pub viewer_can_delete: bool,
     pub url: String,
 }
 
@@ -284,6 +300,8 @@ pub struct PullRequestDetail {
     pub comments: Vec<PullRequestComment>,
     pub latest_reviews: Vec<PullRequestReview>,
     pub review_threads: Vec<PullRequestReviewThread>,
+    #[serde(default)]
+    pub viewer_pending_review: Option<PendingPullRequestReview>,
     pub files: Vec<PullRequestFile>,
     pub raw_diff: String,
     pub parsed_diff: Vec<ParsedDiffFile>,
@@ -310,6 +328,14 @@ pub enum ReviewAction {
     Approve,
     Comment,
     RequestChanges,
+}
+
+fn review_action_event(action: ReviewAction) -> &'static str {
+    match action {
+        ReviewAction::Approve => "APPROVE",
+        ReviewAction::Comment => "COMMENT",
+        ReviewAction::RequestChanges => "REQUEST_CHANGES",
+    }
 }
 
 pub fn load_workspace_snapshot(cache: &CacheStore) -> Result<WorkspaceSnapshot, String> {
@@ -585,6 +611,281 @@ pub fn add_pull_request_review_thread(
             "Review thread added to the diff.".to_string()
         } else {
             "GitHub did not return the new review thread.".to_string()
+        },
+    })
+}
+
+pub fn add_pending_pull_request_review_thread(
+    pull_request_id: &str,
+    pending_review_id: Option<&str>,
+    path: &str,
+    body: &str,
+    line: Option<i64>,
+    side: Option<&str>,
+    start_line: Option<i64>,
+    start_side: Option<&str>,
+) -> Result<ActionResult, String> {
+    let auth = live_auth_state()?;
+
+    if !auth.is_authenticated {
+        return Ok(ActionResult {
+            success: false,
+            message: auth.message,
+        });
+    }
+
+    if body.trim().is_empty() {
+        return Ok(ActionResult {
+            success: false,
+            message: "Comment body cannot be empty.".to_string(),
+        });
+    }
+
+    if line.is_none() || side.is_none() {
+        return Ok(ActionResult {
+            success: false,
+            message: "Line comments require both a line number and diff side.".to_string(),
+        });
+    }
+
+    let mutation = r#"
+        mutation(
+          $pullRequestId: ID,
+          $pullRequestReviewId: ID,
+          $path: String!,
+          $body: String!,
+          $line: Int,
+          $side: DiffSide,
+          $startLine: Int,
+          $startSide: DiffSide
+        ) {
+          addPullRequestReviewThread(
+            input: {
+              pullRequestId: $pullRequestId
+              pullRequestReviewId: $pullRequestReviewId
+              path: $path
+              body: $body
+              line: $line
+              side: $side
+              startLine: $startLine
+              startSide: $startSide
+              subjectType: LINE
+            }
+          ) {
+            thread { id }
+          }
+        }
+    "#;
+
+    let response = gh::graphql(
+        mutation,
+        json!({
+            "pullRequestId": pending_review_id.is_none().then_some(pull_request_id),
+            "pullRequestReviewId": pending_review_id,
+            "path": path,
+            "body": body,
+            "line": line,
+            "side": side,
+            "startLine": start_line,
+            "startSide": start_side,
+        }),
+    )?;
+
+    if let Some(error_message) = graphql_error_message(&response) {
+        return Ok(ActionResult {
+            success: false,
+            message: error_message,
+        });
+    }
+
+    let success = response
+        .get("data")
+        .and_then(|v| v.get("addPullRequestReviewThread"))
+        .and_then(|v| v.get("thread"))
+        .and_then(|v| v.get("id"))
+        .and_then(Value::as_str)
+        .is_some();
+
+    Ok(ActionResult {
+        success,
+        message: if success {
+            "Pending review comment added.".to_string()
+        } else {
+            "GitHub did not return the new pending review thread.".to_string()
+        },
+    })
+}
+
+pub fn update_pull_request_review_comment(
+    comment_id: &str,
+    body: &str,
+) -> Result<ActionResult, String> {
+    let auth = live_auth_state()?;
+
+    if !auth.is_authenticated {
+        return Ok(ActionResult {
+            success: false,
+            message: auth.message,
+        });
+    }
+
+    if body.trim().is_empty() {
+        return Ok(ActionResult {
+            success: false,
+            message: "Comment body cannot be empty.".to_string(),
+        });
+    }
+
+    let mutation = r#"
+        mutation($commentId: ID!, $body: String!) {
+          updatePullRequestReviewComment(
+            input: { pullRequestReviewCommentId: $commentId, body: $body }
+          ) { pullRequestReviewComment { id } }
+        }
+    "#;
+
+    let response = gh::graphql(mutation, json!({ "commentId": comment_id, "body": body }))?;
+
+    if let Some(error_message) = graphql_error_message(&response) {
+        return Ok(ActionResult {
+            success: false,
+            message: error_message,
+        });
+    }
+
+    let success = response
+        .get("data")
+        .and_then(|v| v.get("updatePullRequestReviewComment"))
+        .and_then(|v| v.get("pullRequestReviewComment"))
+        .and_then(|v| v.get("id"))
+        .and_then(Value::as_str)
+        .is_some();
+
+    Ok(ActionResult {
+        success,
+        message: if success {
+            "Pending review comment updated.".to_string()
+        } else {
+            "GitHub did not confirm the comment update.".to_string()
+        },
+    })
+}
+
+pub fn delete_pull_request_review_comment(comment_id: &str) -> Result<ActionResult, String> {
+    let auth = live_auth_state()?;
+
+    if !auth.is_authenticated {
+        return Ok(ActionResult {
+            success: false,
+            message: auth.message,
+        });
+    }
+
+    let mutation = r#"
+        mutation($commentId: ID!) {
+          deletePullRequestReviewComment(input: { id: $commentId }) {
+            clientMutationId
+          }
+        }
+    "#;
+
+    let response = gh::graphql(mutation, json!({ "commentId": comment_id }))?;
+
+    if let Some(error_message) = graphql_error_message(&response) {
+        return Ok(ActionResult {
+            success: false,
+            message: error_message,
+        });
+    }
+
+    let success = response
+        .get("data")
+        .and_then(|v| v.get("deletePullRequestReviewComment"))
+        .is_some();
+
+    Ok(ActionResult {
+        success,
+        message: if success {
+            "Pending review comment deleted.".to_string()
+        } else {
+            "GitHub did not confirm the comment deletion.".to_string()
+        },
+    })
+}
+
+pub fn submit_graphql_pull_request_review(
+    pull_request_id: &str,
+    pending_review_id: Option<&str>,
+    action: ReviewAction,
+    body: &str,
+) -> Result<ActionResult, String> {
+    let auth = live_auth_state()?;
+
+    if !auth.is_authenticated {
+        return Ok(ActionResult {
+            success: false,
+            message: auth.message,
+        });
+    }
+
+    let event = review_action_event(action);
+    let (mutation, variables, field_name) = if let Some(review_id) = pending_review_id {
+        (
+            r#"
+              mutation($pullRequestReviewId: ID!, $event: PullRequestReviewEvent!, $body: String) {
+                submitPullRequestReview(
+                  input: { pullRequestReviewId: $pullRequestReviewId, event: $event, body: $body }
+                ) { pullRequestReview { id state } }
+              }
+            "#,
+            json!({
+                "pullRequestReviewId": review_id,
+                "event": event,
+                "body": body.trim().is_empty().then_some(Value::Null).unwrap_or_else(|| json!(body)),
+            }),
+            "submitPullRequestReview",
+        )
+    } else {
+        (
+            r#"
+              mutation($pullRequestId: ID!, $event: PullRequestReviewEvent!, $body: String) {
+                addPullRequestReview(
+                  input: { pullRequestId: $pullRequestId, event: $event, body: $body }
+                ) { pullRequestReview { id state } }
+              }
+            "#,
+            json!({
+                "pullRequestId": pull_request_id,
+                "event": event,
+                "body": body.trim().is_empty().then_some(Value::Null).unwrap_or_else(|| json!(body)),
+            }),
+            "addPullRequestReview",
+        )
+    };
+
+    let response = gh::graphql(mutation, variables)?;
+
+    if let Some(error_message) = graphql_error_message(&response) {
+        return Ok(ActionResult {
+            success: false,
+            message: error_message,
+        });
+    }
+
+    let success = response
+        .get("data")
+        .and_then(|v| v.get(field_name))
+        .and_then(|v| v.get("pullRequestReview"))
+        .and_then(|v| v.get("id"))
+        .and_then(Value::as_str)
+        .is_some();
+
+    Ok(ActionResult {
+        success,
+        message: if success {
+            "Review submitted.".to_string()
+        } else {
+            "GitHub did not return the submitted review.".to_string()
         },
     })
 }
@@ -922,8 +1223,12 @@ fn fetch_queue(id: &str, label: &str, search_query: &str) -> Result<PullRequestQ
 
 fn fetch_pull_request_detail(repository: &str, number: i64) -> Result<PullRequestDetail, String> {
     let (owner, name) = split_repository(repository)?;
+    let viewer_login = live_auth_state()
+        .ok()
+        .and_then(|auth| auth.active_login)
+        .filter(|login| !login.trim().is_empty());
     let query = r#"
-        query($owner: String!, $name: String!, $number: Int!, $count: Int!) {
+        query($owner: String!, $name: String!, $number: Int!, $count: Int!, $viewerLogin: String) {
           repository(owner: $owner, name: $name) {
             pullRequest(number: $number) {
               id number title body url state isDraft reviewDecision
@@ -956,7 +1261,25 @@ fn fetch_pull_request_detail(repository: &str, number: i64) -> Result<PullReques
               latestReviews(first: $count) {
                 totalCount
                 pageInfo { hasNextPage endCursor }
-                nodes { state body submittedAt author { login avatarUrl } }
+                nodes { id state body submittedAt author { login avatarUrl } }
+              }
+              viewerPendingReviews: reviews(first: 1, states: [PENDING], author: $viewerLogin) {
+                nodes {
+                  id
+                  body
+                  author { login avatarUrl }
+                  comments(first: $count) {
+                    totalCount
+                    pageInfo { hasNextPage endCursor }
+                    nodes {
+                      id body path line originalLine startLine originalStartLine
+                      state createdAt updatedAt publishedAt url
+                      viewerCanUpdate viewerCanDelete
+                      replyTo { id }
+                      author { login avatarUrl }
+                    }
+                  }
+                }
               }
               reviewThreads(first: $count) {
                 totalCount
@@ -972,6 +1295,7 @@ fn fetch_pull_request_detail(repository: &str, number: i64) -> Result<PullReques
                     nodes {
                       id body path line originalLine startLine originalStartLine
                       state createdAt updatedAt publishedAt url
+                      viewerCanUpdate viewerCanDelete
                       replyTo { id }
                       author { login avatarUrl }
                     }
@@ -990,7 +1314,13 @@ fn fetch_pull_request_detail(repository: &str, number: i64) -> Result<PullReques
 
     let response = gh::graphql(
         query,
-        json!({ "owner": owner, "name": name, "number": number, "count": GITHUB_GRAPHQL_PAGE_SIZE }),
+        json!({
+            "owner": owner,
+            "name": name,
+            "number": number,
+            "count": GITHUB_GRAPHQL_PAGE_SIZE,
+            "viewerLogin": viewer_login,
+        }),
     )?;
 
     if let Some(error_message) = graphql_error_message(&response) {
@@ -1027,6 +1357,7 @@ fn fetch_pull_request_detail(repository: &str, number: i64) -> Result<PullReques
     let labels_connection = pr.get("labels").unwrap_or(&null);
     let review_requests_connection = pr.get("reviewRequests").unwrap_or(&null);
     let latest_reviews_connection = pr.get("latestReviews").unwrap_or(&null);
+    let pending_reviews_connection = pr.get("viewerPendingReviews").unwrap_or(&null);
     let review_threads_connection = pr.get("reviewThreads").unwrap_or(&null);
     let files_connection = pr.get("files").unwrap_or(&null);
 
@@ -1080,6 +1411,11 @@ fn fetch_pull_request_detail(repository: &str, number: i64) -> Result<PullReques
         map_pull_request_review,
     )?;
 
+    let viewer_pending_review =
+        map_connection_items(pending_reviews_connection, map_pending_pull_request_review)
+            .into_iter()
+            .next();
+
     let mut review_thread_pages =
         map_connection_items(review_threads_connection, map_review_thread_page);
     let review_threads_completeness = append_pull_request_connection_pages(
@@ -1094,10 +1430,13 @@ fn fetch_pull_request_detail(repository: &str, number: i64) -> Result<PullReques
     )?;
     let review_thread_comments_completeness =
         append_review_thread_comment_pages(&mut review_thread_pages)?;
-    let review_threads = review_thread_pages
+    let mut review_threads = review_thread_pages
         .into_iter()
         .map(|page| page.thread)
         .collect::<Vec<_>>();
+    if let Some(pending_review) = viewer_pending_review.as_ref() {
+        append_missing_pending_review_threads(&mut review_threads, pending_review);
+    }
 
     let mut files = map_connection_items(files_connection, map_pull_request_file);
     let files_completeness = append_pull_request_connection_pages(
@@ -1167,6 +1506,7 @@ fn fetch_pull_request_detail(repository: &str, number: i64) -> Result<PullReques
         reviewer_avatar_urls,
         latest_reviews,
         review_threads,
+        viewer_pending_review,
         files,
         raw_diff,
         parsed_diff,
@@ -1381,6 +1721,7 @@ fn fetch_review_thread_comments_connection(
                 nodes {
                   id body path line originalLine startLine originalStartLine
                   state createdAt updatedAt publishedAt url
+                  viewerCanUpdate viewerCanDelete
                   replyTo { id }
                   author { login avatarUrl }
                 }
@@ -1452,7 +1793,7 @@ fn pull_request_latest_reviews_selection() -> &'static str {
       latestReviews(first: $count, after: $cursor) {
         totalCount
         pageInfo { hasNextPage endCursor }
-        nodes { state body submittedAt author { login avatarUrl } }
+        nodes { id state body submittedAt author { login avatarUrl } }
       }
     "#
 }
@@ -1473,6 +1814,7 @@ fn pull_request_review_threads_selection() -> &'static str {
             nodes {
               id body path line originalLine startLine originalStartLine
               state createdAt updatedAt publishedAt url
+              viewerCanUpdate viewerCanDelete
               replyTo { id }
               author { login avatarUrl }
             }
@@ -1722,6 +2064,7 @@ fn split_reviewer_items(
 
 fn map_pull_request_review(node: &Value) -> Option<PullRequestReview> {
     Some(PullRequestReview {
+        id: node.get("id").and_then(Value::as_str).map(str::to_string),
         author_login: actor_login(node.get("author"))
             .unwrap_or("unknown")
             .to_string(),
@@ -1733,6 +2076,65 @@ fn map_pull_request_review(node: &Value) -> Option<PullRequestReview> {
             .and_then(Value::as_str)
             .map(str::to_string),
     })
+}
+
+fn map_pending_pull_request_review(node: &Value) -> Option<PendingPullRequestReview> {
+    let null = Value::Null;
+    Some(PendingPullRequestReview {
+        id: node.get("id")?.as_str()?.to_string(),
+        author_login: actor_login(node.get("author"))
+            .unwrap_or("unknown")
+            .to_string(),
+        author_avatar_url: actor_avatar_url(node.get("author")).map(str::to_string),
+        body: str_field(node, "body"),
+        comments: node
+            .get("comments")
+            .unwrap_or(&null)
+            .get("nodes")
+            .and_then(Value::as_array)
+            .map(|nodes| nodes.iter().filter_map(map_review_comment).collect())
+            .unwrap_or_default(),
+    })
+}
+
+fn append_missing_pending_review_threads(
+    review_threads: &mut Vec<PullRequestReviewThread>,
+    pending_review: &PendingPullRequestReview,
+) {
+    let mut existing_comment_ids = review_threads
+        .iter()
+        .flat_map(|thread| thread.comments.iter().map(|comment| comment.id.clone()))
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for comment in &pending_review.comments {
+        if !existing_comment_ids.insert(comment.id.clone()) {
+            continue;
+        }
+
+        review_threads.push(PullRequestReviewThread {
+            id: format!("pending-thread-{}", comment.id),
+            path: comment.path.clone(),
+            line: comment.line,
+            original_line: comment.original_line,
+            start_line: comment.start_line,
+            original_start_line: comment.original_start_line,
+            diff_side: "RIGHT".to_string(),
+            start_diff_side: comment.start_line.map(|_| "RIGHT".to_string()),
+            is_collapsed: false,
+            is_outdated: false,
+            is_resolved: false,
+            subject_type: if comment.line.is_some() {
+                "LINE".to_string()
+            } else {
+                "FILE".to_string()
+            },
+            resolved_by_login: None,
+            viewer_can_reply: false,
+            viewer_can_resolve: false,
+            viewer_can_unresolve: false,
+            comments: vec![comment.clone()],
+        });
+    }
 }
 
 fn map_pull_request_file(node: &Value) -> Option<PullRequestFile> {
@@ -1845,6 +2247,14 @@ fn map_review_comment(node: &Value) -> Option<PullRequestReviewComment> {
             .and_then(|value| value.get("id"))
             .and_then(Value::as_str)
             .map(str::to_string),
+        viewer_can_update: node
+            .get("viewerCanUpdate")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        viewer_can_delete: node
+            .get("viewerCanDelete")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         url: str_field(node, "url"),
     })
 }
@@ -1969,4 +2379,59 @@ fn str_field_or(value: &Value, key: &str, default: &str) -> String {
 
 fn i64_field(value: &Value, key: &str) -> i64 {
     value.get(key).and_then(Value::as_i64).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn maps_viewer_pending_review_comments_and_permissions() {
+        let node = json!({
+            "id": "PRR_pending",
+            "body": "",
+            "author": { "login": "riku", "avatarUrl": "https://example.com/a.png" },
+            "comments": {
+                "nodes": [{
+                    "id": "PRRC_draft",
+                    "body": "Please use a guard here.",
+                    "path": "src/lib.rs",
+                    "line": 42,
+                    "originalLine": 42,
+                    "startLine": 40,
+                    "originalStartLine": 40,
+                    "state": "PENDING",
+                    "createdAt": "2026-05-13T10:00:00Z",
+                    "updatedAt": "2026-05-13T10:01:00Z",
+                    "publishedAt": null,
+                    "url": "https://github.com/acme/repo/pull/1#discussion_r1",
+                    "viewerCanUpdate": true,
+                    "viewerCanDelete": true,
+                    "replyTo": null,
+                    "author": { "login": "riku", "avatarUrl": null }
+                }]
+            }
+        });
+
+        let review = map_pending_pull_request_review(&node).expect("pending review");
+        assert_eq!(review.id, "PRR_pending");
+        assert_eq!(review.author_login, "riku");
+        assert_eq!(review.comments.len(), 1);
+
+        let comment = &review.comments[0];
+        assert_eq!(comment.state, "PENDING");
+        assert_eq!(comment.path, "src/lib.rs");
+        assert_eq!(comment.line, Some(42));
+        assert_eq!(comment.start_line, Some(40));
+        assert!(comment.viewer_can_update);
+        assert!(comment.viewer_can_delete);
+
+        let mut threads = Vec::new();
+        append_missing_pending_review_threads(&mut threads, &review);
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].comments[0].id, "PRRC_draft");
+        assert_eq!(threads[0].line, Some(42));
+        assert_eq!(threads[0].start_line, Some(40));
+    }
 }

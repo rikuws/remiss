@@ -28,11 +28,16 @@ use crate::difftastic::{
     adapt_difftastic_file, build_adapted_diff_highlights, run_difftastic_for_texts,
     DifftasticAdaptOptions,
 };
+use crate::emoji::{emoji_shortcode_suggestions, EmojiSuggestion};
 use crate::github::{
     PullRequestDetail, PullRequestFile, PullRequestReviewComment, PullRequestReviewThread,
-    RepositoryFileContent, REPOSITORY_FILE_SOURCE_LOCAL_CHECKOUT,
+    RepositoryFileContent, ReviewAction, REPOSITORY_FILE_SOURCE_LOCAL_CHECKOUT,
 };
 use crate::icons::{lucide_icon, LucideIcon};
+use crate::inline_diff::{
+    inline_token_range, merge_inline_ranges, normalize_inline_emphasis_ranges,
+    tokenize_inline_diff_line, InlineToken, InlineTokenKind,
+};
 use crate::local_documents;
 use crate::local_repo;
 use crate::lsp;
@@ -71,8 +76,8 @@ use crate::{github, notifications, review_intelligence};
 use super::ai_tour::{refresh_active_tour, trigger_generate_tour};
 use super::root::refresh_active_local_review;
 use super::sections::{
-    badge, badge_success, error_text, eyebrow, ghost_button, nested_panel, panel_state_text,
-    review_button, success_text, user_avatar,
+    badge, badge_success, error_text, eyebrow, format_relative_time, ghost_button, nested_panel,
+    panel_state_text, review_button, success_text, user_avatar,
 };
 pub fn enter_files_surface(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
     state.update(cx, |s, cx| {
@@ -381,8 +386,26 @@ pub fn close_review_line_action(state: &Entity<AppState>, cx: &mut App) {
         state.active_review_line_action = None;
         state.active_review_line_action_position = None;
         state.review_line_action_mode = ReviewLineActionMode::Menu;
+        state.active_review_line_drag_origin = None;
+        state.active_review_line_drag_current = None;
         state.inline_comment_draft.clear();
+        state.inline_comment_preview = false;
         state.inline_comment_error = None;
+        state.editing_review_comment_id = None;
+        state.active_review_thread_reply_id = None;
+        cx.notify();
+    });
+}
+
+pub fn close_review_finish_modal(state: &Entity<AppState>, cx: &mut App) {
+    state.update(cx, |state, cx| {
+        if state.review_loading {
+            return;
+        }
+        state.review_finish_modal_open = false;
+        state.review_editor_preview = false;
+        state.review_message = None;
+        state.review_success = false;
         cx.notify();
     });
 }
@@ -398,6 +421,8 @@ pub fn open_waypoint_spotlight(state: &Entity<AppState>, cx: &mut App) {
         state.active_review_line_action = None;
         state.active_review_line_action_position = None;
         state.review_line_action_mode = ReviewLineActionMode::Menu;
+        state.active_review_line_drag_origin = None;
+        state.active_review_line_drag_current = None;
         state.inline_comment_error = None;
         cx.notify();
     });
@@ -493,7 +518,7 @@ pub fn trigger_add_waypoint_shortcut(state: &Entity<AppState>, cx: &mut App) {
 }
 
 pub fn trigger_submit_inline_comment(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
-    let Some((detail_id, repository, number, target, body, loading)) = ({
+    let Some((detail_id, pending_review_id, repository, number, target, body, loading)) = ({
         let app_state = state.read(cx);
         app_state.active_detail().and_then(|detail| {
             if crate::local_review::is_local_review_detail(detail) {
@@ -502,6 +527,10 @@ pub fn trigger_submit_inline_comment(state: &Entity<AppState>, window: &mut Wind
             app_state.active_review_line_action.clone().map(|target| {
                 (
                     detail.id.clone(),
+                    detail
+                        .viewer_pending_review
+                        .as_ref()
+                        .map(|review| review.id.clone()),
                     detail.repository.clone(),
                     detail.number,
                     target,
@@ -547,13 +576,15 @@ pub fn trigger_submit_inline_comment(state: &Entity<AppState>, window: &mut Wind
             let submit_result = cx
                 .background_executor()
                 .spawn(async move {
-                    github::add_pull_request_review_thread(
+                    github::add_pending_pull_request_review_thread(
                         &detail_id,
+                        pending_review_id.as_deref(),
                         &target.anchor.file_path,
                         &body,
                         Some(line),
                         Some(side.as_str()),
-                        Some("LINE"),
+                        target.start_line,
+                        target.start_side.as_deref(),
                     )
                 })
                 .await;
@@ -605,24 +636,578 @@ pub fn trigger_submit_inline_comment(state: &Entity<AppState>, window: &mut Wind
                         state.active_review_line_action_position = None;
                         state.review_line_action_mode = ReviewLineActionMode::Menu;
                     }
+                    cx.notify();
+                })
+                .ok();
 
-                    let detail_key = pr_key(&repository, number);
-                    let detail_state = state.detail_states.entry(detail_key).or_default();
-                    match sync_result {
-                        Ok((snapshot, unread_ids)) => {
-                            detail_state.snapshot = Some(snapshot);
-                            detail_state.error = None;
-                            state.unread_review_comment_ids = unread_ids;
-                        }
-                        Err(error) => {
-                            detail_state.error = Some(error);
-                        }
+            apply_detail_sync_result(&model, &repository, number, sync_result, cx).await;
+        })
+        .detach();
+}
+
+pub fn trigger_submit_review_from_review_mode(
+    state: &Entity<AppState>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if state.read(cx).active_is_local_review() {
+        return;
+    }
+
+    let Some((
+        pull_request_id,
+        pending_review_id,
+        repository,
+        number,
+        action,
+        body,
+        loading,
+        has_pending,
+        own_pr,
+    )) = ({
+        let app_state = state.read(cx);
+        app_state.active_detail().map(|detail| {
+            let viewer = app_state.viewer_login().map(str::to_string);
+            (
+                detail.id.clone(),
+                detail
+                    .viewer_pending_review
+                    .as_ref()
+                    .map(|review| review.id.clone()),
+                detail.repository.clone(),
+                detail.number,
+                app_state.review_action,
+                app_state.review_body.clone(),
+                app_state.review_loading,
+                pending_review_comment_count(detail) > 0,
+                viewer
+                    .as_deref()
+                    .map(|login| login == detail.author_login)
+                    .unwrap_or(false),
+            )
+        })
+    })
+    else {
+        return;
+    };
+
+    if loading {
+        return;
+    }
+
+    if own_pr && action != ReviewAction::Comment {
+        state.update(cx, |state, cx| {
+            state.review_message =
+                Some("You cannot approve or request changes on your own pull request.".to_string());
+            state.review_success = false;
+            cx.notify();
+        });
+        return;
+    }
+
+    if !has_pending && action == ReviewAction::Comment && body.trim().is_empty() {
+        state.update(cx, |state, cx| {
+            state.review_message =
+                Some("Enter a review note before submitting a comment.".to_string());
+            state.review_success = false;
+            cx.notify();
+        });
+        return;
+    }
+
+    state.update(cx, |state, cx| {
+        state.review_loading = true;
+        state.review_message = None;
+        state.review_success = false;
+        cx.notify();
+    });
+
+    let model = state.clone();
+    window
+        .spawn(cx, async move |cx: &mut AsyncWindowContext| {
+            let body_for_submit = body.clone();
+            let submit_result = cx
+                .background_executor()
+                .spawn(async move {
+                    github::submit_graphql_pull_request_review(
+                        &pull_request_id,
+                        pending_review_id.as_deref(),
+                        action,
+                        &body_for_submit,
+                    )
+                })
+                .await;
+
+            let (success, message) = match submit_result {
+                Ok(result) => (result.success, result.message),
+                Err(error) => (false, error),
+            };
+
+            model
+                .update(cx, |state, cx| {
+                    state.review_loading = false;
+                    state.review_message = Some(message.clone());
+                    state.review_success = success;
+                    if success {
+                        state.review_body.clear();
+                        state.review_editor_active = false;
+                        state.review_editor_preview = false;
+                        state.review_finish_modal_open = false;
+                        let detail_key = pr_key(&repository, number);
+                        state.detail_states.entry(detail_key).or_default().syncing = true;
                     }
                     cx.notify();
                 })
                 .ok();
+
+            if success {
+                let cache = model.read_with(cx, |state, _| state.cache.clone()).ok();
+                if let Some(cache) = cache {
+                    let repo_for_sync = repository.clone();
+                    let sync_result = cx
+                        .background_executor()
+                        .spawn(async move {
+                            notifications::sync_pull_request_detail_with_read_state(
+                                &cache,
+                                &repo_for_sync,
+                                number,
+                            )
+                        })
+                        .await;
+                    apply_detail_sync_result(&model, &repository, number, sync_result, cx).await;
+                }
+            }
         })
         .detach();
+}
+
+fn trigger_update_pending_comment(
+    state: &Entity<AppState>,
+    comment_id: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some((repository, number, body)) = ({
+        let app_state = state.read(cx);
+        app_state.active_detail().map(|detail| {
+            (
+                detail.repository.clone(),
+                detail.number,
+                app_state.inline_comment_draft.clone(),
+            )
+        })
+    }) else {
+        return;
+    };
+
+    if body.trim().is_empty() {
+        state.update(cx, |state, cx| {
+            state.review_thread_action_error = Some("Comment body cannot be empty.".to_string());
+            cx.notify();
+        });
+        return;
+    }
+
+    state.update(cx, |state, cx| {
+        state.review_comment_action_loading_id = Some(comment_id.clone());
+        state.review_thread_action_error = None;
+        cx.notify();
+    });
+
+    let model = state.clone();
+    window
+        .spawn(cx, async move |cx: &mut AsyncWindowContext| {
+            let update_result = cx
+                .background_executor()
+                .spawn(
+                    async move { github::update_pull_request_review_comment(&comment_id, &body) },
+                )
+                .await;
+            let (success, message) = match update_result {
+                Ok(result) => (result.success, result.message),
+                Err(error) => (false, error),
+            };
+
+            model
+                .update(cx, |state, cx| {
+                    state.review_comment_action_loading_id = None;
+                    if success {
+                        state.editing_review_comment_id = None;
+                        state.inline_comment_draft.clear();
+                        state.inline_comment_preview = false;
+                        state
+                            .detail_states
+                            .entry(pr_key(&repository, number))
+                            .or_default()
+                            .syncing = true;
+                    } else {
+                        state.review_thread_action_error = Some(message);
+                    }
+                    cx.notify();
+                })
+                .ok();
+
+            if success {
+                let cache = model.read_with(cx, |state, _| state.cache.clone()).ok();
+                if let Some(cache) = cache {
+                    let repo_for_sync = repository.clone();
+                    let sync_result = cx
+                        .background_executor()
+                        .spawn(async move {
+                            notifications::sync_pull_request_detail_with_read_state(
+                                &cache,
+                                &repo_for_sync,
+                                number,
+                            )
+                        })
+                        .await;
+                    apply_detail_sync_result(&model, &repository, number, sync_result, cx).await;
+                }
+            }
+        })
+        .detach();
+}
+
+fn trigger_delete_pending_comment(
+    state: &Entity<AppState>,
+    comment_id: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some((repository, number)) = state
+        .read(cx)
+        .active_detail()
+        .map(|detail| (detail.repository.clone(), detail.number))
+    else {
+        return;
+    };
+
+    state.update(cx, |state, cx| {
+        state.review_comment_action_loading_id = Some(comment_id.clone());
+        state.review_thread_action_error = None;
+        cx.notify();
+    });
+
+    let model = state.clone();
+    window
+        .spawn(cx, async move |cx: &mut AsyncWindowContext| {
+            let delete_result = cx
+                .background_executor()
+                .spawn(async move { github::delete_pull_request_review_comment(&comment_id) })
+                .await;
+            let (success, message) = match delete_result {
+                Ok(result) => (result.success, result.message),
+                Err(error) => (false, error),
+            };
+
+            model
+                .update(cx, |state, cx| {
+                    state.review_comment_action_loading_id = None;
+                    if success {
+                        state.editing_review_comment_id = None;
+                        state.inline_comment_draft.clear();
+                        state.inline_comment_preview = false;
+                        state
+                            .detail_states
+                            .entry(pr_key(&repository, number))
+                            .or_default()
+                            .syncing = true;
+                    } else {
+                        state.review_thread_action_error = Some(message);
+                    }
+                    cx.notify();
+                })
+                .ok();
+
+            if success {
+                let cache = model.read_with(cx, |state, _| state.cache.clone()).ok();
+                if let Some(cache) = cache {
+                    let repo_for_sync = repository.clone();
+                    let sync_result = cx
+                        .background_executor()
+                        .spawn(async move {
+                            notifications::sync_pull_request_detail_with_read_state(
+                                &cache,
+                                &repo_for_sync,
+                                number,
+                            )
+                        })
+                        .await;
+                    apply_detail_sync_result(&model, &repository, number, sync_result, cx).await;
+                }
+            }
+        })
+        .detach();
+}
+
+fn trigger_submit_thread_reply(
+    state: &Entity<AppState>,
+    thread_id: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some((repository, number, body)) = ({
+        let app_state = state.read(cx);
+        app_state.active_detail().map(|detail| {
+            (
+                detail.repository.clone(),
+                detail.number,
+                app_state.inline_comment_draft.clone(),
+            )
+        })
+    }) else {
+        return;
+    };
+
+    if body.trim().is_empty() {
+        state.update(cx, |state, cx| {
+            state.review_thread_action_error = Some("Reply body cannot be empty.".to_string());
+            cx.notify();
+        });
+        return;
+    }
+
+    state.update(cx, |state, cx| {
+        state.review_thread_action_loading_id = Some(thread_id.clone());
+        state.review_thread_action_error = None;
+        cx.notify();
+    });
+
+    let model = state.clone();
+    window
+        .spawn(cx, async move |cx: &mut AsyncWindowContext| {
+            let reply_result = cx
+                .background_executor()
+                .spawn(async move { github::reply_to_review_thread(&thread_id, &body) })
+                .await;
+            let (success, message) = match reply_result {
+                Ok(result) => (result.success, result.message),
+                Err(error) => (false, error),
+            };
+
+            model
+                .update(cx, |state, cx| {
+                    state.review_thread_action_loading_id = None;
+                    if success {
+                        state.active_review_thread_reply_id = None;
+                        state.inline_comment_draft.clear();
+                        state.inline_comment_preview = false;
+                        state
+                            .detail_states
+                            .entry(pr_key(&repository, number))
+                            .or_default()
+                            .syncing = true;
+                    } else {
+                        state.review_thread_action_error = Some(message);
+                    }
+                    cx.notify();
+                })
+                .ok();
+
+            if success {
+                let cache = model.read_with(cx, |state, _| state.cache.clone()).ok();
+                if let Some(cache) = cache {
+                    let repo_for_sync = repository.clone();
+                    let sync_result = cx
+                        .background_executor()
+                        .spawn(async move {
+                            notifications::sync_pull_request_detail_with_read_state(
+                                &cache,
+                                &repo_for_sync,
+                                number,
+                            )
+                        })
+                        .await;
+                    apply_detail_sync_result(&model, &repository, number, sync_result, cx).await;
+                }
+            }
+        })
+        .detach();
+}
+
+fn trigger_set_review_thread_resolution(
+    state: &Entity<AppState>,
+    thread_id: String,
+    resolved: bool,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some((repository, number)) = state
+        .read(cx)
+        .active_detail()
+        .map(|detail| (detail.repository.clone(), detail.number))
+    else {
+        return;
+    };
+
+    state.update(cx, |state, cx| {
+        state.review_thread_action_loading_id = Some(thread_id.clone());
+        state.review_thread_action_error = None;
+        cx.notify();
+    });
+
+    let model = state.clone();
+    window
+        .spawn(cx, async move |cx: &mut AsyncWindowContext| {
+            let resolution_result = cx
+                .background_executor()
+                .spawn(async move { github::set_review_thread_resolution(&thread_id, resolved) })
+                .await;
+            let (success, message) = match resolution_result {
+                Ok(result) => (result.success, result.message),
+                Err(error) => (false, error),
+            };
+
+            model
+                .update(cx, |state, cx| {
+                    state.review_thread_action_loading_id = None;
+                    if success {
+                        state
+                            .detail_states
+                            .entry(pr_key(&repository, number))
+                            .or_default()
+                            .syncing = true;
+                    } else {
+                        state.review_thread_action_error = Some(message);
+                    }
+                    cx.notify();
+                })
+                .ok();
+
+            if success {
+                let cache = model.read_with(cx, |state, _| state.cache.clone()).ok();
+                if let Some(cache) = cache {
+                    let repo_for_sync = repository.clone();
+                    let sync_result = cx
+                        .background_executor()
+                        .spawn(async move {
+                            notifications::sync_pull_request_detail_with_read_state(
+                                &cache,
+                                &repo_for_sync,
+                                number,
+                            )
+                        })
+                        .await;
+                    apply_detail_sync_result(&model, &repository, number, sync_result, cx).await;
+                }
+            }
+        })
+        .detach();
+}
+
+async fn apply_detail_sync_result(
+    model: &Entity<AppState>,
+    repository: &str,
+    number: i64,
+    sync_result: Result<(github::PullRequestDetailSnapshot, BTreeSet<String>), String>,
+    cx: &mut AsyncWindowContext,
+) {
+    model
+        .update(cx, |state, cx| {
+            let detail_key = pr_key(repository, number);
+            let mut updated_detail = None;
+            let mut unread_ids_update = None;
+            {
+                let detail_state = state.detail_states.entry(detail_key).or_default();
+                detail_state.syncing = false;
+                match sync_result {
+                    Ok((snapshot, unread_ids)) => {
+                        updated_detail = snapshot.detail.clone();
+                        detail_state.snapshot = Some(snapshot);
+                        detail_state.error = None;
+                        unread_ids_update = Some(unread_ids);
+                    }
+                    Err(error) => {
+                        detail_state.error = Some(error);
+                    }
+                }
+            }
+            if let Some(unread_ids) = unread_ids_update {
+                state.unread_review_comment_ids = unread_ids;
+            }
+            if let Some(detail) = updated_detail.as_ref() {
+                update_open_tab_summary_from_detail(state, detail);
+            }
+            cx.notify();
+        })
+        .ok();
+}
+
+fn update_open_tab_summary_from_detail(state: &mut AppState, detail: &PullRequestDetail) {
+    let detail_key = pr_key(&detail.repository, detail.number);
+    let Some(tab) = state
+        .open_tabs
+        .iter_mut()
+        .find(|tab| pr_key(&tab.repository, tab.number) == detail_key)
+    else {
+        return;
+    };
+
+    tab.title = detail.title.clone();
+    tab.author_login = detail.author_login.clone();
+    tab.author_avatar_url = detail.author_avatar_url.clone();
+    tab.is_draft = detail.is_draft;
+    tab.comments_count = detail.comments_count;
+    tab.additions = detail.additions;
+    tab.deletions = detail.deletions;
+    tab.changed_files = detail.changed_files;
+    tab.state = detail.state.clone();
+    tab.review_decision = detail.review_decision.clone();
+    tab.updated_at = detail.updated_at.clone();
+    tab.url = detail.url.clone();
+}
+
+fn pending_review_comment_count(detail: &PullRequestDetail) -> usize {
+    let pending_review_count = detail
+        .viewer_pending_review
+        .as_ref()
+        .map(|review| review.comments.len())
+        .unwrap_or(0);
+    let pending_thread_count = detail
+        .review_threads
+        .iter()
+        .flat_map(|thread| thread.comments.iter())
+        .filter(|comment| comment.state == "PENDING")
+        .count();
+
+    pending_review_count.max(pending_thread_count)
+}
+
+fn pending_review_comments(detail: &PullRequestDetail) -> Vec<&PullRequestReviewComment> {
+    let mut seen = BTreeSet::new();
+    let mut comments = Vec::new();
+
+    if let Some(review) = detail.viewer_pending_review.as_ref() {
+        for comment in &review.comments {
+            if seen.insert(comment.id.clone()) {
+                comments.push(comment);
+            }
+        }
+    }
+
+    for comment in detail
+        .review_threads
+        .iter()
+        .flat_map(|thread| thread.comments.iter())
+        .filter(|comment| comment.state == "PENDING")
+    {
+        if seen.insert(comment.id.clone()) {
+            comments.push(comment);
+        }
+    }
+
+    comments
+}
+
+fn pending_comment_location(comment: &PullRequestReviewComment) -> String {
+    let line = comment
+        .start_line
+        .zip(comment.line)
+        .filter(|(start, end)| start != end)
+        .map(|(start, end)| format!("{start}-{end}"))
+        .or_else(|| comment.line.map(|line| line.to_string()))
+        .unwrap_or_else(|| "file".to_string());
+    format!("{}:{line}", comment.path)
 }
 
 fn open_review_line_action(
@@ -636,13 +1221,182 @@ fn open_review_line_action(
         state.navigate_to_review_location(target.review_location(), true);
         state.active_review_line_action = Some(target);
         state.active_review_line_action_position = Some(position);
-        state.review_line_action_mode = ReviewLineActionMode::Menu;
+        state.review_line_action_mode = ReviewLineActionMode::Comment;
+        state.active_review_line_drag_origin = None;
+        state.active_review_line_drag_current = None;
         state.inline_comment_draft.clear();
+        state.inline_comment_preview = false;
         state.inline_comment_error = None;
         state.waypoint_spotlight_open = false;
         state.persist_active_review_session();
         cx.notify();
     });
+}
+
+fn review_line_action_target_with_range(
+    state: &Entity<AppState>,
+    mut target: ReviewLineActionTarget,
+    range_requested: bool,
+    cx: &App,
+) -> ReviewLineActionTarget {
+    if !range_requested {
+        return target;
+    }
+
+    let Some(current_anchor) = state.read(cx).selected_diff_anchor.clone() else {
+        return target;
+    };
+    if current_anchor.file_path != target.anchor.file_path
+        || current_anchor.side != target.anchor.side
+        || current_anchor.line == target.anchor.line
+    {
+        return target;
+    }
+
+    let Some(current_line) = current_anchor.line else {
+        return target;
+    };
+    let Some(target_line) = target.anchor.line else {
+        return target;
+    };
+
+    let start = current_line.min(target_line);
+    let end = current_line.max(target_line);
+    target.start_line = Some(start);
+    target.start_side = target.anchor.side.clone();
+    target.anchor.line = Some(end);
+    target.label = format!("{}:{start}-{end}", target.anchor.file_path);
+    target
+}
+
+fn review_line_action_target_from_drag_range(
+    origin: &ReviewLineActionTarget,
+    mut target: ReviewLineActionTarget,
+) -> ReviewLineActionTarget {
+    if origin.anchor.file_path != target.anchor.file_path
+        || origin.anchor.side != target.anchor.side
+        || origin.anchor.line == target.anchor.line
+    {
+        return target;
+    }
+
+    let Some(origin_line) = origin.anchor.line else {
+        return target;
+    };
+    let Some(target_line) = target.anchor.line else {
+        return target;
+    };
+
+    let start = origin_line.min(target_line);
+    let end = origin_line.max(target_line);
+    target.start_line = Some(start);
+    target.start_side = target.anchor.side.clone();
+    target.anchor.line = Some(end);
+    target.label = format!("{}:{start}-{end}", target.anchor.file_path);
+    target
+}
+
+fn begin_review_line_drag(state: &Entity<AppState>, target: ReviewLineActionTarget, cx: &mut App) {
+    state.update(cx, |state, cx| {
+        state.active_review_line_drag_origin = Some(target.clone());
+        state.active_review_line_drag_current = Some(target.clone());
+        state.active_review_line_action = None;
+        state.active_review_line_action_position = None;
+        state.review_line_action_mode = ReviewLineActionMode::Menu;
+        state.inline_comment_error = None;
+        state.navigate_to_review_location(target.review_location(), true);
+        cx.notify();
+    });
+}
+
+fn update_review_line_drag(state: &Entity<AppState>, target: ReviewLineActionTarget, cx: &mut App) {
+    state.update(cx, |state, cx| {
+        if state.active_review_line_drag_origin.is_none() {
+            return;
+        }
+        state.active_review_line_drag_current = Some(target.clone());
+        state.navigate_to_review_location(target.review_location(), false);
+        cx.notify();
+    });
+}
+
+fn finish_review_line_drag(
+    state: &Entity<AppState>,
+    target: ReviewLineActionTarget,
+    position: Point<Pixels>,
+    cx: &mut App,
+) {
+    let Some(origin) = state.read(cx).active_review_line_drag_origin.clone() else {
+        return;
+    };
+    let target = review_line_action_target_from_drag_range(&origin, target);
+
+    state.update(cx, |state, cx| {
+        state.active_review_line_drag_origin = None;
+        state.active_review_line_drag_current = None;
+        cx.notify();
+    });
+
+    open_review_line_action(state, target, position, cx);
+}
+
+fn line_target_in_review_range(
+    target: &ReviewLineActionTarget,
+    range_end: &ReviewLineActionTarget,
+) -> bool {
+    let Some(start_line) = range_end.start_line else {
+        return false;
+    };
+    if target.anchor.file_path != range_end.anchor.file_path
+        || target.anchor.side != range_end.anchor.side
+    {
+        return false;
+    }
+
+    let Some(target_line) = target.anchor.line else {
+        return false;
+    };
+    let Some(end_line) = range_end.anchor.line else {
+        return false;
+    };
+
+    let start = start_line.min(end_line);
+    let end = start_line.max(end_line);
+    (start..=end).contains(&target_line)
+}
+
+fn line_target_in_active_drag_range(
+    target: &ReviewLineActionTarget,
+    origin: Option<&ReviewLineActionTarget>,
+    current: Option<&ReviewLineActionTarget>,
+) -> bool {
+    let Some(origin) = origin else {
+        return false;
+    };
+    let Some(current) = current else {
+        return false;
+    };
+    if target.anchor.file_path != origin.anchor.file_path
+        || target.anchor.file_path != current.anchor.file_path
+        || target.anchor.side != origin.anchor.side
+        || target.anchor.side != current.anchor.side
+    {
+        return false;
+    }
+
+    let Some(target_line) = target.anchor.line else {
+        return false;
+    };
+    let Some(origin_line) = origin.anchor.line else {
+        return false;
+    };
+    let Some(current_line) = current.anchor.line else {
+        return false;
+    };
+
+    let start = origin_line.min(current_line);
+    let end = origin_line.max(current_line);
+    (start..=end).contains(&target_line)
 }
 
 fn filtered_waypoint_spotlight_items(
@@ -896,6 +1650,7 @@ pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement
     let line_action_target = s.active_review_line_action.clone();
     let line_action_position = s.active_review_line_action_position;
     let line_action_mode = s.review_line_action_mode.clone();
+    let review_finish_modal_open = s.review_finish_modal_open;
     let is_local_review = crate::local_review::is_local_review_detail(detail);
     let review_stack = prepare_review_stack(&s, detail);
     let review_queue = prepare_review_queue(&s, detail);
@@ -987,6 +1742,9 @@ pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement
         )
         .when(waypoint_spotlight_open, |el| {
             el.child(render_waypoint_spotlight(state, cx))
+        })
+        .when(review_finish_modal_open && !is_local_review, |el| {
+            el.child(render_finish_review_modal(state, detail, cx))
         })
         .when_some(
             (!is_local_review)
@@ -6796,6 +7554,13 @@ fn render_diff_toolbar(
     );
     let is_local_review = crate::local_review::is_local_review_detail(detail);
     let state_for_refresh = state.clone();
+    let state_for_submit = state.clone();
+    let pending_count = pending_review_comment_count(detail);
+    let submit_label = if pending_count > 0 {
+        format!("Submit review ({pending_count})")
+    } else {
+        "Submit review".to_string()
+    };
 
     div()
         .flex()
@@ -6843,11 +7608,43 @@ fn render_diff_toolbar(
                 layout_toggle_disabled,
             ))
         })
+        .when(!is_local_review, |el| {
+            el.child(diff_toolbar_primary_button(
+                &submit_label,
+                move |_, _, cx| {
+                    state_for_submit.update(cx, |state, cx| {
+                        state.review_finish_modal_open = true;
+                        state.review_editor_active = true;
+                        state.review_message = None;
+                        state.review_success = false;
+                        cx.notify();
+                    });
+                },
+            ))
+        })
         .when(is_local_review, |el| {
             el.child(review_button("Refresh", move |_, window, cx| {
                 refresh_active_local_review(&state_for_refresh, window, cx);
             }))
         })
+}
+
+fn diff_toolbar_primary_button(
+    label: &str,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .px(px(12.0))
+        .py(px(6.0))
+        .rounded(radius_sm())
+        .bg(primary_action_bg())
+        .text_color(fg_on_primary_action())
+        .text_size(px(12.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .cursor_pointer()
+        .hover(|style| style.bg(primary_action_hover()))
+        .on_mouse_down(MouseButton::Left, on_click)
+        .child(label.to_string())
 }
 
 fn render_local_review_empty_state(
@@ -8745,17 +9542,19 @@ fn prepare_combined_diff_file_context(
         .active_detail_state()
         .and_then(|detail_state| detail_state.file_content_states.get(&file.path));
     let prepared_file = file_content_state.and_then(|state| state.prepared.as_ref());
-    let reserve_waypoint_slot = app_state
-        .active_review_session()
-        .map(|session| {
-            session.waymarks.iter().any(|waymark| {
-                matches!(
-                    waymark.location.mode,
-                    ReviewCenterMode::SemanticDiff | ReviewCenterMode::StructuralDiff
-                ) && waymark.location.file_path == file.path
+    let has_review_submission = !crate::local_review::is_local_review_detail(detail);
+    let reserve_waypoint_slot = has_review_submission
+        || app_state
+            .active_review_session()
+            .map(|session| {
+                session.waymarks.iter().any(|waymark| {
+                    matches!(
+                        waymark.location.mode,
+                        ReviewCenterMode::SemanticDiff | ReviewCenterMode::StructuralDiff
+                    ) && waymark.location.file_path == file.path
+                })
             })
-        })
-        .unwrap_or(false);
+            .unwrap_or(false);
 
     let mut parsed = original_parsed.cloned().map(Arc::new);
     let mut parsed_override = None;
@@ -9687,17 +10486,22 @@ fn render_file_diff(
     let highlighted_hunks = diff_view_state.highlighted_hunks.clone();
     let (reserve_waypoint_slot, wrap_diff_lines) = {
         let app_state = state.read(cx);
-        let reserve_waypoint_slot = app_state
-            .active_review_session()
-            .map(|session| {
-                session.waymarks.iter().any(|waymark| {
-                    matches!(
-                        waymark.location.mode,
-                        ReviewCenterMode::SemanticDiff | ReviewCenterMode::StructuralDiff
-                    ) && waymark.location.file_path == file.path
-                })
-            })
+        let has_review_submission = app_state
+            .active_detail()
+            .map(|detail| !crate::local_review::is_local_review_detail(detail))
             .unwrap_or(false);
+        let reserve_waypoint_slot = has_review_submission
+            || app_state
+                .active_review_session()
+                .map(|session| {
+                    session.waymarks.iter().any(|waymark| {
+                        matches!(
+                            waymark.location.mode,
+                            ReviewCenterMode::SemanticDiff | ReviewCenterMode::StructuralDiff
+                        ) && waymark.location.file_path == file.path
+                    })
+                })
+                .unwrap_or(false);
         let wrap_diff_lines = app_state
             .active_review_session()
             .map(|session| session.wrap_diff_lines)
@@ -11312,6 +12116,7 @@ fn render_virtualized_diff_row(
 ) -> impl IntoElement {
     let s = state.read(cx);
     let detail = s.active_detail();
+    let thread_ui = review_thread_ui_state(&s);
     let parsed_file = parsed_file_override.or_else(|| {
         parsed_file_index.and_then(|ix| detail.and_then(|detail| detail.parsed_diff.get(ix)))
     });
@@ -11336,6 +12141,8 @@ fn render_virtualized_diff_row(
                         selected_anchor,
                         &s.unread_review_comment_ids,
                         state,
+                        cx,
+                        thread_ui.clone(),
                     ))
                     .into_any_element()
             })
@@ -11355,6 +12162,8 @@ fn render_virtualized_diff_row(
                         selected_anchor,
                         &s.unread_review_comment_ids,
                         state,
+                        cx,
+                        thread_ui.clone(),
                     ))
                     .into_any_element()
             })
@@ -11373,6 +12182,8 @@ fn render_virtualized_diff_row(
                         selected_anchor,
                         &s.unread_review_comment_ids,
                         state,
+                        cx,
+                        thread_ui.clone(),
                     ))
                     .into_any_element()
             })
@@ -11923,6 +12734,10 @@ fn render_structural_side_by_side_cell(
     ));
     let content = cell
         .map(|cell| {
+            let emphasis_ranges = normalize_inline_emphasis_ranges(
+                cell.line.content.as_str(),
+                cell.emphasis_ranges.as_slice(),
+            );
             let line_lsp_context = (side == SideBySideDiffSide::Right)
                 .then(|| build_diff_line_lsp_context(file_lsp_context, &cell.line))
                 .flatten();
@@ -11941,7 +12756,7 @@ fn render_structural_side_by_side_cell(
                 Some(hunk_header),
                 &cell.line,
                 None,
-                Some(cell.emphasis_ranges.as_slice()),
+                Some(emphasis_ranges.as_slice()),
                 selected_anchor,
                 line_lsp_context.as_ref(),
                 temp_source_target,
@@ -12240,6 +13055,8 @@ fn build_review_line_action_target(
             side: Some(side.to_string()),
             thread_id: None,
         },
+        start_line: None,
+        start_side: None,
         label: format!("{file_path}:{display_line}"),
     })
 }
@@ -12258,9 +13075,11 @@ fn render_reviewable_diff_line(
     cx: &App,
 ) -> impl IntoElement {
     let line_action_target = build_review_line_action_target(file_path, hunk_header, line);
-    let (active_line_action, waypoint, wrap_diff_lines) = {
+    let (active_line_action, drag_origin, drag_current, waypoint, wrap_diff_lines) = {
         let app_state = state.read(cx);
         let active_line_action = app_state.active_review_line_action.clone();
+        let drag_origin = app_state.active_review_line_drag_origin.clone();
+        let drag_current = app_state.active_review_line_drag_current.clone();
         let waypoint = line_action_target
             .as_ref()
             .and_then(|target| {
@@ -12273,7 +13092,13 @@ fn render_reviewable_diff_line(
             .active_review_session()
             .map(|session| session.wrap_diff_lines)
             .unwrap_or(false);
-        (active_line_action, waypoint, wrap_diff_lines)
+        (
+            active_line_action,
+            drag_origin,
+            drag_current,
+            waypoint,
+            wrap_diff_lines,
+        )
     };
 
     let popup_open = line_action_target
@@ -12282,6 +13107,20 @@ fn render_reviewable_diff_line(
         .map(|(line_target, active_target)| line_target.stable_key() == active_target.stable_key())
         .unwrap_or(false);
     let has_waypoint = !popup_open && waypoint.is_some();
+    let range_selected = line_action_target
+        .as_ref()
+        .map(|target| {
+            active_line_action
+                .as_ref()
+                .map(|active| line_target_in_review_range(target, active))
+                .unwrap_or(false)
+                || line_target_in_active_drag_range(
+                    target,
+                    drag_origin.as_ref(),
+                    drag_current.as_ref(),
+                )
+        })
+        .unwrap_or(false);
 
     render_diff_line(
         gutter_layout,
@@ -12295,6 +13134,7 @@ fn render_reviewable_diff_line(
         temp_source_target.map(|target| (state.clone(), target)),
         has_waypoint,
         popup_open,
+        range_selected,
         wrap_diff_lines,
     )
 }
@@ -12432,6 +13272,399 @@ fn render_review_line_action_overlay(
         ))
 }
 
+fn render_finish_review_modal(
+    state: &Entity<AppState>,
+    detail: &PullRequestDetail,
+    cx: &App,
+) -> impl IntoElement {
+    let app_state = state.read(cx);
+    let pending_comments = pending_review_comments(detail);
+    let pending_count = pending_comments.len();
+    let action = app_state.review_action;
+    let body_empty = app_state.review_body.trim().is_empty();
+    let loading = app_state.review_loading;
+    let preview = app_state.review_editor_preview;
+    let message = app_state.review_message.clone();
+    let success = app_state.review_success;
+    let own_pr = app_state
+        .viewer_login()
+        .map(|login| login == detail.author_login)
+        .unwrap_or(false);
+    let invalid_empty_comment = pending_count == 0 && action == ReviewAction::Comment && body_empty;
+    let own_pr_blocked = own_pr && action != ReviewAction::Comment;
+    let submit_disabled = loading || invalid_empty_comment || own_pr_blocked;
+    let close_state = state.clone();
+    let submit_state = state.clone();
+
+    div()
+        .absolute()
+        .inset_0()
+        .occlude()
+        .flex()
+        .items_start()
+        .justify_center()
+        .pt(px(72.0))
+        .pb(px(32.0))
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .bg(palette_backdrop())
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    close_review_finish_modal(&close_state, cx);
+                }),
+        )
+        .child(
+            div()
+                .relative()
+                .w(px(860.0))
+                .max_w(px(1040.0))
+                .max_h(px(640.0))
+                .rounded(radius_lg())
+                .border_1()
+                .border_color(border_default())
+                .bg(bg_overlay())
+                .shadow_sm()
+                .occlude()
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .px(px(22.0))
+                        .py(px(16.0))
+                        .border_b(px(1.0))
+                        .border_color(border_muted())
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_size(px(18.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(fg_emphasis())
+                                .child("Finish your review"),
+                        )
+                        .child(
+                            div()
+                                .w(px(28.0))
+                                .h(px(28.0))
+                                .rounded(radius_sm())
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .hover(|style| style.bg(hover_bg()))
+                                .on_mouse_down(MouseButton::Left, {
+                                    let state = state.clone();
+                                    move |_, _, cx| {
+                                        cx.stop_propagation();
+                                        close_review_finish_modal(&state, cx);
+                                    }
+                                })
+                                .child(lucide_icon(LucideIcon::X, 17.0, fg_muted())),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h_0()
+                        .id("finish-review-scroll")
+                        .gap(px(14.0))
+                        .p(px(22.0))
+                        .overflow_y_scroll()
+                        .child(render_markdown_editor(
+                            state,
+                            AppTextFieldKind::ReviewBody,
+                            "finish-review-body",
+                            "Leave a comment",
+                            preview,
+                            170.0,
+                            cx,
+                        ))
+                        .child(render_pending_review_summary(pending_comments))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(8.0))
+                                .child(render_review_action_choice(
+                                    state,
+                                    ReviewAction::Comment,
+                                    action,
+                                    false,
+                                    "Comment",
+                                    "Submit general feedback without explicit approval.",
+                                ))
+                                .child(render_review_action_choice(
+                                    state,
+                                    ReviewAction::Approve,
+                                    action,
+                                    own_pr,
+                                    "Approve",
+                                    if own_pr {
+                                        "You cannot approve your own pull request."
+                                    } else {
+                                        "Submit feedback and approve merging these changes."
+                                    },
+                                ))
+                                .child(render_review_action_choice(
+                                    state,
+                                    ReviewAction::RequestChanges,
+                                    action,
+                                    own_pr,
+                                    "Request changes",
+                                    if own_pr {
+                                        "You cannot request changes on your own pull request."
+                                    } else {
+                                        "Submit feedback suggesting changes."
+                                    },
+                                )),
+                        )
+                        .when_some(message, |el, message: String| {
+                            el.child(if success {
+                                success_text(&message).into_any_element()
+                            } else {
+                                error_text(&message).into_any_element()
+                            })
+                        }),
+                )
+                .child(
+                    div()
+                        .px(px(22.0))
+                        .py(px(16.0))
+                        .border_t(px(1.0))
+                        .border_color(border_muted())
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(div().text_size(px(12.0)).text_color(fg_subtle()).child(
+                            if pending_count > 0 {
+                                "Pending drafts will be published with this review.".to_string()
+                            } else {
+                                "Approval can be submitted without a body.".to_string()
+                            },
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(ghost_button("Cancel", {
+                                    let state = state.clone();
+                                    move |_, _, cx| {
+                                        close_review_finish_modal(&state, cx);
+                                    }
+                                }))
+                                .child(review_submit_button(
+                                    if loading {
+                                        "Submitting..."
+                                    } else {
+                                        "Submit review"
+                                    },
+                                    submit_disabled,
+                                    move |_, window, cx| {
+                                        trigger_submit_review_from_review_mode(
+                                            &submit_state,
+                                            window,
+                                            cx,
+                                        );
+                                    },
+                                )),
+                        ),
+                ),
+        )
+}
+
+fn render_pending_review_summary(comments: Vec<&PullRequestReviewComment>) -> impl IntoElement {
+    let count = comments.len();
+
+    div()
+        .rounded(radius())
+        .border_1()
+        .border_color(border_muted())
+        .bg(diff_editor_surface())
+        .overflow_hidden()
+        .child(
+            div()
+                .px(px(12.0))
+                .py(px(9.0))
+                .border_b(px(1.0))
+                .border_color(border_muted())
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg_emphasis())
+                        .child("Pending drafts"),
+                )
+                .child(badge(&count.to_string())),
+        )
+        .child(if comments.is_empty() {
+            div()
+                .px(px(12.0))
+                .py(px(10.0))
+                .text_size(px(12.0))
+                .text_color(fg_muted())
+                .child("No pending line comments.")
+                .into_any_element()
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .children(comments.into_iter().take(5).map(|comment| {
+                    div()
+                        .px(px(12.0))
+                        .py(px(9.0))
+                        .border_b(px(1.0))
+                        .border_color(border_muted())
+                        .flex()
+                        .items_start()
+                        .gap(px(10.0))
+                        .child(lucide_icon(LucideIcon::MessageSquare, 14.0, fg_muted()))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(3.0))
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .font_family(mono_font_family())
+                                        .text_color(fg_muted())
+                                        .child(pending_comment_location(comment)),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .line_height(px(18.0))
+                                        .text_color(fg_default())
+                                        .whitespace_normal()
+                                        .child(
+                                            comment.body.lines().next().unwrap_or("").to_string(),
+                                        ),
+                                ),
+                        )
+                }))
+                .into_any_element()
+        })
+}
+
+fn render_review_action_choice(
+    state: &Entity<AppState>,
+    action: ReviewAction,
+    selected: ReviewAction,
+    disabled: bool,
+    label: &'static str,
+    description: &'static str,
+) -> impl IntoElement {
+    let active = action == selected;
+    let state_for_click = state.clone();
+
+    div()
+        .flex()
+        .items_start()
+        .gap(px(10.0))
+        .p(px(10.0))
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(if active { accent() } else { border_muted() })
+        .bg(if active { bg_selected() } else { bg_surface() })
+        .opacity(if disabled { 0.48 } else { 1.0 })
+        .when(!disabled, |el| {
+            el.cursor_pointer()
+                .hover(|style| style.bg(hover_bg()))
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    cx.stop_propagation();
+                    state_for_click.update(cx, |state, cx| {
+                        state.review_action = action;
+                        state.review_message = None;
+                        state.review_success = false;
+                        cx.notify();
+                    });
+                })
+        })
+        .child(
+            div()
+                .w(px(16.0))
+                .h(px(16.0))
+                .mt(px(1.0))
+                .rounded(px(999.0))
+                .border_1()
+                .border_color(if active { accent() } else { border_default() })
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(if active {
+                    div()
+                        .w(px(8.0))
+                        .h(px(8.0))
+                        .rounded(px(999.0))
+                        .bg(accent())
+                        .into_any_element()
+                } else {
+                    div().into_any_element()
+                }),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg_emphasis())
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .line_height(px(17.0))
+                        .text_color(fg_muted())
+                        .child(description),
+                ),
+        )
+}
+
+fn review_submit_button(
+    label: &'static str,
+    disabled: bool,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .px(px(16.0))
+        .py(px(8.0))
+        .rounded(radius_sm())
+        .bg(if disabled {
+            control_button_bg()
+        } else {
+            primary_action_bg()
+        })
+        .text_color(if disabled {
+            fg_subtle()
+        } else {
+            fg_on_primary_action()
+        })
+        .text_size(px(13.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .opacity(if disabled { 0.72 } else { 1.0 })
+        .when(!disabled, |el| {
+            el.cursor_pointer()
+                .hover(|style| style.bg(primary_action_hover()))
+                .on_mouse_down(MouseButton::Left, on_click)
+        })
+        .child(label)
+}
+
 fn render_review_line_action_popup(
     state: &Entity<AppState>,
     target: Option<&ReviewLineActionTarget>,
@@ -12439,9 +13672,10 @@ fn render_review_line_action_popup(
     has_waypoint: bool,
     cx: &App,
 ) -> impl IntoElement {
-    let inline_comment_draft = state.read(cx).inline_comment_draft.clone();
-    let inline_comment_loading = state.read(cx).inline_comment_loading;
-    let inline_comment_error = state.read(cx).inline_comment_error.clone();
+    let app_state = state.read(cx);
+    let inline_comment_loading = app_state.inline_comment_loading;
+    let inline_comment_error = app_state.inline_comment_error.clone();
+    let inline_comment_preview = app_state.inline_comment_preview;
     let popup_key = target
         .map(|target| target.stable_key())
         .unwrap_or_else(|| "line-action-popup".to_string());
@@ -12450,8 +13684,8 @@ fn render_review_line_action_popup(
     });
 
     div()
-        .min_w(px(248.0))
-        .max_w(px(320.0))
+        .min_w(px(420.0))
+        .max_w(px(560.0))
         .rounded(radius())
         .border_1()
         .border_color(border_default())
@@ -12481,70 +13715,23 @@ fn render_review_line_action_popup(
                 ),
         )
         .child(match mode {
-            ReviewLineActionMode::Menu => div()
-                .p(px(10.0))
-                .flex()
-                .gap(px(8.0))
-                .child(line_action_button("Comment", false, {
-                    let state = state.clone();
-                    move |_, _, cx| {
-                        state.update(cx, |state, cx| {
-                            state.review_line_action_mode = ReviewLineActionMode::Comment;
-                            state.inline_comment_error = None;
-                            cx.notify();
-                        });
-                    }
-                }))
-                .child(line_action_button("Add waypoint", has_waypoint, {
-                    let state = state.clone();
-                    move |_, _, cx| {
-                        let default_name = {
-                            let app_state = state.read(cx);
-                            default_waymark_name(
-                                app_state.selected_file_path.as_deref(),
-                                None,
-                                app_state.selected_diff_anchor.as_ref(),
-                            )
-                        };
-                        state.update(cx, |state, cx| {
-                            state.add_waymark_for_current_review_location(default_name.clone());
-                            state.persist_active_review_session();
-                            cx.notify();
-                        });
-                    }
-                }))
-                .into_any_element(),
-            ReviewLineActionMode::Comment => div()
+            ReviewLineActionMode::Menu | ReviewLineActionMode::Comment => div()
                 .p(px(10.0))
                 .flex()
                 .flex_col()
                 .gap(px(10.0))
-                .child(
-                    div()
-                        .px(px(10.0))
-                        .py(px(9.0))
-                        .rounded(radius_sm())
-                        .border_1()
-                        .border_color(border_default())
-                        .bg(bg_surface())
-                        .text_color(if inline_comment_draft.is_empty() {
-                            fg_subtle()
-                        } else {
-                            fg_emphasis()
-                        })
-                        .child(
-                            AppTextInput::new(
-                                format!(
-                                    "inline-comment-{}",
-                                    target.map(|target| target.stable_key()).unwrap_or_default()
-                                ),
-                                state.clone(),
-                                AppTextFieldKind::InlineCommentDraft,
-                                "Comment on this line…",
-                            )
-                            .autofocus(true),
-                        ),
-                )
+                .child(render_markdown_editor(
+                    state,
+                    AppTextFieldKind::InlineCommentDraft,
+                    format!(
+                        "inline-comment-{}",
+                        target.map(|target| target.stable_key()).unwrap_or_default()
+                    ),
+                    "Comment on this line...",
+                    inline_comment_preview,
+                    104.0,
+                    cx,
+                ))
                 .child(
                     div()
                         .flex()
@@ -12556,21 +13743,38 @@ fn render_review_line_action_popup(
                                 .text_size(px(11.0))
                                 .font_family(mono_font_family())
                                 .text_color(fg_subtle())
-                                .child("cmd-enter submit • esc close"),
+                                .child("cmd-enter submit"),
                         )
                         .child(
                             div()
                                 .flex()
                                 .gap(px(6.0))
-                                .child(ghost_button("Back", {
+                                .when(!has_waypoint, |el| {
+                                    el.child(ghost_button("Add waypoint", {
+                                        let state = state.clone();
+                                        move |_, _, cx| {
+                                            let default_name = {
+                                                let app_state = state.read(cx);
+                                                default_waymark_name(
+                                                    app_state.selected_file_path.as_deref(),
+                                                    None,
+                                                    app_state.selected_diff_anchor.as_ref(),
+                                                )
+                                            };
+                                            state.update(cx, |state, cx| {
+                                                state.add_waymark_for_current_review_location(
+                                                    default_name.clone(),
+                                                );
+                                                state.persist_active_review_session();
+                                                cx.notify();
+                                            });
+                                        }
+                                    }))
+                                })
+                                .child(ghost_button("Cancel", {
                                     let state = state.clone();
                                     move |_, _, cx| {
-                                        state.update(cx, |state, cx| {
-                                            state.review_line_action_mode =
-                                                ReviewLineActionMode::Menu;
-                                            state.inline_comment_error = None;
-                                            cx.notify();
-                                        });
+                                        close_review_line_action(&state, cx);
                                     }
                                 }))
                                 .child(review_button(
@@ -12603,6 +13807,322 @@ fn render_review_line_action_popup(
                     .bg(lerp_rgba(bg_surface(), bg_overlay(), delta))
             },
         )
+}
+
+fn render_markdown_editor(
+    state: &Entity<AppState>,
+    field: AppTextFieldKind,
+    id_prefix: impl Into<String>,
+    placeholder: &'static str,
+    preview: bool,
+    min_height: f32,
+    cx: &App,
+) -> AnyElement {
+    let id_prefix = id_prefix.into();
+    let text = markdown_field_text(state.read(cx), field).to_string();
+    let suggestions = current_emoji_query(&text)
+        .map(|query| emoji_shortcode_suggestions(query, 8))
+        .unwrap_or_default();
+
+    div()
+        .w_full()
+        .min_w_0()
+        .rounded(radius())
+        .border_1()
+        .border_color(if preview { border_default() } else { accent() })
+        .bg(bg_surface())
+        .overflow_hidden()
+        .flex()
+        .flex_col()
+        .child(render_markdown_editor_tabs(state, field, preview))
+        .when(!preview, |el| {
+            el.child(render_markdown_toolbar(state, field))
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .min_h(px(min_height))
+                        .px(px(12.0))
+                        .py(px(10.0))
+                        .text_size(px(13.0))
+                        .line_height(px(20.0))
+                        .text_color(if text.is_empty() {
+                            fg_subtle()
+                        } else {
+                            fg_emphasis()
+                        })
+                        .child(
+                            AppTextInput::new(
+                                format!("{id_prefix}-input"),
+                                state.clone(),
+                                field,
+                                placeholder,
+                            )
+                            .autofocus(true),
+                        ),
+                )
+                .when(!suggestions.is_empty(), |el| {
+                    el.child(render_emoji_suggestions(state, field, suggestions))
+                })
+        })
+        .when(preview, |el| {
+            el.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .min_h(px(min_height))
+                    .px(px(12.0))
+                    .py(px(10.0))
+                    .bg(diff_editor_surface())
+                    .child(if text.trim().is_empty() {
+                        div()
+                            .text_size(px(13.0))
+                            .line_height(px(20.0))
+                            .text_color(fg_subtle())
+                            .child("Nothing to preview.")
+                            .into_any_element()
+                    } else {
+                        render_markdown(&format!("{id_prefix}-preview"), &text).into_any_element()
+                    }),
+            )
+        })
+        .into_any_element()
+}
+
+fn render_markdown_editor_tabs(
+    state: &Entity<AppState>,
+    field: AppTextFieldKind,
+    preview: bool,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .border_b(px(1.0))
+        .border_color(border_muted())
+        .bg(bg_overlay())
+        .child(markdown_editor_tab("Write", !preview, {
+            let state = state.clone();
+            move |_, _, cx| set_markdown_preview(&state, field, false, cx)
+        }))
+        .child(markdown_editor_tab("Preview", preview, {
+            let state = state.clone();
+            move |_, _, cx| set_markdown_preview(&state, field, true, cx)
+        }))
+}
+
+fn markdown_editor_tab(
+    label: &'static str,
+    active: bool,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .px(px(13.0))
+        .py(px(9.0))
+        .border_r(px(1.0))
+        .border_color(border_muted())
+        .bg(if active { bg_surface() } else { transparent() })
+        .text_size(px(12.0))
+        .font_weight(if active {
+            FontWeight::SEMIBOLD
+        } else {
+            FontWeight::MEDIUM
+        })
+        .text_color(if active { fg_emphasis() } else { fg_muted() })
+        .cursor_pointer()
+        .hover(|style| style.bg(hover_bg()))
+        .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+            cx.stop_propagation();
+            on_click(event, window, cx);
+        })
+        .child(label)
+}
+
+fn render_markdown_toolbar(state: &Entity<AppState>, field: AppTextFieldKind) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(2.0))
+        .px(px(8.0))
+        .py(px(6.0))
+        .border_b(px(1.0))
+        .border_color(border_muted())
+        .bg(bg_overlay())
+        .children([
+            markdown_toolbar_button(state, field, LucideIcon::Bold, "Bold", "**bold**"),
+            markdown_toolbar_button(state, field, LucideIcon::Italic, "Italic", "_italic_"),
+            markdown_toolbar_button(state, field, LucideIcon::Quote, "Quote", "\n> "),
+            markdown_toolbar_button(state, field, LucideIcon::Code, "Inline code", "`code`"),
+            markdown_toolbar_button(state, field, LucideIcon::Link, "Link", "[text](url)"),
+            markdown_toolbar_button(state, field, LucideIcon::List, "Bulleted list", "\n- "),
+            markdown_toolbar_button(
+                state,
+                field,
+                LucideIcon::ListOrdered,
+                "Numbered list",
+                "\n1. ",
+            ),
+            markdown_toolbar_button(state, field, LucideIcon::ListTodo, "Task list", "\n- [ ] "),
+            markdown_toolbar_button(
+                state,
+                field,
+                LucideIcon::MessageSquareDiff,
+                "Suggestion",
+                "\n```suggestion\n\n```",
+            ),
+            markdown_toolbar_button(state, field, LucideIcon::SmilePlus, "Emoji", ":"),
+        ])
+}
+
+fn markdown_toolbar_button(
+    state: &Entity<AppState>,
+    field: AppTextFieldKind,
+    icon: LucideIcon,
+    tooltip: &'static str,
+    snippet: &'static str,
+) -> AnyElement {
+    let state = state.clone();
+    div()
+        .id(tooltip)
+        .w(px(26.0))
+        .h(px(24.0))
+        .rounded(radius_sm())
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
+        .hover(|style| style.bg(hover_bg()))
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            cx.stop_propagation();
+            append_markdown_snippet(&state, field, snippet, cx);
+        })
+        .child(lucide_icon(icon, 14.0, fg_muted()))
+        .into_any_element()
+}
+
+fn render_emoji_suggestions(
+    state: &Entity<AppState>,
+    field: AppTextFieldKind,
+    suggestions: Vec<EmojiSuggestion>,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_wrap()
+        .gap(px(4.0))
+        .px(px(8.0))
+        .py(px(7.0))
+        .border_t(px(1.0))
+        .border_color(border_muted())
+        .bg(bg_overlay())
+        .children(suggestions.into_iter().map(|suggestion| {
+            let state = state.clone();
+            let shortcode = suggestion.shortcode.clone();
+            div()
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .px(px(7.0))
+                .py(px(4.0))
+                .rounded(radius_sm())
+                .bg(bg_surface())
+                .border_1()
+                .border_color(border_muted())
+                .text_size(px(12.0))
+                .text_color(fg_default())
+                .cursor_pointer()
+                .hover(|style| style.bg(hover_bg()))
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    cx.stop_propagation();
+                    replace_current_emoji_query(&state, field, &shortcode, cx);
+                })
+                .child(suggestion.glyph)
+                .child(format!(":{}:", suggestion.shortcode))
+        }))
+}
+
+fn set_markdown_preview(
+    state: &Entity<AppState>,
+    field: AppTextFieldKind,
+    preview: bool,
+    cx: &mut App,
+) {
+    state.update(cx, |state, cx| {
+        match field {
+            AppTextFieldKind::ReviewBody => state.review_editor_preview = preview,
+            AppTextFieldKind::InlineCommentDraft => state.inline_comment_preview = preview,
+            _ => {}
+        }
+        cx.notify();
+    });
+}
+
+fn append_markdown_snippet(
+    state: &Entity<AppState>,
+    field: AppTextFieldKind,
+    snippet: &str,
+    cx: &mut App,
+) {
+    state.update(cx, |state, cx| {
+        let current = markdown_field_text_mut(state, field);
+        if !current.is_empty() && !current.ends_with('\n') && snippet.starts_with('\n') {
+            current.push('\n');
+            current.push_str(snippet.trim_start_matches('\n'));
+        } else {
+            current.push_str(snippet);
+        }
+        cx.notify();
+    });
+}
+
+fn replace_current_emoji_query(
+    state: &Entity<AppState>,
+    field: AppTextFieldKind,
+    shortcode: &str,
+    cx: &mut App,
+) {
+    state.update(cx, |state, cx| {
+        let current = markdown_field_text_mut(state, field);
+        let Some(start) = current.rfind(':') else {
+            return;
+        };
+        if current[start + 1..].contains(':') {
+            return;
+        }
+        current.truncate(start);
+        current.push(':');
+        current.push_str(shortcode);
+        current.push_str(": ");
+        cx.notify();
+    });
+}
+
+fn markdown_field_text(state: &AppState, field: AppTextFieldKind) -> &str {
+    match field {
+        AppTextFieldKind::ReviewBody => state.review_body.as_str(),
+        AppTextFieldKind::InlineCommentDraft => state.inline_comment_draft.as_str(),
+        AppTextFieldKind::WaymarkDraft => state.waymark_draft.as_str(),
+        AppTextFieldKind::PaletteQuery => state.palette_query.as_str(),
+        AppTextFieldKind::WaypointSpotlightQuery => state.waypoint_spotlight_query.as_str(),
+    }
+}
+
+fn markdown_field_text_mut(state: &mut AppState, field: AppTextFieldKind) -> &mut String {
+    match field {
+        AppTextFieldKind::ReviewBody => &mut state.review_body,
+        AppTextFieldKind::InlineCommentDraft => &mut state.inline_comment_draft,
+        AppTextFieldKind::WaymarkDraft => &mut state.waymark_draft,
+        AppTextFieldKind::PaletteQuery => &mut state.palette_query,
+        AppTextFieldKind::WaypointSpotlightQuery => &mut state.waypoint_spotlight_query,
+    }
+}
+
+fn current_emoji_query(text: &str) -> Option<&str> {
+    let start = text.rfind(':')?;
+    let query = &text[start + 1..];
+    if query.is_empty() || query.contains(':') || query.chars().any(char::is_whitespace) {
+        return None;
+    }
+    Some(query)
 }
 
 fn line_action_button(
@@ -12669,6 +14189,7 @@ fn render_hunk(
     selected_anchor: Option<&DiffAnchor>,
     unread_comment_ids: &BTreeSet<String>,
     state: &Entity<AppState>,
+    cx: &App,
 ) -> impl IntoElement {
     div()
         .flex()
@@ -12688,6 +14209,7 @@ fn render_hunk(
                         selected_anchor,
                         unread_comment_ids,
                         state,
+                        cx,
                     )
                 })),
         )
@@ -12701,6 +14223,7 @@ fn render_diff_line_with_threads(
     selected_anchor: Option<&DiffAnchor>,
     unread_comment_ids: &BTreeSet<String>,
     state: &Entity<AppState>,
+    cx: &App,
 ) -> impl IntoElement {
     div()
         .flex()
@@ -12718,6 +14241,7 @@ fn render_diff_line_with_threads(
             false,
             false,
             false,
+            false,
         ))
         .when(!threads.is_empty(), |el| {
             el.child(
@@ -12732,7 +14256,14 @@ fn render_diff_line_with_threads(
                     .flex_col()
                     .gap(px(6.0))
                     .children(threads.iter().map(|thread| {
-                        render_review_thread(thread, selected_anchor, unread_comment_ids, state)
+                        render_review_thread(
+                            thread,
+                            selected_anchor,
+                            unread_comment_ids,
+                            state,
+                            cx,
+                            ReviewThreadUiState::default(),
+                        )
                     })),
             )
         })
@@ -12750,10 +14281,12 @@ fn render_diff_line(
     source_action: Option<(Entity<AppState>, TempSourceTarget)>,
     has_waypoint: bool,
     force_marker_visible: bool,
+    range_selected: bool,
     wrap_diff_lines: bool,
 ) -> impl IntoElement {
-    let is_selected = line_matches_diff_anchor(line, selected_anchor);
-    let row_action = line_action.clone();
+    let is_selected = line_matches_diff_anchor(line, selected_anchor) || range_selected;
+    let gutter_line_action = line_action.clone();
+    let has_gutter_line_action = gutter_line_action.is_some();
     let source_slot_action = source_action.clone();
     let hover_source_action = source_action.clone();
 
@@ -12832,12 +14365,6 @@ fn render_diff_line(
                 });
             })
         })
-        .when_some(row_action, |el, (state, target)| {
-            el.cursor_pointer()
-                .on_mouse_down(MouseButton::Left, move |event, _, cx| {
-                    open_review_line_action(&state, target.clone(), event.position, cx);
-                })
-        })
         .child(
             div()
                 .flex()
@@ -12909,7 +14436,76 @@ fn render_diff_line(
                             .flex()
                             .items_center()
                             .justify_center()
-                            .when(has_waypoint, |slot| {
+                            .when_some(gutter_line_action, |slot, (state, target)| {
+                                let move_state = state.clone();
+                                let move_target = target.clone();
+                                let up_state = state.clone();
+                                let up_target = target.clone();
+                                slot.child(
+                                    div()
+                                        .id((
+                                            ElementId::named_usize(
+                                                "diff-comment",
+                                                line.right_line_number
+                                                    .or(line.left_line_number)
+                                                    .unwrap_or_default()
+                                                    as usize,
+                                            ),
+                                            SharedString::from(file_path.to_string()),
+                                        ))
+                                        .w_full()
+                                        .h_full()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(diff_editor_surface()))
+                                        .tooltip(|_, cx| {
+                                            build_static_tooltip("click or drag to comment", cx)
+                                        })
+                                        .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+                                            cx.stop_propagation();
+                                            if event.modifiers.shift {
+                                                let target = review_line_action_target_with_range(
+                                                    &state,
+                                                    target.clone(),
+                                                    true,
+                                                    cx,
+                                                );
+                                                open_review_line_action(
+                                                    &state,
+                                                    target,
+                                                    event.position,
+                                                    cx,
+                                                );
+                                            } else {
+                                                begin_review_line_drag(&state, target.clone(), cx);
+                                            }
+                                        })
+                                        .on_mouse_move(move |_, _, cx| {
+                                            update_review_line_drag(
+                                                &move_state,
+                                                move_target.clone(),
+                                                cx,
+                                            );
+                                        })
+                                        .on_mouse_up(MouseButton::Left, move |event, _, cx| {
+                                            cx.stop_propagation();
+                                            finish_review_line_drag(
+                                                &up_state,
+                                                up_target.clone(),
+                                                event.position,
+                                                cx,
+                                            );
+                                        })
+                                        .child(if has_waypoint {
+                                            render_diff_waypoint_icon().into_any_element()
+                                        } else {
+                                            div().into_any_element()
+                                        }),
+                                )
+                            })
+                            .when(!has_gutter_line_action && has_waypoint, |slot| {
                                 slot.child(
                                     div()
                                         .id((
@@ -13323,75 +14919,10 @@ const MAX_INLINE_DIFF_LINE_CHARS: usize = 512;
 const MAX_INLINE_DIFF_TOKEN_CHARS: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum InlineTokenKind {
-    Whitespace,
-    Word,
-    Punctuation,
-}
-
-#[derive(Clone, Debug)]
-struct InlineToken {
-    text: String,
-    column_start: usize,
-    column_end: usize,
-    kind: InlineTokenKind,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InlineDiffOp {
     Equal(usize, usize),
     Delete(usize),
     Add(usize),
-}
-
-fn classify_inline_diff_char(ch: char) -> InlineTokenKind {
-    if ch.is_whitespace() {
-        InlineTokenKind::Whitespace
-    } else if ch == '_' || ch.is_alphanumeric() {
-        InlineTokenKind::Word
-    } else {
-        InlineTokenKind::Punctuation
-    }
-}
-
-fn tokenize_inline_diff_line(content: &str) -> Vec<InlineToken> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    let mut current_kind = None;
-    let mut token_start = 1usize;
-    let mut next_column = 1usize;
-
-    for ch in content.chars() {
-        let kind = classify_inline_diff_char(ch);
-        if current_kind != Some(kind) && !current.is_empty() {
-            tokens.push(InlineToken {
-                text: std::mem::take(&mut current),
-                column_start: token_start,
-                column_end: next_column,
-                kind: current_kind.expect("non-empty token should have a kind"),
-            });
-            token_start = next_column;
-        }
-
-        if current.is_empty() {
-            token_start = next_column;
-        }
-
-        current_kind = Some(kind);
-        current.push(ch);
-        next_column += 1;
-    }
-
-    if !current.is_empty() {
-        tokens.push(InlineToken {
-            text: current,
-            column_start: token_start,
-            column_end: next_column,
-            kind: current_kind.expect("non-empty token should have a kind"),
-        });
-    }
-
-    tokens
 }
 
 fn diff_sequence_by<T, F>(left: &[T], right: &[T], eq: F) -> Vec<InlineDiffOp>
@@ -13434,13 +14965,6 @@ where
     ops
 }
 
-fn token_range(token: &InlineToken) -> DiffInlineRange {
-    DiffInlineRange {
-        column_start: token.column_start,
-        column_end: token.column_end,
-    }
-}
-
 fn diff_single_token_chars(
     left: &InlineToken,
     right: &InlineToken,
@@ -13449,7 +14973,10 @@ fn diff_single_token_chars(
         || left.text.chars().count() > MAX_INLINE_DIFF_TOKEN_CHARS
         || right.text.chars().count() > MAX_INLINE_DIFF_TOKEN_CHARS
     {
-        return (vec![token_range(left)], vec![token_range(right)]);
+        return (
+            vec![inline_token_range(left)],
+            vec![inline_token_range(right)],
+        );
     }
 
     let left_chars = left.text.chars().collect::<Vec<_>>();
@@ -13474,12 +15001,15 @@ fn diff_single_token_chars(
     }
 
     if left_ranges.is_empty() || right_ranges.is_empty() {
-        return (vec![token_range(left)], vec![token_range(right)]);
+        return (
+            vec![inline_token_range(left)],
+            vec![inline_token_range(right)],
+        );
     }
 
     (
-        merge_inline_ranges(left_ranges),
-        merge_inline_ranges(right_ranges),
+        vec![inline_token_range(left)],
+        vec![inline_token_range(right)],
     )
 }
 
@@ -13513,28 +15043,8 @@ fn apply_inline_diff_group(
         return;
     }
 
-    left_ranges.extend(deleted.into_iter().map(token_range));
-    right_ranges.extend(added.into_iter().map(token_range));
-}
-
-fn merge_inline_ranges(mut ranges: Vec<DiffInlineRange>) -> Vec<DiffInlineRange> {
-    if ranges.len() <= 1 {
-        return ranges;
-    }
-
-    ranges.sort_by_key(|range| (range.column_start, range.column_end));
-    let mut merged: Vec<DiffInlineRange> = Vec::with_capacity(ranges.len());
-
-    for range in ranges {
-        match merged.last_mut() {
-            Some(previous) if previous.column_end >= range.column_start => {
-                previous.column_end = previous.column_end.max(range.column_end);
-            }
-            _ => merged.push(range),
-        }
-    }
-
-    merged
+    left_ranges.extend(deleted.into_iter().map(inline_token_range));
+    right_ranges.extend(added.into_iter().map(inline_token_range));
 }
 
 fn compute_inline_emphasis(
@@ -13634,7 +15144,8 @@ fn build_hunk_inline_emphasis(hunk: &ParsedDiffHunk) -> Vec<Vec<DiffInlineRange>
 
     emphasis
         .into_iter()
-        .map(merge_inline_ranges)
+        .zip(hunk.lines.iter())
+        .map(|(ranges, line)| normalize_inline_emphasis_ranges(line.content.as_str(), &ranges))
         .collect::<Vec<_>>()
 }
 
@@ -13743,11 +15254,34 @@ fn build_diff_highlights(parsed_file: &ParsedDiffFile) -> Arc<Vec<Vec<DiffLineHi
     )
 }
 
+#[derive(Clone, Default)]
+struct ReviewThreadUiState {
+    active_reply_id: Option<String>,
+    editing_comment_id: Option<String>,
+    thread_loading_id: Option<String>,
+    comment_loading_id: Option<String>,
+    action_error: Option<String>,
+    inline_preview: bool,
+}
+
+fn review_thread_ui_state(state: &AppState) -> ReviewThreadUiState {
+    ReviewThreadUiState {
+        active_reply_id: state.active_review_thread_reply_id.clone(),
+        editing_comment_id: state.editing_review_comment_id.clone(),
+        thread_loading_id: state.review_thread_action_loading_id.clone(),
+        comment_loading_id: state.review_comment_action_loading_id.clone(),
+        action_error: state.review_thread_action_error.clone(),
+        inline_preview: state.inline_comment_preview,
+    }
+}
+
 fn render_review_thread(
     thread: &PullRequestReviewThread,
     selected_anchor: Option<&DiffAnchor>,
     unread_comment_ids: &BTreeSet<String>,
     state: &Entity<AppState>,
+    cx: &App,
+    ui: ReviewThreadUiState,
 ) -> impl IntoElement {
     let is_selected = thread_matches_diff_anchor(thread, selected_anchor);
     let thread_unread_comment_ids = thread
@@ -13758,6 +15292,14 @@ fn render_review_thread(
         .collect::<Vec<_>>();
     let unread_count = thread_unread_comment_ids.len();
     let state_for_mark_read = state.clone();
+    let thread_id = thread.id.clone();
+    let reply_open = ui.active_reply_id.as_deref() == Some(thread.id.as_str());
+    let thread_loading = ui.thread_loading_id.as_deref() == Some(thread.id.as_str());
+    let can_resolve = if thread.is_resolved {
+        thread.viewer_can_unresolve
+    } else {
+        thread.viewer_can_resolve
+    };
     let thread_border = transparent();
     let header_bg = if is_selected {
         diff_line_hover_bg()
@@ -13821,17 +15363,135 @@ fn render_review_thread(
                                         cx.notify();
                                     });
                                 }))
-                        }),
+                        })
+                        .when(thread.viewer_can_reply && !reply_open, |el| {
+                            let state = state.clone();
+                            let thread_id = thread_id.clone();
+                            el.child(ghost_button("Reply", move |_, _, cx| {
+                                state.update(cx, |state, cx| {
+                                    state.active_review_thread_reply_id = Some(thread_id.clone());
+                                    state.editing_review_comment_id = None;
+                                    state.inline_comment_draft.clear();
+                                    state.inline_comment_preview = false;
+                                    state.review_thread_action_error = None;
+                                    cx.notify();
+                                });
+                            }))
+                        })
+                        .when(can_resolve, |el| {
+                            let state = state.clone();
+                            let thread_id = thread_id.clone();
+                            let next_resolved = !thread.is_resolved;
+                            el.child(ghost_button(
+                                if thread.is_resolved {
+                                    "Unresolve"
+                                } else {
+                                    "Resolve"
+                                },
+                                move |_, window, cx| {
+                                    trigger_set_review_thread_resolution(
+                                        &state,
+                                        thread_id.clone(),
+                                        next_resolved,
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            ))
+                        })
+                        .when(thread_loading, |el| el.child(badge("syncing"))),
                 ),
         )
-        .child(div().p(px(12.0)).flex().flex_col().gap(px(8.0)).children(
-            thread.comments.iter().map(|comment| {
-                render_thread_comment(comment, unread_comment_ids.contains(&comment.id))
-            }),
-        ))
+        .child(
+            div()
+                .p(px(12.0))
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .children(thread.comments.iter().map(|comment| {
+                    render_thread_comment(
+                        comment,
+                        unread_comment_ids.contains(&comment.id),
+                        state,
+                        ui.clone(),
+                        cx,
+                    )
+                }))
+                .when(reply_open, |el| {
+                    let state_for_cancel = state.clone();
+                    let state_for_submit = state.clone();
+                    let thread_id_for_submit = thread_id.clone();
+                    el.child(
+                        div()
+                            .rounded(radius_sm())
+                            .border_1()
+                            .border_color(border_default())
+                            .bg(diff_editor_surface())
+                            .p(px(10.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.0))
+                            .child(render_markdown_editor(
+                                state,
+                                AppTextFieldKind::InlineCommentDraft,
+                                format!("thread-reply-{thread_id}"),
+                                "Reply to this thread...",
+                                ui.inline_preview,
+                                82.0,
+                                cx,
+                            ))
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_end()
+                                    .gap(px(6.0))
+                                    .child(ghost_button("Cancel", move |_, _, cx| {
+                                        state_for_cancel.update(cx, |state, cx| {
+                                            state.active_review_thread_reply_id = None;
+                                            state.inline_comment_draft.clear();
+                                            state.inline_comment_preview = false;
+                                            state.review_thread_action_error = None;
+                                            cx.notify();
+                                        });
+                                    }))
+                                    .child(review_button(
+                                        if thread_loading {
+                                            "Replying..."
+                                        } else {
+                                            "Reply"
+                                        },
+                                        move |_, window, cx| {
+                                            trigger_submit_thread_reply(
+                                                &state_for_submit,
+                                                thread_id_for_submit.clone(),
+                                                window,
+                                                cx,
+                                            );
+                                        },
+                                    )),
+                            ),
+                    )
+                })
+                .when_some(ui.action_error.clone(), |el, error| {
+                    el.child(error_text(&error))
+                }),
+        )
 }
 
-fn render_thread_comment(comment: &PullRequestReviewComment, is_unread: bool) -> impl IntoElement {
+fn render_thread_comment(
+    comment: &PullRequestReviewComment,
+    is_unread: bool,
+    state: &Entity<AppState>,
+    ui: ReviewThreadUiState,
+    cx: &App,
+) -> impl IntoElement {
+    let is_pending = comment.state == "PENDING";
+    let is_editing = ui.editing_comment_id.as_deref() == Some(comment.id.as_str());
+    let comment_loading = ui.comment_loading_id.as_deref() == Some(comment.id.as_str());
+    let can_update = is_pending && comment.viewer_can_update;
+    let can_delete = is_pending && comment.viewer_can_delete;
+    let comment_id = comment.id.clone();
+
     div()
         .p(px(12.0))
         .rounded(radius_sm())
@@ -13868,17 +15528,90 @@ fn render_thread_comment(comment: &PullRequestReviewComment, is_unread: bool) ->
                         .child(comment.author_login.clone()),
                 )
                 .child(
-                    div().text_color(fg_subtle()).child(
+                    div().text_color(fg_subtle()).child(format_relative_time(
                         comment
                             .published_at
                             .as_deref()
-                            .unwrap_or(&comment.created_at)
-                            .to_string(),
-                    ),
+                            .unwrap_or(&comment.created_at),
+                    )),
                 )
-                .when(is_unread, |el| el.child(badge("new"))),
+                .when(is_unread, |el| el.child(badge("new")))
+                .when(is_pending, |el| el.child(badge("pending")))
+                .when(can_update && !is_editing, |el| {
+                    let state = state.clone();
+                    let comment_id = comment_id.clone();
+                    let body = comment.body.clone();
+                    el.child(ghost_button("Edit", move |_, _, cx| {
+                        state.update(cx, |state, cx| {
+                            state.editing_review_comment_id = Some(comment_id.clone());
+                            state.active_review_thread_reply_id = None;
+                            state.inline_comment_draft = body.clone();
+                            state.inline_comment_preview = false;
+                            state.review_thread_action_error = None;
+                            cx.notify();
+                        });
+                    }))
+                })
+                .when(can_delete, |el| {
+                    let state = state.clone();
+                    let comment_id = comment_id.clone();
+                    el.child(ghost_button(
+                        if comment_loading {
+                            "Deleting..."
+                        } else {
+                            "Delete"
+                        },
+                        move |_, window, cx| {
+                            trigger_delete_pending_comment(&state, comment_id.clone(), window, cx);
+                        },
+                    ))
+                }),
         )
-        .child(if comment.body.is_empty() {
+        .child(if is_editing {
+            let state_for_cancel = state.clone();
+            let state_for_save = state.clone();
+            let comment_id_for_save = comment_id.clone();
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(render_markdown_editor(
+                    state,
+                    AppTextFieldKind::InlineCommentDraft,
+                    format!("comment-edit-{comment_id}"),
+                    "Edit pending comment...",
+                    ui.inline_preview,
+                    82.0,
+                    cx,
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap(px(6.0))
+                        .child(ghost_button("Cancel", move |_, _, cx| {
+                            state_for_cancel.update(cx, |state, cx| {
+                                state.editing_review_comment_id = None;
+                                state.inline_comment_draft.clear();
+                                state.inline_comment_preview = false;
+                                state.review_thread_action_error = None;
+                                cx.notify();
+                            });
+                        }))
+                        .child(review_button(
+                            if comment_loading { "Saving..." } else { "Save" },
+                            move |_, window, cx| {
+                                trigger_update_pending_comment(
+                                    &state_for_save,
+                                    comment_id_for_save.clone(),
+                                    window,
+                                    cx,
+                                );
+                            },
+                        )),
+                )
+                .into_any_element()
+        } else if comment.body.is_empty() {
             div()
                 .text_size(px(13.0))
                 .text_color(fg_muted())
@@ -14215,6 +15948,7 @@ fn render_full_tour_diff_preview(
                     None,
                     false,
                     false,
+                    false,
                     wrap_diff_lines,
                 )
                 .into_any_element(),
@@ -14480,15 +16214,38 @@ fn label_for_change_type(change_type: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use crate::diff::parse_unified_diff;
-    use crate::state::{ReviewFileTreeRow, StructuralDiffFileState};
+    use crate::state::{DiffInlineRange, ReviewFileTreeRow, StructuralDiffFileState};
     use gpui::{px, ListAlignment, ListOffset, ListState};
 
     use super::{
-        build_file_tree_rows, build_normal_side_by_side_diff_file,
+        build_file_tree_rows, build_normal_side_by_side_diff_file, compute_inline_emphasis,
         should_apply_structural_diff_update, should_reuse_structural_diff_state,
         structural_diff_state_terminal_status, DiffFileCollapseScrollAdjustment,
         ReviewFileTreeEntry, StructuralDiffTerminalStatus,
     };
+
+    fn inline_range(column_start: usize, column_end: usize) -> DiffInlineRange {
+        DiffInlineRange {
+            column_start,
+            column_end,
+        }
+    }
+
+    #[test]
+    fn inline_emphasis_expands_single_token_character_diffs_to_words() {
+        let (left, right) = compute_inline_emphasis("fooBar", "fooBaz");
+
+        assert_eq!(left, vec![inline_range(1, 7)]);
+        assert_eq!(right, vec![inline_range(1, 7)]);
+    }
+
+    #[test]
+    fn inline_emphasis_suppresses_whitespace_only_changes() {
+        let (left, right) = compute_inline_emphasis("foo(bar)", "foo( bar )");
+
+        assert!(left.is_empty());
+        assert!(right.is_empty());
+    }
 
     #[test]
     fn selected_structural_load_reuses_warmup_loading_state() {

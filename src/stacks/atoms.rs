@@ -714,6 +714,7 @@ diff --git a/src/service.rs b/src/service.rs
             comments: Vec::new(),
             latest_reviews: Vec::new(),
             review_threads: Vec::new(),
+            viewer_pending_review: None,
             files: vec![
                 PullRequestFile {
                     path: "src/model.rs".to_string(),

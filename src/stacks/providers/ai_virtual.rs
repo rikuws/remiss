@@ -1624,6 +1624,7 @@ mod tests {
             comments: Vec::new(),
             latest_reviews: Vec::new(),
             review_threads: Vec::new(),
+            viewer_pending_review: None,
             files: vec![PullRequestFile {
                 path: "src/atom_1.rs".to_string(),
                 additions: 120,

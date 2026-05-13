@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk, ParsedDiffLine},
+    inline_diff::normalize_inline_emphasis_ranges,
     state::{DiffInlineRange, DiffLineHighlight},
     syntax,
 };
@@ -118,12 +119,21 @@ pub fn build_adapted_diff_highlights(
                 hunk.lines
                     .iter()
                     .enumerate()
-                    .map(|(line_ix, _)| DiffLineHighlight {
-                        syntax_spans: syntax_lines.get(line_ix).cloned().unwrap_or_default(),
-                        emphasis_ranges: hunk_emphasis
+                    .map(|(line_ix, line)| {
+                        let emphasis_ranges = hunk_emphasis
                             .and_then(|lines| lines.get(line_ix))
-                            .cloned()
-                            .unwrap_or_default(),
+                            .map(|ranges| {
+                                normalize_inline_emphasis_ranges(
+                                    line.content.as_str(),
+                                    ranges.as_slice(),
+                                )
+                            })
+                            .unwrap_or_default();
+
+                        DiffLineHighlight {
+                            syntax_spans: syntax_lines.get(line_ix).cloned().unwrap_or_default(),
+                            emphasis_ranges,
+                        }
                     })
                     .collect::<Vec<_>>()
             })
@@ -671,6 +681,13 @@ impl AdaptRow {
 mod tests {
     use super::*;
 
+    fn inline_range(column_start: usize, column_end: usize) -> DiffInlineRange {
+        DiffInlineRange {
+            column_start,
+            column_end,
+        }
+    }
+
     fn changed_diff() -> DifftasticDiff {
         DifftasticDiff {
             aligned_lines: vec![(Some(0), Some(0)), (Some(1), Some(1))],
@@ -742,6 +759,44 @@ mod tests {
             previous_path: None,
             status: LibraryDifftasticStatus::Changed,
         }
+    }
+
+    #[test]
+    fn adapted_display_highlights_normalize_existing_ranges_to_tokens() {
+        let adapted = AdaptedDifftasticDiffFile {
+            parsed_file: ParsedDiffFile {
+                path: "src/lib.rs".to_string(),
+                previous_path: None,
+                is_binary: false,
+                hunks: vec![ParsedDiffHunk {
+                    header: "@@ -1,1 +1,1 @@ structural".to_string(),
+                    lines: vec![
+                        ParsedDiffLine {
+                            kind: DiffLineKind::Deletion,
+                            prefix: "-".to_string(),
+                            left_line_number: Some(1),
+                            right_line_number: None,
+                            content: "let fooBar = 1;".to_string(),
+                        },
+                        ParsedDiffLine {
+                            kind: DiffLineKind::Addition,
+                            prefix: "+".to_string(),
+                            left_line_number: None,
+                            right_line_number: Some(1),
+                            content: "let fooBaz = 1;".to_string(),
+                        },
+                    ],
+                }],
+            },
+            emphasis_hunks: vec![vec![vec![inline_range(8, 9)], vec![inline_range(10, 11)]]],
+            side_by_side_hunks: Vec::new(),
+            side_by_side_line_map: Vec::new(),
+        };
+
+        let highlights = build_adapted_diff_highlights(&adapted);
+
+        assert_eq!(highlights[0][0].emphasis_ranges, vec![inline_range(5, 11)]);
+        assert_eq!(highlights[0][1].emphasis_ranges, vec![inline_range(5, 11)]);
     }
 
     #[test]

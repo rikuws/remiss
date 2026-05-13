@@ -523,16 +523,19 @@ pub enum ReviewLineActionMode {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReviewLineActionTarget {
     pub anchor: DiffAnchor,
+    pub start_line: Option<i64>,
+    pub start_side: Option<String>,
     pub label: String,
 }
 
 impl ReviewLineActionTarget {
     pub fn stable_key(&self) -> String {
         format!(
-            "{}:{}:{}",
+            "{}:{}:{}:{}",
             self.anchor.file_path,
             self.anchor.side.as_deref().unwrap_or(""),
-            self.anchor.line.unwrap_or_default()
+            self.anchor.line.unwrap_or_default(),
+            self.start_line.unwrap_or_default()
         )
     }
 
@@ -565,7 +568,7 @@ impl DiffFileViewState {
             revision,
             parsed_file_index,
             highlighted_hunks,
-            list_state: ListState::new(0, ListAlignment::Top, px(400.0)),
+            list_state: ListState::new(0, ListAlignment::Top, px(400.0)).measure_all(),
             side_by_side_left_scroll: ScrollHandle::new(),
             side_by_side_right_scroll: ScrollHandle::new(),
             last_focus_key: Rc::new(RefCell::new(None)),
@@ -599,7 +602,7 @@ pub struct CombinedDiffViewState {
 impl CombinedDiffViewState {
     pub fn new() -> Self {
         Self {
-            list_state: ListState::new(0, ListAlignment::Top, px(400.0)),
+            list_state: ListState::new(0, ListAlignment::Top, px(400.0)).measure_all(),
             side_by_side_left_scroll: ScrollHandle::new(),
             side_by_side_right_scroll: ScrollHandle::new(),
             last_focus_key: Rc::new(RefCell::new(None)),
@@ -961,6 +964,8 @@ pub struct AppState {
     pub review_action: ReviewAction,
     pub review_body: String,
     pub review_editor_active: bool,
+    pub review_editor_preview: bool,
+    pub review_finish_modal_open: bool,
     pub review_loading: bool,
     pub review_message: Option<String>,
     pub review_success: bool,
@@ -968,9 +973,17 @@ pub struct AppState {
     pub active_review_line_action: Option<ReviewLineActionTarget>,
     pub active_review_line_action_position: Option<Point<Pixels>>,
     pub review_line_action_mode: ReviewLineActionMode,
+    pub active_review_line_drag_origin: Option<ReviewLineActionTarget>,
+    pub active_review_line_drag_current: Option<ReviewLineActionTarget>,
     pub inline_comment_draft: String,
+    pub inline_comment_preview: bool,
     pub inline_comment_loading: bool,
     pub inline_comment_error: Option<String>,
+    pub active_review_thread_reply_id: Option<String>,
+    pub editing_review_comment_id: Option<String>,
+    pub review_thread_action_loading_id: Option<String>,
+    pub review_comment_action_loading_id: Option<String>,
+    pub review_thread_action_error: Option<String>,
     pub pr_header_compact: bool,
 
     // Command palette
@@ -1078,6 +1091,8 @@ impl AppState {
             review_action: ReviewAction::Comment,
             review_body: String::new(),
             review_editor_active: false,
+            review_editor_preview: false,
+            review_finish_modal_open: false,
             review_loading: false,
             review_message: None,
             review_success: false,
@@ -1085,9 +1100,17 @@ impl AppState {
             active_review_line_action: None,
             active_review_line_action_position: None,
             review_line_action_mode: ReviewLineActionMode::Menu,
+            active_review_line_drag_origin: None,
+            active_review_line_drag_current: None,
             inline_comment_draft: String::new(),
+            inline_comment_preview: false,
             inline_comment_loading: false,
             inline_comment_error: None,
+            active_review_thread_reply_id: None,
+            editing_review_comment_id: None,
+            review_thread_action_loading_id: None,
+            review_comment_action_loading_id: None,
+            review_thread_action_error: None,
             pr_header_compact: false,
             palette_open: false,
             palette_closing: false,
@@ -1425,6 +1448,8 @@ impl AppState {
                 side: Some(side.to_string()),
                 thread_id: None,
             },
+            start_line: None,
+            start_side: None,
             label: location_label(&file_path, Some(line_number)),
         })
     }
@@ -2235,6 +2260,7 @@ mod tests {
             comments: Vec::<PullRequestComment>::new(),
             latest_reviews: Vec::<PullRequestReview>::new(),
             review_threads,
+            viewer_pending_review: None,
             files: vec![file("src/a.rs"), file("src/b.rs")],
             raw_diff: String::new(),
             parsed_diff: vec![parsed_file("src/a.rs", 1, 5), parsed_file("src/b.rs", 1, 6)],
@@ -2316,6 +2342,8 @@ mod tests {
             updated_at: "2026-05-13T00:00:00Z".to_string(),
             published_at: Some("2026-05-13T00:00:00Z".to_string()),
             reply_to_id: None,
+            viewer_can_update: false,
+            viewer_can_delete: false,
             url: "https://example.com/comment".to_string(),
         }
     }

@@ -835,11 +835,7 @@ fn render_review_brief_panel(
         || (!provider_loading && provider_error.is_some());
     let state_for_generate = state.clone();
     let state_for_settings = state.clone();
-    let action_label = if brief_state.document.is_some() {
-        "Regenerate"
-    } else {
-        "Generate"
-    };
+    let has_brief = brief_state.document.is_some();
 
     let header = div()
         .flex()
@@ -870,24 +866,27 @@ fn render_review_brief_panel(
                 .justify_end()
                 .gap(px(6.0))
                 .flex_wrap()
-                .child(badge(provider.label()))
-                .when_some(brief_state.document.as_ref(), |el, brief| {
-                    el.child(badge(brief.confidence.label()))
-                })
                 .when(provider_loading, |el| el.child(badge("Checking provider")))
                 .when(local_repository_loading, |el| {
                     el.child(badge("Preparing checkout"))
                 })
                 .when(!busy && !provider_needs_setup, |el| {
-                    el.child(ghost_button(action_label, move |_, window, cx| {
-                        review_intelligence::trigger_review_intelligence(
-                            &state_for_generate,
-                            window,
-                            cx,
-                            ReviewIntelligenceScope::BriefOnly,
-                            true,
-                        );
-                    }))
+                    let trigger_generate =
+                        move |_: &MouseDownEvent, window: &mut Window, cx: &mut App| {
+                            review_intelligence::trigger_review_intelligence(
+                                &state_for_generate,
+                                window,
+                                cx,
+                                ReviewIntelligenceScope::BriefOnly,
+                                true,
+                            );
+                        };
+
+                    if has_brief {
+                        el.child(review_brief_icon_button(trigger_generate))
+                    } else {
+                        el.child(ghost_button("Generate", trigger_generate))
+                    }
                 }),
         );
 
@@ -926,6 +925,51 @@ fn render_review_brief_panel(
     };
 
     nested_panel().child(header).child(body).into_any_element()
+}
+
+fn review_brief_icon_button(
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id("regenerate-review-brief")
+        .w(px(24.0))
+        .h(px(24.0))
+        .rounded(radius_sm())
+        .bg(transparent())
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .tooltip(|_, cx| build_review_brief_tooltip("Regenerate pre-diff briefing", cx))
+        .hover(|style| style.bg(bg_selected()))
+        .on_mouse_down(MouseButton::Left, on_click)
+        .child(lucide_icon(LucideIcon::RefreshCw, 13.0, fg_subtle()))
+}
+
+fn build_review_brief_tooltip(text: &'static str, cx: &mut App) -> AnyView {
+    AnyView::from(cx.new(|_| ReviewBriefTooltip {
+        text: SharedString::from(text),
+    }))
+}
+
+struct ReviewBriefTooltip {
+    text: SharedString,
+}
+
+impl Render for ReviewBriefTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded(radius_sm())
+            .border_1()
+            .border_color(border_muted())
+            .bg(bg_overlay())
+            .text_size(px(11.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(fg_emphasis())
+            .child(self.text.clone())
+    }
 }
 
 fn render_review_brief_document(brief: &ReviewBrief) -> impl IntoElement {
@@ -990,6 +1034,7 @@ fn render_review_brief_text_block(
                 .flex()
                 .items_start()
                 .gap(px(8.0))
+                .w_full()
                 .min_w_0()
                 .child(
                     div()
@@ -1001,7 +1046,10 @@ fn render_review_brief_text_block(
                 )
                 .child(
                     div()
+                        .flex_1()
+                        .w_full()
                         .min_w_0()
+                        .whitespace_normal()
                         .text_size(if emphasized { px(14.0) } else { px(13.0) })
                         .line_height(px(20.0))
                         .font_weight(if emphasized {
@@ -1990,11 +2038,30 @@ pub fn trigger_submit_review(state: &Entity<AppState>, window: &mut Window, cx: 
         return;
     }
 
-    let Some((repository, number)) = state
-        .read(cx)
-        .active_pr()
-        .map(|pr| (pr.repository.clone(), pr.number))
-    else {
+    let Some((repository, number, pull_request_id, pending_review_id, has_pending_drafts)) = ({
+        let s = state.read(cx);
+        s.active_detail().map(|detail| {
+            (
+                detail.repository.clone(),
+                detail.number,
+                detail.id.clone(),
+                detail
+                    .viewer_pending_review
+                    .as_ref()
+                    .map(|review| review.id.clone()),
+                detail
+                    .viewer_pending_review
+                    .as_ref()
+                    .map(|review| !review.comments.is_empty())
+                    .unwrap_or(false)
+                    || detail
+                        .review_threads
+                        .iter()
+                        .flat_map(|thread| thread.comments.iter())
+                        .any(|comment| comment.state == "PENDING"),
+            )
+        })
+    }) else {
         return;
     };
 
@@ -2012,7 +2079,7 @@ pub fn trigger_submit_review(state: &Entity<AppState>, window: &mut Window, cx: 
         return;
     }
 
-    if action == ReviewAction::Comment && body.trim().is_empty() {
+    if !has_pending_drafts && action == ReviewAction::Comment && body.trim().is_empty() {
         state.update(cx, |s, cx| {
             s.review_message = Some("Enter a review note before submitting a comment.".to_string());
             s.review_success = false;
@@ -2036,9 +2103,9 @@ pub fn trigger_submit_review(state: &Entity<AppState>, window: &mut Window, cx: 
             let submit_result = cx
                 .background_executor()
                 .spawn(async move {
-                    github::submit_pull_request_review(
-                        &repository,
-                        number,
+                    github::submit_graphql_pull_request_review(
+                        &pull_request_id,
+                        pending_review_id.as_deref(),
                         action,
                         &body_for_submit,
                     )
@@ -2069,6 +2136,7 @@ pub fn trigger_submit_review(state: &Entity<AppState>, window: &mut Window, cx: 
                                 ds.snapshot.as_mut().and_then(|sn| sn.detail.as_mut())
                             {
                                 apply_submitted_review_to_detail(detail, login, action, &body);
+                                detail.viewer_pending_review = None;
                                 updated_detail = Some(detail.clone());
                             }
                         }
@@ -2110,6 +2178,7 @@ pub fn trigger_submit_review(state: &Entity<AppState>, window: &mut Window, cx: 
                             if let Some(login) = reviewer_login.as_deref() {
                                 if let Some(detail) = snapshot.detail.as_mut() {
                                     apply_submitted_review_to_detail(detail, login, action, &body);
+                                    detail.viewer_pending_review = None;
                                 }
                             }
                             updated_detail = snapshot.detail.clone();
@@ -2163,6 +2232,7 @@ fn apply_submitted_review_to_detail(
             .latest_reviews
             .retain(|review| review.author_login != reviewer_login);
         detail.latest_reviews.push(PullRequestReview {
+            id: None,
             author_login: reviewer_login.to_string(),
             author_avatar_url: None,
             state: review_state.to_string(),
@@ -3613,6 +3683,7 @@ mod tests {
 
     fn review(author_login: &str, state: &str, submitted_at: Option<&str>) -> PullRequestReview {
         PullRequestReview {
+            id: None,
             author_login: author_login.to_string(),
             author_avatar_url: None,
             state: state.to_string(),
@@ -3649,6 +3720,8 @@ mod tests {
             updated_at: timestamp.to_string(),
             published_at: Some(timestamp.to_string()),
             reply_to_id: None,
+            viewer_can_update: false,
+            viewer_can_delete: false,
             url: "https://example.com/comment".to_string(),
         }
     }
@@ -3744,6 +3817,7 @@ mod tests {
             comments,
             latest_reviews,
             review_threads,
+            viewer_pending_review: None,
             files: vec![PullRequestFile {
                 path: "src/main.rs".to_string(),
                 additions: 12,
