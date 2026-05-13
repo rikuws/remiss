@@ -8,6 +8,7 @@
     clippy::filter_map_bool_then,
     clippy::items_after_test_module,
     clippy::large_enum_variant,
+    clippy::len_zero,
     clippy::manual_div_ceil,
     clippy::manual_is_multiple_of,
     clippy::map_identity,
