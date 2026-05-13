@@ -6,14 +6,14 @@ use std::time::Instant;
 
 use crate::cache::CacheStore;
 use crate::code_tour::{
-    self, build_tour_request_key, CodeTourProvider, CodeTourProviderStatus, CodeTourSettings,
-    DiffAnchor, GeneratedCodeTour,
+    self, build_tour_request_key, review_thread_anchor, CodeTourProvider, CodeTourProviderStatus,
+    CodeTourSettings, DiffAnchor, GeneratedCodeTour,
 };
-use crate::diff::{find_parsed_diff_file, DiffRenderRow, ParsedDiffFile};
+use crate::diff::{build_diff_render_rows, find_parsed_diff_file, DiffRenderRow, ParsedDiffFile};
 use crate::difftastic::AdaptedDifftasticDiffFile;
 use crate::github::{
-    PullRequestDetail, PullRequestDetailSnapshot, PullRequestQueue, PullRequestSummary,
-    RepositoryFileContent, ReviewAction, WorkspaceSnapshot,
+    PullRequestDetail, PullRequestDetailSnapshot, PullRequestQueue, PullRequestReviewThread,
+    PullRequestSummary, RepositoryFileContent, ReviewAction, WorkspaceSnapshot,
 };
 use crate::local_repo::LocalRepositoryStatus;
 use crate::local_review::{self, RememberedLocalRepository};
@@ -586,6 +586,14 @@ struct ReviewModeFocus {
     anchor: Option<DiffAnchor>,
 }
 
+#[derive(Clone)]
+struct ReviewCommentNavigationItem {
+    thread_index: usize,
+    file_index: usize,
+    row_index: usize,
+    location: ReviewLocation,
+}
+
 fn diff_anchor_for_line(
     parsed: &ParsedDiffFile,
     line_number: i64,
@@ -616,6 +624,211 @@ fn diff_anchor_for_line(
     }
 
     None
+}
+
+fn review_comment_navigation_items(
+    detail: &PullRequestDetail,
+    mode: ReviewCenterMode,
+) -> Vec<ReviewCommentNavigationItem> {
+    let mut seen_threads = HashSet::<usize>::new();
+    let mut items = Vec::new();
+
+    for (file_index, file) in detail.files.iter().enumerate() {
+        for (row_index, row) in build_diff_render_rows(detail, &file.path)
+            .into_iter()
+            .enumerate()
+        {
+            let thread_index = match row {
+                DiffRenderRow::FileCommentThread { thread_index }
+                | DiffRenderRow::InlineThread { thread_index }
+                | DiffRenderRow::OutdatedThread { thread_index } => thread_index,
+                _ => continue,
+            };
+            if seen_threads.insert(thread_index) {
+                push_review_comment_navigation_item(
+                    &mut items,
+                    detail,
+                    thread_index,
+                    mode,
+                    file_index,
+                    row_index,
+                );
+            }
+        }
+    }
+
+    for thread_index in 0..detail.review_threads.len() {
+        if seen_threads.insert(thread_index) {
+            let file_index = detail
+                .review_threads
+                .get(thread_index)
+                .and_then(|thread| review_thread_file_index(detail, thread))
+                .unwrap_or(detail.files.len());
+            push_review_comment_navigation_item(
+                &mut items,
+                detail,
+                thread_index,
+                mode,
+                file_index,
+                usize::MAX,
+            );
+        }
+    }
+
+    items
+}
+
+fn push_review_comment_navigation_item(
+    items: &mut Vec<ReviewCommentNavigationItem>,
+    detail: &PullRequestDetail,
+    thread_index: usize,
+    mode: ReviewCenterMode,
+    file_index: usize,
+    row_index: usize,
+) {
+    let Some(thread) = detail.review_threads.get(thread_index) else {
+        return;
+    };
+    if thread.comments.is_empty() {
+        return;
+    }
+    let Some(anchor) = review_thread_anchor(thread) else {
+        return;
+    };
+
+    let file_path = if anchor.file_path.is_empty() {
+        thread.path.clone()
+    } else {
+        anchor.file_path.clone()
+    };
+    let location = review_thread_location(mode, file_path.clone(), anchor);
+
+    items.push(ReviewCommentNavigationItem {
+        thread_index,
+        file_index,
+        row_index,
+        location,
+    });
+}
+
+fn review_thread_location(
+    mode: ReviewCenterMode,
+    file_path: String,
+    anchor: DiffAnchor,
+) -> ReviewLocation {
+    match mode {
+        ReviewCenterMode::StructuralDiff => {
+            ReviewLocation::from_structural_diff(file_path, Some(anchor))
+        }
+        _ => ReviewLocation::from_diff(file_path, Some(anchor)),
+    }
+}
+
+fn review_thread_file_index(
+    detail: &PullRequestDetail,
+    thread: &PullRequestReviewThread,
+) -> Option<usize> {
+    detail
+        .files
+        .iter()
+        .position(|file| file.path == thread.path)
+}
+
+fn first_review_comment_after_focus_index(
+    detail: &PullRequestDetail,
+    items: &[ReviewCommentNavigationItem],
+    focus: &ReviewModeFocus,
+) -> Option<usize> {
+    let (focus_file_index, focus_row_index) = review_focus_position(detail, focus)?;
+    items.iter().position(|item| {
+        item.file_index > focus_file_index
+            || (item.file_index == focus_file_index && item.row_index >= focus_row_index)
+    })
+}
+
+fn review_focus_position(
+    detail: &PullRequestDetail,
+    focus: &ReviewModeFocus,
+) -> Option<(usize, usize)> {
+    let file_index = detail
+        .files
+        .iter()
+        .position(|file| file.path == focus.file_path)?;
+    let rows = build_diff_render_rows(detail, &focus.file_path);
+    let row_index = focus
+        .anchor
+        .as_ref()
+        .and_then(|anchor| review_focus_row_index(detail, &focus.file_path, &rows, anchor))
+        .or_else(|| {
+            review_focus_line_row_index(
+                detail,
+                &focus.file_path,
+                &rows,
+                focus.line,
+                focus.side.as_deref(),
+            )
+        })
+        .unwrap_or(0);
+
+    Some((file_index, row_index))
+}
+
+fn review_focus_row_index(
+    detail: &PullRequestDetail,
+    file_path: &str,
+    rows: &[DiffRenderRow],
+    anchor: &DiffAnchor,
+) -> Option<usize> {
+    if let Some(thread_id) = anchor.thread_id.as_deref() {
+        if let Some(row_index) = rows.iter().position(|row| match row {
+            DiffRenderRow::FileCommentThread { thread_index }
+            | DiffRenderRow::InlineThread { thread_index }
+            | DiffRenderRow::OutdatedThread { thread_index } => detail
+                .review_threads
+                .get(*thread_index)
+                .map(|thread| thread.id == thread_id)
+                .unwrap_or(false),
+            _ => false,
+        }) {
+            return Some(row_index);
+        }
+    }
+
+    review_focus_line_row_index(
+        detail,
+        file_path,
+        rows,
+        anchor
+            .line
+            .and_then(|line| usize::try_from(line).ok())
+            .filter(|line| *line > 0),
+        anchor.side.as_deref(),
+    )
+}
+
+fn review_focus_line_row_index(
+    detail: &PullRequestDetail,
+    file_path: &str,
+    rows: &[DiffRenderRow],
+    line: Option<usize>,
+    preferred_side: Option<&str>,
+) -> Option<usize> {
+    let line = i64::try_from(line?).ok()?;
+    let parsed = find_parsed_diff_file(&detail.parsed_diff, file_path)?;
+    let anchor = diff_anchor_for_line(parsed, line, preferred_side)?;
+
+    rows.iter().position(|row| match row {
+        DiffRenderRow::Line {
+            hunk_index,
+            line_index,
+        } => parsed
+            .hunks
+            .get(*hunk_index)
+            .and_then(|hunk| hunk.lines.get(*line_index))
+            .map(|line| code_tour::line_matches_diff_anchor(line, Some(&anchor)))
+            .unwrap_or(false),
+        _ => false,
+    })
 }
 
 #[derive(Clone)]
@@ -1334,6 +1547,52 @@ impl AppState {
         true
     }
 
+    pub fn next_review_comment_location(&self) -> Option<ReviewLocation> {
+        let mode = self.active_review_comment_navigation_mode()?;
+        let detail = self.active_detail()?;
+        let items = review_comment_navigation_items(detail, mode);
+        if items.is_empty() {
+            return None;
+        }
+
+        let selected_thread_id = self
+            .selected_diff_anchor
+            .as_ref()
+            .and_then(|anchor| anchor.thread_id.as_deref());
+        let next_index = selected_thread_id
+            .and_then(|thread_id| {
+                items
+                    .iter()
+                    .position(|item| {
+                        detail
+                            .review_threads
+                            .get(item.thread_index)
+                            .map(|thread| thread.id == thread_id)
+                            .unwrap_or(false)
+                    })
+                    .map(|index| (index + 1) % items.len())
+            })
+            .or_else(|| {
+                self.current_review_mode_focus()
+                    .as_ref()
+                    .and_then(|focus| first_review_comment_after_focus_index(detail, &items, focus))
+            })
+            .unwrap_or(0);
+
+        items.get(next_index).map(|item| item.location.clone())
+    }
+
+    fn active_review_comment_navigation_mode(&self) -> Option<ReviewCenterMode> {
+        self.active_review_session()
+            .map(|session| session.center_mode)
+            .filter(|mode| {
+                matches!(
+                    mode,
+                    ReviewCenterMode::SemanticDiff | ReviewCenterMode::StructuralDiff
+                )
+            })
+    }
+
     pub fn toggle_review_section_collapse(&mut self, section_id: &str) {
         let Some(session) = self.active_review_session_mut() else {
             return;
@@ -1768,9 +2027,19 @@ fn parse_debug_pull_request_target(target: &str) -> Option<(String, i64)> {
 
 #[cfg(test)]
 mod tests {
-    use crate::diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk, ParsedDiffLine};
+    use std::collections::BTreeMap;
 
-    use super::{diff_anchor_for_line, StructuralDiffWarmupState};
+    use crate::diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk, ParsedDiffLine};
+    use crate::github::{
+        PullRequestComment, PullRequestDataCompleteness, PullRequestDetail, PullRequestFile,
+        PullRequestReview, PullRequestReviewComment, PullRequestReviewThread,
+    };
+    use crate::review_session::ReviewCenterMode;
+
+    use super::{
+        diff_anchor_for_line, first_review_comment_after_focus_index,
+        review_comment_navigation_items, ReviewModeFocus, StructuralDiffWarmupState,
+    };
 
     #[test]
     fn diff_anchor_for_line_preserves_requested_side() {
@@ -1842,5 +2111,165 @@ mod tests {
         let text = state.status_text().expect("loading status is visible");
         assert!(text.starts_with("Preparing structural diffs 3/4"));
         assert!(!text.contains("ready"));
+    }
+
+    #[test]
+    fn review_comment_navigation_follows_rendered_diff_order() {
+        let detail = detail_with_threads(vec![
+            review_thread("file", "src/a.rs", None, "RIGHT", "FILE", false),
+            review_thread("inline", "src/a.rs", Some(3), "RIGHT", "LINE", false),
+            review_thread("outdated", "src/a.rs", Some(1), "RIGHT", "LINE", true),
+            review_thread("second-file", "src/b.rs", Some(5), "RIGHT", "LINE", false),
+        ]);
+
+        let items = review_comment_navigation_items(&detail, ReviewCenterMode::SemanticDiff);
+        let ids = items
+            .iter()
+            .map(|item| detail.review_threads[item.thread_index].id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec!["file", "inline", "outdated", "second-file"]);
+    }
+
+    #[test]
+    fn next_review_comment_after_focus_uses_rendered_row_position() {
+        let detail = detail_with_threads(vec![
+            review_thread("file", "src/a.rs", None, "RIGHT", "FILE", false),
+            review_thread("inline", "src/a.rs", Some(3), "RIGHT", "LINE", false),
+            review_thread("outdated", "src/a.rs", Some(1), "RIGHT", "LINE", true),
+            review_thread("second-file", "src/b.rs", Some(5), "RIGHT", "LINE", false),
+        ]);
+        let items = review_comment_navigation_items(&detail, ReviewCenterMode::StructuralDiff);
+        let focus = ReviewModeFocus {
+            mode: ReviewCenterMode::StructuralDiff,
+            file_path: "src/a.rs".to_string(),
+            line: Some(4),
+            side: Some("RIGHT".to_string()),
+            anchor: None,
+        };
+
+        let index = first_review_comment_after_focus_index(&detail, &items, &focus)
+            .expect("outdated thread should be after the focused row");
+
+        assert_eq!(
+            detail.review_threads[items[index].thread_index].id,
+            "outdated"
+        );
+        assert_eq!(items[index].location.mode, ReviewCenterMode::StructuralDiff);
+    }
+
+    fn detail_with_threads(review_threads: Vec<PullRequestReviewThread>) -> PullRequestDetail {
+        PullRequestDetail {
+            id: "pr".to_string(),
+            repository: "org/repo".to_string(),
+            number: 1,
+            title: "Review comments".to_string(),
+            body: String::new(),
+            url: "https://example.com/pr".to_string(),
+            author_login: "alice".to_string(),
+            author_avatar_url: None,
+            state: "OPEN".to_string(),
+            is_draft: false,
+            review_decision: None,
+            base_ref_name: "main".to_string(),
+            head_ref_name: "feature".to_string(),
+            base_ref_oid: None,
+            head_ref_oid: None,
+            additions: 0,
+            deletions: 0,
+            changed_files: 2,
+            comments_count: 0,
+            commits_count: 1,
+            created_at: "2026-05-13T00:00:00Z".to_string(),
+            updated_at: "2026-05-13T00:00:00Z".to_string(),
+            labels: Vec::new(),
+            reviewers: Vec::new(),
+            reviewer_avatar_urls: BTreeMap::new(),
+            comments: Vec::<PullRequestComment>::new(),
+            latest_reviews: Vec::<PullRequestReview>::new(),
+            review_threads,
+            files: vec![file("src/a.rs"), file("src/b.rs")],
+            raw_diff: String::new(),
+            parsed_diff: vec![parsed_file("src/a.rs", 1, 5), parsed_file("src/b.rs", 1, 6)],
+            data_completeness: PullRequestDataCompleteness::default(),
+        }
+    }
+
+    fn file(path: &str) -> PullRequestFile {
+        PullRequestFile {
+            path: path.to_string(),
+            additions: 0,
+            deletions: 0,
+            change_type: "MODIFIED".to_string(),
+        }
+    }
+
+    fn parsed_file(path: &str, start: i64, end: i64) -> ParsedDiffFile {
+        ParsedDiffFile {
+            path: path.to_string(),
+            previous_path: Some(path.to_string()),
+            is_binary: false,
+            hunks: vec![ParsedDiffHunk {
+                header: format!("@@ -{start},{end} +{start},{end} @@"),
+                lines: (start..=end)
+                    .map(|line| ParsedDiffLine {
+                        kind: DiffLineKind::Context,
+                        prefix: " ".to_string(),
+                        left_line_number: Some(line),
+                        right_line_number: Some(line),
+                        content: format!("line {line}"),
+                    })
+                    .collect(),
+            }],
+        }
+    }
+
+    fn review_thread(
+        id: &str,
+        path: &str,
+        line: Option<i64>,
+        diff_side: &str,
+        subject_type: &str,
+        is_outdated: bool,
+    ) -> PullRequestReviewThread {
+        PullRequestReviewThread {
+            id: id.to_string(),
+            path: path.to_string(),
+            line,
+            original_line: line,
+            start_line: None,
+            original_start_line: None,
+            diff_side: diff_side.to_string(),
+            start_diff_side: None,
+            is_collapsed: false,
+            is_outdated,
+            is_resolved: false,
+            subject_type: subject_type.to_string(),
+            resolved_by_login: None,
+            viewer_can_reply: true,
+            viewer_can_resolve: true,
+            viewer_can_unresolve: true,
+            comments: vec![review_comment(id, path, line)],
+        }
+    }
+
+    fn review_comment(id: &str, path: &str, line: Option<i64>) -> PullRequestReviewComment {
+        PullRequestReviewComment {
+            id: format!("{id}-comment"),
+            author_login: "bob".to_string(),
+            author_avatar_url: None,
+            body: "Please check this.".to_string(),
+            path: path.to_string(),
+            line,
+            original_line: line,
+            start_line: None,
+            original_start_line: None,
+            state: "SUBMITTED".to_string(),
+            created_at: "2026-05-13T00:00:00Z".to_string(),
+            updated_at: "2026-05-13T00:00:00Z".to_string(),
+            published_at: Some("2026-05-13T00:00:00Z".to_string()),
+            reply_to_id: None,
+            url: "https://example.com/comment".to_string(),
+        }
     }
 }

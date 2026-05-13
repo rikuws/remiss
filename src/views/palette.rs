@@ -563,6 +563,7 @@ enum CommandAction {
     ShowPullRequestSurface(PullRequestSurface),
     EnterCodeReview,
     EnterCodeLens(ReviewCenterMode),
+    JumpToNextReviewComment,
     EnterAiTour,
     EnterStack,
     SyncWorkspace,
@@ -692,6 +693,13 @@ fn push_review_navigation_items(items: &mut Vec<CommandItem>, state: &AppState) 
         CommandAction::EnterCodeLens(ReviewCenterMode::StructuralDiff),
         &["struct", "difftastic", "syntax", "ast", "code", "review"],
     ));
+    if state.next_review_comment_location().is_some() {
+        items.push(CommandItem::normal_with_keywords(
+            "Jump to next review comment",
+            CommandAction::JumpToNextReviewComment,
+            &["next", "comment", "thread", "review", "diff"],
+        ));
+    }
     items.push(CommandItem::normal_with_keywords(
         "Switch to Source",
         CommandAction::EnterCodeLens(ReviewCenterMode::SourceBrowser),
@@ -905,6 +913,21 @@ fn apply_command_action(
                 cx.notify();
             });
             switch_review_code_mode(state, mode, window, cx);
+        }
+        CommandAction::JumpToNextReviewComment => {
+            let location = state.read(cx).next_review_comment_location();
+            close_palette(state, cx);
+            if let Some(location) = location {
+                state.update(cx, |s, cx| {
+                    s.active_surface = PullRequestSurface::Files;
+                    s.pr_header_compact = false;
+                    s.set_review_file_collapsed(&location.file_path, false);
+                    s.navigate_to_review_location(location, true);
+                    s.persist_active_review_session();
+                    cx.notify();
+                });
+                ensure_active_review_focus_loaded(state, window, cx);
+            }
         }
         CommandAction::EnterAiTour => {
             close_palette(state, cx);

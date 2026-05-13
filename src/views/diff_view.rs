@@ -8288,6 +8288,7 @@ fn render_combined_diff_files(
         &view_state,
         &items,
         &contexts,
+        &detail.review_threads,
         selected_path,
         selected_anchor,
     );
@@ -8957,6 +8958,7 @@ fn scroll_combined_diff_list_to_focus(
     view_state: &CombinedDiffViewState,
     items: &[CombinedDiffViewItem],
     contexts: &[CombinedDiffFileContext],
+    review_threads: &[PullRequestReviewThread],
     selected_path: Option<&str>,
     selected_anchor: Option<&DiffAnchor>,
 ) {
@@ -8976,7 +8978,13 @@ fn scroll_combined_diff_list_to_focus(
     let item_ix = selected_anchor
         .filter(|anchor| diff_anchor_matches_file(anchor, selected_path))
         .and_then(|anchor| {
-            find_combined_diff_anchor_item_index(items, contexts, selected_path, anchor)
+            find_combined_diff_anchor_item_index(
+                items,
+                contexts,
+                review_threads,
+                selected_path,
+                anchor,
+            )
         })
         .or_else(|| find_combined_diff_file_header_index(items, contexts, selected_path));
 
@@ -9261,6 +9269,7 @@ fn combined_file_scroll_focus(file_path: &str) -> DiffScrollFocus {
 fn find_combined_diff_anchor_item_index(
     items: &[CombinedDiffViewItem],
     contexts: &[CombinedDiffFileContext],
+    review_threads: &[PullRequestReviewThread],
     file_path: &str,
     anchor: &DiffAnchor,
 ) -> Option<usize> {
@@ -9268,16 +9277,15 @@ fn find_combined_diff_anchor_item_index(
         .iter()
         .position(|context| context.file.path == file_path)?;
     let context = contexts.get(context_ix)?;
-    let local_ix = context.parsed.as_deref().and_then(|parsed| {
-        find_diff_focus_item_index(
-            context.items.as_ref(),
-            context.rows.as_ref(),
-            parsed,
-            context.structural_side_by_side.as_deref(),
-            context.normal_side_by_side.as_deref(),
-            anchor,
-        )
-    })?;
+    let local_ix = find_diff_focus_item_index(
+        context.items.as_ref(),
+        context.rows.as_ref(),
+        context.parsed.as_deref(),
+        context.structural_side_by_side.as_deref(),
+        context.normal_side_by_side.as_deref(),
+        review_threads,
+        anchor,
+    )?;
 
     let mut seen_rows = 0usize;
     for (item_ix, item) in items.iter().enumerate() {
@@ -9732,6 +9740,11 @@ fn render_file_diff(
         stack_visibility.as_ref(),
     );
 
+    let review_threads = state
+        .read(cx)
+        .active_detail()
+        .map(|detail| detail.review_threads.clone())
+        .unwrap_or_default();
     reset_list_state_preserving_scroll(&list_state, items.len());
     scroll_diff_list_to_focus(
         &diff_view_state,
@@ -9740,6 +9753,7 @@ fn render_file_diff(
         parsed,
         structural_side_by_side.as_deref(),
         normal_side_by_side.as_deref(),
+        &review_threads,
         selected_anchor.as_ref(),
         file.path.as_str(),
     );
@@ -10108,6 +10122,7 @@ fn scroll_diff_list_to_focus(
     parsed: Option<&ParsedDiffFile>,
     structural_side_by_side: Option<&crate::difftastic::AdaptedDifftasticDiffFile>,
     normal_side_by_side: Option<&NormalSideBySideDiffFile>,
+    review_threads: &[PullRequestReviewThread],
     selected_anchor: Option<&DiffAnchor>,
     fallback_file_path: &str,
 ) {
@@ -10122,16 +10137,15 @@ fn scroll_diff_list_to_focus(
         return;
     }
 
-    if let Some(item_ix) = parsed.and_then(|parsed| {
-        find_diff_focus_item_index(
-            items,
-            rows,
-            parsed,
-            structural_side_by_side,
-            normal_side_by_side,
-            anchor,
-        )
-    }) {
+    if let Some(item_ix) = find_diff_focus_item_index(
+        items,
+        rows,
+        parsed,
+        structural_side_by_side,
+        normal_side_by_side,
+        review_threads,
+        anchor,
+    ) {
         view_state.list_state.scroll_to(ListOffset {
             item_ix: item_ix.saturating_sub(6),
             offset_in_item: px(0.0),
@@ -10141,11 +10155,11 @@ fn scroll_diff_list_to_focus(
 }
 
 fn diff_focus_key(fallback_file_path: &str, anchor: &DiffAnchor) -> Option<String> {
-    anchor
-        .line
-        .or_else(|| anchor.hunk_header.as_ref().map(|_| 0))?;
+    if anchor.line.is_none() && anchor.hunk_header.is_none() && anchor.thread_id.is_none() {
+        return None;
+    }
     Some(format!(
-        "{}:{}:{}:{}",
+        "{}:{}:{}:{}:{}",
         if anchor.file_path.is_empty() {
             fallback_file_path
         } else {
@@ -10153,18 +10167,39 @@ fn diff_focus_key(fallback_file_path: &str, anchor: &DiffAnchor) -> Option<Strin
         },
         anchor.side.as_deref().unwrap_or(""),
         anchor.line.unwrap_or_default(),
-        anchor.hunk_header.as_deref().unwrap_or("")
+        anchor.hunk_header.as_deref().unwrap_or(""),
+        anchor.thread_id.as_deref().unwrap_or("")
     ))
 }
 
 fn find_diff_focus_item_index(
     items: &[DiffViewItem],
     rows: &[DiffRenderRow],
-    parsed: &ParsedDiffFile,
+    parsed: Option<&ParsedDiffFile>,
     structural_side_by_side: Option<&crate::difftastic::AdaptedDifftasticDiffFile>,
     normal_side_by_side: Option<&NormalSideBySideDiffFile>,
+    review_threads: &[PullRequestReviewThread],
     anchor: &DiffAnchor,
 ) -> Option<usize> {
+    if let Some(thread_id) = anchor.thread_id.as_deref() {
+        if let Some(row_ix) = rows.iter().position(|row| match row {
+            DiffRenderRow::FileCommentThread { thread_index }
+            | DiffRenderRow::InlineThread { thread_index }
+            | DiffRenderRow::OutdatedThread { thread_index } => review_threads
+                .get(*thread_index)
+                .map(|thread| thread.id == thread_id)
+                .unwrap_or(false),
+            _ => false,
+        }) {
+            if let Some(item_ix) = items.iter().position(
+                |item| matches!(item, DiffViewItem::Row(item_row_ix) if *item_row_ix == row_ix),
+            ) {
+                return Some(item_ix);
+            }
+        }
+    }
+
+    let parsed = parsed?;
     let direct_row_ix = rows.iter().position(|row| match row {
         DiffRenderRow::HunkHeader { hunk_index } => {
             anchor.line.is_none()
