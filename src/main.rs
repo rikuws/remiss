@@ -1,9 +1,12 @@
 #![allow(dead_code)]
 #![allow(
     clippy::collapsible_else_if,
+    clippy::collapsible_if,
+    clippy::cmp_owned,
     clippy::derivable_impls,
     clippy::double_ended_iterator_last,
     clippy::filter_map_bool_then,
+    clippy::items_after_test_module,
     clippy::large_enum_variant,
     clippy::manual_div_ceil,
     clippy::manual_is_multiple_of,
@@ -11,10 +14,18 @@
     clippy::needless_borrow,
     clippy::needless_borrows_for_generic_args,
     clippy::needless_lifetimes,
+    clippy::needless_match,
+    clippy::needless_range_loop,
+    clippy::needless_update,
+    clippy::obfuscated_if_else,
+    clippy::ptr_arg,
+    clippy::question_mark,
     clippy::redundant_closure,
+    clippy::result_large_err,
     clippy::single_match,
     clippy::too_many_arguments,
     clippy::type_complexity,
+    clippy::unnecessary_lazy_evaluations,
     clippy::useless_vec
 )]
 
@@ -128,7 +139,6 @@ fn start_app(cx: &mut App) -> Result<(), String> {
                     px(MACOS_TRAFFIC_LIGHT_LEFT),
                     px(MACOS_TRAFFIC_LIGHT_TOP),
                 )),
-                ..Default::default()
             }),
             ..Default::default()
         },
