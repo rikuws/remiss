@@ -12734,10 +12734,16 @@ fn render_structural_side_by_side_cell(
     ));
     let content = cell
         .map(|cell| {
-            let emphasis_ranges = normalize_inline_emphasis_ranges(
-                cell.line.content.as_str(),
-                cell.emphasis_ranges.as_slice(),
-            );
+            let emphasis_ranges = if DIFF_INLINE_EMPHASIS_ENABLED {
+                normalize_inline_emphasis_ranges(
+                    cell.line.content.as_str(),
+                    cell.emphasis_ranges.as_slice(),
+                )
+            } else {
+                Vec::new()
+            };
+            let emphasis_ranges =
+                (!emphasis_ranges.is_empty()).then_some(emphasis_ranges.as_slice());
             let line_lsp_context = (side == SideBySideDiffSide::Right)
                 .then(|| build_diff_line_lsp_context(file_lsp_context, &cell.line))
                 .flatten();
@@ -12756,7 +12762,7 @@ fn render_structural_side_by_side_cell(
                 Some(hunk_header),
                 &cell.line,
                 None,
-                Some(emphasis_ranges.as_slice()),
+                emphasis_ranges,
                 selected_anchor,
                 line_lsp_context.as_ref(),
                 temp_source_target,
@@ -15239,7 +15245,11 @@ fn build_diff_highlights(parsed_file: &ParsedDiffFile) -> Arc<Vec<Vec<DiffLineHi
                     parsed_file.path.as_str(),
                     hunk.lines.iter().map(|line| line.content.as_str()),
                 );
-                let emphasis_lines = build_hunk_inline_emphasis(hunk);
+                let emphasis_lines = if DIFF_INLINE_EMPHASIS_ENABLED {
+                    build_hunk_inline_emphasis(hunk)
+                } else {
+                    vec![Vec::new(); hunk.lines.len()]
+                };
 
                 hunk.lines
                     .iter()

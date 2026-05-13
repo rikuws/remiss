@@ -507,6 +507,10 @@ pub struct DiffInlineRange {
     pub column_end: usize,
 }
 
+// Keep review diffs line-oriented. Syntax highlighting remains active, but
+// changed-token background patches are disabled for GitHub-style scanability.
+pub const DIFF_INLINE_EMPHASIS_ENABLED: bool = false;
+
 #[derive(Clone, Debug, Default)]
 pub struct DiffLineHighlight {
     pub syntax_spans: Vec<SyntaxSpan>,

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk, ParsedDiffLine},
     inline_diff::normalize_inline_emphasis_ranges,
-    state::{DiffInlineRange, DiffLineHighlight},
+    state::{DiffInlineRange, DiffLineHighlight, DIFF_INLINE_EMPHASIS_ENABLED},
     syntax,
 };
 
@@ -120,15 +120,19 @@ pub fn build_adapted_diff_highlights(
                     .iter()
                     .enumerate()
                     .map(|(line_ix, line)| {
-                        let emphasis_ranges = hunk_emphasis
-                            .and_then(|lines| lines.get(line_ix))
-                            .map(|ranges| {
-                                normalize_inline_emphasis_ranges(
-                                    line.content.as_str(),
-                                    ranges.as_slice(),
-                                )
-                            })
-                            .unwrap_or_default();
+                        let emphasis_ranges = if DIFF_INLINE_EMPHASIS_ENABLED {
+                            hunk_emphasis
+                                .and_then(|lines| lines.get(line_ix))
+                                .map(|ranges| {
+                                    normalize_inline_emphasis_ranges(
+                                        line.content.as_str(),
+                                        ranges.as_slice(),
+                                    )
+                                })
+                                .unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        };
 
                         DiffLineHighlight {
                             syntax_spans: syntax_lines.get(line_ix).cloned().unwrap_or_default(),
@@ -762,7 +766,7 @@ mod tests {
     }
 
     #[test]
-    fn adapted_display_highlights_normalize_existing_ranges_to_tokens() {
+    fn adapted_display_highlights_keep_inline_emphasis_disabled() {
         let adapted = AdaptedDifftasticDiffFile {
             parsed_file: ParsedDiffFile {
                 path: "src/lib.rs".to_string(),
@@ -795,8 +799,8 @@ mod tests {
 
         let highlights = build_adapted_diff_highlights(&adapted);
 
-        assert_eq!(highlights[0][0].emphasis_ranges, vec![inline_range(5, 11)]);
-        assert_eq!(highlights[0][1].emphasis_ranges, vec![inline_range(5, 11)]);
+        assert!(highlights[0][0].emphasis_ranges.is_empty());
+        assert!(highlights[0][1].emphasis_ranges.is_empty());
     }
 
     #[test]
