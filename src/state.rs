@@ -1208,10 +1208,20 @@ impl AppState {
     }
 
     pub fn unread_review_comment_ids_for_detail(&self, detail: &PullRequestDetail) -> Vec<String> {
+        let viewer_login = self.viewer_login().unwrap_or_default();
         detail
             .review_threads
             .iter()
+            .filter(|thread| {
+                !viewer_login.is_empty()
+                    && thread
+                        .comments
+                        .first()
+                        .map(|comment| comment.author_login.as_str())
+                        == Some(viewer_login)
+            })
             .flat_map(|thread| &thread.comments)
+            .filter(|comment| comment.author_login != viewer_login)
             .filter(|comment| self.is_review_comment_unread(&comment.id))
             .map(|comment| comment.id.clone())
             .collect()
@@ -1310,6 +1320,15 @@ impl AppState {
             .and_then(|w| w.viewer.as_ref())
             .and_then(|v| v.name.as_deref().or(Some(v.login.as_str())))
             .unwrap_or("developer")
+    }
+
+    pub fn viewer_login(&self) -> Option<&str> {
+        let workspace = self.workspace.as_ref()?;
+        workspace
+            .viewer
+            .as_ref()
+            .map(|viewer| viewer.login.as_str())
+            .or(workspace.auth.active_login.as_deref())
     }
 
     pub fn is_authenticated(&self) -> bool {

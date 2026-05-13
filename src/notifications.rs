@@ -209,14 +209,23 @@ fn record_review_comments(
     let first_pr_observation = !read_state.observed_pr_keys.contains(&detail_key);
     let viewer_login = viewer_login.unwrap_or_default();
 
-    for comment in detail
-        .review_threads
-        .iter()
-        .flat_map(|thread| &thread.comments)
-    {
-        let newly_known = read_state.known_comment_ids.insert(comment.id.clone());
-        if newly_known && !first_pr_observation && comment.author_login != viewer_login {
-            read_state.unread_comment_ids.insert(comment.id.clone());
+    for thread in &detail.review_threads {
+        let thread_owned_by_viewer = !viewer_login.is_empty()
+            && thread
+                .comments
+                .first()
+                .map(|comment| comment.author_login.as_str())
+                == Some(viewer_login);
+
+        for comment in &thread.comments {
+            let newly_known = read_state.known_comment_ids.insert(comment.id.clone());
+            if newly_known
+                && !first_pr_observation
+                && thread_owned_by_viewer
+                && comment.author_login != viewer_login
+            {
+                read_state.unread_comment_ids.insert(comment.id.clone());
+            }
         }
     }
 
@@ -661,10 +670,10 @@ mod tests {
     }
 
     #[test]
-    fn review_comment_read_state_tracks_new_foreign_comments_until_marked_read() {
+    fn review_comment_read_state_tracks_replies_to_viewer_owned_threads() {
         let cache = temp_cache();
         let baseline =
-            detail_with_thread_comments("org/repo", 42, vec![review_comment("c1", "alice")]);
+            detail_with_thread_comments("org/repo", 42, vec![review_comment("c1", "me")]);
 
         let unread =
             record_review_comments(&cache, &baseline, Some("me")).expect("baseline record failed");
@@ -675,7 +684,7 @@ mod tests {
             "org/repo",
             42,
             vec![
-                review_comment("c1", "alice"),
+                review_comment("c1", "me"),
                 review_comment("c2", "bob"),
                 review_comment("c3", "me"),
             ],
@@ -687,6 +696,25 @@ mod tests {
 
         let unread =
             mark_review_comments_read(&cache, vec!["c2".to_string()]).expect("mark read failed");
+
+        assert!(unread.is_empty());
+    }
+
+    #[test]
+    fn review_comment_read_state_ignores_threads_not_started_by_viewer() {
+        let cache = temp_cache();
+        let baseline =
+            detail_with_thread_comments("org/repo", 42, vec![review_comment("c1", "alice")]);
+
+        record_review_comments(&cache, &baseline, Some("me")).expect("baseline record failed");
+
+        let updated = detail_with_thread_comments(
+            "org/repo",
+            42,
+            vec![review_comment("c1", "alice"), review_comment("c2", "bob")],
+        );
+        let unread =
+            record_review_comments(&cache, &updated, Some("me")).expect("updated record failed");
 
         assert!(unread.is_empty());
     }

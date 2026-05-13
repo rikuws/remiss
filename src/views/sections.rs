@@ -42,7 +42,7 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
         .unwrap_or_default();
     let workspace_loading = s.workspace_loading;
     let workspace_error = s.workspace_error.clone();
-    let review_comment_items = overview_review_comment_items(&s, &review_items);
+    let review_comment_items = overview_review_comment_items(&s);
 
     let welcome_greeting = overview_welcome_greeting(&viewer_name, is_auth);
     let state_for_pull_requests = state.clone();
@@ -274,7 +274,7 @@ fn overview_empty_state_panel() -> impl IntoElement {
                             .line_height(px(20.0))
                             .text_color(fg_muted())
                             .child(
-                                "No unread review comments or review requests were found in the current workspace snapshot.",
+                                "No unread replies to your reviews or review requests were found in the current workspace snapshot.",
                             ),
                     ),
             )
@@ -290,13 +290,13 @@ fn overview_review_comment_briefing_panel(
 ) -> impl IntoElement {
     let has_unread = items.iter().any(|item| item.unread);
     let copy = if workspace_loading {
-        "Checking the current review queue for new thread replies."
+        "Checking your review threads for replies from other people."
     } else if workspace_error.is_some() {
-        "Workspace sync needs attention before the comment briefing can refresh."
+        "Workspace sync needs attention before review replies can refresh."
     } else if has_unread {
-        "Newest unread replies on review threads in your queue."
+        "Unread replies from others on review threads you started."
     } else {
-        "Latest review-thread activity from the current review queue."
+        "Latest replies from others on review threads you started."
     };
 
     panel().child(
@@ -312,13 +312,13 @@ fn overview_review_comment_briefing_panel(
                     .flex_col()
                     .gap(px(4.0))
                     .min_w_0()
-                    .child(eyebrow("Newest comments"))
+                    .child(eyebrow("Review replies"))
                     .child(
                         div()
                             .text_size(px(18.0))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(fg_emphasis())
-                            .child("Review Comment Briefing"),
+                            .child("Comments on Your Reviews"),
                     )
                     .child(
                         div()
@@ -329,7 +329,7 @@ fn overview_review_comment_briefing_panel(
                     ),
             )
             .when(workspace_loading, |el| {
-                el.child(panel_state_text("Loading review comments..."))
+                el.child(panel_state_text("Loading replies to your reviews..."))
             })
             .when_some(workspace_error.clone(), |el, err| {
                 el.child(error_text(&err))
@@ -338,9 +338,9 @@ fn overview_review_comment_briefing_panel(
                 !workspace_loading && workspace_error.is_none() && items.is_empty(),
                 |el| {
                     el.child(panel_state_text(if is_auth {
-                        "No new review comments are waiting in the current queue."
+                        "No replies to your review comments are waiting in the current workspace."
                     } else {
-                        "Authenticate with gh to populate review comments."
+                        "Authenticate with gh to populate replies to your reviews."
                     }))
                 },
             )
@@ -665,21 +665,17 @@ fn overview_review_comment_row(
         )
 }
 
-fn overview_review_comment_items(
-    state: &AppState,
-    review_items: &[github::PullRequestSummary],
-) -> Vec<OverviewReviewCommentItem> {
+fn overview_review_comment_items(state: &AppState) -> Vec<OverviewReviewCommentItem> {
     let mut summaries = BTreeMap::new();
-    for item in review_items {
-        summaries.insert(pr_key(&item.repository, item.number), item.clone());
+    if let Some(workspace) = state.workspace.as_ref() {
+        for item in workspace.queues.iter().flat_map(|queue| &queue.items) {
+            summaries
+                .entry(pr_key(&item.repository, item.number))
+                .or_insert_with(|| item.clone());
+        }
     }
 
-    let viewer_login = state
-        .workspace
-        .as_ref()
-        .and_then(|workspace| workspace.viewer.as_ref())
-        .map(|viewer| viewer.login.as_str())
-        .unwrap_or_default();
+    let viewer_login = state.viewer_login().unwrap_or_default();
     let mut unread_items = Vec::new();
     let mut latest_items = Vec::new();
 
@@ -696,29 +692,29 @@ fn overview_review_comment_items(
         };
 
         for thread in &detail.review_threads {
+            if !overview_thread_started_by_viewer(thread, viewer_login) {
+                continue;
+            }
+
             let mut latest_foreign_comment = None;
             for comment in &thread.comments {
-                let unread = state.unread_review_comment_ids.contains(&comment.id);
-                if unread {
+                if comment.body.trim().is_empty() || comment.author_login == viewer_login {
+                    continue;
+                }
+
+                if state.unread_review_comment_ids.contains(&comment.id) {
                     unread_items.push(overview_comment_item_for_comment(
                         summary, thread, comment, true,
                     ));
-                }
-
-                if !thread.is_resolved
-                    && !comment.body.trim().is_empty()
-                    && (viewer_login.is_empty() || comment.author_login != viewer_login)
-                {
+                } else {
                     latest_foreign_comment = Some(comment);
                 }
             }
 
-            if unread_items.is_empty() {
-                if let Some(comment) = latest_foreign_comment {
-                    latest_items.push(overview_comment_item_for_comment(
-                        summary, thread, comment, false,
-                    ));
-                }
+            if let Some(comment) = latest_foreign_comment {
+                latest_items.push(overview_comment_item_for_comment(
+                    summary, thread, comment, false,
+                ));
             }
         }
     }
@@ -736,6 +732,18 @@ fn overview_review_comment_items(
     });
     items.truncate(5);
     items
+}
+
+fn overview_thread_started_by_viewer(
+    thread: &github::PullRequestReviewThread,
+    viewer_login: &str,
+) -> bool {
+    !viewer_login.is_empty()
+        && thread
+            .comments
+            .first()
+            .map(|comment| comment.author_login.as_str())
+            == Some(viewer_login)
 }
 
 fn overview_comment_item_for_comment(
