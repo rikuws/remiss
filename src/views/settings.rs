@@ -701,7 +701,7 @@ fn render_code_tour_settings_panel(state: &Entity<AppState>, s: &AppState) -> im
                     .text_size(px(24.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(fg_emphasis())
-                    .child("Background code tours"),
+                    .child("Background review intelligence"),
             )
             .child(
                 div()
@@ -709,7 +709,7 @@ fn render_code_tour_settings_panel(state: &Entity<AppState>, s: &AppState) -> im
                     .text_color(fg_muted())
                     .max_w(px(760.0))
                     .child(
-                        "Pick the guide provider here, then enable automatic background generation per repository. Remiss only regenerates a guide when the pull request code version changes; otherwise it keeps using the cached guide.",
+                        "Pick the guide provider here, then enable automatic background generation per repository. Remiss prewarms code tours and review briefs, and only regenerates them when the pull request code version changes.",
                     ),
             )
             .child(
@@ -751,7 +751,9 @@ fn render_code_tour_settings_panel(state: &Entity<AppState>, s: &AppState) -> im
                         el.child(panel_state_text("Checking available providers..."))
                     })
                     .when(settings_state.background_syncing, |el| {
-                        el.child(panel_state_text("Refreshing automatic background guides..."))
+                        el.child(panel_state_text(
+                            "Refreshing automatic review intelligence...",
+                        ))
                     }),
             )
             .child(

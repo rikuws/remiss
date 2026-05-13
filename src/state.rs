@@ -20,6 +20,7 @@ use crate::local_review::{self, RememberedLocalRepository};
 use crate::lsp::{LspServerStatus, LspSessionManager, LspSymbolDetails};
 use crate::managed_lsp::{ManagedServerInstallStatus, ManagedServerKind};
 use crate::notifications;
+use crate::review_brief::ReviewBrief;
 use crate::review_queue::{default_review_file, ReviewQueue};
 use crate::review_session::{
     add_waymark, load_review_session, location_label, push_history_location, push_route_location,
@@ -109,6 +110,7 @@ pub struct DetailState {
     pub source_file_tree: SourceFileTreeState,
     pub review_intelligence_request_key: Option<String>,
     pub review_intelligence_loading: bool,
+    pub review_brief_state: ReviewBriefState,
     pub ai_stack_state: AiStackState,
     pub tour_states: std::collections::HashMap<CodeTourProvider, CodeTourState>,
     pub file_content_states: std::collections::HashMap<String, FileContentState>,
@@ -139,6 +141,7 @@ impl Default for DetailState {
             source_file_tree: SourceFileTreeState::default(),
             review_intelligence_request_key: None,
             review_intelligence_loading: false,
+            review_brief_state: ReviewBriefState::default(),
             ai_stack_state: AiStackState::default(),
             tour_states: std::collections::HashMap::new(),
             file_content_states: std::collections::HashMap::new(),
@@ -165,6 +168,33 @@ pub struct SourceFileTreeState {
     pub file_count: usize,
     pub loading: bool,
     pub error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ReviewBriefState {
+    pub request_key: Option<String>,
+    pub document: Option<ReviewBrief>,
+    pub loading: bool,
+    pub generating: bool,
+    pub progress_text: Option<String>,
+    pub error: Option<String>,
+    pub message: Option<String>,
+    pub success: bool,
+}
+
+impl Default for ReviewBriefState {
+    fn default() -> Self {
+        Self {
+            request_key: None,
+            document: None,
+            loading: false,
+            generating: false,
+            progress_text: None,
+            error: None,
+            message: None,
+            success: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -966,6 +996,7 @@ pub struct AppState {
     pub code_tour_provider_loading: bool,
     pub code_tour_provider_error: Option<String>,
     pub automatic_tour_request_keys: std::collections::HashSet<String>,
+    pub automatic_brief_request_keys: std::collections::HashSet<String>,
     pub settings_scroll_handle: ScrollHandle,
     pub ai_tour_section_list_state: ListState,
     pub code_tour_settings: CodeTourSettingsState,
@@ -1078,6 +1109,7 @@ impl AppState {
             code_tour_provider_loading: false,
             code_tour_provider_error: None,
             automatic_tour_request_keys: std::collections::HashSet::new(),
+            automatic_brief_request_keys: std::collections::HashSet::new(),
             settings_scroll_handle: ScrollHandle::new(),
             ai_tour_section_list_state: ListState::new(0, ListAlignment::Top, px(720.0)),
             code_tour_settings: initial_code_tour_settings,
@@ -1251,6 +1283,10 @@ impl AppState {
         detail_state
             .tour_states
             .get(&self.code_tour_settings.settings.provider)
+    }
+
+    pub fn active_review_brief_state(&self) -> Option<&ReviewBriefState> {
+        Some(&self.active_detail_state()?.review_brief_state)
     }
 
     pub fn active_review_session(&self) -> Option<&ReviewSessionState> {

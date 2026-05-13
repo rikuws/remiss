@@ -85,7 +85,7 @@ pub async fn sync_workspace_flow(model: Entity<AppState>, cx: &mut AsyncWindowCo
                         state.code_tour_settings.background_syncing = true;
                         state.code_tour_settings.background_error = None;
                         state.code_tour_settings.background_message =
-                            Some("Refreshing automatic background guides...".to_string());
+                            Some("Refreshing automatic review intelligence...".to_string());
                         cx.notify();
                     })
                     .ok();
