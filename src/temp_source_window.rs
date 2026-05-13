@@ -819,6 +819,7 @@ mod tests {
             comments: Vec::new(),
             latest_reviews: Vec::new(),
             review_threads: Vec::new(),
+            viewer_pending_review: None,
             files: Vec::new(),
             raw_diff: String::new(),
             parsed_diff,
@@ -918,6 +919,8 @@ mod tests {
         let detail = detail_with_parsed(vec![parsed]);
         let active_line_action = ReviewLineActionTarget {
             anchor: anchor("src/new.rs", "LEFT", 14),
+            start_line: None,
+            start_side: None,
             label: "src/new.rs:14".to_string(),
         };
         let selected_anchor = anchor("src/new.rs", "RIGHT", 12);

@@ -4,7 +4,7 @@ use std::time::Duration;
 use gpui::prelude::*;
 use gpui::*;
 
-use crate::code_tour::review_thread_anchor;
+use crate::code_tour::{review_thread_anchor, CodeTourProvider, CodeTourProviderStatus};
 use crate::github::{
     self, PullRequestComment, PullRequestReview, PullRequestReviewComment, PullRequestReviewThread,
     ReviewAction,
@@ -12,6 +12,8 @@ use crate::github::{
 use crate::icons::{lucide_icon, LucideIcon};
 use crate::markdown::render_markdown;
 use crate::notifications;
+use crate::review_brief::ReviewBrief;
+use crate::review_intelligence::{self, ReviewIntelligenceScope};
 use crate::review_session::ReviewCenterMode;
 use crate::selectable_text::{AppTextFieldKind, AppTextInput, SelectableText};
 use crate::state::*;
@@ -633,6 +635,12 @@ fn render_overview_surface(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
         .map(|sn| sn.loaded_from_cache)
         .unwrap_or(false);
     let syncing = detail_state.map(|d| d.syncing).unwrap_or(false);
+    let review_brief_state = detail_state
+        .map(|d| d.review_brief_state.clone())
+        .unwrap_or_default();
+    let local_repository_loading = detail_state
+        .map(|d| d.local_repository_loading)
+        .unwrap_or(false);
     let viewer_login = viewer_login(&s);
     let is_local_review = crate::local_review::is_local_review_detail(detail);
     let is_own_pull_request = viewer_login
@@ -655,8 +663,18 @@ fn render_overview_surface(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
         summarize_thread_activity(&detail.review_threads, &s.unread_review_comment_ids);
     let recent_activity = summarize_recent_activity(detail, &s.unread_review_comment_ids);
     let participants = summarize_participants(detail, &review_status);
+    let provider = s.selected_tour_provider();
+    let provider_status = s.selected_tour_provider_status().cloned();
+    let provider_loading = s.code_tour_provider_loading;
+    let provider_error = s.code_tour_provider_error.clone();
+    let brief_automatic_enabled = s
+        .code_tour_settings
+        .settings
+        .automatically_generates_for(&detail.repository);
+    let brief_settings_loaded = s.code_tour_settings.loaded;
 
     let state_for_review = state.clone();
+    let state_for_brief = state.clone();
     let state_for_threads = state.clone();
     let state_for_activity = state.clone();
     let state_for_files = state.clone();
@@ -679,6 +697,17 @@ fn render_overview_surface(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                     detail,
                     is_own_pull_request,
                     &state_for_files,
+                ))
+                .child(render_review_brief_panel(
+                    review_brief_state,
+                    provider,
+                    provider_status,
+                    provider_loading,
+                    provider_error,
+                    local_repository_loading,
+                    brief_automatic_enabled,
+                    brief_settings_loaded,
+                    &state_for_brief,
                 ))
                 .child(render_review_snapshot_panel(
                     detail,
@@ -782,6 +811,486 @@ fn render_overview_summary_strip(
                 enter_files_surface(&state, window, cx)
             })),
     )
+}
+
+fn render_review_brief_panel(
+    brief_state: ReviewBriefState,
+    provider: CodeTourProvider,
+    provider_status: Option<CodeTourProviderStatus>,
+    provider_loading: bool,
+    provider_error: Option<String>,
+    local_repository_loading: bool,
+    automatic_enabled: bool,
+    settings_loaded: bool,
+    state: &Entity<AppState>,
+) -> AnyElement {
+    let busy = provider_loading
+        || local_repository_loading
+        || brief_state.loading
+        || brief_state.generating;
+    let provider_needs_setup = provider_status
+        .as_ref()
+        .map(|status| !status.available || !status.authenticated)
+        .unwrap_or(false)
+        || (!provider_loading && provider_error.is_some());
+    let state_for_generate = state.clone();
+    let state_for_settings = state.clone();
+    let has_brief = brief_state.document.is_some();
+
+    let header = div()
+        .flex()
+        .items_start()
+        .justify_between()
+        .gap(px(12.0))
+        .flex_wrap()
+        .mb(px(14.0))
+        .child(
+            div()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(eyebrow("Review Brief"))
+                .child(
+                    div()
+                        .text_size(px(15.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg_emphasis())
+                        .child("Pre-diff briefing"),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_end()
+                .gap(px(6.0))
+                .flex_wrap()
+                .when(provider_loading, |el| el.child(badge("Checking provider")))
+                .when(local_repository_loading, |el| {
+                    el.child(badge("Preparing checkout"))
+                })
+                .when(!busy && !provider_needs_setup, |el| {
+                    let trigger_generate =
+                        move |_: &MouseDownEvent, window: &mut Window, cx: &mut App| {
+                            review_intelligence::trigger_review_intelligence(
+                                &state_for_generate,
+                                window,
+                                cx,
+                                ReviewIntelligenceScope::BriefOnly,
+                                true,
+                            );
+                        };
+
+                    if has_brief {
+                        el.child(review_brief_icon_button(trigger_generate))
+                    } else {
+                        el.child(ghost_button("Generate", trigger_generate))
+                    }
+                }),
+        );
+
+    let body = if let Some(brief) = brief_state.document.as_ref() {
+        render_review_brief_document(brief).into_any_element()
+    } else if provider_needs_setup {
+        render_review_brief_setup_needed(
+            provider_status.as_ref(),
+            provider_error.as_deref(),
+            state,
+            state_for_settings,
+        )
+        .into_any_element()
+    } else if let Some(error) = brief_state.error.as_deref() {
+        render_review_brief_error(error, state).into_any_element()
+    } else if busy {
+        render_review_brief_progress(
+            provider,
+            provider_status.as_ref(),
+            provider_error.as_deref(),
+            local_repository_loading,
+            brief_state.progress_text.as_deref(),
+        )
+        .into_any_element()
+    } else if !settings_loaded {
+        render_review_brief_progress(
+            provider,
+            provider_status.as_ref(),
+            provider_error.as_deref(),
+            local_repository_loading,
+            Some("Preparing briefing for this pull request."),
+        )
+        .into_any_element()
+    } else {
+        render_review_brief_idle(state, state_for_settings, automatic_enabled).into_any_element()
+    };
+
+    nested_panel().child(header).child(body).into_any_element()
+}
+
+fn review_brief_icon_button(
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id("regenerate-review-brief")
+        .w(px(24.0))
+        .h(px(24.0))
+        .rounded(radius_sm())
+        .bg(transparent())
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .tooltip(|_, cx| build_review_brief_tooltip("Regenerate pre-diff briefing", cx))
+        .hover(|style| style.bg(bg_selected()))
+        .on_mouse_down(MouseButton::Left, on_click)
+        .child(lucide_icon(LucideIcon::RefreshCw, 13.0, fg_subtle()))
+}
+
+fn build_review_brief_tooltip(text: &'static str, cx: &mut App) -> AnyView {
+    AnyView::from(cx.new(|_| ReviewBriefTooltip {
+        text: SharedString::from(text),
+    }))
+}
+
+struct ReviewBriefTooltip {
+    text: SharedString,
+}
+
+impl Render for ReviewBriefTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded(radius_sm())
+            .border_1()
+            .border_color(border_muted())
+            .bg(bg_overlay())
+            .text_size(px(11.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(fg_emphasis())
+            .child(self.text.clone())
+    }
+}
+
+fn render_review_brief_document(brief: &ReviewBrief) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(14.0))
+        .child(render_review_brief_text_block(
+            "Likely intent",
+            &[brief.likely_intent.clone()],
+            true,
+        ))
+        .child(render_review_brief_text_block(
+            "What changed",
+            &brief.changed_summary,
+            false,
+        ))
+        .child(render_review_brief_text_block(
+            "Review risks/questions",
+            &brief.risks_questions,
+            false,
+        ))
+        .when(!brief.warnings.is_empty(), |el| {
+            el.child(render_review_brief_text_block(
+                "Notes",
+                &brief.warnings,
+                false,
+            ))
+        })
+        .when(!brief.related_file_paths.is_empty(), |el| {
+            el.child(
+                div().flex().gap(px(6.0)).flex_wrap().children(
+                    brief
+                        .related_file_paths
+                        .iter()
+                        .take(8)
+                        .map(|path| badge(path)),
+                ),
+            )
+        })
+}
+
+fn render_review_brief_text_block(
+    title: &str,
+    items: &[String],
+    emphasized: bool,
+) -> impl IntoElement {
+    div()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(7.0))
+        .child(
+            div()
+                .text_size(px(12.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_emphasis())
+                .child(title.to_string()),
+        )
+        .children(items.iter().map(move |item| {
+            div()
+                .flex()
+                .items_start()
+                .gap(px(8.0))
+                .w_full()
+                .min_w_0()
+                .child(
+                    div()
+                        .mt(px(8.0))
+                        .w(px(4.0))
+                        .h(px(4.0))
+                        .rounded(px(2.0))
+                        .bg(if emphasized { accent() } else { fg_subtle() }),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .w_full()
+                        .min_w_0()
+                        .whitespace_normal()
+                        .text_size(if emphasized { px(14.0) } else { px(13.0) })
+                        .line_height(px(20.0))
+                        .font_weight(if emphasized {
+                            FontWeight::MEDIUM
+                        } else {
+                            FontWeight::NORMAL
+                        })
+                        .text_color(if emphasized {
+                            fg_emphasis()
+                        } else {
+                            fg_default()
+                        })
+                        .child(item.clone()),
+                )
+        }))
+}
+
+fn render_review_brief_progress(
+    provider: CodeTourProvider,
+    provider_status: Option<&CodeTourProviderStatus>,
+    provider_error: Option<&str>,
+    local_repository_loading: bool,
+    progress_text: Option<&str>,
+) -> impl IntoElement {
+    let title = progress_text
+        .map(str::to_string)
+        .unwrap_or_else(|| "Preparing briefing.".to_string());
+
+    div()
+        .p(px(14.0))
+        .rounded(radius_sm())
+        .bg(bg_subtle())
+        .border_1()
+        .border_color(border_muted())
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(12.0))
+        .flex_wrap()
+        .child(
+            div()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(9.0))
+                .child(lucide_icon(LucideIcon::Sparkles, 15.0, accent()))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.0))
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(fg_emphasis())
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(fg_muted())
+                                .child("Start review remains available while this finishes."),
+                        ),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .flex_wrap()
+                .child(badge(provider.label()))
+                .when_some(provider_status, |el, status| {
+                    el.child(badge(if status.available && status.authenticated {
+                        "Ready"
+                    } else {
+                        "Setup needed"
+                    }))
+                })
+                .when(local_repository_loading, |el| el.child(badge("Checkout")))
+                .when_some(provider_error, |el, error| el.child(error_text(error))),
+        )
+}
+
+fn render_review_brief_error(error: &str, state: &Entity<AppState>) -> impl IntoElement {
+    let state_for_retry = state.clone();
+    div()
+        .p(px(14.0))
+        .rounded(radius_sm())
+        .bg(bg_subtle())
+        .border_1()
+        .border_color(border_muted())
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(12.0))
+        .flex_wrap()
+        .child(
+            div()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(9.0))
+                .child(lucide_icon(LucideIcon::CircleHelp, 15.0, danger()))
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_size(px(12.0))
+                        .line_height(px(18.0))
+                        .text_color(danger())
+                        .child(error.to_string()),
+                ),
+        )
+        .child(ghost_button("Retry", move |_, window, cx| {
+            review_intelligence::trigger_review_intelligence(
+                &state_for_retry,
+                window,
+                cx,
+                ReviewIntelligenceScope::BriefOnly,
+                true,
+            );
+        }))
+}
+
+fn render_review_brief_setup_needed(
+    provider_status: Option<&CodeTourProviderStatus>,
+    provider_error: Option<&str>,
+    state: &Entity<AppState>,
+    state_for_settings: Entity<AppState>,
+) -> impl IntoElement {
+    let state_for_retry = state.clone();
+    let message = provider_status
+        .map(|status| status.message.clone())
+        .or_else(|| provider_error.map(str::to_string))
+        .unwrap_or_else(|| {
+            "The selected AI provider needs setup before briefing generation.".to_string()
+        });
+
+    div()
+        .p(px(14.0))
+        .rounded(radius_sm())
+        .bg(bg_subtle())
+        .border_1()
+        .border_color(border_muted())
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(12.0))
+        .flex_wrap()
+        .child(
+            div()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(9.0))
+                .child(lucide_icon(LucideIcon::Settings, 15.0, fg_muted()))
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_size(px(12.0))
+                        .line_height(px(18.0))
+                        .text_color(fg_muted())
+                        .child(message),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .gap(px(6.0))
+                .flex_wrap()
+                .child(ghost_button("Retry", move |_, window, cx| {
+                    review_intelligence::refresh_active_review_brief(
+                        &state_for_retry,
+                        window,
+                        cx,
+                        true,
+                    );
+                }))
+                .child(ghost_button("Settings", move |_, _, cx| {
+                    state_for_settings.update(cx, |state, cx| {
+                        state.set_active_section(SectionId::Settings);
+                        cx.notify();
+                    });
+                })),
+        )
+}
+
+fn render_review_brief_idle(
+    state: &Entity<AppState>,
+    state_for_settings: Entity<AppState>,
+    automatic_enabled: bool,
+) -> impl IntoElement {
+    let state_for_generate = state.clone();
+    let copy = if automatic_enabled {
+        "No cached review brief is available for this pull request head yet."
+    } else {
+        "Automatic briefings use the Background code tours repository setting."
+    };
+
+    div()
+        .p(px(14.0))
+        .rounded(radius_sm())
+        .bg(bg_subtle())
+        .border_1()
+        .border_color(border_muted())
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(12.0))
+        .flex_wrap()
+        .child(
+            div()
+                .min_w_0()
+                .text_size(px(12.0))
+                .line_height(px(18.0))
+                .text_color(fg_muted())
+                .child(copy),
+        )
+        .child(
+            div()
+                .flex()
+                .gap(px(6.0))
+                .flex_wrap()
+                .child(ghost_button("Generate", move |_, window, cx| {
+                    review_intelligence::trigger_review_intelligence(
+                        &state_for_generate,
+                        window,
+                        cx,
+                        ReviewIntelligenceScope::BriefOnly,
+                        true,
+                    );
+                }))
+                .child(ghost_button("Settings", move |_, _, cx| {
+                    state_for_settings.update(cx, |state, cx| {
+                        state.set_active_section(SectionId::Settings);
+                        cx.notify();
+                    });
+                })),
+        )
 }
 
 fn render_overview_metric(value: String, label: &str, color: Rgba) -> impl IntoElement {
@@ -1529,11 +2038,30 @@ pub fn trigger_submit_review(state: &Entity<AppState>, window: &mut Window, cx: 
         return;
     }
 
-    let Some((repository, number)) = state
-        .read(cx)
-        .active_pr()
-        .map(|pr| (pr.repository.clone(), pr.number))
-    else {
+    let Some((repository, number, pull_request_id, pending_review_id, has_pending_drafts)) = ({
+        let s = state.read(cx);
+        s.active_detail().map(|detail| {
+            (
+                detail.repository.clone(),
+                detail.number,
+                detail.id.clone(),
+                detail
+                    .viewer_pending_review
+                    .as_ref()
+                    .map(|review| review.id.clone()),
+                detail
+                    .viewer_pending_review
+                    .as_ref()
+                    .map(|review| !review.comments.is_empty())
+                    .unwrap_or(false)
+                    || detail
+                        .review_threads
+                        .iter()
+                        .flat_map(|thread| thread.comments.iter())
+                        .any(|comment| comment.state == "PENDING"),
+            )
+        })
+    }) else {
         return;
     };
 
@@ -1551,7 +2079,7 @@ pub fn trigger_submit_review(state: &Entity<AppState>, window: &mut Window, cx: 
         return;
     }
 
-    if action == ReviewAction::Comment && body.trim().is_empty() {
+    if !has_pending_drafts && action == ReviewAction::Comment && body.trim().is_empty() {
         state.update(cx, |s, cx| {
             s.review_message = Some("Enter a review note before submitting a comment.".to_string());
             s.review_success = false;
@@ -1575,9 +2103,9 @@ pub fn trigger_submit_review(state: &Entity<AppState>, window: &mut Window, cx: 
             let submit_result = cx
                 .background_executor()
                 .spawn(async move {
-                    github::submit_pull_request_review(
-                        &repository,
-                        number,
+                    github::submit_graphql_pull_request_review(
+                        &pull_request_id,
+                        pending_review_id.as_deref(),
                         action,
                         &body_for_submit,
                     )
@@ -1608,6 +2136,7 @@ pub fn trigger_submit_review(state: &Entity<AppState>, window: &mut Window, cx: 
                                 ds.snapshot.as_mut().and_then(|sn| sn.detail.as_mut())
                             {
                                 apply_submitted_review_to_detail(detail, login, action, &body);
+                                detail.viewer_pending_review = None;
                                 updated_detail = Some(detail.clone());
                             }
                         }
@@ -1649,6 +2178,7 @@ pub fn trigger_submit_review(state: &Entity<AppState>, window: &mut Window, cx: 
                             if let Some(login) = reviewer_login.as_deref() {
                                 if let Some(detail) = snapshot.detail.as_mut() {
                                     apply_submitted_review_to_detail(detail, login, action, &body);
+                                    detail.viewer_pending_review = None;
                                 }
                             }
                             updated_detail = snapshot.detail.clone();
@@ -1702,6 +2232,7 @@ fn apply_submitted_review_to_detail(
             .latest_reviews
             .retain(|review| review.author_login != reviewer_login);
         detail.latest_reviews.push(PullRequestReview {
+            id: None,
             author_login: reviewer_login.to_string(),
             author_avatar_url: None,
             state: review_state.to_string(),
@@ -2818,6 +3349,19 @@ fn trigger_sync_pr(
 
             warm_structural_diffs_flow(model.clone(), cx).await;
 
+            let should_refresh_brief = model
+                .read_with(cx, |s, _| {
+                    s.active_surface == PullRequestSurface::Overview
+                        && s.active_pr_key.as_deref() == Some(&detail_key)
+                })
+                .ok()
+                .unwrap_or(false);
+
+            if should_refresh_brief {
+                review_intelligence::refresh_active_review_brief_flow(model.clone(), true, cx)
+                    .await;
+            }
+
             let should_refresh_tour = model
                 .read_with(cx, |s, _| {
                     s.active_surface == PullRequestSurface::Files
@@ -3139,6 +3683,7 @@ mod tests {
 
     fn review(author_login: &str, state: &str, submitted_at: Option<&str>) -> PullRequestReview {
         PullRequestReview {
+            id: None,
             author_login: author_login.to_string(),
             author_avatar_url: None,
             state: state.to_string(),
@@ -3175,6 +3720,8 @@ mod tests {
             updated_at: timestamp.to_string(),
             published_at: Some(timestamp.to_string()),
             reply_to_id: None,
+            viewer_can_update: false,
+            viewer_can_delete: false,
             url: "https://example.com/comment".to_string(),
         }
     }
@@ -3270,6 +3817,7 @@ mod tests {
             comments,
             latest_reviews,
             review_threads,
+            viewer_pending_review: None,
             files: vec![PullRequestFile {
                 path: "src/main.rs".to_string(),
                 additions: 12,

@@ -215,6 +215,7 @@ mod tests {
             comments: Vec::new(),
             latest_reviews: Vec::new(),
             review_threads: Vec::new(),
+            viewer_pending_review: None,
             files: vec![
                 PullRequestFile {
                     path: "src/main.rs".to_string(),

@@ -4,7 +4,7 @@ use crate::{
     cache::CacheStore,
     code_tour::{self, CodeTourSettings},
     github::{self, PullRequestDetail, PullRequestSummary, WorkspaceSnapshot},
-    local_repo, review_intelligence,
+    local_repo, review_brief, review_intelligence,
     state::pr_key,
 };
 
@@ -14,26 +14,28 @@ pub struct BackgroundCodeTourSyncOutcome {
     pub pull_requests_considered: usize,
     pub generated_tours: usize,
     pub reused_cached_tours: usize,
+    pub generated_briefs: usize,
+    pub reused_cached_briefs: usize,
 }
 
 impl BackgroundCodeTourSyncOutcome {
     pub fn summary(&self) -> String {
         if self.enabled_repositories == 0 {
-            return "Automatic background code tours are disabled for every repository."
+            return "Automatic background review intelligence is disabled for every repository."
                 .to_string();
         }
 
         if self.pull_requests_considered == 0 {
             return format!(
-                "No open pull requests matched the {} repository setting{} for automatic code tours.",
+                "No open pull requests matched the {} repository setting{} for automatic review intelligence.",
                 self.enabled_repositories,
                 if self.enabled_repositories == 1 { "" } else { "s" }
             );
         }
 
-        if self.generated_tours == 0 {
+        if self.generated_tours == 0 && self.generated_briefs == 0 {
             return format!(
-                "Checked {} pull request{} and reused {} cached guide{}.",
+                "Checked {} pull request{} and reused {} cached guide{} and {} cached brief{}.",
                 self.pull_requests_considered,
                 if self.pull_requests_considered == 1 {
                     ""
@@ -45,12 +47,18 @@ impl BackgroundCodeTourSyncOutcome {
                     ""
                 } else {
                     "s"
+                },
+                self.reused_cached_briefs,
+                if self.reused_cached_briefs == 1 {
+                    ""
+                } else {
+                    "s"
                 }
             );
         }
 
         format!(
-            "Checked {} pull request{}, generated {} guide{}, and reused {} cached guide{}.",
+            "Checked {} pull request{}, generated {} guide{} and {} brief{}, and reused {} cached guide{} and {} cached brief{}.",
             self.pull_requests_considered,
             if self.pull_requests_considered == 1 {
                 ""
@@ -59,12 +67,16 @@ impl BackgroundCodeTourSyncOutcome {
             },
             self.generated_tours,
             if self.generated_tours == 1 { "" } else { "s" },
+            self.generated_briefs,
+            if self.generated_briefs == 1 { "" } else { "s" },
             self.reused_cached_tours,
             if self.reused_cached_tours == 1 {
                 ""
             } else {
                 "s"
-            }
+            },
+            self.reused_cached_briefs,
+            if self.reused_cached_briefs == 1 { "" } else { "s" }
         )
     }
 }
@@ -73,6 +85,18 @@ impl BackgroundCodeTourSyncOutcome {
 enum PullRequestTourState {
     Generated,
     Cached,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PullRequestBriefState {
+    Generated,
+    Cached,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PullRequestIntelligenceState {
+    tour: PullRequestTourState,
+    brief: PullRequestBriefState,
 }
 
 pub fn sync_workspace_code_tours(
@@ -112,13 +136,21 @@ pub fn sync_workspace_code_tours(
 
     for summary in pull_requests {
         match review_intelligence::run_background_blocking(|| {
-            ensure_pull_request_code_tour(cache, &summary, settings.provider)
+            ensure_pull_request_review_intelligence(cache, &summary, settings.provider)
         }) {
-            Ok(PullRequestTourState::Generated) => outcome.generated_tours += 1,
-            Ok(PullRequestTourState::Cached) => outcome.reused_cached_tours += 1,
+            Ok(state) => {
+                match state.tour {
+                    PullRequestTourState::Generated => outcome.generated_tours += 1,
+                    PullRequestTourState::Cached => outcome.reused_cached_tours += 1,
+                }
+                match state.brief {
+                    PullRequestBriefState::Generated => outcome.generated_briefs += 1,
+                    PullRequestBriefState::Cached => outcome.reused_cached_briefs += 1,
+                }
+            }
             Err(error) => {
                 return Err(format!(
-                    "Failed to prepare {}#{} for automatic code tours: {error}",
+                    "Failed to prepare {}#{} for automatic review intelligence: {error}",
                     summary.repository, summary.number
                 ));
             }
@@ -153,14 +185,20 @@ fn enabled_pull_requests(
     unique_pull_requests.into_values().collect()
 }
 
-fn ensure_pull_request_code_tour(
+fn ensure_pull_request_review_intelligence(
     cache: &CacheStore,
     summary: &PullRequestSummary,
     provider: code_tour::CodeTourProvider,
-) -> Result<PullRequestTourState, String> {
+) -> Result<PullRequestIntelligenceState, String> {
     let detail = load_or_sync_pull_request_detail(cache, summary)?;
-    if code_tour::load_code_tour(cache, &detail, provider)?.is_some() {
-        return Ok(PullRequestTourState::Cached);
+    let cached_tour = code_tour::load_code_tour(cache, &detail, provider)?.is_some();
+    let cached_brief = review_brief::load_review_brief(cache, &detail, provider)?.is_some();
+
+    if cached_tour && cached_brief {
+        return Ok(PullRequestIntelligenceState {
+            tour: PullRequestTourState::Cached,
+            brief: PullRequestBriefState::Cached,
+        });
     }
 
     let local_repository_status = local_repo::ensure_local_repository_for_pull_request(
@@ -173,11 +211,29 @@ fn ensure_pull_request_code_tour(
         .path
         .clone()
         .ok_or_else(|| local_repository_status.message.clone())?;
-    let generation_input =
-        code_tour::build_code_tour_generation_input(&detail, provider, &working_directory);
 
-    code_tour::generate_code_tour_with_progress(cache, generation_input, |_| {})?;
-    Ok(PullRequestTourState::Generated)
+    let tour = if cached_tour {
+        PullRequestTourState::Cached
+    } else {
+        let generation_input =
+            code_tour::build_code_tour_generation_input(&detail, provider, &working_directory);
+        code_tour::generate_code_tour_with_progress(cache, generation_input, |_| {})?;
+        PullRequestTourState::Generated
+    };
+
+    let brief = if cached_brief {
+        PullRequestBriefState::Cached
+    } else {
+        let generation_input = review_brief::build_review_brief_generation_input(
+            &detail,
+            provider,
+            &working_directory,
+        );
+        review_brief::generate_review_brief(cache, generation_input)?;
+        PullRequestBriefState::Generated
+    };
+
+    Ok(PullRequestIntelligenceState { tour, brief })
 }
 
 fn load_or_sync_pull_request_detail(
@@ -290,7 +346,24 @@ mod tests {
 
         assert_eq!(
             outcome.summary(),
-            "Automatic background code tours are disabled for every repository."
+            "Automatic background review intelligence is disabled for every repository."
+        );
+    }
+
+    #[test]
+    fn background_sync_summary_includes_review_briefs() {
+        let outcome = BackgroundCodeTourSyncOutcome {
+            enabled_repositories: 1,
+            pull_requests_considered: 2,
+            generated_tours: 1,
+            reused_cached_tours: 1,
+            generated_briefs: 2,
+            reused_cached_briefs: 0,
+        };
+
+        assert_eq!(
+            outcome.summary(),
+            "Checked 2 pull requests, generated 1 guide and 2 briefs, and reused 1 cached guide and 0 cached briefs."
         );
     }
 }

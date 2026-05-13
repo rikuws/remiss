@@ -121,10 +121,56 @@ pub const TOUR_OUTPUT_SCHEMA_JSON: &str = r#"{
   "additionalProperties": false
 }"#;
 
+pub const REVIEW_BRIEF_OUTPUT_SCHEMA_JSON: &str = r#"{
+  "type": "object",
+  "properties": {
+    "confidence": {
+      "type": "string",
+      "enum": ["low", "medium", "high"]
+    },
+    "likelyIntent": { "type": "string" },
+    "changedSummary": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1,
+      "maxItems": 5
+    },
+    "risksQuestions": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1,
+      "maxItems": 5
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "relatedFilePaths": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "required": [
+    "confidence",
+    "likelyIntent",
+    "changedSummary",
+    "risksQuestions",
+    "warnings",
+    "relatedFilePaths"
+  ],
+  "additionalProperties": false
+}"#;
+
 #[allow(dead_code)]
 pub static TOUR_OUTPUT_SCHEMA_VALUE: Lazy<Value> = Lazy::new(|| {
     serde_json::from_str(TOUR_OUTPUT_SCHEMA_JSON)
         .expect("TOUR_OUTPUT_SCHEMA_JSON must be valid JSON")
+});
+
+#[allow(dead_code)]
+pub static REVIEW_BRIEF_OUTPUT_SCHEMA_VALUE: Lazy<Value> = Lazy::new(|| {
+    serde_json::from_str(REVIEW_BRIEF_OUTPUT_SCHEMA_JSON)
+        .expect("REVIEW_BRIEF_OUTPUT_SCHEMA_JSON must be valid JSON")
 });
 
 #[cfg(test)]
@@ -157,5 +203,21 @@ mod tests {
             .unwrap()
             .iter()
             .any(|value| value.as_str() == Some("priority")));
+    }
+
+    #[test]
+    fn review_brief_schema_parses() {
+        let value = &*REVIEW_BRIEF_OUTPUT_SCHEMA_VALUE;
+        assert_eq!(value["type"], "object");
+        assert!(value["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value.as_str() == Some("likelyIntent")));
+        assert!(value["properties"]["confidence"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value.as_str() == Some("high")));
     }
 }

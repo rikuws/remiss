@@ -1210,13 +1210,19 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                                 "Briefing",
                                 active_surface == PullRequestSurface::Overview,
                                 false,
-                                move |_, _, cx| {
+                                move |_, window, cx| {
                                     state_for_briefing.update(cx, |state, cx| {
                                         state.active_surface = PullRequestSurface::Overview;
                                         state.pr_header_compact = false;
                                         state.persist_active_review_session();
                                         cx.notify();
                                     });
+                                    crate::review_intelligence::refresh_active_review_brief(
+                                        &state_for_briefing,
+                                        window,
+                                        cx,
+                                        true,
+                                    );
                                 },
                             ),
                             chrome_segment(

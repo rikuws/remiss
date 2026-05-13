@@ -346,6 +346,7 @@ fn synthetic_detail(input: SyntheticDetailInput) -> PullRequestDetail {
         comments: Vec::new(),
         latest_reviews: Vec::new(),
         review_threads: Vec::new(),
+        viewer_pending_review: None,
         files: input.files,
         raw_diff: input.raw_diff,
         parsed_diff: input.parsed_diff,

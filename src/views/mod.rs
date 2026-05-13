@@ -8,9 +8,10 @@ mod settings;
 mod workspace_sync;
 
 pub use diff_view::{
-    close_review_line_action, close_waypoint_spotlight, execute_waypoint_spotlight_selection,
-    move_waypoint_spotlight_selection, toggle_waypoint_spotlight, trigger_add_waypoint_shortcut,
-    trigger_submit_inline_comment,
+    close_review_finish_modal, close_review_line_action, close_waypoint_spotlight,
+    execute_waypoint_spotlight_selection, move_waypoint_spotlight_selection,
+    toggle_waypoint_spotlight, trigger_add_waypoint_shortcut, trigger_submit_inline_comment,
+    trigger_submit_review_from_review_mode,
 };
 pub use palette::{
     close_palette, execute_palette_selection, move_palette_selection, toggle_palette,

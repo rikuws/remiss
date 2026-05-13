@@ -42,9 +42,11 @@ mod code_tour_background;
 mod command_runner;
 mod diff;
 mod difftastic;
+mod emoji;
 mod gh;
 mod github;
 mod icons;
+mod inline_diff;
 mod local_documents;
 mod local_repo;
 mod local_review;
@@ -53,6 +55,7 @@ mod managed_lsp;
 mod markdown;
 mod notifications;
 mod platform_macos;
+mod review_brief;
 mod review_file_header;
 mod review_intelligence;
 mod review_queue;
@@ -87,13 +90,14 @@ use temp_source_window::{
     open_temp_source_window_for_selected_diff_line,
 };
 use views::{
-    blur_review_editor, close_palette, close_review_line_action, close_waypoint_spotlight,
-    cycle_diff_color_theme_preference, decrease_code_font_size_preference,
-    execute_palette_selection, execute_waypoint_spotlight_selection,
-    increase_code_font_size_preference, move_palette_selection, move_waypoint_spotlight_selection,
-    reset_code_font_size_preference, toggle_palette, toggle_waypoint_spotlight,
-    trigger_add_waypoint_shortcut, trigger_submit_inline_comment, trigger_submit_review, RootView,
-    APP_CHROME_HEIGHT,
+    blur_review_editor, close_palette, close_review_finish_modal, close_review_line_action,
+    close_waypoint_spotlight, cycle_diff_color_theme_preference,
+    decrease_code_font_size_preference, execute_palette_selection,
+    execute_waypoint_spotlight_selection, increase_code_font_size_preference,
+    move_palette_selection, move_waypoint_spotlight_selection, reset_code_font_size_preference,
+    toggle_palette, toggle_waypoint_spotlight, trigger_add_waypoint_shortcut,
+    trigger_submit_inline_comment, trigger_submit_review, trigger_submit_review_from_review_mode,
+    RootView, APP_CHROME_HEIGHT,
 };
 
 const MACOS_TRAFFIC_LIGHT_LEFT: f32 = 18.0;
@@ -225,6 +229,20 @@ fn start_app(cx: &mut App) -> Result<(), String> {
 
         if keystroke.key == "escape" && close_temp_source_window_if_active(&app_state_for_keys, cx)
         {
+            return;
+        }
+
+        let finish_review_open = app_state_for_keys.read(cx).review_finish_modal_open;
+        if finish_review_open {
+            if is_platform_plain && keystroke.key == "enter" {
+                trigger_submit_review_from_review_mode(&app_state_for_keys, window, cx);
+                return;
+            }
+
+            if keystroke.key == "escape" {
+                close_review_finish_modal(&app_state_for_keys, cx);
+                return;
+            }
             return;
         }
 

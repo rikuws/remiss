@@ -488,6 +488,8 @@ mod tests {
             updated_at: "2026-04-24T10:00:00Z".to_string(),
             published_at: Some("2026-04-24T10:00:00Z".to_string()),
             reply_to_id: None,
+            viewer_can_update: false,
+            viewer_can_delete: false,
             url: format!("https://example.com/{id}"),
         }
     }
@@ -548,6 +550,7 @@ mod tests {
             comments: Vec::new(),
             latest_reviews: Vec::new(),
             review_threads: vec![review_thread(comments)],
+            viewer_pending_review: None,
             files: Vec::new(),
             raw_diff: String::new(),
             parsed_diff: Vec::new(),

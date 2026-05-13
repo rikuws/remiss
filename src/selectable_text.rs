@@ -10,7 +10,7 @@ use gpui::{
 
 use crate::{
     state::AppState,
-    theme::{accent_muted, fg_subtle},
+    theme::{accent, accent_muted},
 };
 
 thread_local! {
@@ -1113,16 +1113,18 @@ impl Element for AppTextInput {
                     }
                 }
 
-                if is_active_text_target(&selection_id) {
-                    if let Some(cursor_quad) =
+                let cursor_quad = is_active_text_target(&selection_id)
+                    .then(|| {
                         cursor_quad_for_index(&text_layout, selection_state.borrow().cursor_index())
-                    {
-                        window.paint_quad(cursor_quad);
-                    }
-                }
+                    })
+                    .flatten();
 
                 self.text
                     .paint(None, inspector_id, bounds, &mut (), &mut (), window, cx);
+
+                if let Some(cursor_quad) = cursor_quad {
+                    window.paint_quad(cursor_quad);
+                }
 
                 ((), input_state)
             },
@@ -1421,7 +1423,7 @@ fn cursor_quad_for_index(layout: &TextLayout, index: usize) -> Option<PaintQuad>
             point(bounds.left() + position.x, bounds.top() + position.y),
             size(px(2.0), line_height),
         ),
-        fg_subtle(),
+        accent(),
     ))
 }
 

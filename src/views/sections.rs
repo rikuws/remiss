@@ -2325,6 +2325,9 @@ pub fn open_pull_request(
     });
 
     ensure_structural_diff_warmup_started(state, window, cx);
+    if initial_surface == PullRequestSurface::Overview {
+        crate::review_intelligence::refresh_active_review_brief(state, window, cx, true);
+    }
 
     if !load_plan.load_cached_snapshot && !load_plan.sync_live {
         return;
@@ -2374,6 +2377,7 @@ pub fn open_pull_request(
                     .ok();
 
                 warm_structural_diffs_flow(model.clone(), cx).await;
+                refresh_brief_if_active_overview(model.clone(), &detail_key, cx).await;
             }
 
             if !should_sync {
@@ -2434,8 +2438,27 @@ pub fn open_pull_request(
                 .ok();
 
             warm_structural_diffs_flow(model.clone(), cx).await;
+            refresh_brief_if_active_overview(model.clone(), &detail_key, cx).await;
         })
         .detach();
+}
+
+async fn refresh_brief_if_active_overview(
+    model: Entity<AppState>,
+    detail_key: &str,
+    cx: &mut AsyncWindowContext,
+) {
+    let should_refresh_brief = model
+        .read_with(cx, |state, _| {
+            state.active_surface == PullRequestSurface::Overview
+                && state.active_pr_key.as_deref() == Some(detail_key)
+        })
+        .ok()
+        .unwrap_or(false);
+
+    if should_refresh_brief {
+        crate::review_intelligence::refresh_active_review_brief_flow(model, true, cx).await;
+    }
 }
 
 #[derive(Clone, Copy)]

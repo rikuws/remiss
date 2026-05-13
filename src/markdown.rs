@@ -3,6 +3,7 @@ use gpui::*;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
 use crate::code_display::render_highlighted_code_block;
+use crate::emoji::replace_shortcode_emoji;
 use crate::selectable_text::SelectableText;
 use crate::theme::*;
 
@@ -329,13 +330,13 @@ impl MarkdownBuilder {
         // Check if the last inline span is a link placeholder with empty text
         if let Some(last) = self.inline_buffer.last_mut() {
             if last.link_url.is_some() && last.text.is_empty() {
-                last.text = text.to_string();
+                last.text = replace_shortcode_emoji(text);
                 return;
             }
         }
 
         self.inline_buffer.push(InlineSpan {
-            text: text.to_string(),
+            text: replace_shortcode_emoji(text),
             bold: self.bold,
             emphasis: self.emphasis,
             strikethrough: self.strikethrough,
@@ -490,6 +491,32 @@ fn render_inline_div(
 }
 
 fn render_code_block(_id: &str, text: &str, lang: Option<&str>) -> AnyElement {
+    if is_suggestion_language(lang) {
+        return div()
+            .w_full()
+            .min_w_0()
+            .my(px(8.0))
+            .rounded(radius())
+            .border_1()
+            .border_color(success_muted())
+            .bg(bg_surface())
+            .overflow_hidden()
+            .child(
+                div()
+                    .px(px(10.0))
+                    .py(px(6.0))
+                    .border_b(px(1.0))
+                    .border_color(success_muted())
+                    .bg(success_muted())
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(success())
+                    .child("Suggested change"),
+            )
+            .child(render_highlighted_code_block("diff", text))
+            .into_any_element();
+    }
+
     div()
         .w_full()
         .min_w_0()
@@ -501,27 +528,56 @@ fn render_code_block(_id: &str, text: &str, lang: Option<&str>) -> AnyElement {
         .into_any_element()
 }
 
+fn is_suggestion_language(lang: Option<&str>) -> bool {
+    lang.map(|lang| lang.trim().eq_ignore_ascii_case("suggestion"))
+        .unwrap_or(false)
+}
+
 fn render_list_item(id: &str, prefix: &str, spans: &[InlineSpan]) -> AnyElement {
     div()
-        .flex()
-        .items_start()
+        .relative()
         .w_full()
         .min_w_0()
-        .gap(px(4.0))
-        .pl(px(8.0))
+        .pl(px(24.0))
+        .py(px(1.0))
         .child(
             div()
+                .absolute()
+                .left(px(2.0))
+                .top(px(1.0))
+                .w(px(16.0))
                 .text_size(px(13.0))
+                .line_height(px(20.0))
+                .text_right()
                 .text_color(fg_muted())
-                .flex_shrink_0()
-                .child(prefix.to_string()),
+                .child(prefix.trim_end().to_string()),
         )
         .child(
             render_inline_div(id, spans, px(13.0), fg_default(), FontWeight::NORMAL)
-                .flex_1()
-                .min_w_0(),
+                .w_full()
+                .min_w_0()
+                .line_height(px(20.0)),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_suggestion_language;
+    use crate::emoji::replace_shortcode_emoji;
+
+    #[test]
+    fn recognizes_suggestion_fence_language() {
+        assert!(is_suggestion_language(Some("suggestion")));
+        assert!(is_suggestion_language(Some(" Suggestion ")));
+        assert!(!is_suggestion_language(Some("rust")));
+        assert!(!is_suggestion_language(None));
+    }
+
+    #[test]
+    fn renders_emoji_shortcodes_as_glyph_text() {
+        assert_eq!(replace_shortcode_emoji("ship it :+1:"), "ship it 👍");
+    }
 }
 
 fn render_table(id: &str, rows: &[Vec<String>]) -> AnyElement {
