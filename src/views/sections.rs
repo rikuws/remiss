@@ -42,18 +42,22 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
         .unwrap_or_default();
     let workspace_loading = s.workspace_loading;
     let workspace_error = s.workspace_error.clone();
-    let review_comment_items = overview_review_comment_items(&s);
+    let authored_comment_items =
+        overview_pull_request_comment_items(&s, OverviewCommentBucket::Authored);
+    let other_comment_items = overview_pull_request_comment_items(&s, OverviewCommentBucket::Other);
 
     let welcome_greeting = overview_welcome_greeting(&viewer_name, is_auth);
     let state_for_pull_requests = state.clone();
     let state_for_review_requests = state.clone();
     let state_for_items = state.clone();
-    let state_for_comment_items = state.clone();
+    let state_for_authored_comments = state.clone();
+    let state_for_other_comments = state.clone();
     let show_empty_state = is_auth
         && !workspace_loading
         && workspace_error.is_none()
         && review_items.is_empty()
-        && review_comment_items.is_empty();
+        && authored_comment_items.is_empty()
+        && other_comment_items.is_empty();
 
     div()
         .p(px(28.0))
@@ -139,18 +143,39 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                     state_for_items.clone(),
                                 ),
                             ))
-                            .child(div().flex_1().min_w(px(380.0)).child(
-                                overview_review_comment_briefing_panel(
-                                    review_comment_items.clone(),
-                                    workspace_loading,
-                                    workspace_error.clone(),
-                                    is_auth,
-                                    state_for_comment_items.clone(),
-                                ),
-                            )),
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(380.0))
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(18.0))
+                                    .child(overview_pull_request_comment_panel(
+                                        OverviewCommentBucket::Authored,
+                                        authored_comment_items.clone(),
+                                        workspace_loading,
+                                        workspace_error.clone(),
+                                        is_auth,
+                                        state_for_authored_comments.clone(),
+                                    ))
+                                    .child(overview_pull_request_comment_panel(
+                                        OverviewCommentBucket::Other,
+                                        other_comment_items.clone(),
+                                        workspace_loading,
+                                        workspace_error.clone(),
+                                        is_auth,
+                                        state_for_other_comments.clone(),
+                                    )),
+                            ),
                     )
                 }),
         )
+}
+
+#[derive(Clone, Copy)]
+enum OverviewCommentBucket {
+    Authored,
+    Other,
 }
 
 #[derive(Clone)]
@@ -274,14 +299,15 @@ fn overview_empty_state_panel() -> impl IntoElement {
                             .line_height(px(20.0))
                             .text_color(fg_muted())
                             .child(
-                                "No unread replies to your reviews or review requests were found in the current workspace snapshot.",
+                                "No comments from others or review requests were found in the current workspace snapshot.",
                             ),
                     ),
             )
     )
 }
 
-fn overview_review_comment_briefing_panel(
+fn overview_pull_request_comment_panel(
+    bucket: OverviewCommentBucket,
     items: Vec<OverviewReviewCommentItem>,
     workspace_loading: bool,
     workspace_error: Option<String>,
@@ -289,14 +315,37 @@ fn overview_review_comment_briefing_panel(
     state: Entity<AppState>,
 ) -> impl IntoElement {
     let has_unread = items.iter().any(|item| item.unread);
+    let (eyebrow_text, title, loading, error, unread, latest, empty, unauthenticated) = match bucket
+    {
+        OverviewCommentBucket::Authored => (
+            "Your PR comments",
+            "Comments on Your Pull Requests",
+            "Checking comments on pull requests you opened.",
+            "Workspace sync needs attention before comments on your pull requests can refresh.",
+            "Unread review comments from others on pull requests you opened.",
+            "Latest comments from others on pull requests you opened.",
+            "No comments from others on your pull requests are waiting in the current workspace.",
+            "Authenticate with gh to populate comments on your pull requests.",
+        ),
+        OverviewCommentBucket::Other => (
+            "Other PR comments",
+            "Comments on Other Pull Requests",
+            "Checking comments on other pull requests in your workspace.",
+            "Workspace sync needs attention before other pull request comments can refresh.",
+            "Unread review comments from others on pull requests opened by other people.",
+            "Latest comments from others on pull requests opened by other people.",
+            "No comments from others on other pull requests are waiting in the current workspace.",
+            "Authenticate with gh to populate comments on other pull requests.",
+        ),
+    };
     let copy = if workspace_loading {
-        "Checking your review threads for replies from other people."
+        loading
     } else if workspace_error.is_some() {
-        "Workspace sync needs attention before review replies can refresh."
+        error
     } else if has_unread {
-        "Unread replies from others on review threads you started."
+        unread
     } else {
-        "Latest replies from others on review threads you started."
+        latest
     };
 
     panel().child(
@@ -312,13 +361,13 @@ fn overview_review_comment_briefing_panel(
                     .flex_col()
                     .gap(px(4.0))
                     .min_w_0()
-                    .child(eyebrow("Review replies"))
+                    .child(eyebrow(eyebrow_text))
                     .child(
                         div()
                             .text_size(px(18.0))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(fg_emphasis())
-                            .child("Comments on Your Reviews"),
+                            .child(title),
                     )
                     .child(
                         div()
@@ -328,9 +377,7 @@ fn overview_review_comment_briefing_panel(
                             .child(copy),
                     ),
             )
-            .when(workspace_loading, |el| {
-                el.child(panel_state_text("Loading replies to your reviews..."))
-            })
+            .when(workspace_loading, |el| el.child(panel_state_text(loading)))
             .when_some(workspace_error.clone(), |el, err| {
                 el.child(error_text(&err))
             })
@@ -338,9 +385,9 @@ fn overview_review_comment_briefing_panel(
                 !workspace_loading && workspace_error.is_none() && items.is_empty(),
                 |el| {
                     el.child(panel_state_text(if is_auth {
-                        "No replies to your review comments are waiting in the current workspace."
+                        empty
                     } else {
-                        "Authenticate with gh to populate replies to your reviews."
+                        unauthenticated
                     }))
                 },
             )
@@ -665,7 +712,10 @@ fn overview_review_comment_row(
         )
 }
 
-fn overview_review_comment_items(state: &AppState) -> Vec<OverviewReviewCommentItem> {
+fn overview_pull_request_comment_items(
+    state: &AppState,
+    bucket: OverviewCommentBucket,
+) -> Vec<OverviewReviewCommentItem> {
     let mut summaries = BTreeMap::new();
     if let Some(workspace) = state.workspace.as_ref() {
         for item in workspace.queues.iter().flat_map(|queue| &queue.items) {
@@ -691,11 +741,19 @@ fn overview_review_comment_items(state: &AppState) -> Vec<OverviewReviewCommentI
             continue;
         };
 
-        for thread in &detail.review_threads {
-            if !overview_thread_started_by_viewer(thread, viewer_login) {
+        if !overview_detail_matches_comment_bucket(summary, detail, viewer_login, bucket) {
+            continue;
+        }
+
+        for comment in &detail.comments {
+            if comment.body.trim().is_empty() || comment.author_login == viewer_login {
                 continue;
             }
 
+            latest_items.push(overview_item_for_pull_request_comment(summary, comment));
+        }
+
+        for thread in &detail.review_threads {
             let mut latest_foreign_comment = None;
             for comment in &thread.comments {
                 if comment.body.trim().is_empty() || comment.author_login == viewer_login {
@@ -734,16 +792,22 @@ fn overview_review_comment_items(state: &AppState) -> Vec<OverviewReviewCommentI
     items
 }
 
-fn overview_thread_started_by_viewer(
-    thread: &github::PullRequestReviewThread,
+fn overview_detail_matches_comment_bucket(
+    summary: &github::PullRequestSummary,
+    detail: &github::PullRequestDetail,
     viewer_login: &str,
+    bucket: OverviewCommentBucket,
 ) -> bool {
-    !viewer_login.is_empty()
-        && thread
-            .comments
-            .first()
-            .map(|comment| comment.author_login.as_str())
-            == Some(viewer_login)
+    if viewer_login.is_empty() {
+        return false;
+    }
+
+    let authored_by_viewer =
+        summary.author_login == viewer_login || detail.author_login == viewer_login;
+    match bucket {
+        OverviewCommentBucket::Authored => authored_by_viewer,
+        OverviewCommentBucket::Other => !authored_by_viewer,
+    }
 }
 
 fn overview_comment_item_for_comment(
@@ -765,6 +829,23 @@ fn overview_comment_item_for_comment(
         unread,
         is_resolved: thread.is_resolved,
         is_outdated: thread.is_outdated,
+    }
+}
+
+fn overview_item_for_pull_request_comment(
+    summary: &github::PullRequestSummary,
+    comment: &github::PullRequestComment,
+) -> OverviewReviewCommentItem {
+    OverviewReviewCommentItem {
+        summary: summary.clone(),
+        author_login: comment.author_login.clone(),
+        author_avatar_url: comment.author_avatar_url.clone(),
+        location: "Conversation".to_string(),
+        preview: summarize_overview_comment(&comment.body),
+        timestamp: comment.updated_at.clone(),
+        unread: false,
+        is_resolved: false,
+        is_outdated: false,
     }
 }
 

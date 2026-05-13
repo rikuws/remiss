@@ -1212,16 +1212,8 @@ impl AppState {
         detail
             .review_threads
             .iter()
-            .filter(|thread| {
-                !viewer_login.is_empty()
-                    && thread
-                        .comments
-                        .first()
-                        .map(|comment| comment.author_login.as_str())
-                        == Some(viewer_login)
-            })
             .flat_map(|thread| &thread.comments)
-            .filter(|comment| comment.author_login != viewer_login)
+            .filter(|comment| viewer_login.is_empty() || comment.author_login != viewer_login)
             .filter(|comment| self.is_review_comment_unread(&comment.id))
             .map(|comment| comment.id.clone())
             .collect()

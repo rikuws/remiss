@@ -151,6 +151,11 @@ fn build_notification_input(
     workspace: &WorkspaceSnapshot,
 ) -> (NotificationInput, Vec<github::PullRequestDetailSnapshot>) {
     let review_requested_prs = review_requested_pull_requests(workspace);
+    let review_requested_pr_keys = review_requested_prs
+        .iter()
+        .map(|pull_request| pull_request.pr_key.clone())
+        .collect::<BTreeSet<_>>();
+    let comment_overview_prs = comment_overview_pull_requests(workspace);
     let viewer_login = workspace
         .viewer
         .as_ref()
@@ -162,7 +167,7 @@ fn build_notification_input(
     let mut tracked_threads = Vec::new();
     let mut review_detail_snapshots = Vec::new();
 
-    for pull_request in &review_requested_prs {
+    for pull_request in &comment_overview_prs {
         match github::sync_pull_request_detail(cache, &pull_request.repository, pull_request.number)
         {
             Ok(snapshot) => {
@@ -173,17 +178,19 @@ fn build_notification_input(
                             pull_request.repository, pull_request.number
                         );
                     }
-                    tracked_threads.extend(extract_tracked_threads(
-                        detail,
-                        pull_request,
-                        &viewer_login,
-                    ));
+                    if review_requested_pr_keys.contains(&pull_request.pr_key) {
+                        tracked_threads.extend(extract_tracked_threads(
+                            detail,
+                            pull_request,
+                            &viewer_login,
+                        ));
+                    }
                 }
                 review_detail_snapshots.push(snapshot);
             }
             Err(error) => {
                 eprintln!(
-                    "Failed to load review threads for {}#{} notifications: {error}",
+                    "Failed to load pull request comments for {}#{} notifications: {error}",
                     pull_request.repository, pull_request.number
                 );
             }
@@ -209,23 +216,14 @@ fn record_review_comments(
     let first_pr_observation = !read_state.observed_pr_keys.contains(&detail_key);
     let viewer_login = viewer_login.unwrap_or_default();
 
-    for thread in &detail.review_threads {
-        let thread_owned_by_viewer = !viewer_login.is_empty()
-            && thread
-                .comments
-                .first()
-                .map(|comment| comment.author_login.as_str())
-                == Some(viewer_login);
-
-        for comment in &thread.comments {
-            let newly_known = read_state.known_comment_ids.insert(comment.id.clone());
-            if newly_known
-                && !first_pr_observation
-                && thread_owned_by_viewer
-                && comment.author_login != viewer_login
-            {
-                read_state.unread_comment_ids.insert(comment.id.clone());
-            }
+    for comment in detail
+        .review_threads
+        .iter()
+        .flat_map(|thread| &thread.comments)
+    {
+        let newly_known = read_state.known_comment_ids.insert(comment.id.clone());
+        if newly_known && !first_pr_observation && comment.author_login != viewer_login {
+            read_state.unread_comment_ids.insert(comment.id.clone());
         }
     }
 
@@ -259,6 +257,22 @@ fn review_requested_pull_requests(workspace: &WorkspaceSnapshot) -> Vec<TrackedP
         .find(|queue| queue.id == "reviewRequested")
         .map(|queue| queue.items.iter().map(tracked_pull_request).collect())
         .unwrap_or_default()
+}
+
+fn comment_overview_pull_requests(workspace: &WorkspaceSnapshot) -> Vec<TrackedPullRequest> {
+    let mut pull_requests = BTreeMap::<String, PullRequestSummary>::new();
+
+    for summary in workspace.queues.iter().flat_map(|queue| &queue.items) {
+        let key = pr_key(&summary.repository, summary.number);
+        match pull_requests.get(&key) {
+            Some(existing) if existing.updated_at >= summary.updated_at => {}
+            _ => {
+                pull_requests.insert(key, summary.clone());
+            }
+        }
+    }
+
+    pull_requests.values().map(tracked_pull_request).collect()
 }
 
 fn tracked_pull_request(summary: &PullRequestSummary) -> TrackedPullRequest {
@@ -670,10 +684,10 @@ mod tests {
     }
 
     #[test]
-    fn review_comment_read_state_tracks_replies_to_viewer_owned_threads() {
+    fn review_comment_read_state_tracks_new_foreign_comments_until_marked_read() {
         let cache = temp_cache();
         let baseline =
-            detail_with_thread_comments("org/repo", 42, vec![review_comment("c1", "me")]);
+            detail_with_thread_comments("org/repo", 42, vec![review_comment("c1", "alice")]);
 
         let unread =
             record_review_comments(&cache, &baseline, Some("me")).expect("baseline record failed");
@@ -684,7 +698,7 @@ mod tests {
             "org/repo",
             42,
             vec![
-                review_comment("c1", "me"),
+                review_comment("c1", "alice"),
                 review_comment("c2", "bob"),
                 review_comment("c3", "me"),
             ],
@@ -701,7 +715,7 @@ mod tests {
     }
 
     #[test]
-    fn review_comment_read_state_ignores_threads_not_started_by_viewer() {
+    fn review_comment_read_state_tracks_foreign_comments_on_threads_started_by_others() {
         let cache = temp_cache();
         let baseline =
             detail_with_thread_comments("org/repo", 42, vec![review_comment("c1", "alice")]);
@@ -716,6 +730,6 @@ mod tests {
         let unread =
             record_review_comments(&cache, &updated, Some("me")).expect("updated record failed");
 
-        assert!(unread.is_empty());
+        assert_eq!(unread, BTreeSet::from(["c2".to_string()]));
     }
 }

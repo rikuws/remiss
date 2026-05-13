@@ -1699,10 +1699,10 @@ fn render_notification_drawer(state: &Entity<AppState>, cx: &App) -> impl IntoEl
         .unwrap_or_default();
     let state_for_close = state.clone();
     let state_for_mark_read = state.clone();
-    let reply_label = if unread_items.len() == 1 {
-        "reply"
+    let comment_label = if unread_items.len() == 1 {
+        "comment"
     } else {
-        "replies"
+        "comments"
     };
 
     div()
@@ -1739,13 +1739,13 @@ fn render_notification_drawer(state: &Entity<AppState>, cx: &App) -> impl IntoEl
                                 .text_size(px(13.0))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(fg_emphasis())
-                                .child("Unread review replies"),
+                                .child("Unread review activity"),
                         )
                         .child(
                             div()
                                 .text_size(px(11.0))
                                 .text_color(fg_muted())
-                                .child(format!("{} unread {reply_label}", unread_items.len())),
+                                .child(format!("{} unread {comment_label}", unread_items.len())),
                         ),
                 )
                 .child(
@@ -1807,7 +1807,7 @@ fn render_notification_drawer(state: &Entity<AppState>, cx: &App) -> impl IntoEl
                             .bg(bg_surface())
                             .text_size(px(12.0))
                             .text_color(fg_muted())
-                            .child("No unread replies to your reviews."),
+                            .child("No unread review comments."),
                     )
                 })
                 .children(
