@@ -206,6 +206,10 @@ pub struct ReviewSessionDocument {
     pub last_read: Option<ReviewLocation>,
     #[serde(default)]
     pub collapsed_sections: Vec<String>,
+    #[serde(default)]
+    pub collapsed_file_paths: Vec<String>,
+    #[serde(default)]
+    pub reviewed_file_paths: Vec<String>,
     #[serde(default = "default_false")]
     pub stack_rail_expanded: bool,
     #[serde(default)]
@@ -235,6 +239,8 @@ pub struct ReviewSessionState {
     pub history_forward: Vec<ReviewLocation>,
     pub last_read: Option<ReviewLocation>,
     pub collapsed_sections: HashSet<String>,
+    pub collapsed_file_paths: HashSet<String>,
+    pub reviewed_file_paths: HashSet<String>,
     pub stack_rail_expanded: bool,
     pub selected_stack_layer_id: Option<ReviewStackLayerId>,
     pub stack_diff_mode: StackDiffMode,
@@ -260,6 +266,8 @@ impl Default for ReviewSessionState {
             history_forward: Vec::new(),
             last_read: None,
             collapsed_sections: HashSet::new(),
+            collapsed_file_paths: HashSet::new(),
+            reviewed_file_paths: HashSet::new(),
             stack_rail_expanded: false,
             selected_stack_layer_id: None,
             stack_diff_mode: StackDiffMode::WholePr,
@@ -303,6 +311,8 @@ impl ReviewSessionState {
             history_forward: document.history_forward,
             last_read: document.last_read,
             collapsed_sections: document.collapsed_sections.into_iter().collect(),
+            collapsed_file_paths: document.collapsed_file_paths.into_iter().collect(),
+            reviewed_file_paths: document.reviewed_file_paths.into_iter().collect(),
             stack_rail_expanded: document.stack_rail_expanded,
             selected_stack_layer_id: document.selected_stack_layer_id,
             stack_diff_mode,
@@ -332,6 +342,8 @@ impl ReviewSessionState {
             history_forward: self.history_forward.clone(),
             last_read: self.last_read.clone(),
             collapsed_sections: self.collapsed_sections.iter().cloned().collect(),
+            collapsed_file_paths: self.collapsed_file_paths.iter().cloned().collect(),
+            reviewed_file_paths: self.reviewed_file_paths.iter().cloned().collect(),
             stack_rail_expanded: self.stack_rail_expanded,
             selected_stack_layer_id: self.selected_stack_layer_id.clone(),
             stack_diff_mode: self.stack_diff_mode,

@@ -53,7 +53,16 @@ pub fn render_review_file_header_with_action(
     props: ReviewFileHeaderProps,
     action: Option<AnyElement>,
 ) -> AnyElement {
+    render_review_file_header_with_controls(props, None, action)
+}
+
+pub fn render_review_file_header_with_controls(
+    props: ReviewFileHeaderProps,
+    leading_control: Option<AnyElement>,
+    action: Option<AnyElement>,
+) -> AnyElement {
     let display_path = review_file_display_path(&props);
+    let copy_path = props.path.clone();
 
     div()
         .w_full()
@@ -75,7 +84,9 @@ pub fn render_review_file_header_with_action(
                 .flex()
                 .items_center()
                 .gap(px(13.0))
-                .child(lucide_icon(LucideIcon::ChevronDown, 14.0, fg_muted()))
+                .child(leading_control.unwrap_or_else(|| {
+                    lucide_icon(LucideIcon::ChevronDown, 14.0, fg_muted()).into_any_element()
+                }))
                 .child(
                     div()
                         .min_w_0()
@@ -105,7 +116,7 @@ pub fn render_review_file_header_with_action(
                 .flex()
                 .items_center()
                 .gap(px(10.0))
-                .child(lucide_icon(LucideIcon::Copy, 13.0, fg_muted()))
+                .child(render_file_header_copy_button(copy_path).into_any_element())
                 .when_some(
                     props.additions.zip(props.deletions),
                     |el, (additions, deletions)| {
@@ -163,6 +174,57 @@ pub fn render_review_file_header_with_action(
                 .when_some(action, |el, action| el.child(action)),
         )
         .into_any_element()
+}
+
+fn render_file_header_copy_button(path: String) -> impl IntoElement {
+    let id_path = path.clone();
+
+    div()
+        .id(ElementId::Name(
+            format!("review-file-header-copy-{id_path}").into(),
+        ))
+        .h(px(26.0))
+        .w(px(26.0))
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(transparent())
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .tooltip(|_, cx| build_file_header_static_tooltip("Copy file path", cx))
+        .hover(|style| style.bg(bg_selected()).border_color(border_muted()))
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(path.clone()));
+            cx.stop_propagation();
+        })
+        .child(lucide_icon(LucideIcon::Copy, 13.0, fg_muted()))
+}
+
+fn build_file_header_static_tooltip(text: &'static str, cx: &mut App) -> AnyView {
+    AnyView::from(cx.new(|_| ReviewFileHeaderTooltip {
+        text: SharedString::from(text),
+    }))
+}
+
+struct ReviewFileHeaderTooltip {
+    text: SharedString,
+}
+
+impl Render for ReviewFileHeaderTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded(radius_sm())
+            .border_1()
+            .border_color(border_muted())
+            .bg(bg_overlay())
+            .text_size(px(11.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(fg_emphasis())
+            .child(self.text.clone())
+    }
 }
 
 fn review_file_display_path(props: &ReviewFileHeaderProps) -> String {

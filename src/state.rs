@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
@@ -1346,6 +1347,81 @@ impl AppState {
     pub fn is_review_section_collapsed(&self, section_id: &str) -> bool {
         self.active_review_session()
             .map(|session| session.collapsed_sections.contains(section_id))
+            .unwrap_or(false)
+    }
+
+    pub fn set_review_file_collapsed(&mut self, file_path: &str, collapsed: bool) {
+        let Some(session) = self.active_review_session_mut() else {
+            return;
+        };
+
+        if collapsed {
+            session.collapsed_file_paths.insert(file_path.to_string());
+        } else {
+            session.collapsed_file_paths.remove(file_path);
+        }
+    }
+
+    pub fn is_review_file_collapsed(&self, file_path: &str) -> bool {
+        self.active_review_session()
+            .map(|session| session.collapsed_file_paths.contains(file_path))
+            .unwrap_or(false)
+    }
+
+    pub fn set_review_file_reviewed(
+        &mut self,
+        review_stack: &ReviewStack,
+        file_path: &str,
+        reviewed: bool,
+    ) {
+        let Some(session) = self.active_review_session_mut() else {
+            return;
+        };
+
+        if reviewed {
+            session.reviewed_file_paths.insert(file_path.to_string());
+        } else {
+            session.reviewed_file_paths.remove(file_path);
+        }
+
+        let affected_atom_ids = review_stack
+            .atoms
+            .iter()
+            .filter(|atom| {
+                atom.path == file_path || atom.previous_path.as_deref() == Some(file_path)
+            })
+            .map(|atom| atom.id.clone())
+            .collect::<HashSet<_>>();
+
+        for atom_id in &affected_atom_ids {
+            if reviewed {
+                session.reviewed_stack_atom_ids.insert(atom_id.clone());
+            } else {
+                session.reviewed_stack_atom_ids.remove(atom_id);
+            }
+        }
+
+        for layer in &review_stack.layers {
+            if !layer.atom_ids.is_empty()
+                && layer
+                    .atom_ids
+                    .iter()
+                    .all(|atom_id| session.reviewed_stack_atom_ids.contains(atom_id))
+            {
+                session.reviewed_stack_layer_ids.insert(layer.id.clone());
+            } else if layer
+                .atom_ids
+                .iter()
+                .any(|atom_id| affected_atom_ids.contains(atom_id))
+            {
+                session.reviewed_stack_layer_ids.remove(&layer.id);
+            }
+        }
+    }
+
+    pub fn is_review_file_reviewed(&self, file_path: &str) -> bool {
+        self.active_review_session()
+            .map(|session| session.reviewed_file_paths.contains(file_path))
             .unwrap_or(false)
     }
 

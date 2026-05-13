@@ -38,7 +38,7 @@ use crate::local_repo;
 use crate::lsp;
 use crate::markdown::render_markdown;
 use crate::review_file_header::{
-    render_review_file_header, render_review_file_header_with_action, ReviewFileHeaderProps,
+    render_review_file_header, render_review_file_header_with_controls, ReviewFileHeaderProps,
 };
 use crate::review_queue::{build_review_queue, ReviewQueue, ReviewQueueBucket};
 use crate::review_session::{
@@ -1433,7 +1433,7 @@ fn render_changed_files_pane(
                         let state = state.clone();
                         let tree_rows = tree_rows.clone();
                         let selected_path = selected_path.clone();
-                        move |ix, _window, _cx| match tree_rows[ix].clone() {
+                        move |ix, _window, cx| match tree_rows[ix].clone() {
                             ReviewFileTreeRow::Directory { name, depth } => {
                                 render_file_tree_directory_row(name, depth).into_any_element()
                             }
@@ -1443,17 +1443,21 @@ fn render_changed_files_pane(
                                 depth,
                                 additions,
                                 deletions,
-                            } => render_file_tree_file_row(
-                                state.clone(),
-                                path,
-                                name,
-                                additions,
-                                deletions,
-                                depth,
-                                selected_path.as_deref(),
-                                open_mode,
-                            )
-                            .into_any_element(),
+                            } => {
+                                let is_reviewed = state.read(cx).is_review_file_reviewed(&path);
+                                render_file_tree_file_row(
+                                    state.clone(),
+                                    path,
+                                    name,
+                                    additions,
+                                    deletions,
+                                    depth,
+                                    selected_path.as_deref(),
+                                    open_mode,
+                                    is_reviewed,
+                                )
+                                .into_any_element()
+                            }
                         }
                     })
                     .with_sizing_behavior(ListSizingBehavior::Auto)
@@ -1877,7 +1881,7 @@ fn render_stack_file_tree_section(
                         let state = state.clone();
                         let tree_rows = tree_rows.clone();
                         let selected_path = selected_path.clone();
-                        move |ix, _window, _cx| match tree_rows[ix].clone() {
+                        move |ix, _window, cx| match tree_rows[ix].clone() {
                             ReviewFileTreeRow::Directory { name, depth } => {
                                 render_file_tree_directory_row(name, depth).into_any_element()
                             }
@@ -1887,17 +1891,21 @@ fn render_stack_file_tree_section(
                                 depth,
                                 additions,
                                 deletions,
-                            } => render_file_tree_file_row(
-                                state.clone(),
-                                path,
-                                name,
-                                additions,
-                                deletions,
-                                depth,
-                                selected_path.as_deref(),
-                                ReviewFileRowOpenMode::Stack,
-                            )
-                            .into_any_element(),
+                            } => {
+                                let is_reviewed = state.read(cx).is_review_file_reviewed(&path);
+                                render_file_tree_file_row(
+                                    state.clone(),
+                                    path,
+                                    name,
+                                    additions,
+                                    deletions,
+                                    depth,
+                                    selected_path.as_deref(),
+                                    ReviewFileRowOpenMode::Stack,
+                                    is_reviewed,
+                                )
+                                .into_any_element()
+                            }
                         }
                     })
                     .with_sizing_behavior(ListSizingBehavior::Auto)
@@ -2497,6 +2505,7 @@ fn render_review_nav_list_item(
                 0,
                 selected_path,
                 ReviewFileRowOpenMode::Diff,
+                state.read(cx).is_review_file_reviewed(&file.path),
             ))
             .into_any_element(),
         ReviewNavListItem::SemanticHeader { count } => div()
@@ -3671,7 +3680,7 @@ fn render_source_file_tree(
                         let state = state.clone();
                         let tree_rows = tree_rows.clone();
                         let selected_path = selected_path.clone();
-                        move |ix, _window, _cx| match tree_rows[ix].clone() {
+                        move |ix, _window, cx| match tree_rows[ix].clone() {
                             ReviewFileTreeRow::Directory { name, depth } => {
                                 render_file_tree_directory_row(name, depth).into_any_element()
                             }
@@ -3681,17 +3690,21 @@ fn render_source_file_tree(
                                 depth,
                                 additions,
                                 deletions,
-                            } => render_file_tree_file_row(
-                                state.clone(),
-                                path,
-                                name,
-                                additions,
-                                deletions,
-                                depth,
-                                selected_path.as_deref(),
-                                ReviewFileRowOpenMode::Source,
-                            )
-                            .into_any_element(),
+                            } => {
+                                let is_reviewed = state.read(cx).is_review_file_reviewed(&path);
+                                render_file_tree_file_row(
+                                    state.clone(),
+                                    path,
+                                    name,
+                                    additions,
+                                    deletions,
+                                    depth,
+                                    selected_path.as_deref(),
+                                    ReviewFileRowOpenMode::Source,
+                                    is_reviewed,
+                                )
+                                .into_any_element()
+                            }
                         }
                     })
                     .with_sizing_behavior(ListSizingBehavior::Auto)
@@ -3843,7 +3856,7 @@ fn review_file_tree_totals(
 struct ReviewFileTreeNode {
     name: String,
     children: std::collections::BTreeMap<String, ReviewFileTreeNode>,
-    files: Vec<ReviewFileTreeRow>,
+    entries: Vec<ReviewFileTreeNodeEntry>,
 }
 
 #[derive(Clone)]
@@ -3851,6 +3864,11 @@ struct ReviewFileTreeEntry {
     path: String,
     additions: i64,
     deletions: i64,
+}
+
+enum ReviewFileTreeNodeEntry {
+    Directory(String),
+    File(ReviewFileTreeEntry),
 }
 
 fn build_review_file_tree_rows(
@@ -3908,21 +3926,26 @@ fn build_file_tree_rows(entries: Vec<ReviewFileTreeEntry>) -> Vec<ReviewFileTree
         let mut segments = file.path.split('/').peekable();
         while let Some(segment) = segments.next() {
             if segments.peek().is_some() {
+                if !cursor.children.contains_key(segment) {
+                    cursor.children.insert(
+                        segment.to_string(),
+                        ReviewFileTreeNode {
+                            name: segment.to_string(),
+                            ..ReviewFileTreeNode::default()
+                        },
+                    );
+                    cursor
+                        .entries
+                        .push(ReviewFileTreeNodeEntry::Directory(segment.to_string()));
+                }
                 cursor = cursor
                     .children
-                    .entry(segment.to_string())
-                    .or_insert_with(|| ReviewFileTreeNode {
-                        name: segment.to_string(),
-                        ..ReviewFileTreeNode::default()
-                    });
+                    .get_mut(segment)
+                    .expect("inserted directory should be present");
             } else {
-                cursor.files.push(ReviewFileTreeRow::File {
-                    path: file.path.clone(),
-                    name: segment.to_string(),
-                    depth: 0,
-                    additions: file.additions,
-                    deletions: file.deletions,
-                });
+                cursor
+                    .entries
+                    .push(ReviewFileTreeNodeEntry::File(file.clone()));
             }
         }
     }
@@ -3932,17 +3955,94 @@ fn build_file_tree_rows(entries: Vec<ReviewFileTreeEntry>) -> Vec<ReviewFileTree
     rows
 }
 
+fn ordered_review_files_from_tree_rows<'a>(
+    detail: &'a PullRequestDetail,
+    tree_rows: &[ReviewFileTreeRow],
+    visible_paths: Option<&BTreeSet<String>>,
+) -> Vec<&'a PullRequestFile> {
+    let mut files = tree_rows
+        .iter()
+        .filter_map(|row| match row {
+            ReviewFileTreeRow::File { path, .. } => {
+                detail.files.iter().find(|file| file.path == *path)
+            }
+            ReviewFileTreeRow::Directory { .. } => None,
+        })
+        .collect::<Vec<_>>();
+
+    for file in detail.files.iter().filter(|file| {
+        visible_paths
+            .map(|paths| paths.contains(&file.path))
+            .unwrap_or(true)
+    }) {
+        if !files
+            .iter()
+            .any(|ordered_file| ordered_file.path == file.path)
+        {
+            files.push(file);
+        }
+    }
+
+    files
+}
+
+fn push_review_file_tree_file(
+    file: &ReviewFileTreeEntry,
+    file_depth: usize,
+    rows: &mut Vec<ReviewFileTreeRow>,
+) {
+    let name = file
+        .path
+        .rsplit('/')
+        .next()
+        .unwrap_or(file.path.as_str())
+        .to_string();
+    rows.push(ReviewFileTreeRow::File {
+        path: file.path.clone(),
+        name,
+        depth: file_depth,
+        additions: file.additions,
+        deletions: file.deletions,
+    });
+}
+
+fn review_file_tree_single_directory_child(
+    node: &ReviewFileTreeNode,
+) -> Option<&ReviewFileTreeNode> {
+    if node.entries.len() != 1 {
+        return None;
+    }
+
+    let ReviewFileTreeNodeEntry::Directory(child_name) = &node.entries[0] else {
+        return None;
+    };
+
+    node.children.get(child_name)
+}
+
+fn review_file_tree_child<'a>(
+    node: &'a ReviewFileTreeNode,
+    child_name: &str,
+) -> Option<&'a ReviewFileTreeNode> {
+    node.children.get(child_name)
+}
+
 fn flatten_review_file_tree(
     node: &ReviewFileTreeNode,
     depth: usize,
     rows: &mut Vec<ReviewFileTreeRow>,
 ) {
     if depth == 0 {
-        for child in node.children.values() {
-            flatten_review_file_tree_directory(child, 1, rows);
+        for entry in &node.entries {
+            match entry {
+                ReviewFileTreeNodeEntry::Directory(child_name) => {
+                    if let Some(child) = review_file_tree_child(node, child_name) {
+                        flatten_review_file_tree_directory(child, 1, rows);
+                    }
+                }
+                ReviewFileTreeNodeEntry::File(file) => push_review_file_tree_file(file, 0, rows),
+            }
         }
-
-        push_review_file_tree_files(node, 0, rows);
         return;
     }
 
@@ -3957,54 +4057,31 @@ fn flatten_review_file_tree_directory(
     let (name, node) = compact_review_file_tree_directory(node);
     rows.push(ReviewFileTreeRow::Directory { name, depth });
 
-    for child in node.children.values() {
-        flatten_review_file_tree_directory(child, depth + 1, rows);
+    for entry in &node.entries {
+        match entry {
+            ReviewFileTreeNodeEntry::Directory(child_name) => {
+                if let Some(child) = review_file_tree_child(node, child_name) {
+                    flatten_review_file_tree_directory(child, depth + 1, rows);
+                }
+            }
+            ReviewFileTreeNodeEntry::File(file) => {
+                push_review_file_tree_file(file, depth + 1, rows);
+            }
+        }
     }
-
-    push_review_file_tree_files(node, depth + 1, rows);
 }
 
 fn compact_review_file_tree_directory(
     mut node: &ReviewFileTreeNode,
 ) -> (String, &ReviewFileTreeNode) {
     let mut name = node.name.clone();
-    while node.files.is_empty() && node.children.len() == 1 {
-        let child = node
-            .children
-            .values()
-            .next()
-            .expect("single child directory should have a child");
+    while let Some(child) = review_file_tree_single_directory_child(node) {
         name.push('/');
         name.push_str(&child.name);
         node = child;
     }
 
     (name, node)
-}
-
-fn push_review_file_tree_files(
-    node: &ReviewFileTreeNode,
-    file_depth: usize,
-    rows: &mut Vec<ReviewFileTreeRow>,
-) {
-    for file in &node.files {
-        if let ReviewFileTreeRow::File {
-            path,
-            name,
-            additions,
-            deletions,
-            ..
-        } = file
-        {
-            rows.push(ReviewFileTreeRow::File {
-                path: path.clone(),
-                name: name.clone(),
-                depth: file_depth,
-                additions: *additions,
-                deletions: *deletions,
-            });
-        }
-    }
 }
 
 const REVIEW_FILE_TREE_INDENT_STEP: f32 = 12.0;
@@ -4114,6 +4191,7 @@ fn render_file_tree_file_row(
     depth: usize,
     selected_path: Option<&str>,
     open_mode: ReviewFileRowOpenMode,
+    is_reviewed: bool,
 ) -> impl IntoElement {
     let is_active = selected_path == Some(path.as_str());
     let file_name_for_tooltip = file_name.clone();
@@ -4196,6 +4274,9 @@ fn render_file_tree_file_row(
                         .gap(px(4.0))
                         .min_w_0()
                         .pl(indent)
+                        .when(is_reviewed, |el| {
+                            el.child(lucide_icon(LucideIcon::Check, 11.0, success()))
+                        })
                         .child(
                             div()
                                 .id(("file-tree-file-name", file_name_id))
@@ -4203,6 +4284,8 @@ fn render_file_tree_file_row(
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(if is_active {
                                     fg_emphasis()
+                                } else if is_reviewed {
+                                    fg_muted()
                                 } else {
                                     fg_default()
                                 })
@@ -8056,6 +8139,8 @@ fn workspace_mode_button(
 struct CombinedDiffFileContext {
     file: PullRequestFile,
     header: ReviewFileHeaderProps,
+    collapsed: bool,
+    reviewed: bool,
     parsed: Option<Arc<ParsedDiffFile>>,
     parsed_override: Option<Arc<ParsedDiffFile>>,
     structural_side_by_side: Option<Arc<crate::difftastic::AdaptedDifftasticDiffFile>>,
@@ -8087,6 +8172,70 @@ enum CombinedDiffViewItem {
     Footer,
 }
 
+#[derive(Clone)]
+struct CombinedDiffFloatingHeader {
+    header: ReviewFileHeaderProps,
+    collapsed: bool,
+    reviewed: bool,
+    collapse_scroll: Option<DiffFileCollapseScrollAdjustment>,
+}
+
+#[derive(Clone)]
+struct DiffFileCollapseScrollAdjustment {
+    list_state: ListState,
+    header_item_ix: usize,
+    expanded_extra_item_count: usize,
+}
+
+impl DiffFileCollapseScrollAdjustment {
+    fn for_combined_file(
+        list_state: &ListState,
+        header_item_ix: usize,
+        context: &CombinedDiffFileContext,
+    ) -> Self {
+        Self {
+            list_state: list_state.clone(),
+            header_item_ix,
+            expanded_extra_item_count: combined_diff_file_expanded_extra_item_count(context),
+        }
+    }
+
+    fn apply_for_toggle(&self, currently_collapsed: bool) {
+        if self.expanded_extra_item_count == 0 {
+            return;
+        }
+
+        let range_start = self.header_item_ix.saturating_add(1);
+        let item_count = self.list_state.item_count();
+        if range_start > item_count {
+            return;
+        }
+
+        if currently_collapsed {
+            self.list_state
+                .splice(range_start..range_start, self.expanded_extra_item_count);
+        } else {
+            let range_end = range_start.saturating_add(self.expanded_extra_item_count);
+            if range_end > item_count {
+                return;
+            }
+
+            let scroll_top = self.list_state.logical_scroll_top();
+            let scroll_was_inside_collapsed_body =
+                (range_start..range_end).contains(&scroll_top.item_ix);
+
+            self.list_state.splice(range_start..range_end, 0);
+
+            if scroll_was_inside_collapsed_body {
+                self.list_state.scroll_to(ListOffset {
+                    item_ix: self.header_item_ix,
+                    offset_in_item: px(0.0),
+                });
+            }
+        }
+    }
+}
+
 fn render_combined_diff_files(
     state: &Entity<AppState>,
     app_state: &AppState,
@@ -8102,15 +8251,11 @@ fn render_combined_diff_files(
     let visible_paths = stack_filter
         .as_ref()
         .map(|filter| stack_file_paths_for_filter(review_stack.as_ref(), filter));
-    let contexts = detail
-        .files
-        .iter()
-        .filter(|file| {
-            visible_paths
-                .as_ref()
-                .map(|paths| paths.contains(&file.path))
-                .unwrap_or(true)
-        })
+    let tree_rows = prepare_review_file_tree_rows(app_state, detail, visible_paths.as_ref());
+    let ordered_files =
+        ordered_review_files_from_tree_rows(detail, tree_rows.as_ref(), visible_paths.as_ref());
+    let contexts = ordered_files
+        .into_iter()
         .map(|file| {
             prepare_combined_diff_file_context(
                 state,
@@ -8162,32 +8307,43 @@ fn render_combined_diff_files(
         .pr_header_compact
         .then(|| {
             current_combined_diff_header(
+                &view_state.list_state,
                 &contexts,
+                &items,
                 app_state.selected_file_path.as_deref().or(selected_path),
             )
         })
         .flatten();
+    let floating_header_path = floating_header
+        .as_ref()
+        .map(|header| header.header.path.clone());
     let show_top_fade = floating_header.is_some();
     let state = state.clone();
     let render_state = state.clone();
     let items = Arc::new(items);
     let contexts = Arc::new(contexts);
     let list_state = view_state.list_state.clone();
+    let render_collapse_list_state = view_state.list_state.clone();
     let scrollbar_list_state = view_state.list_state.clone();
     let side_by_side_scroll_handles = SideBySideScrollHandles {
         left: view_state.side_by_side_left_scroll.clone(),
         right: view_state.side_by_side_right_scroll.clone(),
     };
     let render_side_by_side_scroll_handles = side_by_side_scroll_handles.clone();
+    let render_review_stack = review_stack.clone();
+    let render_floating_header_path = floating_header_path.clone();
     let item_count = items.len();
     let rows = list(list_state, move |ix, _window, cx| {
         render_combined_diff_view_item(
             &render_state,
+            render_review_stack.clone(),
+            render_floating_header_path.as_deref(),
             contexts.as_ref(),
             items[ix].clone(),
             ix,
             wrap_diff_lines,
             &render_side_by_side_scroll_handles,
+            &render_collapse_list_state,
             cx,
         )
     })
@@ -8215,6 +8371,7 @@ fn render_combined_diff_files(
     );
 
     div()
+        .relative()
         .flex()
         .flex_col()
         .flex_grow()
@@ -8222,16 +8379,25 @@ fn render_combined_diff_files(
         .min_w_0()
         .bg(diff_editor_bg())
         .overflow_hidden()
-        .pl(px(DIFF_CONTENT_LEFT_GUTTER))
-        .pr(px(DIFF_CONTENT_RIGHT_GUTTER))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_grow()
+                .min_h_0()
+                .min_w_0()
+                .pl(px(DIFF_CONTENT_LEFT_GUTTER))
+                .pr(px(DIFF_CONTENT_RIGHT_GUTTER))
+                .child(body),
+        )
         .when_some(floating_header, |el, header| {
             el.child(render_floating_diff_file_header(
                 &state,
+                review_stack.clone(),
                 header,
                 wrap_diff_lines,
             ))
         })
-        .child(body)
         .into_any_element()
 }
 
@@ -8707,6 +8873,8 @@ fn prepare_combined_diff_file_context(
     CombinedDiffFileContext {
         file: file.clone(),
         header,
+        collapsed: app_state.is_review_file_collapsed(&file.path),
+        reviewed: app_state.is_review_file_reviewed(&file.path),
         parsed,
         parsed_override,
         structural_side_by_side,
@@ -8732,6 +8900,9 @@ fn build_combined_diff_view_items(
 
     for (file_index, context) in contexts.iter().enumerate() {
         items.push(CombinedDiffViewItem::Header(file_index));
+        if context.collapsed {
+            continue;
+        }
         if context.stack_visibility.is_some() {
             items.push(CombinedDiffViewItem::StackNotice(file_index));
         }
@@ -8753,6 +8924,16 @@ fn build_combined_diff_view_items(
     }
 
     (items, has_side_by_side_rows)
+}
+
+fn combined_diff_file_expanded_extra_item_count(context: &CombinedDiffFileContext) -> usize {
+    usize::from(context.stack_visibility.is_some())
+        + if context.state_message.is_some() {
+            1
+        } else {
+            context.items.len()
+        }
+        + 1
 }
 
 fn prepare_combined_diff_view_state(
@@ -8830,12 +9011,12 @@ fn install_combined_diff_scroll_handler(
         let active_pr_key = active_pr_key.clone();
         window.on_next_frame(move |window, cx| {
             let scroll_top = list_state.logical_scroll_top();
-            let compact = scroll_top.item_ix > 0 || scroll_top.offset_in_item > px(0.0);
             let focus = combined_diff_scroll_focus_for_item_index(
                 items.as_ref(),
                 contexts.as_ref(),
                 scroll_top.item_ix,
             );
+            let compact = scroll_top.item_ix > 0 || scroll_top.offset_in_item > px(0.0);
             let mut should_load_content = false;
             let mut should_load_structural = false;
             state.update(cx, |state, cx| {
@@ -8886,17 +9067,22 @@ fn install_combined_diff_scroll_handler(
 
 fn render_combined_diff_view_item(
     state: &Entity<AppState>,
+    review_stack: Arc<ReviewStack>,
+    floating_header_path: Option<&str>,
     contexts: &[CombinedDiffFileContext],
     item: CombinedDiffViewItem,
     item_ix: usize,
     wrap_diff_lines: bool,
     side_by_side_scroll_handles: &SideBySideScrollHandles,
+    collapse_list_state: &ListState,
     cx: &App,
 ) -> AnyElement {
     match item {
         CombinedDiffViewItem::Header(file_index) => contexts
             .get(file_index)
             .map(|context| {
+                let hidden_by_floating_header =
+                    floating_header_path == Some(context.file.path.as_str());
                 div()
                     .ml(px(DIFF_SECTION_HEADER_LEFT_MARGIN))
                     .mr(px(DIFF_SECTION_HEADER_RIGHT_MARGIN))
@@ -8906,11 +9092,20 @@ fn render_combined_diff_view_item(
                         px(DIFF_FILE_HEADER_TOP_MARGIN)
                     })
                     .pb(px(DIFF_FILE_HEADER_BOTTOM_MARGIN))
+                    .when(hidden_by_floating_header, |el| el.invisible())
                     .child(render_diff_file_header_row(
                         state,
+                        review_stack,
                         context.header.clone(),
                         wrap_diff_lines,
                         format!("row-{item_ix}"),
+                        context.collapsed,
+                        context.reviewed,
+                        Some(DiffFileCollapseScrollAdjustment::for_combined_file(
+                            collapse_list_state,
+                            item_ix,
+                            context,
+                        )),
                     ))
                     .into_any_element()
             })
@@ -9121,27 +9316,49 @@ fn find_combined_diff_file_header_index(
 }
 
 fn current_combined_diff_header(
+    list_state: &ListState,
     contexts: &[CombinedDiffFileContext],
+    items: &[CombinedDiffViewItem],
     selected_path: Option<&str>,
-) -> Option<ReviewFileHeaderProps> {
-    let mut header = selected_path
+) -> Option<CombinedDiffFloatingHeader> {
+    let (context_ix, context) = selected_path
         .and_then(|path| {
             contexts
                 .iter()
-                .find(|context| context.file.path == path)
-                .map(|context| context.header.clone())
+                .enumerate()
+                .find(|(_, context)| context.file.path == path)
         })
-        .or_else(|| contexts.first().map(|context| context.header.clone()))?;
+        .or_else(|| contexts.iter().enumerate().next())?;
+    let header_item_ix = items.iter().position(|item| {
+        matches!(
+            item,
+            CombinedDiffViewItem::Header(file_index) if *file_index == context_ix
+        )
+    });
+    let mut header = context.header.clone();
     header.active = true;
-    Some(header)
+    Some(CombinedDiffFloatingHeader {
+        header,
+        collapsed: context.collapsed,
+        reviewed: context.reviewed,
+        collapse_scroll: header_item_ix.map(|header_item_ix| {
+            DiffFileCollapseScrollAdjustment::for_combined_file(list_state, header_item_ix, context)
+        }),
+    })
 }
 
 fn render_floating_diff_file_header(
     state: &Entity<AppState>,
-    header: ReviewFileHeaderProps,
+    review_stack: Arc<ReviewStack>,
+    header: CombinedDiffFloatingHeader,
     wrap_diff_lines: bool,
 ) -> impl IntoElement {
     div()
+        .absolute()
+        .top(px(0.0))
+        .left(px(DIFF_CONTENT_LEFT_GUTTER))
+        .right(px(DIFF_CONTENT_RIGHT_GUTTER))
+        .occlude()
         .ml(px(DIFF_SECTION_HEADER_LEFT_MARGIN))
         .mr(px(DIFF_SECTION_HEADER_RIGHT_MARGIN))
         .pt(px(DIFF_FLOATING_FILE_HEADER_TOP_PADDING))
@@ -9149,28 +9366,168 @@ fn render_floating_diff_file_header(
         .bg(diff_editor_bg())
         .child(render_diff_file_header_row(
             state,
-            header,
+            review_stack,
+            header.header,
             wrap_diff_lines,
             "floating",
+            header.collapsed,
+            header.reviewed,
+            header.collapse_scroll,
         ))
 }
 
 fn render_diff_file_header_row(
     state: &Entity<AppState>,
+    review_stack: Arc<ReviewStack>,
     header: ReviewFileHeaderProps,
     wrap_diff_lines: bool,
     scope: impl Into<String>,
+    collapsed: bool,
+    reviewed: bool,
+    collapse_scroll: Option<DiffFileCollapseScrollAdjustment>,
 ) -> impl IntoElement {
-    let toggle_key = header.path.clone();
+    let key = header.path.clone();
     let scope = scope.into();
 
-    render_review_file_header_with_action(
+    render_review_file_header_with_controls(
         header,
         Some(
-            render_diff_line_wrap_toggle(state, wrap_diff_lines, scope, toggle_key)
+            render_diff_file_collapse_toggle(
+                state,
+                collapsed,
+                scope.clone(),
+                key.clone(),
+                collapse_scroll,
+            )
+            .into_any_element(),
+        ),
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(
+                    render_diff_file_review_toggle(
+                        state,
+                        review_stack,
+                        reviewed,
+                        scope.clone(),
+                        key.clone(),
+                    )
+                    .into_any_element(),
+                )
+                .child(
+                    render_diff_line_wrap_toggle(state, wrap_diff_lines, scope, key)
+                        .into_any_element(),
+                )
                 .into_any_element(),
         ),
     )
+}
+
+fn render_diff_file_collapse_toggle(
+    state: &Entity<AppState>,
+    collapsed: bool,
+    scope: String,
+    key: String,
+    collapse_scroll: Option<DiffFileCollapseScrollAdjustment>,
+) -> impl IntoElement {
+    let state_for_toggle = state.clone();
+    let collapse_scroll_for_toggle = collapse_scroll.clone();
+    let icon = if collapsed {
+        LucideIcon::ChevronRight
+    } else {
+        LucideIcon::ChevronDown
+    };
+    let tooltip = if collapsed {
+        "Expand file"
+    } else {
+        "Collapse file"
+    };
+
+    div()
+        .id(ElementId::Name(
+            format!("diff-file-collapse-toggle-{scope}-{key}").into(),
+        ))
+        .h(px(28.0))
+        .w(px(28.0))
+        .flex_shrink_0()
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(transparent())
+        .bg(transparent())
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
+        .hover(|style| style.bg(bg_selected()).border_color(border_muted()))
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            if let Some(adjustment) = collapse_scroll_for_toggle.as_ref() {
+                adjustment.apply_for_toggle(collapsed);
+            }
+            state_for_toggle.update(cx, |state, cx| {
+                state.set_review_file_collapsed(&key, !collapsed);
+                state.persist_active_review_session();
+                cx.notify();
+            });
+            cx.stop_propagation();
+        })
+        .child(lucide_icon(icon, 14.0, fg_muted()))
+}
+
+fn render_diff_file_review_toggle(
+    state: &Entity<AppState>,
+    review_stack: Arc<ReviewStack>,
+    reviewed: bool,
+    scope: String,
+    key: String,
+) -> impl IntoElement {
+    let state_for_toggle = state.clone();
+    let tooltip = if reviewed {
+        "Mark file unreviewed"
+    } else {
+        "Mark file reviewed"
+    };
+
+    div()
+        .id(ElementId::Name(
+            format!("diff-file-review-toggle-{scope}-{key}").into(),
+        ))
+        .h(px(28.0))
+        .w(px(30.0))
+        .flex_shrink_0()
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(if reviewed {
+            success()
+        } else {
+            diff_annotation_border()
+        })
+        .bg(if reviewed {
+            success_muted()
+        } else {
+            diff_annotation_bg()
+        })
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
+        .hover(|style| style.bg(bg_selected()).border_color(border_default()))
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            state_for_toggle.update(cx, |state, cx| {
+                state.set_review_file_reviewed(review_stack.as_ref(), &key, !reviewed);
+                state.persist_active_review_session();
+                cx.notify();
+            });
+            cx.stop_propagation();
+        })
+        .child(lucide_icon(
+            LucideIcon::FileCheck,
+            14.0,
+            if reviewed { success() } else { fg_muted() },
+        ))
 }
 
 fn render_diff_line_wrap_toggle(
@@ -9222,6 +9579,7 @@ fn render_diff_line_wrap_toggle(
                 state.persist_active_review_session();
                 cx.notify();
             });
+            cx.stop_propagation();
         })
         .child(lucide_icon(
             icon,
@@ -14088,11 +14446,13 @@ fn label_for_change_type(change_type: &str) -> &str {
 mod tests {
     use crate::diff::parse_unified_diff;
     use crate::state::{ReviewFileTreeRow, StructuralDiffFileState};
+    use gpui::{px, ListAlignment, ListOffset, ListState};
 
     use super::{
         build_file_tree_rows, build_normal_side_by_side_diff_file,
         should_apply_structural_diff_update, should_reuse_structural_diff_state,
-        structural_diff_state_terminal_status, ReviewFileTreeEntry, StructuralDiffTerminalStatus,
+        structural_diff_state_terminal_status, DiffFileCollapseScrollAdjustment,
+        ReviewFileTreeEntry, StructuralDiffTerminalStatus,
     };
 
     #[test]
@@ -14221,6 +14581,69 @@ mod tests {
             1,
         );
         assert_file_row(&rows[5], "README.md", "README.md", 0, 1, 0);
+    }
+
+    #[test]
+    fn file_tree_keeps_root_files_in_diff_order() {
+        let rows = build_file_tree_rows(vec![
+            ReviewFileTreeEntry {
+                path: "README.md".to_string(),
+                additions: 1,
+                deletions: 0,
+            },
+            ReviewFileTreeEntry {
+                path: "src/lib.rs".to_string(),
+                additions: 2,
+                deletions: 1,
+            },
+        ]);
+
+        assert_eq!(rows.len(), 3);
+        assert_file_row(&rows[0], "README.md", "README.md", 0, 1, 0);
+        assert_directory_row(&rows[1], "src", 1);
+        assert_file_row(&rows[2], "src/lib.rs", "lib.rs", 2, 2, 1);
+    }
+
+    #[test]
+    fn collapsing_combined_file_body_pins_scroll_inside_body_to_header() {
+        let list_state = ListState::new(12, ListAlignment::Top, px(400.0));
+        list_state.scroll_to(ListOffset {
+            item_ix: 4,
+            offset_in_item: px(7.0),
+        });
+
+        DiffFileCollapseScrollAdjustment {
+            list_state: list_state.clone(),
+            header_item_ix: 2,
+            expanded_extra_item_count: 5,
+        }
+        .apply_for_toggle(false);
+
+        assert_eq!(list_state.item_count(), 7);
+        let scroll_top = list_state.logical_scroll_top();
+        assert_eq!(scroll_top.item_ix, 2);
+        assert_eq!(scroll_top.offset_in_item, px(0.0));
+    }
+
+    #[test]
+    fn collapsing_combined_file_body_preserves_scroll_after_body() {
+        let list_state = ListState::new(12, ListAlignment::Top, px(400.0));
+        list_state.scroll_to(ListOffset {
+            item_ix: 9,
+            offset_in_item: px(7.0),
+        });
+
+        DiffFileCollapseScrollAdjustment {
+            list_state: list_state.clone(),
+            header_item_ix: 2,
+            expanded_extra_item_count: 5,
+        }
+        .apply_for_toggle(false);
+
+        assert_eq!(list_state.item_count(), 7);
+        let scroll_top = list_state.logical_scroll_top();
+        assert_eq!(scroll_top.item_ix, 4);
+        assert_eq!(scroll_top.offset_in_item, px(7.0));
     }
 
     #[test]
