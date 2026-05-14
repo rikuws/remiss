@@ -2,6 +2,7 @@
 #![allow(
     clippy::collapsible_else_if,
     clippy::collapsible_if,
+    clippy::cloned_ref_to_slice_refs,
     clippy::cmp_owned,
     clippy::derivable_impls,
     clippy::double_ended_iterator_last,
