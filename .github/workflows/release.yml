@@ -40,6 +40,9 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          prefix-key: v1-rust
 
       - name: Set version from release tag
         if: startsWith(github.ref, 'refs/tags/v')
