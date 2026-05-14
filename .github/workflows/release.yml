@@ -1,0 +1,168 @@
+name: Build and Release
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    name: macOS app package
+    runs-on: macos-latest
+    env:
+      REMISS_DEVELOPER_ID_CERTIFICATE_BASE64: ${{ secrets.REMISS_DEVELOPER_ID_CERTIFICATE_BASE64 }}
+      REMISS_DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.REMISS_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+      REMISS_APPLE_ID: ${{ secrets.REMISS_APPLE_ID }}
+      REMISS_APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.REMISS_APPLE_APP_SPECIFIC_PASSWORD }}
+      REMISS_APPLE_TEAM_ID: ${{ secrets.REMISS_APPLE_TEAM_ID }}
+      NOTARYTOOL_PROFILE: remiss-notary
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.92.0
+
+      - name: Ensure Metal toolchain
+        run: |
+          xcrun -sdk macosx metal -v >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+          xcrun -sdk macosx metal -v
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set version from release tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          echo "REMISS_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          echo "REMISS_BUILD_NUMBER=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+
+      - name: Validate release signing secrets
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+
+          missing=()
+          for name in \
+            REMISS_DEVELOPER_ID_CERTIFICATE_BASE64 \
+            REMISS_DEVELOPER_ID_CERTIFICATE_PASSWORD \
+            REMISS_APPLE_ID \
+            REMISS_APPLE_APP_SPECIFIC_PASSWORD \
+            REMISS_APPLE_TEAM_ID; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+
+          if ((${#missing[@]})); then
+            printf '::error::Missing GitHub release signing secret(s): %s\n' "${missing[*]}"
+            exit 1
+          fi
+
+      - name: Import Developer ID certificate
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+
+          certificate_path="$RUNNER_TEMP/developer-id-application.p12"
+          keychain_path="$RUNNER_TEMP/remiss-signing.keychain-db"
+          keychain_password="$(uuidgen)"
+
+          printf '%s' "$REMISS_DEVELOPER_ID_CERTIFICATE_BASE64" | base64 --decode > "$certificate_path"
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" \
+            -P "$REMISS_DEVELOPER_ID_CERTIFICATE_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+          security default-keychain -s "$keychain_path"
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain_path"
+          security find-identity -p codesigning -v
+
+      - name: Build distributable package
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            export REMISS_SIGNING_MODE=developer-id
+          else
+            export REMISS_ALLOW_DEVELOPMENT_PACKAGE=1
+            export REMISS_SIGNING_MODE=adhoc
+          fi
+
+          ./scripts/package-app.sh
+
+      - name: Notarize release DMG
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+
+          xcrun notarytool store-credentials "$NOTARYTOOL_PROFILE" \
+            --apple-id "$REMISS_APPLE_ID" \
+            --team-id "$REMISS_APPLE_TEAM_ID" \
+            --password "$REMISS_APPLE_APP_SPECIFIC_PASSWORD"
+
+          dmg="$(find dist -maxdepth 1 -name 'remiss-*.dmg' -print | sort | tail -n 1)"
+          ./scripts/notarize-app.sh "$dmg"
+
+      - name: Prepare release assets
+        run: |
+          set -euo pipefail
+
+          rm -rf release-assets
+          mkdir -p release-assets
+
+          for artifact in dist/remiss-*.dmg dist/remiss-*.zip; do
+            cp "$artifact" "release-assets/$(basename "$artifact")"
+          done
+
+          latest_dmg="$(find dist -maxdepth 1 -name 'remiss-*.dmg' -print | sort | tail -n 1)"
+          latest_zip="$(find dist -maxdepth 1 -name 'remiss-*.zip' -print | sort | tail -n 1)"
+
+          cp "$latest_dmg" release-assets/remiss-latest-macos.dmg
+          cp "$latest_zip" release-assets/remiss-latest-macos.zip
+
+          shasum -a 256 release-assets/* > release-assets/SHA256SUMS.txt
+
+      - name: Upload CI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: remiss-macos
+          path: release-assets/*
+          if-no-files-found: error
+
+      - name: Upload release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --title "Remiss ${RELEASE_TAG#v}" \
+              --notes "Automated macOS build for ${RELEASE_TAG}." \
+              --verify-tag
+          fi
+
+          gh release upload "$RELEASE_TAG" release-assets/* --clobber

@@ -24,11 +24,15 @@ use crate::review_brief::ReviewBrief;
 use crate::review_queue::{default_review_file, ReviewQueue};
 use crate::review_session::{
     add_waymark, load_review_session, location_label, push_history_location, push_route_location,
-    remove_waymark, sanitize_code_lens_mode, save_review_session, NormalDiffLayout,
-    ReviewCenterMode, ReviewLocation, ReviewSessionDocument, ReviewSessionState,
-    ReviewSourceTarget, ReviewTaskRoute, ReviewWaymark,
+    remove_waymark, sanitize_code_lens_mode, save_review_session, DiffLayout, ReviewCenterMode,
+    ReviewLocation, ReviewSessionDocument, ReviewSessionState, ReviewSourceTarget, ReviewTaskRoute,
+    ReviewWaymark,
 };
 use crate::semantic_diff::SemanticDiffFile;
+use crate::shader_surface::{
+    load_project_shader_settings, save_project_shader_settings, OverviewShaderVariant,
+    ProjectShaderSettings,
+};
 use crate::stacks::model::{ReviewStack, StackDiffMode, StackPullRequestRef};
 use crate::syntax::{self, SyntaxSpan};
 use crate::theme::{self, CodeFontSizePreference, DiffColorThemePreference, ThemePreference};
@@ -908,6 +912,12 @@ pub struct CachedReviewStack {
     pub stack: Arc<ReviewStack>,
 }
 
+#[derive(Clone, Debug)]
+pub struct ProjectShaderPickerState {
+    pub project: String,
+    pub label: String,
+}
+
 pub struct AppState {
     pub cache: Arc<CacheStore>,
     pub lsp_session_manager: Arc<LspSessionManager>,
@@ -922,8 +932,9 @@ pub struct AppState {
     pub local_review_loading: bool,
     pub local_review_error: Option<String>,
     pub muted_repos: std::collections::HashSet<String>,
-    pub pr_swimlane_shader_debug: bool,
-    pub pr_swimlane_shader_debug_offset: usize,
+    pub project_shader_settings: ProjectShaderSettings,
+    pub project_shader_settings_error: Option<String>,
+    pub project_shader_picker: Option<ProjectShaderPickerState>,
 
     // Workspace data
     pub workspace: Option<WorkspaceSnapshot>,
@@ -934,6 +945,7 @@ pub struct AppState {
     // PR detail data (keyed by pr_key)
     pub detail_states: std::collections::HashMap<String, DetailState>,
     pub unread_review_comment_ids: std::collections::BTreeSet<String>,
+    pub expanded_automation_activity_keys: std::collections::BTreeSet<String>,
 
     // Bootstrap
     pub gh_available: bool,
@@ -1048,6 +1060,11 @@ impl AppState {
         };
         let local_review_repositories =
             local_review::load_remembered_repositories(&cache).unwrap_or_default();
+        let (project_shader_settings, project_shader_settings_error) =
+            match load_project_shader_settings(&cache) {
+                Ok(settings) => (settings, None),
+                Err(error) => (ProjectShaderSettings::default(), Some(error)),
+            };
         let mut state = Self {
             cache: Arc::new(cache),
             lsp_session_manager: Arc::new(LspSessionManager::new()),
@@ -1060,14 +1077,16 @@ impl AppState {
             local_review_loading: false,
             local_review_error: None,
             muted_repos: std::collections::HashSet::new(),
-            pr_swimlane_shader_debug: false,
-            pr_swimlane_shader_debug_offset: 0,
+            project_shader_settings,
+            project_shader_settings_error,
+            project_shader_picker: None,
             workspace: None,
             workspace_loading: true,
             workspace_syncing: false,
             workspace_error: None,
             detail_states: std::collections::HashMap::new(),
             unread_review_comment_ids,
+            expanded_automation_activity_keys: std::collections::BTreeSet::new(),
             gh_available: false,
             gh_version: None,
             cache_path,
@@ -1153,6 +1172,35 @@ impl AppState {
 
     pub fn set_active_section(&mut self, section: SectionId) {
         self.active_section = section;
+    }
+
+    pub fn shader_for_project(&self, project: &str) -> OverviewShaderVariant {
+        self.project_shader_settings.shader_for_project(project)
+    }
+
+    pub fn open_project_shader_picker(&mut self, project: &str, label: &str) {
+        self.project_shader_picker = Some(ProjectShaderPickerState {
+            project: project.to_string(),
+            label: label.to_string(),
+        });
+    }
+
+    pub fn close_project_shader_picker(&mut self) {
+        self.project_shader_picker = None;
+    }
+
+    pub fn set_project_shader(&mut self, project: &str, variant: OverviewShaderVariant) {
+        self.project_shader_settings
+            .set_project_shader(project, variant);
+        match save_project_shader_settings(self.cache.as_ref(), &self.project_shader_settings) {
+            Ok(()) => {
+                self.project_shader_settings_error = None;
+                self.project_shader_picker = None;
+            }
+            Err(error) => {
+                self.project_shader_settings_error = Some(error);
+            }
+        }
     }
 
     pub fn set_theme_preference(&mut self, preference: ThemePreference) {
@@ -1947,9 +1995,15 @@ impl AppState {
         }
     }
 
-    pub fn set_normal_diff_layout(&mut self, layout: NormalDiffLayout) {
+    pub fn set_normal_diff_layout(&mut self, layout: DiffLayout) {
         if let Some(session) = self.active_review_session_mut() {
             session.normal_diff_layout = layout;
+        }
+    }
+
+    pub fn set_structural_diff_layout(&mut self, layout: DiffLayout) {
+        if let Some(session) = self.active_review_session_mut() {
+            session.structural_diff_layout = layout;
         }
     }
 

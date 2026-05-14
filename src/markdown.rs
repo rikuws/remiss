@@ -7,6 +7,10 @@ use crate::emoji::replace_shortcode_emoji;
 use crate::selectable_text::SelectableText;
 use crate::theme::*;
 
+const PROSE_TEXT_SIZE: f32 = 14.0;
+const PROSE_LINE_HEIGHT: f32 = 22.0;
+const PROSE_LIST_MARKER_WIDTH: f32 = 18.0;
+
 /// Render a markdown string into GPUI elements.
 pub fn render_markdown(id_prefix: &str, text: &str) -> impl IntoElement {
     let options = Options::ENABLE_GFM
@@ -347,18 +351,25 @@ impl MarkdownBuilder {
 
     fn flush_inline_paragraph(&mut self, id: &str) -> AnyElement {
         let spans = std::mem::take(&mut self.inline_buffer);
-        render_inline_block(id, &spans, px(13.0), fg_default(), false)
+        render_inline_block(
+            id,
+            &spans,
+            px(PROSE_TEXT_SIZE),
+            px(PROSE_LINE_HEIGHT),
+            fg_default(),
+            false,
+        )
     }
 
     fn flush_inline_heading(&mut self, id: &str, level: u8) -> AnyElement {
         let spans = std::mem::take(&mut self.inline_buffer);
-        let size = match level {
-            1 => px(22.0),
-            2 => px(18.0),
-            3 => px(16.0),
-            _ => px(14.0),
+        let (size, line_height) = match level {
+            1 => (px(22.0), px(28.0)),
+            2 => (px(18.0), px(24.0)),
+            3 => (px(16.0), px(22.0)),
+            _ => (px(14.0), px(21.0)),
         };
-        render_inline_block(id, &spans, size, fg_emphasis(), true)
+        render_inline_block(id, &spans, size, line_height, fg_emphasis(), true)
     }
 
     fn flush_inline_blockquote(&mut self, id: &str) -> AnyElement {
@@ -366,14 +377,22 @@ impl MarkdownBuilder {
         div()
             .w_full()
             .min_w_0()
-            .p(px(12.0))
-            .rounded(radius_sm())
-            .bg(bg_subtle())
+            .pl(px(12.0))
+            .py(px(4.0))
+            .border_l(px(2.0))
+            .border_color(border_default())
             .my(px(8.0))
             .child(
-                render_inline_div(id, &spans, px(13.0), fg_muted(), FontWeight::NORMAL)
-                    .w_full()
-                    .min_w_0(),
+                render_inline_div(
+                    id,
+                    &spans,
+                    px(PROSE_TEXT_SIZE),
+                    fg_default(),
+                    FontWeight::NORMAL,
+                )
+                .w_full()
+                .min_w_0()
+                .line_height(px(PROSE_LINE_HEIGHT)),
             )
             .into_any_element()
     }
@@ -384,7 +403,7 @@ impl MarkdownBuilder {
             .flex_col()
             .w_full()
             .min_w_0()
-            .gap(px(8.0))
+            .gap(px(9.0))
             .children(self.blocks)
     }
 }
@@ -393,6 +412,7 @@ fn render_inline_block(
     id: &str,
     spans: &[InlineSpan],
     base_size: Pixels,
+    line_height: Pixels,
     base_color: Rgba,
     heading: bool,
 ) -> AnyElement {
@@ -403,7 +423,8 @@ fn render_inline_block(
     };
     let mut el = render_inline_div(id, spans, base_size, base_color, base_weight)
         .w_full()
-        .min_w_0();
+        .min_w_0()
+        .line_height(line_height);
     if heading {
         el = el.mt(px(12.0)).mb(px(4.0));
     } else {
@@ -427,7 +448,8 @@ fn render_inline_div(
     let mut runs = Vec::with_capacity(spans.len());
     let base_color_hsla: Hsla = base_color.into();
     let code_color: Hsla = fg_emphasis().into();
-    let code_bg: Hsla = bg_emphasis().into();
+    let link_color: Hsla = fg_emphasis().into();
+    let code_bg: Hsla = bg_subtle().into();
 
     for span in spans {
         if span.text.is_empty() {
@@ -456,8 +478,10 @@ fn render_inline_div(
             FontStyle::Normal
         };
 
-        let color = if span.code || span.link_url.is_some() {
+        let color = if span.code {
             code_color
+        } else if span.link_url.is_some() {
+            link_color
         } else {
             base_color_hsla
         };
@@ -470,7 +494,7 @@ fn render_inline_div(
             background_color: span.code.then_some(code_bg),
             underline: span.link_url.as_ref().map(|_| UnderlineStyle {
                 thickness: px(1.0),
-                color: Some(color),
+                color: Some(fg_muted().into()),
                 wavy: false,
             }),
             strikethrough: span.strikethrough.then_some(StrikethroughStyle {
@@ -485,6 +509,7 @@ fn render_inline_div(
         .min_w_0()
         .whitespace_normal()
         .text_size(base_size)
+        .line_height(px(PROSE_LINE_HEIGHT))
         .text_color(base_color)
         .font_weight(base_weight)
         .child(SelectableText::new(id.to_string(), text).with_runs(runs))
@@ -538,25 +563,31 @@ fn render_list_item(id: &str, prefix: &str, spans: &[InlineSpan]) -> AnyElement 
         .relative()
         .w_full()
         .min_w_0()
-        .pl(px(24.0))
-        .py(px(1.0))
+        .pl(px(26.0))
+        .py(px(2.0))
         .child(
             div()
                 .absolute()
                 .left(px(2.0))
-                .top(px(1.0))
-                .w(px(16.0))
-                .text_size(px(13.0))
-                .line_height(px(20.0))
+                .top(px(2.0))
+                .w(px(PROSE_LIST_MARKER_WIDTH))
+                .text_size(px(PROSE_TEXT_SIZE))
+                .line_height(px(PROSE_LINE_HEIGHT))
                 .text_right()
                 .text_color(fg_muted())
                 .child(prefix.trim_end().to_string()),
         )
         .child(
-            render_inline_div(id, spans, px(13.0), fg_default(), FontWeight::NORMAL)
-                .w_full()
-                .min_w_0()
-                .line_height(px(20.0)),
+            render_inline_div(
+                id,
+                spans,
+                px(PROSE_TEXT_SIZE),
+                fg_default(),
+                FontWeight::NORMAL,
+            )
+            .w_full()
+            .min_w_0()
+            .line_height(px(PROSE_LINE_HEIGHT)),
         )
         .into_any_element()
 }
@@ -609,7 +640,8 @@ fn render_table(id: &str, rows: &[Vec<String>]) -> AnyElement {
                         .px(px(12.0))
                         .py(px(6.0))
                         .whitespace_normal()
-                        .text_size(px(12.0))
+                        .text_size(px(13.0))
+                        .line_height(px(20.0))
                         .text_color(if is_header {
                             fg_emphasis()
                         } else {

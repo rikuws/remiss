@@ -83,7 +83,6 @@ use app_http::UreqHttpClient;
 use app_storage::cache_path;
 use branding::APP_NAME;
 use cache::CacheStore;
-use platform_macos::apply_app_icon;
 use state::AppState;
 use temp_source_window::{
     close_temp_source_window_if_active, install_temp_source_window_key_bindings,
@@ -116,7 +115,6 @@ fn main() {
 }
 
 fn start_app(cx: &mut App) -> Result<(), String> {
-    apply_app_icon();
     let bundled_fonts =
         load_bundled_fonts().map_err(|error| format!("Failed to load bundled fonts: {error}"))?;
     cx.text_system()

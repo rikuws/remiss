@@ -15,16 +15,18 @@ use crate::notifications;
 use crate::review_brief::ReviewBrief;
 use crate::review_intelligence::{self, ReviewIntelligenceScope};
 use crate::review_session::ReviewCenterMode;
-use crate::selectable_text::{AppTextFieldKind, AppTextInput, SelectableText};
+use crate::selectable_text::{AppTextFieldKind, AppTextInput};
 use crate::state::*;
 use crate::theme::*;
 
 use super::ai_tour::refresh_active_tour_flow;
 use super::diff_view::{enter_files_surface, render_files_view, warm_structural_diffs_flow};
 use super::sections::{
-    badge, error_text, eyebrow, format_relative_time, ghost_button, nested_panel, panel_state_text,
+    badge, error_text, eyebrow, format_relative_time, ghost_button, panel_state_text,
     review_button, success_text, user_avatar,
 };
+
+const PR_OVERVIEW_CONTENT_MAX_WIDTH: f32 = 1440.0;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct ReviewStatusSummary {
@@ -100,6 +102,16 @@ struct ActivityItem {
     location_label: Option<String>,
     file_path: Option<String>,
     anchor: Option<crate::code_tour::DiffAnchor>,
+    thread_comments: Vec<ActivityThreadComment>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ActivityThreadComment {
+    id: String,
+    author_login: String,
+    author_avatar_url: Option<String>,
+    timestamp: String,
+    body: String,
 }
 
 fn summarize_review_status(
@@ -322,11 +334,17 @@ pub fn render_pr_workspace(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                         .min_h_0()
                         .flex()
                         .flex_col()
+                        .items_center()
                         .id("pr-overview-scroll")
                         .overflow_y_scroll()
                         .pt(px(16.0))
                         .pb(px(24.0))
-                        .child(render_overview_surface(state, cx)),
+                        .child(
+                            div()
+                                .w_full()
+                                .max_w(px(PR_OVERVIEW_CONTENT_MAX_WIDTH))
+                                .child(render_overview_surface(state, cx)),
+                        ),
                 )
             },
         )
@@ -662,6 +680,10 @@ fn render_overview_surface(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
     let thread_digest =
         summarize_thread_activity(&detail.review_threads, &s.unread_review_comment_ids);
     let recent_activity = summarize_recent_activity(detail, &s.unread_review_comment_ids);
+    let automation_activity_key = automation_activity_key(detail);
+    let automation_activity_expanded = s
+        .expanded_automation_activity_keys
+        .contains(&automation_activity_key);
     let participants = summarize_participants(detail, &review_status);
     let provider = s.selected_tour_provider();
     let provider_status = s.selected_tour_provider_status().cloned();
@@ -692,11 +714,16 @@ fn render_overview_surface(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                 .min_w(px(460.0))
                 .flex()
                 .flex_col()
-                .gap(px(16.0))
+                .gap(px(14.0))
                 .child(render_overview_summary_strip(
                     detail,
                     is_own_pull_request,
                     &state_for_files,
+                ))
+                .child(render_pull_request_summary_panel(
+                    detail,
+                    loaded_from_cache,
+                    syncing,
                 ))
                 .child(render_review_brief_panel(
                     review_brief_state,
@@ -717,13 +744,10 @@ fn render_overview_surface(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                     is_own_pull_request,
                     &state_for_threads,
                 ))
-                .child(render_pull_request_summary_panel(
-                    detail,
-                    loaded_from_cache,
-                    syncing,
-                ))
                 .child(render_recent_activity_panel(
                     &recent_activity,
+                    &automation_activity_key,
+                    automation_activity_expanded,
                     &state_for_activity,
                 ))
                 .when(!is_own_pull_request && !is_local_review, |el| {
@@ -753,6 +777,16 @@ fn render_overview_surface(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
         .into_any_element()
 }
 
+fn pr_detail_section() -> Div {
+    div()
+        .w_full()
+        .min_w_0()
+        .rounded(radius())
+        .bg(bg_overlay())
+        .px(px(18.0))
+        .py(px(16.0))
+}
+
 fn render_overview_summary_strip(
     detail: &github::PullRequestDetail,
     is_own_pull_request: bool,
@@ -765,7 +799,7 @@ fn render_overview_summary_strip(
         "Start review"
     };
 
-    nested_panel().child(
+    pr_detail_section().py(px(12.0)).child(
         div()
             .flex()
             .items_center()
@@ -775,37 +809,25 @@ fn render_overview_summary_strip(
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .gap(px(12.0))
-                    .min_w_0()
-                    .child(eyebrow(if is_own_pull_request {
-                        "Own pull request"
-                    } else {
-                        "Review overview"
-                    }))
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(10.0))
-                            .items_center()
-                            .flex_wrap()
-                            .child(render_overview_metric(
-                                detail.commits_count.to_string(),
-                                "Commits",
-                                fg_emphasis(),
-                            ))
-                            .child(render_overview_metric(
-                                detail.changed_files.to_string(),
-                                "Files changed",
-                                fg_emphasis(),
-                            ))
-                            .child(render_overview_metric(
-                                detail.comments_count.to_string(),
-                                "Comments",
-                                accent(),
-                            ))
-                            .child(render_change_meter(detail.additions, detail.deletions)),
-                    ),
+                    .gap(px(16.0))
+                    .items_center()
+                    .flex_wrap()
+                    .child(render_overview_metric(
+                        detail.commits_count.to_string(),
+                        "commits",
+                        fg_emphasis(),
+                    ))
+                    .child(render_overview_metric(
+                        detail.changed_files.to_string(),
+                        "files",
+                        fg_emphasis(),
+                    ))
+                    .child(render_overview_metric(
+                        detail.comments_count.to_string(),
+                        "comments",
+                        fg_muted(),
+                    ))
+                    .child(render_change_meter(detail.additions, detail.deletions)),
             )
             .child(review_button(action_label, move |_, window, cx| {
                 enter_files_surface(&state, window, cx)
@@ -924,7 +946,10 @@ fn render_review_brief_panel(
         render_review_brief_idle(state, state_for_settings, automatic_enabled).into_any_element()
     };
 
-    nested_panel().child(header).child(body).into_any_element()
+    pr_detail_section()
+        .child(header)
+        .child(body)
+        .into_any_element()
 }
 
 fn review_brief_icon_button(
@@ -979,7 +1004,7 @@ fn render_review_brief_document(brief: &ReviewBrief) -> impl IntoElement {
         .gap(px(14.0))
         .child(render_review_brief_text_block(
             "Likely intent",
-            &[brief.likely_intent.clone()],
+            std::slice::from_ref(&brief.likely_intent),
             true,
         ))
         .child(render_review_brief_text_block(
@@ -1026,23 +1051,23 @@ fn render_review_brief_text_block(
             div()
                 .text_size(px(12.0))
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(fg_emphasis())
+                .text_color(fg_muted())
                 .child(title.to_string()),
         )
         .children(items.iter().map(move |item| {
             div()
                 .flex()
                 .items_start()
-                .gap(px(8.0))
+                .gap(px(10.0))
                 .w_full()
                 .min_w_0()
                 .child(
                     div()
-                        .mt(px(8.0))
-                        .w(px(4.0))
-                        .h(px(4.0))
-                        .rounded(px(2.0))
-                        .bg(if emphasized { accent() } else { fg_subtle() }),
+                        .mt(px(9.0))
+                        .w(px(3.0))
+                        .h(px(3.0))
+                        .rounded(px(999.0))
+                        .bg(if emphasized { accent() } else { fg_muted() }),
                 )
                 .child(
                     div()
@@ -1050,8 +1075,9 @@ fn render_review_brief_text_block(
                         .w_full()
                         .min_w_0()
                         .whitespace_normal()
-                        .text_size(if emphasized { px(14.0) } else { px(13.0) })
-                        .line_height(px(20.0))
+                        .max_w(px(760.0))
+                        .text_size(px(14.0))
+                        .line_height(px(22.0))
                         .font_weight(if emphasized {
                             FontWeight::MEDIUM
                         } else {
@@ -1295,27 +1321,23 @@ fn render_review_brief_idle(
 
 fn render_overview_metric(value: String, label: &str, color: Rgba) -> impl IntoElement {
     div()
-        .px(px(12.0))
-        .py(px(10.0))
-        .min_h(px(68.0))
-        .rounded(radius_sm())
-        .bg(bg_subtle())
-        .border_1()
-        .border_color(border_muted())
+        .flex()
+        .items_baseline()
+        .gap(px(6.0))
         .child(
             div()
-                .text_size(px(13.0))
+                .text_size(px(14.0))
+                .font_weight(FontWeight::SEMIBOLD)
                 .font_family(mono_font_family())
                 .text_color(color)
                 .child(value),
         )
         .child(
             div()
-                .mt(px(4.0))
-                .text_size(px(10.0))
-                .font_family(mono_font_family())
+                .text_size(px(12.0))
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(fg_subtle())
-                .child(label.to_uppercase()),
+                .child(label.to_string()),
         )
 }
 
@@ -1338,17 +1360,13 @@ fn render_change_meter(additions: i64, deletions: i64) -> impl IntoElement {
     };
 
     div()
-        .px(px(12.0))
-        .py(px(10.0))
-        .min_h(px(68.0))
-        .rounded(radius_sm())
-        .bg(bg_subtle())
-        .border_1()
-        .border_color(border_muted())
+        .flex()
+        .items_center()
+        .gap(px(8.0))
         .child(
             div()
                 .flex()
-                .gap(px(8.0))
+                .gap(px(5.0))
                 .items_center()
                 .font_family(mono_font_family())
                 .text_size(px(12.0))
@@ -1357,7 +1375,6 @@ fn render_change_meter(additions: i64, deletions: i64) -> impl IntoElement {
         )
         .child(
             div()
-                .mt(px(8.0))
                 .flex()
                 .gap(px(2.0))
                 .children((0..segments).map(move |ix| {
@@ -1369,17 +1386,33 @@ fn render_change_meter(additions: i64, deletions: i64) -> impl IntoElement {
                         border_muted()
                     };
 
-                    div().w(px(10.0)).h(px(4.0)).rounded(px(2.0)).bg(bg)
+                    div().w(px(8.0)).h(px(4.0)).rounded(px(2.0)).bg(bg)
                 })),
         )
         .child(
             div()
-                .mt(px(4.0))
-                .text_size(px(10.0))
-                .font_family(mono_font_family())
+                .text_size(px(12.0))
                 .text_color(fg_subtle())
-                .child("DIFF".to_string()),
+                .child("diff".to_string()),
         )
+}
+
+fn readable_text(text: String) -> impl IntoElement {
+    div()
+        .max_w(px(760.0))
+        .text_size(px(14.0))
+        .line_height(px(22.0))
+        .text_color(fg_default())
+        .child(text)
+}
+
+fn section_label(label: &str) -> impl IntoElement {
+    div()
+        .mb(px(8.0))
+        .text_size(px(12.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(fg_muted())
+        .child(label.to_string())
 }
 
 fn render_review_snapshot_panel(
@@ -1410,7 +1443,7 @@ fn render_review_snapshot_panel(
         build_review_snapshot_text(review_status, thread_digest, detail.comments_count as usize)
     };
 
-    nested_panel()
+    pr_detail_section()
         .child(
             div()
                 .flex()
@@ -1441,19 +1474,12 @@ fn render_review_snapshot_panel(
                         }),
                 ),
         )
+        .child(readable_text(summary_text))
         .child(
             div()
-                .max_w(px(760.0))
-                .text_size(px(13.0))
-                .line_height(px(20.0))
-                .text_color(fg_default())
-                .child(summary_text),
-        )
-        .child(
-            div()
-                .mt(px(16.0))
+                .mt(px(12.0))
                 .flex()
-                .gap(px(10.0))
+                .gap(px(8.0))
                 .flex_wrap()
                 .child(if is_own_pull_request {
                     render_snapshot_stat(
@@ -1499,36 +1525,29 @@ fn render_review_snapshot_panel(
         )))
 }
 
-fn render_snapshot_stat(value: String, label: &str, hint: &str, color: Rgba) -> impl IntoElement {
+fn render_snapshot_stat(value: String, label: &str, _hint: &str, color: Rgba) -> impl IntoElement {
     div()
-        .p(px(14.0))
-        .rounded(radius())
-        .bg(bg_overlay())
-        .min_w(px(150.0))
-        .max_w(px(188.0))
+        .px(px(10.0))
+        .py(px(5.0))
+        .rounded(radius_sm())
+        .bg(bg_subtle())
+        .flex()
+        .items_center()
+        .gap(px(7.0))
         .child(
             div()
-                .text_size(px(22.0))
-                .font_weight(FontWeight::SEMIBOLD)
                 .font_family(mono_font_family())
+                .text_size(px(13.0))
+                .font_weight(FontWeight::SEMIBOLD)
                 .text_color(color)
                 .child(value),
         )
         .child(
             div()
-                .mt(px(4.0))
                 .text_size(px(12.0))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(fg_emphasis())
-                .child(label.to_string()),
-        )
-        .child(
-            div()
-                .mt(px(6.0))
-                .text_size(px(12.0))
-                .line_height(px(18.0))
                 .text_color(fg_muted())
-                .child(hint.to_string()),
+                .child(label.to_string()),
         )
 }
 
@@ -1544,15 +1563,13 @@ fn render_thread_focus_panel(
         div()
             .w_full()
             .min_w_0()
-            .p(px(16.0))
-            .rounded(radius())
-            .bg(bg_overlay())
-            .child(eyebrow("Needs your attention"))
+            .pt(px(4.0))
+            .child(section_label("Needs your attention"))
             .when(own_pr_feedback.is_empty(), |el| {
                 el.child(panel_state_text("No reviewer comments yet."))
             })
             .child(
-                div().flex().flex_col().gap(px(8.0)).children(
+                div().flex().flex_col().children(
                     own_pr_feedback
                         .iter()
                         .take(4)
@@ -1583,15 +1600,13 @@ fn render_thread_focus_panel(
         div()
             .w_full()
             .min_w_0()
-            .p(px(16.0))
-            .rounded(radius())
-            .bg(bg_overlay())
-            .child(eyebrow("Comment threads"))
+            .pt(px(4.0))
+            .child(section_label("Comment threads"))
             .when(thread_digest.is_empty(), |el| {
                 el.child(panel_state_text("No review threads yet."))
             })
             .child(
-                div().flex().flex_col().gap(px(8.0)).children(
+                div().flex().flex_col().children(
                     thread_digest
                         .iter()
                         .take(4)
@@ -1630,10 +1645,12 @@ fn render_own_feedback_card(
     let updated_at = format_relative_time(&item.updated_at);
 
     div()
+        .relative()
         .min_w_0()
-        .p(px(14.0))
-        .rounded(radius_sm())
-        .bg(bg_overlay())
+        .pl(px(32.0))
+        .py(px(12.0))
+        .border_t(px(1.0))
+        .border_color(border_muted())
         .cursor_pointer()
         .hover(|style| style.bg(hover_bg()))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
@@ -1647,15 +1664,43 @@ fn render_own_feedback_card(
         })
         .child(
             div()
+                .absolute()
+                .left(px(0.0))
+                .top(px(13.0))
+                .child(user_avatar(
+                    &item.author_login,
+                    item.author_avatar_url.as_deref(),
+                    22.0,
+                    false,
+                )),
+        )
+        .child(
+            div()
                 .flex()
                 .items_start()
                 .justify_between()
                 .gap(px(10.0))
                 .min_w_0()
-                .child(div().flex_grow().min_w_0().child(overflow_safe_code_label(
-                    &item.location_label,
-                    fg_emphasis(),
-                )))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .min_w_0()
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(px(13.0))
+                                .text_color(fg_emphasis())
+                                .child(item.author_login.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(fg_muted())
+                                .child(updated_at.clone()),
+                        ),
+                )
                 .child(
                     div()
                         .flex()
@@ -1686,40 +1731,16 @@ fn render_own_feedback_card(
         )
         .child(
             div()
-                .mt(px(8.0))
-                .text_size(px(13.0))
-                .line_height(px(19.0))
-                .text_color(fg_default())
-                .child(render_markdown(
-                    &format!(
-                        "own-pr-feedback-preview-{}-{}",
-                        item.file_path, item.updated_at
-                    ),
-                    &item.preview,
-                )),
+                .mt(px(4.0))
+                .child(overflow_safe_code_label(&item.location_label, fg_muted())),
         )
-        .child(
-            div()
-                .mt(px(8.0))
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .text_size(px(12.0))
-                .text_color(fg_muted())
-                .child(user_avatar(
-                    &item.author_login,
-                    item.author_avatar_url.as_deref(),
-                    18.0,
-                    false,
-                ))
-                .child(
-                    div()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(fg_emphasis())
-                        .child(item.author_login.clone()),
-                )
-                .child(format!("\u{2022} {updated_at}")),
-        )
+        .child(div().mt(px(8.0)).max_w(px(760.0)).child(render_markdown(
+            &format!(
+                "own-pr-feedback-preview-{}-{}",
+                item.file_path, item.updated_at
+            ),
+            &item.preview,
+        )))
 }
 
 fn render_thread_digest_card(
@@ -1734,10 +1755,12 @@ fn render_thread_digest_card(
     let resolved_by = item.resolved_by_login.clone();
 
     div()
+        .relative()
         .min_w_0()
-        .p(px(14.0))
-        .rounded(radius_sm())
-        .bg(bg_overlay())
+        .pl(px(32.0))
+        .py(px(12.0))
+        .border_t(px(1.0))
+        .border_color(border_muted())
         .cursor_pointer()
         .hover(|style| style.bg(hover_bg()))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
@@ -1751,15 +1774,43 @@ fn render_thread_digest_card(
         })
         .child(
             div()
+                .absolute()
+                .left(px(0.0))
+                .top(px(13.0))
+                .child(user_avatar(
+                    &item.latest_author,
+                    item.latest_author_avatar_url.as_deref(),
+                    22.0,
+                    false,
+                )),
+        )
+        .child(
+            div()
                 .flex()
                 .items_start()
                 .justify_between()
                 .gap(px(10.0))
                 .min_w_0()
-                .child(div().flex_grow().min_w_0().child(overflow_safe_code_label(
-                    &item.location_label,
-                    fg_emphasis(),
-                )))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .min_w_0()
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(px(13.0))
+                                .text_color(fg_emphasis())
+                                .child(item.latest_author.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(fg_muted())
+                                .child(updated_at.clone()),
+                        ),
+                )
                 .child(
                     div()
                         .flex()
@@ -1797,40 +1848,16 @@ fn render_thread_digest_card(
         )
         .child(
             div()
-                .mt(px(8.0))
-                .text_size(px(13.0))
-                .line_height(px(19.0))
-                .text_color(fg_default())
-                .child(render_markdown(
-                    &format!(
-                        "thread-digest-preview-{}-{}",
-                        item.file_path, item.updated_at
-                    ),
-                    &item.preview,
-                )),
+                .mt(px(4.0))
+                .child(overflow_safe_code_label(&item.location_label, fg_muted())),
         )
-        .child(
-            div()
-                .mt(px(8.0))
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .text_size(px(12.0))
-                .text_color(fg_muted())
-                .child(user_avatar(
-                    &item.latest_author,
-                    item.latest_author_avatar_url.as_deref(),
-                    18.0,
-                    false,
-                ))
-                .child(
-                    div()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(fg_emphasis())
-                        .child(item.latest_author.clone()),
-                )
-                .child(format!("\u{2022} {updated_at}")),
-        )
+        .child(div().mt(px(8.0)).max_w(px(760.0)).child(render_markdown(
+            &format!(
+                "thread-digest-preview-{}-{}",
+                item.file_path, item.updated_at
+            ),
+            &item.preview,
+        )))
 }
 
 fn render_pull_request_summary_panel(
@@ -1838,13 +1865,13 @@ fn render_pull_request_summary_panel(
     loaded_from_cache: bool,
     syncing: bool,
 ) -> impl IntoElement {
-    nested_panel()
+    pr_detail_section()
         .child(
             div()
                 .flex()
                 .items_center()
                 .justify_between()
-                .mb(px(16.0))
+                .mb(px(12.0))
                 .child(
                     div()
                         .text_size(px(15.0))
@@ -1861,9 +1888,10 @@ fn render_pull_request_summary_panel(
                         .when(syncing, |el| el.child(badge("refreshing"))),
                 ),
         )
-        .child(div().max_w(px(720.0)).child(if detail.body.is_empty() {
+        .child(div().max_w(px(760.0)).child(if detail.body.is_empty() {
             div()
-                .text_size(px(13.0))
+                .text_size(px(14.0))
+                .line_height(px(22.0))
                 .text_color(fg_muted())
                 .child("No PR description provided.")
                 .into_any_element()
@@ -1874,38 +1902,83 @@ fn render_pull_request_summary_panel(
 
 fn render_recent_activity_panel(
     activity: &[ActivityItem],
+    automation_key: &str,
+    automation_expanded: bool,
     state: &Entity<AppState>,
 ) -> impl IntoElement {
-    nested_panel()
+    let mut human_activity = Vec::new();
+    let mut automation_activity = Vec::new();
+    for item in activity {
+        if is_automation_actor(&item.author_login) {
+            automation_activity.push(item);
+        } else {
+            human_activity.push(item);
+        }
+    }
+    let displayed_count = human_activity.len() + usize::from(!automation_activity.is_empty());
+    let visible_human_count = human_activity.len().min(10);
+    let has_automation_activity = !automation_activity.is_empty();
+
+    pr_detail_section()
         .child(
             div()
                 .flex()
                 .items_center()
                 .justify_between()
-                .mb(px(16.0))
+                .mb(px(12.0))
                 .child(
                     div()
                         .text_size(px(15.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(fg_emphasis())
-                        .child("Recent Activity"),
+                        .child("Activity"),
                 )
-                .child(badge(&activity.len().to_string())),
+                .child(badge(&displayed_count.to_string())),
         )
         .when(activity.is_empty(), |el| {
             el.child(panel_state_text("No recent review or comment activity."))
         })
         .child(
-            div().flex().flex_col().gap(px(8.0)).children(
-                activity
-                    .iter()
-                    .take(10)
-                    .map(|item| render_activity_card(item, state)),
-            ),
+            div()
+                .flex()
+                .flex_col()
+                .children(
+                    human_activity
+                        .into_iter()
+                        .take(10)
+                        .enumerate()
+                        .map(|(index, item)| {
+                            render_activity_card(
+                                item,
+                                state,
+                                index > 0,
+                                index + 1 < visible_human_count || has_automation_activity,
+                            )
+                        }),
+                )
+                .when(has_automation_activity, |el| {
+                    el.child(render_automation_activity_group(
+                        automation_activity,
+                        automation_key,
+                        automation_expanded,
+                        state,
+                        visible_human_count > 0,
+                    ))
+                }),
         )
 }
 
-fn render_activity_card(item: &ActivityItem, state: &Entity<AppState>) -> impl IntoElement {
+fn render_activity_card(
+    item: &ActivityItem,
+    state: &Entity<AppState>,
+    connector_above: bool,
+    connector_below: bool,
+) -> AnyElement {
+    if !item.thread_comments.is_empty() {
+        return render_activity_thread_card(item, state, connector_above, connector_below)
+            .into_any_element();
+    }
+
     let clickable = item.file_path.is_some() && item.anchor.is_some();
     let state = state.clone();
     let file_path = item.file_path.clone();
@@ -1914,99 +1987,540 @@ fn render_activity_card(item: &ActivityItem, state: &Entity<AppState>) -> impl I
 
     div()
         .min_w_0()
-        .p(px(16.0))
-        .rounded(radius())
-        .bg(bg_overlay())
-        .when(clickable, |el| {
-            el.cursor_pointer()
-                .hover(|style| style.bg(hover_bg()))
-                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                    state.update(cx, |state, cx| {
-                        state.selected_file_path = file_path.clone();
-                        state.selected_diff_anchor = anchor.clone();
-                        cx.notify();
-                    });
-                    enter_files_surface(&state, window, cx);
-                })
-        })
+        .py(px(4.0))
+        .flex()
+        .items_start()
+        .gap(px(10.0))
+        .child(render_activity_timeline_avatar(
+            &item.author_login,
+            item.author_avatar_url.as_deref(),
+            connector_above,
+            connector_below,
+        ))
         .child(
             div()
-                .flex()
-                .items_start()
-                .justify_between()
-                .gap(px(10.0))
+                .flex_1()
                 .min_w_0()
+                .rounded(radius_sm())
+                .border_1()
+                .border_color(transparent())
+                .px(px(12.0))
+                .py(px(10.0))
+                .flex()
+                .flex_col()
+                .when(clickable, |el| {
+                    el.cursor_pointer()
+                        .hover(|style| style.bg(hover_bg()).border_color(border_muted()))
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                            state.update(cx, |state, cx| {
+                                state.selected_file_path = file_path.clone();
+                                state.selected_diff_anchor = anchor.clone();
+                                cx.notify();
+                            });
+                            enter_files_surface(&state, window, cx);
+                        })
+                })
                 .child(
                     div()
                         .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .flex_grow()
+                        .items_start()
+                        .justify_between()
+                        .gap(px(10.0))
                         .min_w_0()
-                        .when(item.kind != ActivityItemKind::Thread, |el| {
-                            el.child(activity_kind_badge(&item.kind))
-                        })
-                        .child(user_avatar(
-                            &item.author_login,
-                            item.author_avatar_url.as_deref(),
-                            20.0,
-                            false,
-                        ))
                         .child(
                             div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .flex_grow()
                                 .min_w_0()
-                                .text_size(px(13.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(fg_emphasis())
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .overflow_x_hidden()
-                                .child(item.title.clone()),
+                                .when(item.kind != ActivityItemKind::Thread, |el| {
+                                    el.child(activity_kind_badge(&item.kind))
+                                })
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .text_size(px(13.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(fg_emphasis())
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .overflow_x_hidden()
+                                        .child(item.title.clone()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(12.0))
+                                .text_color(fg_muted())
+                                .child(timestamp),
                         ),
                 )
                 .child(
                     div()
-                        .flex_shrink_0()
-                        .text_size(px(12.0))
-                        .text_color(fg_muted())
-                        .child(timestamp),
+                        .mt(px(8.0))
+                        .flex()
+                        .items_start()
+                        .gap(px(6.0))
+                        .flex_wrap()
+                        .min_w_0()
+                        .when_some(item.location_label.clone(), |el, location| {
+                            el.child(
+                                div()
+                                    .min_w_0()
+                                    .max_w(px(720.0))
+                                    .child(activity_location_text(&location)),
+                            )
+                        })
+                        .when_some(item.status_label.clone(), |el, status| {
+                            el.child(activity_status_badge(item, &status))
+                        }),
+                )
+                .when(
+                    item.thread_comments.is_empty() && !item.preview.is_empty(),
+                    |el| {
+                        el.child(div().mt(px(8.0)).max_w(px(760.0)).child(render_markdown(
+                            &format!("activity-preview-{}-{}", item.author_login, item.timestamp),
+                            &item.preview,
+                        )))
+                    },
                 ),
         )
+        .into_any_element()
+}
+
+fn render_activity_thread_card(
+    item: &ActivityItem,
+    state: &Entity<AppState>,
+    connector_above: bool,
+    connector_below: bool,
+) -> impl IntoElement {
+    let clickable = item.file_path.is_some() && item.anchor.is_some();
+    let state = state.clone();
+    let file_path = item.file_path.clone();
+    let anchor = item.anchor.clone();
+    let timestamp = format_relative_time(&item.timestamp);
+    let comment_count = item.thread_comments.len();
+
+    div()
+        .flex()
+        .flex_col()
         .child(
             div()
-                .mt(px(8.0))
+                .min_w_0()
+                .py(px(4.0))
                 .flex()
                 .items_start()
-                .gap(px(6.0))
-                .flex_wrap()
-                .min_w_0()
-                .when_some(item.location_label.clone(), |el, location| {
-                    el.child(
-                        div()
-                            .min_w_0()
-                            .max_w(px(720.0))
-                            .child(activity_location_text(&location)),
+                .gap(px(10.0))
+                .child(render_activity_timeline_avatar(
+                    &item.author_login,
+                    item.author_avatar_url.as_deref(),
+                    connector_above,
+                    true,
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .rounded(radius_sm())
+                        .border_1()
+                        .border_color(transparent())
+                        .px(px(12.0))
+                        .py(px(10.0))
+                        .flex()
+                        .flex_col()
+                        .when(clickable, |el| {
+                            el.cursor_pointer()
+                                .hover(|style| style.bg(hover_bg()).border_color(border_muted()))
+                                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                    state.update(cx, |state, cx| {
+                                        state.selected_file_path = file_path.clone();
+                                        state.selected_diff_anchor = anchor.clone();
+                                        cx.notify();
+                                    });
+                                    enter_files_surface(&state, window, cx);
+                                })
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .items_start()
+                                .justify_between()
+                                .gap(px(10.0))
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .text_size(px(13.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(fg_emphasis())
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .overflow_x_hidden()
+                                        .child(item.title.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .text_size(px(12.0))
+                                        .text_color(fg_muted())
+                                        .child(timestamp),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .mt(px(8.0))
+                                .flex()
+                                .items_start()
+                                .gap(px(6.0))
+                                .flex_wrap()
+                                .min_w_0()
+                                .when_some(item.location_label.clone(), |el, location| {
+                                    el.child(
+                                        div()
+                                            .min_w_0()
+                                            .max_w(px(720.0))
+                                            .child(activity_location_text(&location)),
+                                    )
+                                })
+                                .when_some(item.status_label.clone(), |el, status| {
+                                    el.child(activity_status_badge(item, &status))
+                                }),
+                        ),
+                ),
+        )
+        .children(
+            item.thread_comments
+                .iter()
+                .enumerate()
+                .map(|(index, comment)| {
+                    render_activity_thread_comment_row(
+                        comment,
+                        true,
+                        index + 1 < comment_count || connector_below,
                     )
-                })
-                .when_some(item.status_label.clone(), |el, status| {
-                    el.child(activity_status_badge(item, &status))
                 }),
         )
-        .when(!item.preview.is_empty(), |el| {
+}
+
+fn render_activity_thread_comment_row(
+    comment: &ActivityThreadComment,
+    connector_above: bool,
+    connector_below: bool,
+) -> impl IntoElement {
+    div()
+        .min_w_0()
+        .py(px(4.0))
+        .flex()
+        .items_start()
+        .gap(px(10.0))
+        .child(render_activity_thread_comment_avatar(
+            &comment.author_login,
+            comment.author_avatar_url.as_deref(),
+            connector_above,
+            connector_below,
+        ))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .px(px(12.0))
+                .py(px(4.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(7.0))
+                        .text_size(px(12.0))
+                        .line_height(px(18.0))
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(fg_emphasis())
+                                .child(comment.author_login.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_color(fg_subtle())
+                                .child(format_relative_time(&comment.timestamp)),
+                        ),
+                )
+                .child(div().mt(px(4.0)).max_w(px(760.0)).child(render_markdown(
+                    &format!("activity-thread-comment-{}", comment.id),
+                    &comment.body,
+                ))),
+        )
+}
+
+fn render_activity_thread_comment_avatar(
+    login: &str,
+    avatar_url: Option<&str>,
+    connector_above: bool,
+    connector_below: bool,
+) -> impl IntoElement {
+    div()
+        .relative()
+        .w(px(32.0))
+        .min_h(px(42.0))
+        .flex_shrink_0()
+        .flex()
+        .justify_center()
+        .pt(px(2.0))
+        .child(user_avatar(login, avatar_url, 18.0, false))
+        .when(connector_above, |el| {
             el.child(
                 div()
-                    .mt(px(8.0))
-                    .pl(px(10.0))
-                    .border_l(px(2.0))
-                    .border_color(transparent())
-                    .text_size(px(14.0))
-                    .line_height(px(21.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(fg_emphasis())
-                    .child(SelectableText::new(
-                        format!("activity-preview-{}-{}", item.author_login, item.timestamp),
-                        item.preview.clone(),
-                    )),
+                    .absolute()
+                    .top(px(0.0))
+                    .left(px(15.5))
+                    .w(px(1.0))
+                    .h(px(4.0))
+                    .bg(border_muted()),
+            )
+        })
+        .when(connector_below, |el| {
+            el.child(
+                div()
+                    .absolute()
+                    .top(px(24.0))
+                    .bottom(px(-6.0))
+                    .left(px(15.5))
+                    .w(px(1.0))
+                    .bg(border_muted()),
+            )
+        })
+}
+
+fn render_activity_timeline_avatar(
+    login: &str,
+    avatar_url: Option<&str>,
+    connector_above: bool,
+    connector_below: bool,
+) -> impl IntoElement {
+    div()
+        .relative()
+        .w(px(32.0))
+        .min_h(px(60.0))
+        .flex_shrink_0()
+        .flex()
+        .justify_center()
+        .pt(px(8.0))
+        .child(user_avatar(login, avatar_url, 22.0, false))
+        .when(connector_above, |el| {
+            el.child(
+                div()
+                    .absolute()
+                    .top(px(0.0))
+                    .left(px(15.5))
+                    .w(px(1.0))
+                    .h(px(8.0))
+                    .bg(border_muted()),
+            )
+        })
+        .when(connector_below, |el| {
+            el.child(
+                div()
+                    .absolute()
+                    .top(px(34.0))
+                    .bottom(px(0.0))
+                    .left(px(15.5))
+                    .w(px(1.0))
+                    .bg(border_muted()),
+            )
+        })
+}
+
+fn render_activity_timeline_icon(
+    icon: LucideIcon,
+    connector_above: bool,
+    connector_below: bool,
+) -> impl IntoElement {
+    div()
+        .relative()
+        .w(px(32.0))
+        .min_h(px(58.0))
+        .flex_shrink_0()
+        .flex()
+        .justify_center()
+        .pt(px(9.0))
+        .child(
+            div()
+                .size(px(20.0))
+                .rounded(px(999.0))
+                .bg(bg_emphasis())
+                .border_1()
+                .border_color(border_muted())
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(lucide_icon(icon, 12.0, fg_muted())),
+        )
+        .when(connector_above, |el| {
+            el.child(
+                div()
+                    .absolute()
+                    .top(px(0.0))
+                    .left(px(15.5))
+                    .w(px(1.0))
+                    .h(px(9.0))
+                    .bg(border_muted()),
+            )
+        })
+        .when(connector_below, |el| {
+            el.child(
+                div()
+                    .absolute()
+                    .top(px(35.0))
+                    .bottom(px(0.0))
+                    .left(px(15.5))
+                    .w(px(1.0))
+                    .bg(border_muted()),
+            )
+        })
+}
+
+fn automation_activity_key(detail: &github::PullRequestDetail) -> String {
+    format!(
+        "{}#{}:automation-activity",
+        detail.repository, detail.number
+    )
+}
+
+fn is_automation_actor(login: &str) -> bool {
+    let login = login.trim().to_ascii_lowercase();
+    if login.is_empty() {
+        return false;
+    }
+
+    login.contains("[bot]")
+        || login.ends_with("-bot")
+        || login.ends_with("bot")
+        || matches!(
+            login.as_str(),
+            "github-actions" | "dependabot" | "renovate" | "vercel" | "netlify" | "supabase"
+        )
+}
+
+fn automation_activity_needs_attention(item: &ActivityItem) -> bool {
+    let mut haystack = String::new();
+    haystack.push_str(&item.title);
+    haystack.push(' ');
+    haystack.push_str(&item.preview);
+    if let Some(status) = item.status_label.as_deref() {
+        haystack.push(' ');
+        haystack.push_str(status);
+    }
+    let haystack = haystack.to_ascii_lowercase();
+
+    [
+        "fail",
+        "error",
+        "blocked",
+        "denied",
+        "unauthorized",
+        "not authorized",
+        "conflict",
+        "cancelled",
+        "canceled",
+    ]
+    .iter()
+    .any(|needle| haystack.contains(needle))
+}
+
+fn render_automation_activity_group(
+    items: Vec<&ActivityItem>,
+    automation_key: &str,
+    expanded: bool,
+    state: &Entity<AppState>,
+    connector_above: bool,
+) -> impl IntoElement {
+    let key = automation_key.to_string();
+    let toggle_state = state.clone();
+    let has_attention = items
+        .iter()
+        .any(|item| automation_activity_needs_attention(item));
+    let latest = items
+        .first()
+        .map(|item| format_relative_time(&item.timestamp))
+        .unwrap_or_default();
+    let count = items.len();
+
+    div()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .min_w_0()
+                .py(px(4.0))
+                .flex()
+                .items_start()
+                .gap(px(10.0))
+                .child(render_activity_timeline_icon(
+                    LucideIcon::Zap,
+                    connector_above,
+                    expanded,
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .rounded(radius_sm())
+                        .border_1()
+                        .border_color(transparent())
+                        .px(px(12.0))
+                        .py(px(10.0))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(12.0))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(hover_bg()).border_color(border_muted()))
+                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                            toggle_state.update(cx, |state, cx| {
+                                if !state.expanded_automation_activity_keys.insert(key.clone()) {
+                                    state.expanded_automation_activity_keys.remove(&key);
+                                }
+                                cx.notify();
+                            });
+                        })
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(
+                                    div()
+                                        .text_size(px(13.0))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(fg_emphasis())
+                                        .child("Automation updates"),
+                                )
+                                .child(subtle_badge(&format!("{count} updates")))
+                                .when(has_attention, |el| {
+                                    el.child(tone_badge(
+                                        "needs attention",
+                                        danger(),
+                                        danger_muted(),
+                                        diff_remove_border(),
+                                    ))
+                                }),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(12.0))
+                                .text_color(fg_muted())
+                                .child(if expanded { "Hide".to_string() } else { latest }),
+                        ),
+                ),
+        )
+        .when(expanded, |el| {
+            el.children(
+                items.into_iter().enumerate().map(|(index, item)| {
+                    render_activity_card(item, state, true, index + 1 < count)
+                }),
             )
         })
 }
@@ -2302,69 +2816,54 @@ fn render_submit_review_panel(
     state: &Entity<AppState>,
 ) -> impl IntoElement {
     let editor_state = state.clone();
-    nested_panel()
+    pr_detail_section()
         .child(
             div()
                 .flex()
                 .items_center()
-                .mb(px(16.0))
+                .justify_between()
+                .gap(px(12.0))
+                .flex_wrap()
+                .mb(px(12.0))
                 .child(
                     div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.0))
-                        .child(eyebrow("Review action"))
-                        .child(
-                            div()
-                                .text_size(px(15.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(fg_emphasis())
-                                .child("Submit review"),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(fg_muted())
-                                .child(
-                                    "Write a review note here, then submit through gh without leaving the pull request.",
-                                ),
-                        ),
+                        .text_size(px(15.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg_emphasis())
+                        .child("Submit review"),
                 )
-        )
-        .child(
-            div().flex().gap(px(4.0)).flex_wrap().children(
-                [
-                    (ReviewAction::Comment, "Comment"),
-                    (ReviewAction::Approve, "Approve"),
-                    (ReviewAction::RequestChanges, "Request changes"),
-                ]
-                .iter()
-                .map(|(action, label)| {
-                    let is_active = review_action == *action;
-                    let action = *action;
-                    let state = state.clone();
-                    surface_tab(label, is_active, move |_, _, cx| {
-                        state.update(cx, |s, cx| {
-                            s.review_action = action;
-                            cx.notify();
-                        });
-                    })
-                }),
-            ),
+                .child(
+                    div().flex().gap(px(4.0)).flex_wrap().children(
+                        [
+                            (ReviewAction::Comment, "Comment"),
+                            (ReviewAction::Approve, "Approve"),
+                            (ReviewAction::RequestChanges, "Request changes"),
+                        ]
+                        .iter()
+                        .map(|(action, label)| {
+                            let is_active = review_action == *action;
+                            let action = *action;
+                            let state = state.clone();
+                            surface_tab(label, is_active, move |_, _, cx| {
+                                state.update(cx, |s, cx| {
+                                    s.review_action = action;
+                                    cx.notify();
+                                });
+                            })
+                        }),
+                    ),
+                ),
         )
         .child(
             div()
-                .mt(px(12.0))
-                .p(px(12.0))
-                .px(px(14.0))
-                .rounded(radius_sm())
+                .rounded(radius())
                 .border_1()
-                .border_color(transparent())
-                .bg(if review_editor_active {
-                    bg_overlay()
+                .border_color(if review_editor_active {
+                    border_default()
                 } else {
-                    bg_subtle()
+                    border_muted()
                 })
+                .bg(bg_surface())
                 .cursor(CursorStyle::IBeam)
                 .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                     start_review_editor(&editor_state, cx);
@@ -2375,48 +2874,35 @@ fn render_submit_review_panel(
                     fg_default()
                 })
                 .text_size(px(14.0))
-                .min_h(px(120.0))
+                .line_height(px(22.0))
+                .min_h(px(132.0))
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .justify_between()
-                        .gap(px(12.0))
+                        .border_b(px(1.0))
+                        .border_color(border_muted())
+                        .px(px(12.0))
+                        .py(px(8.0))
+                        .child(markdown_editor_tab_label("Write", true))
                         .child(
                             div()
-                                .text_size(px(11.0))
-                                .font_family(mono_font_family())
-                                .text_color(if review_editor_active {
-                                    accent()
-                                } else {
-                                    fg_subtle()
-                                })
-                                .child(if review_editor_active {
-                                    "EDITING"
-                                } else {
-                                    "CLICK TO EDIT"
-                                }),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .font_family(mono_font_family())
+                                .text_size(px(12.0))
                                 .text_color(fg_subtle())
-                                .child("cmd-enter submit • esc blur"),
+                                .child("cmd-enter submit"),
                         ),
                 )
                 .child(
-                    div()
-                        .mt(px(10.0))
-                        .child(
-                            AppTextInput::new(
-                                "review-body-input",
-                                state.clone(),
-                                AppTextFieldKind::ReviewBody,
-                                "Leave a review note...",
-                            )
-                            .autofocus(review_editor_active),
-                        ),
+                    div().px(px(12.0)).py(px(10.0)).min_h(px(92.0)).child(
+                        AppTextInput::new(
+                            "review-body-input",
+                            state.clone(),
+                            AppTextFieldKind::ReviewBody,
+                            "Leave a review note...",
+                        )
+                        .autofocus(review_editor_active),
+                    ),
                 ),
         )
         .child(
@@ -3044,12 +3530,13 @@ fn activity_item_for_comment(comment: &PullRequestComment) -> ActivityItem {
         author_avatar_url: comment.author_avatar_url.clone(),
         timestamp: comment.updated_at.clone(),
         title: format!("{} commented on the pull request", comment.author_login),
-        preview: summarize_text_preview(&comment.body, 220),
+        preview: full_markdown_comment_body(&comment.body),
         status_label: None,
         status_code: None,
         location_label: None,
         file_path: None,
         anchor: None,
+        thread_comments: Vec::new(),
     }
 }
 
@@ -3074,6 +3561,7 @@ fn activity_item_for_review(review: &PullRequestReview) -> ActivityItem {
         location_label: None,
         file_path: None,
         anchor: None,
+        thread_comments: Vec::new(),
     }
 }
 
@@ -3082,6 +3570,11 @@ fn activity_item_for_thread(
     unread_comment_ids: &BTreeSet<String>,
 ) -> Option<ActivityItem> {
     let digest = thread_digest_item(thread, unread_comment_ids)?;
+    let thread_comments = thread
+        .comments
+        .iter()
+        .map(activity_thread_comment)
+        .collect::<Vec<_>>();
     let mut status_parts = Vec::new();
     if digest.unread_count > 0 {
         status_parts.push(format!("{} new", digest.unread_count));
@@ -3099,7 +3592,7 @@ fn activity_item_for_thread(
         author_avatar_url: digest.latest_author_avatar_url.clone(),
         timestamp: digest.updated_at.clone(),
         title: format!("{} commented", digest.latest_author),
-        preview: digest.preview.clone(),
+        preview: String::new(),
         status_label: if status_parts.is_empty() {
             Some(format!("{} comments", digest.comment_count))
         } else {
@@ -3109,7 +3602,21 @@ fn activity_item_for_thread(
         location_label: Some(digest.location_label.clone()),
         file_path: Some(digest.file_path),
         anchor: Some(digest.anchor),
+        thread_comments,
     })
+}
+
+fn activity_thread_comment(comment: &PullRequestReviewComment) -> ActivityThreadComment {
+    ActivityThreadComment {
+        id: comment.id.clone(),
+        author_login: comment.author_login.clone(),
+        author_avatar_url: comment.author_avatar_url.clone(),
+        timestamp: comment
+            .published_at
+            .clone()
+            .unwrap_or_else(|| comment.updated_at.clone()),
+        body: full_markdown_comment_body(&comment.body),
+    }
 }
 
 fn review_activity_preview(review: &PullRequestReview) -> String {
@@ -3118,7 +3625,7 @@ fn review_activity_preview(review: &PullRequestReview) -> String {
         return String::new();
     }
 
-    summarize_text_preview(body, 220)
+    full_markdown_comment_body(body)
 }
 
 fn summarize_participants(
@@ -3284,6 +3791,21 @@ pub fn surface_tab(
         )
 }
 
+fn markdown_editor_tab_label(label: &str, active: bool) -> impl IntoElement {
+    div()
+        .px(px(8.0))
+        .py(px(3.0))
+        .rounded(radius_sm())
+        .text_size(px(12.0))
+        .font_weight(if active {
+            FontWeight::SEMIBOLD
+        } else {
+            FontWeight::MEDIUM
+        })
+        .text_color(if active { fg_emphasis() } else { fg_muted() })
+        .child(label.to_string())
+}
+
 fn trigger_sync_pr(
     state: &Entity<AppState>,
     repository: &str,
@@ -3407,9 +3929,10 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{
-        apply_submitted_review_to_detail, humanize_review_state, participant_display_name,
+        apply_submitted_review_to_detail, automation_activity_needs_attention,
+        humanize_review_state, is_automation_actor, participant_display_name,
         summarize_feedback_preview, summarize_own_pr_feedback, summarize_participants,
-        summarize_recent_activity, summarize_review_status, ActivityItemKind,
+        summarize_recent_activity, summarize_review_status, ActivityItem, ActivityItemKind,
     };
     use crate::github::{
         PullRequestComment, PullRequestDetail, PullRequestFile, PullRequestReview,
@@ -3438,6 +3961,34 @@ mod tests {
         assert_eq!(summary.changes_requested, vec!["bob".to_string()]);
         assert_eq!(summary.commented, vec!["carol".to_string()]);
         assert_eq!(summary.waiting, vec!["sam".to_string(), "zoe".to_string()]);
+    }
+
+    #[test]
+    fn automation_actor_detection_matches_bot_logins() {
+        assert!(is_automation_actor("coderabbitai[bot]"));
+        assert!(is_automation_actor("github-actions"));
+        assert!(is_automation_actor("review-bot"));
+        assert!(!is_automation_actor("alice"));
+    }
+
+    #[test]
+    fn automation_attention_detects_failure_text() {
+        let item = ActivityItem {
+            kind: ActivityItemKind::Conversation,
+            author_login: "vercel[bot]".to_string(),
+            author_avatar_url: None,
+            timestamp: "2026-05-13T10:00:00Z".to_string(),
+            title: "vercel deployment failed".to_string(),
+            preview: "A member first needs to authorize it.".to_string(),
+            status_label: None,
+            status_code: None,
+            location_label: None,
+            file_path: None,
+            anchor: None,
+            thread_comments: Vec::new(),
+        };
+
+        assert!(automation_activity_needs_attention(&item));
     }
 
     #[test]
@@ -3527,11 +4078,18 @@ mod tests {
                 42,
                 false,
                 false,
-                vec![comment(
-                    "carol",
-                    "Please rename this helper so the intent is clearer.",
-                    "2026-04-14T11:00:00Z",
-                )],
+                vec![
+                    comment(
+                        "carol",
+                        "Please rename this helper so the intent is clearer.",
+                        "2026-04-14T11:00:00Z",
+                    ),
+                    comment(
+                        "dave",
+                        "Done in the follow-up commit.",
+                        "2026-04-14T11:05:00Z",
+                    ),
+                ],
             )],
         );
 
@@ -3539,8 +4097,20 @@ mod tests {
 
         assert_eq!(items.len(), 3);
         assert_eq!(items[0].kind, ActivityItemKind::Thread);
-        assert_eq!(items[0].title, "carol commented");
+        assert_eq!(items[0].title, "dave commented");
         assert_eq!(items[0].location_label.as_deref(), Some("src/main.rs:42"));
+        assert_eq!(items[0].thread_comments.len(), 2);
+        assert_eq!(items[0].thread_comments[0].author_login, "carol");
+        assert_eq!(
+            items[0].thread_comments[0].body,
+            "Please rename this helper so the intent is clearer."
+        );
+        assert_eq!(items[0].thread_comments[1].author_login, "dave");
+        assert_eq!(
+            items[0].thread_comments[1].body,
+            "Done in the follow-up commit."
+        );
+        assert!(items[0].preview.is_empty());
         assert_eq!(items[1].kind, ActivityItemKind::Review);
         assert_eq!(items[1].status_code.as_deref(), Some("APPROVED"));
         assert!(items[1].preview.is_empty());

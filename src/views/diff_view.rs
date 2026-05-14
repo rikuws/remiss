@@ -46,9 +46,7 @@ use crate::review_file_header::{
     render_review_file_header, render_review_file_header_with_controls, ReviewFileHeaderProps,
 };
 use crate::review_queue::{build_review_queue, ReviewQueue, ReviewQueueBucket};
-use crate::review_session::{
-    NormalDiffLayout, ReviewCenterMode, ReviewLocation, ReviewSourceTarget,
-};
+use crate::review_session::{DiffLayout, ReviewCenterMode, ReviewLocation, ReviewSourceTarget};
 use crate::selectable_text::{AppTextFieldKind, AppTextInput, SelectableText};
 use crate::semantic_diff::{build_semantic_diff_file, SemanticDiffFile, SemanticDiffSection};
 use crate::source_browser::render_source_browser;
@@ -7396,6 +7394,12 @@ fn render_diff_panel(
         .unwrap_or_default();
     let center_mode = review_session.center_mode;
     let normal_diff_layout = review_session.normal_diff_layout;
+    let structural_diff_layout = review_session.structural_diff_layout;
+    let active_diff_layout = if center_mode == ReviewCenterMode::StructuralDiff {
+        structural_diff_layout
+    } else {
+        normal_diff_layout
+    };
     let stack_filter = (center_mode == ReviewCenterMode::Stack)
         .then(|| {
             build_layer_diff_filter(
@@ -7449,7 +7453,7 @@ fn render_diff_panel(
             local_repo_error,
             structural_warmup_status,
             center_mode,
-            normal_diff_layout,
+            active_diff_layout,
             !has_textual_diff,
         ))
         .child(
@@ -7491,7 +7495,7 @@ fn render_diff_panel(
                             review_stack.clone(),
                             None,
                             center_mode,
-                            normal_diff_layout,
+                            structural_diff_layout,
                             cx,
                         )
                         .into_any_element()
@@ -7525,7 +7529,7 @@ fn render_diff_toolbar(
     _local_repo_error: Option<&str>,
     structural_warmup_status: Option<String>,
     center_mode: ReviewCenterMode,
-    normal_diff_layout: NormalDiffLayout,
+    active_diff_layout: DiffLayout,
     layout_toggle_disabled: bool,
 ) -> impl IntoElement {
     let mut focus_meta = Vec::new();
@@ -7550,7 +7554,7 @@ fn render_diff_toolbar(
     let focus_summary = focus_meta.join(" / ");
     let show_layout_toggle = matches!(
         center_mode,
-        ReviewCenterMode::SemanticDiff | ReviewCenterMode::Stack
+        ReviewCenterMode::SemanticDiff | ReviewCenterMode::StructuralDiff | ReviewCenterMode::Stack
     );
     let is_local_review = crate::local_review::is_local_review_detail(detail);
     let state_for_refresh = state.clone();
@@ -7602,9 +7606,10 @@ fn render_diff_toolbar(
                 ),
         )
         .when(show_layout_toggle, |el| {
-            el.child(render_normal_diff_layout_toggle(
+            el.child(render_diff_layout_toggle(
                 state,
-                normal_diff_layout,
+                center_mode,
+                active_diff_layout,
                 layout_toggle_disabled,
             ))
         })
@@ -7721,16 +7726,24 @@ fn short_oid(oid: &str) -> String {
     oid.chars().take(12).collect()
 }
 
-fn render_normal_diff_layout_toggle(
+fn render_diff_layout_toggle(
     state: &Entity<AppState>,
-    active_layout: NormalDiffLayout,
+    center_mode: ReviewCenterMode,
+    active_layout: DiffLayout,
     disabled: bool,
 ) -> impl IntoElement {
     let state_for_unified = state.clone();
     let state_for_side_by_side = state.clone();
+    let tooltip = if center_mode == ReviewCenterMode::StructuralDiff {
+        "Structural diff layout"
+    } else {
+        "Diff layout"
+    };
 
     div()
-        .id("normal-diff-layout-toggle")
+        .id(ElementId::Name(
+            format!("diff-layout-toggle-{center_mode:?}").into(),
+        ))
         .h(px(28.0))
         .p(px(2.0))
         .rounded(radius_sm())
@@ -7741,14 +7754,18 @@ fn render_normal_diff_layout_toggle(
         .items_center()
         .gap(px(1.0))
         .opacity(if disabled { 0.5 } else { 1.0 })
-        .tooltip(|_, cx| build_static_tooltip("Normal diff layout", cx))
+        .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
         .child(diff_layout_segment(
             "Unified",
-            active_layout == NormalDiffLayout::Unified,
+            active_layout == DiffLayout::Unified,
             disabled,
             move |_, _, cx| {
                 state_for_unified.update(cx, |state, cx| {
-                    state.set_normal_diff_layout(NormalDiffLayout::Unified);
+                    if center_mode == ReviewCenterMode::StructuralDiff {
+                        state.set_structural_diff_layout(DiffLayout::Unified);
+                    } else {
+                        state.set_normal_diff_layout(DiffLayout::Unified);
+                    }
                     state.persist_active_review_session();
                     cx.notify();
                 });
@@ -7756,11 +7773,15 @@ fn render_normal_diff_layout_toggle(
         ))
         .child(diff_layout_segment(
             "Split",
-            active_layout == NormalDiffLayout::SideBySide,
+            active_layout == DiffLayout::SideBySide,
             disabled,
             move |_, _, cx| {
                 state_for_side_by_side.update(cx, |state, cx| {
-                    state.set_normal_diff_layout(NormalDiffLayout::SideBySide);
+                    if center_mode == ReviewCenterMode::StructuralDiff {
+                        state.set_structural_diff_layout(DiffLayout::SideBySide);
+                    } else {
+                        state.set_normal_diff_layout(DiffLayout::SideBySide);
+                    }
                     state.persist_active_review_session();
                     cx.notify();
                 });
@@ -7774,10 +7795,7 @@ fn diff_layout_segment(
     disabled: bool,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let animation_id = SharedString::from(format!(
-        "normal-diff-layout-{label}-{}",
-        usize::from(active)
-    ));
+    let animation_id = SharedString::from(format!("diff-layout-{label}-{}", usize::from(active)));
 
     div()
         .h(px(22.0))
@@ -9042,7 +9060,7 @@ fn render_combined_diff_files(
     review_stack: Arc<ReviewStack>,
     stack_filter: Option<LayerDiffFilter>,
     center_mode: ReviewCenterMode,
-    normal_diff_layout: NormalDiffLayout,
+    diff_layout: DiffLayout,
     cx: &App,
 ) -> AnyElement {
     let visible_paths = stack_filter
@@ -9064,7 +9082,7 @@ fn render_combined_diff_files(
                 review_stack.as_ref(),
                 stack_filter.as_ref(),
                 center_mode,
-                normal_diff_layout,
+                diff_layout,
                 cx,
             )
         })
@@ -9078,6 +9096,11 @@ fn render_combined_diff_files(
         .active_review_session()
         .map(|session| session.wrap_diff_lines)
         .unwrap_or(false);
+    let combined_side_by_side_widths = if wrap_diff_lines {
+        None
+    } else {
+        combined_side_by_side_column_widths(&contexts)
+    };
     let (items, has_side_by_side_rows) = build_combined_diff_view_items(&contexts);
     let view_state = prepare_combined_diff_view_state(app_state, center_mode);
     reset_list_state_preserving_scroll(&view_state.list_state, items.len());
@@ -9141,6 +9164,7 @@ fn render_combined_diff_files(
             ix,
             wrap_diff_lines,
             &render_side_by_side_scroll_handles,
+            combined_side_by_side_widths,
             &render_collapse_list_state,
             cx,
         )
@@ -9165,6 +9189,7 @@ fn render_combined_diff_files(
         &scrollbar_list_state,
         item_count,
         (!wrap_diff_lines && has_side_by_side_rows).then_some(&side_by_side_scroll_handles),
+        DiffScrollbarInsets::combined_body(),
         show_top_fade,
     );
 
@@ -9204,10 +9229,12 @@ fn render_diff_scroll_body(
     list_state: &ListState,
     item_count: usize,
     side_by_side_scroll_handles: Option<&SideBySideScrollHandles>,
+    side_by_side_scrollbar_insets: DiffScrollbarInsets,
     show_top_fade: bool,
 ) -> AnyElement {
-    let side_by_side_scrollbars =
-        side_by_side_scroll_handles.and_then(render_side_by_side_horizontal_scrollbars);
+    let side_by_side_scrollbars = side_by_side_scroll_handles.and_then(|handles| {
+        render_side_by_side_horizontal_scrollbars(handles, side_by_side_scrollbar_insets)
+    });
     let has_side_by_side_scrollbars = side_by_side_scrollbars.is_some();
 
     div()
@@ -9425,8 +9452,31 @@ fn render_diff_vertical_scrollbar(list_state: &ListState, item_count: usize) -> 
     )
 }
 
+#[derive(Clone, Copy)]
+struct DiffScrollbarInsets {
+    left: f32,
+    right: f32,
+}
+
+impl DiffScrollbarInsets {
+    fn none() -> Self {
+        Self {
+            left: 0.0,
+            right: 0.0,
+        }
+    }
+
+    fn combined_body() -> Self {
+        Self {
+            left: DIFF_SECTION_BODY_LEFT_MARGIN,
+            right: DIFF_SECTION_BODY_RIGHT_MARGIN,
+        }
+    }
+}
+
 fn render_side_by_side_horizontal_scrollbars(
     handles: &SideBySideScrollHandles,
+    insets: DiffScrollbarInsets,
 ) -> Option<AnyElement> {
     let left_has_scroll = handles.left_has_horizontal_scroll();
     let right_has_scroll = handles.right_has_horizontal_scroll();
@@ -9437,8 +9487,8 @@ fn render_side_by_side_horizontal_scrollbars(
     Some(
         div()
             .absolute()
-            .left(px(DIFF_SECTION_BODY_LEFT_MARGIN))
-            .right(px(DIFF_SECTION_BODY_RIGHT_MARGIN))
+            .left(px(insets.left))
+            .right(px(insets.right))
             .bottom(px(2.0))
             .h(px(DIFF_SCROLLBAR_WIDTH))
             .flex()
@@ -9534,7 +9584,7 @@ fn prepare_combined_diff_file_context(
     review_stack: &ReviewStack,
     stack_filter: Option<&LayerDiffFilter>,
     center_mode: ReviewCenterMode,
-    normal_diff_layout: NormalDiffLayout,
+    diff_layout: DiffLayout,
     cx: &App,
 ) -> CombinedDiffFileContext {
     let original_parsed = find_parsed_diff_file(&detail.parsed_diff, &file.path);
@@ -9592,7 +9642,9 @@ fn prepare_combined_diff_file_context(
                     let structural_parsed = Arc::new(structural.parsed_file.clone());
                     parsed = Some(structural_parsed.clone());
                     parsed_override = Some(structural_parsed);
-                    structural_side_by_side = Some(structural.clone());
+                    if diff_layout == DiffLayout::SideBySide {
+                        structural_side_by_side = Some(structural.clone());
+                    }
                     Some(view_state)
                 } else {
                     state_message =
@@ -9615,8 +9667,9 @@ fn prepare_combined_diff_file_context(
     let highlighted_hunks = diff_view_state
         .as_ref()
         .and_then(|state| state.highlighted_hunks.clone());
-    let normal_side_by_side = (structural_side_by_side.is_none()
-        && normal_diff_layout == NormalDiffLayout::SideBySide)
+    let normal_side_by_side = (center_mode != ReviewCenterMode::StructuralDiff
+        && structural_side_by_side.is_none()
+        && diff_layout == DiffLayout::SideBySide)
         .then(|| {
             parsed
                 .as_deref()
@@ -9881,6 +9934,7 @@ fn render_combined_diff_view_item(
     item_ix: usize,
     wrap_diff_lines: bool,
     side_by_side_scroll_handles: &SideBySideScrollHandles,
+    combined_side_by_side_column_widths: Option<SideBySideColumnWidths>,
     collapse_list_state: &ListState,
     cx: &App,
 ) -> AnyElement {
@@ -9938,7 +9992,14 @@ fn render_combined_diff_view_item(
         CombinedDiffViewItem::Row { file_index, item } => contexts
             .get(file_index)
             .map(|context| {
-                render_combined_diff_row_item(state, context, item, side_by_side_scroll_handles, cx)
+                render_combined_diff_row_item(
+                    state,
+                    context,
+                    item,
+                    side_by_side_scroll_handles,
+                    combined_side_by_side_column_widths,
+                    cx,
+                )
             })
             .unwrap_or_else(|| div().into_any_element()),
         CombinedDiffViewItem::Footer => div().h(px(12.0)).into_any_element(),
@@ -9950,6 +10011,7 @@ fn render_combined_diff_row_item(
     context: &CombinedDiffFileContext,
     item: DiffViewItem,
     side_by_side_scroll_handles: &SideBySideScrollHandles,
+    combined_side_by_side_column_widths: Option<SideBySideColumnWidths>,
     cx: &App,
 ) -> AnyElement {
     let row = match item {
@@ -9976,7 +10038,7 @@ fn render_combined_diff_row_item(
                     row,
                     context.selected_anchor.as_ref(),
                     side_by_side_scroll_handles,
-                    context.side_by_side_column_widths,
+                    combined_side_by_side_column_widths.or(context.side_by_side_column_widths),
                     cx,
                 )
                 .into_any_element()
@@ -10449,19 +10511,25 @@ fn render_structural_file_diff(
     let diff_view_state =
         prepare_structural_diff_view_state(app_state, detail, &file.path, request_key, structural);
     let parsed_override = Arc::new(structural.parsed_file.clone());
+    let structural_diff_layout = app_state
+        .active_review_session()
+        .map(|session| session.structural_diff_layout)
+        .unwrap_or(DiffLayout::SideBySide);
+    let structural_side_by_side =
+        (structural_diff_layout == DiffLayout::SideBySide).then(|| structural.clone());
 
     render_file_diff(
         state,
         file,
         Some(&structural.parsed_file),
         Some(parsed_override),
-        Some(structural.clone()),
+        structural_side_by_side,
         prepared_file,
         selected_anchor,
         diff_view_state,
         review_stack,
         None,
-        NormalDiffLayout::Unified,
+        structural_diff_layout,
         cx,
     )
     .into_any_element()
@@ -10478,7 +10546,7 @@ fn render_file_diff(
     diff_view_state: DiffFileViewState,
     review_stack: Arc<ReviewStack>,
     stack_filter: Option<LayerDiffFilter>,
-    normal_diff_layout: NormalDiffLayout,
+    diff_layout: DiffLayout,
     cx: &App,
 ) -> impl IntoElement {
     let rows = diff_view_state.rows.clone();
@@ -10522,7 +10590,7 @@ fn render_file_diff(
         .as_ref()
         .map(|filter| stack_file_visibility(review_stack.as_ref(), filter, &file.path));
     let normal_side_by_side = (structural_side_by_side.is_none()
-        && normal_diff_layout == NormalDiffLayout::SideBySide)
+        && diff_layout == DiffLayout::SideBySide)
         .then(|| parsed.filter(|parsed| !parsed.hunks.is_empty() && !parsed.is_binary))
         .flatten()
         .map(|parsed| Arc::new(build_normal_side_by_side_diff_file(parsed)));
@@ -10733,6 +10801,7 @@ fn render_virtualized_diff_rows(
         &scrollbar_list_state,
         item_count,
         (!wrap_diff_lines && has_side_by_side_rows).then_some(&side_by_side_scroll_handles),
+        DiffScrollbarInsets::none(),
         false,
     )
 }
@@ -12151,8 +12220,7 @@ fn render_virtualized_diff_row(
             .and_then(|detail| detail.review_threads.get(*thread_index))
             .map(|thread| {
                 div()
-                    .pl(px(gutter_layout.inline_thread_inset()))
-                    .pr(px(16.0))
+                    .px(px(16.0))
                     .py(px(10.0))
                     .border_b(px(1.0))
                     .border_color(diff_annotation_border())
@@ -12393,6 +12461,30 @@ impl SideBySideColumnWidths {
             SideBySideDiffSide::Right => self.right,
         }
     }
+
+    fn max(self, other: Self) -> Self {
+        Self {
+            left: self.left.max(other.left),
+            right: self.right.max(other.right),
+        }
+    }
+}
+
+fn combined_side_by_side_column_widths(
+    contexts: &[CombinedDiffFileContext],
+) -> Option<SideBySideColumnWidths> {
+    max_side_by_side_column_widths(
+        contexts
+            .iter()
+            .filter(|context| !context.collapsed)
+            .filter_map(|context| context.side_by_side_column_widths),
+    )
+}
+
+fn max_side_by_side_column_widths(
+    widths: impl Iterator<Item = SideBySideColumnWidths>,
+) -> Option<SideBySideColumnWidths> {
+    widths.reduce(SideBySideColumnWidths::max)
 }
 
 fn side_by_side_column_widths_for_file(
@@ -13492,7 +13584,7 @@ fn render_pending_review_summary(comments: Vec<&PullRequestReviewComment>) -> im
         .rounded(radius())
         .border_1()
         .border_color(border_muted())
-        .bg(diff_editor_surface())
+        .bg(bg_surface())
         .overflow_hidden()
         .child(
             div()
@@ -13549,8 +13641,8 @@ fn render_pending_review_summary(comments: Vec<&PullRequestReviewComment>) -> im
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(12.0))
-                                        .line_height(px(18.0))
+                                        .text_size(px(14.0))
+                                        .line_height(px(22.0))
                                         .text_color(fg_default())
                                         .whitespace_normal()
                                         .child(
@@ -13835,7 +13927,11 @@ fn render_markdown_editor(
         .min_w_0()
         .rounded(radius())
         .border_1()
-        .border_color(if preview { border_default() } else { accent() })
+        .border_color(if preview {
+            border_default()
+        } else {
+            border_muted()
+        })
         .bg(bg_surface())
         .overflow_hidden()
         .flex()
@@ -13850,8 +13946,8 @@ fn render_markdown_editor(
                         .min_h(px(min_height))
                         .px(px(12.0))
                         .py(px(10.0))
-                        .text_size(px(13.0))
-                        .line_height(px(20.0))
+                        .text_size(px(14.0))
+                        .line_height(px(22.0))
                         .text_color(if text.is_empty() {
                             fg_subtle()
                         } else {
@@ -13879,11 +13975,11 @@ fn render_markdown_editor(
                     .min_h(px(min_height))
                     .px(px(12.0))
                     .py(px(10.0))
-                    .bg(diff_editor_surface())
+                    .bg(bg_surface())
                     .child(if text.trim().is_empty() {
                         div()
-                            .text_size(px(13.0))
-                            .line_height(px(20.0))
+                            .text_size(px(14.0))
+                            .line_height(px(22.0))
                             .text_color(fg_subtle())
                             .child("Nothing to preview.")
                             .into_any_element()
@@ -14252,8 +14348,7 @@ fn render_diff_line_with_threads(
         .when(!threads.is_empty(), |el| {
             el.child(
                 div()
-                    .pl(px(gutter_layout.inline_thread_inset()))
-                    .pr(px(16.0))
+                    .px(px(16.0))
                     .py(px(8.0))
                     .border_b(px(1.0))
                     .border_color(diff_annotation_border())
@@ -14745,6 +14840,7 @@ const DIFF_SIDE_BY_SIDE_MIN_WIDTH: f32 = 960.0;
 const DIFF_CODE_CHAR_WIDTH: f32 = 8.4;
 const DIFF_CODE_MIN_TEXT_WIDTH: f32 = 16.0;
 const DIFF_CODE_MAX_TEXT_WIDTH: f32 = 16000.0;
+const REVIEW_THREAD_MAX_WIDTH: f32 = 1040.0;
 
 fn diff_row_height_px() -> Pixels {
     code_row_height(DIFF_ROW_HEIGHT)
@@ -14808,10 +14904,6 @@ impl DiffGutterLayout {
             } else {
                 0.0
             }
-    }
-
-    fn inline_thread_inset(self) -> f32 {
-        self.gutter_width() + 12.0
     }
 }
 
@@ -15287,13 +15379,12 @@ fn review_thread_ui_state(state: &AppState) -> ReviewThreadUiState {
 
 fn render_review_thread(
     thread: &PullRequestReviewThread,
-    selected_anchor: Option<&DiffAnchor>,
+    _selected_anchor: Option<&DiffAnchor>,
     unread_comment_ids: &BTreeSet<String>,
     state: &Entity<AppState>,
     cx: &App,
     ui: ReviewThreadUiState,
 ) -> impl IntoElement {
-    let is_selected = thread_matches_diff_anchor(thread, selected_anchor);
     let thread_unread_comment_ids = thread
         .comments
         .iter()
@@ -15305,25 +15396,21 @@ fn render_review_thread(
     let thread_id = thread.id.clone();
     let reply_open = ui.active_reply_id.as_deref() == Some(thread.id.as_str());
     let thread_loading = ui.thread_loading_id.as_deref() == Some(thread.id.as_str());
+    let viewer_login = state.read(cx).viewer_login().unwrap_or("you").to_string();
     let can_resolve = if thread.is_resolved {
         thread.viewer_can_unresolve
     } else {
         thread.viewer_can_resolve
     };
-    let thread_border = transparent();
-    let header_bg = if is_selected {
-        diff_line_hover_bg()
-    } else if thread.is_resolved {
-        success_muted()
-    } else {
-        diff_annotation_bg()
-    };
+    let comment_count = thread.comments.len();
 
     div()
+        .w_full()
+        .max_w(px(REVIEW_THREAD_MAX_WIDTH))
         .rounded(radius_sm())
         .border_1()
-        .border_color(thread_border)
-        .bg(diff_editor_chrome())
+        .border_color(diff_annotation_border())
+        .bg(diff_editor_surface())
         .overflow_hidden()
         .flex()
         .flex_col()
@@ -15335,7 +15422,7 @@ fn render_review_thread(
                 .rounded_tr(radius_sm())
                 .border_b(px(1.0))
                 .border_color(diff_annotation_border())
-                .bg(header_bg)
+                .bg(diff_editor_surface())
                 .flex()
                 .items_center()
                 .justify_between()
@@ -15374,20 +15461,6 @@ fn render_review_thread(
                                     });
                                 }))
                         })
-                        .when(thread.viewer_can_reply && !reply_open, |el| {
-                            let state = state.clone();
-                            let thread_id = thread_id.clone();
-                            el.child(ghost_button("Reply", move |_, _, cx| {
-                                state.update(cx, |state, cx| {
-                                    state.active_review_thread_reply_id = Some(thread_id.clone());
-                                    state.editing_review_comment_id = None;
-                                    state.inline_comment_draft.clear();
-                                    state.inline_comment_preview = false;
-                                    state.review_thread_action_error = None;
-                                    cx.notify();
-                                });
-                            }))
-                        })
                         .when(can_resolve, |el| {
                             let state = state.clone();
                             let thread_id = thread_id.clone();
@@ -15414,13 +15487,15 @@ fn render_review_thread(
         )
         .child(
             div()
-                .p(px(12.0))
+                .px(px(16.0))
+                .py(px(8.0))
                 .flex()
                 .flex_col()
-                .gap(px(8.0))
-                .children(thread.comments.iter().map(|comment| {
+                .children(thread.comments.iter().enumerate().map(|(ix, comment)| {
                     render_thread_comment(
                         comment,
+                        ix > 0,
+                        ix + 1 < comment_count || reply_open || thread.viewer_can_reply,
                         unread_comment_ids.contains(&comment.id),
                         state,
                         ui.clone(),
@@ -15431,65 +15506,59 @@ fn render_review_thread(
                     let state_for_cancel = state.clone();
                     let state_for_submit = state.clone();
                     let thread_id_for_submit = thread_id.clone();
-                    el.child(
-                        div()
-                            .rounded(radius_sm())
-                            .border_1()
-                            .border_color(border_default())
-                            .bg(diff_editor_surface())
-                            .p(px(10.0))
-                            .flex()
-                            .flex_col()
-                            .gap(px(8.0))
-                            .child(render_markdown_editor(
-                                state,
-                                AppTextFieldKind::InlineCommentDraft,
-                                format!("thread-reply-{thread_id}"),
-                                "Reply to this thread...",
-                                ui.inline_preview,
-                                82.0,
+                    el.child(render_thread_reply_editor(
+                        state,
+                        &thread_id,
+                        &viewer_login,
+                        ui.inline_preview,
+                        thread_loading,
+                        move |_, _, cx| {
+                            state_for_cancel.update(cx, |state, cx| {
+                                state.active_review_thread_reply_id = None;
+                                state.inline_comment_draft.clear();
+                                state.inline_comment_preview = false;
+                                state.review_thread_action_error = None;
+                                cx.notify();
+                            });
+                        },
+                        move |_, window, cx| {
+                            trigger_submit_thread_reply(
+                                &state_for_submit,
+                                thread_id_for_submit.clone(),
+                                window,
                                 cx,
-                            ))
-                            .child(
-                                div()
-                                    .flex()
-                                    .justify_end()
-                                    .gap(px(6.0))
-                                    .child(ghost_button("Cancel", move |_, _, cx| {
-                                        state_for_cancel.update(cx, |state, cx| {
-                                            state.active_review_thread_reply_id = None;
-                                            state.inline_comment_draft.clear();
-                                            state.inline_comment_preview = false;
-                                            state.review_thread_action_error = None;
-                                            cx.notify();
-                                        });
-                                    }))
-                                    .child(review_button(
-                                        if thread_loading {
-                                            "Replying..."
-                                        } else {
-                                            "Reply"
-                                        },
-                                        move |_, window, cx| {
-                                            trigger_submit_thread_reply(
-                                                &state_for_submit,
-                                                thread_id_for_submit.clone(),
-                                                window,
-                                                cx,
-                                            );
-                                        },
-                                    )),
-                            ),
-                    )
+                            );
+                        },
+                        cx,
+                    ))
+                })
+                .when(thread.viewer_can_reply && !reply_open, |el| {
+                    let state = state.clone();
+                    let thread_id = thread_id.clone();
+                    el.child(render_thread_reply_prompt(
+                        &viewer_login,
+                        move |_, _, cx| {
+                            state.update(cx, |state, cx| {
+                                state.active_review_thread_reply_id = Some(thread_id.clone());
+                                state.editing_review_comment_id = None;
+                                state.inline_comment_draft.clear();
+                                state.inline_comment_preview = false;
+                                state.review_thread_action_error = None;
+                                cx.notify();
+                            });
+                        },
+                    ))
                 })
                 .when_some(ui.action_error.clone(), |el, error| {
-                    el.child(error_text(&error))
+                    el.child(div().ml(px(48.0)).pt(px(4.0)).child(error_text(&error)))
                 }),
         )
 }
 
 fn render_thread_comment(
     comment: &PullRequestReviewComment,
+    connector_above: bool,
+    connector_below: bool,
     is_unread: bool,
     state: &Entity<AppState>,
     ui: ReviewThreadUiState,
@@ -15503,94 +15572,294 @@ fn render_thread_comment(
     let comment_id = comment.id.clone();
 
     div()
-        .p(px(12.0))
-        .rounded(radius_sm())
-        .border_1()
-        .border_color(if is_unread {
-            diff_selected_edge()
-        } else {
-            diff_annotation_border()
-        })
+        .py(px(10.0))
         .bg(if is_unread {
             diff_line_hover_bg()
         } else {
-            diff_editor_surface()
+            transparent()
         })
         .flex()
-        .flex_col()
-        .gap(px(6.0))
+        .items_start()
+        .gap(px(12.0))
+        .child(render_thread_timeline_avatar(
+            &comment.author_login,
+            comment.author_avatar_url.as_deref(),
+            connector_above,
+            connector_below,
+        ))
         .child(
             div()
                 .flex()
-                .items_center()
-                .gap(px(6.0))
-                .text_size(px(12.0))
-                .child(user_avatar(
-                    &comment.author_login,
-                    comment.author_avatar_url.as_deref(),
-                    20.0,
-                    false,
-                ))
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .gap(px(10.0))
                 .child(
                     div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(fg_emphasis())
-                        .child(comment.author_login.clone()),
+                        .flex()
+                        .items_start()
+                        .justify_between()
+                        .gap(px(12.0))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .min_h(px(24.0))
+                                .min_w_0()
+                                .gap(px(7.0))
+                                .text_size(px(13.0))
+                                .line_height(px(19.0))
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(fg_emphasis())
+                                        .child(comment.author_login.clone()),
+                                )
+                                .child(
+                                    div().text_color(fg_subtle()).child(format_relative_time(
+                                        comment
+                                            .published_at
+                                            .as_deref()
+                                            .unwrap_or(&comment.created_at),
+                                    )),
+                                )
+                                .when(is_unread, |el| el.child(badge("new")))
+                                .when(is_pending, |el| el.child(pending_comment_status_label())),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(10.0))
+                                .flex_shrink_0()
+                                .when(can_update && !is_editing, |el| {
+                                    let state = state.clone();
+                                    let comment_id = comment_id.clone();
+                                    let body = comment.body.clone();
+                                    el.child(inline_comment_text_action(
+                                        "Edit",
+                                        false,
+                                        move |_, _, cx| {
+                                            state.update(cx, |state, cx| {
+                                                state.editing_review_comment_id =
+                                                    Some(comment_id.clone());
+                                                state.active_review_thread_reply_id = None;
+                                                state.inline_comment_draft = body.clone();
+                                                state.inline_comment_preview = false;
+                                                state.review_thread_action_error = None;
+                                                cx.notify();
+                                            });
+                                        },
+                                    ))
+                                })
+                                .when(can_delete, |el| {
+                                    let state = state.clone();
+                                    let comment_id = comment_id.clone();
+                                    el.child(inline_comment_text_action(
+                                        if comment_loading {
+                                            "Deleting..."
+                                        } else {
+                                            "Delete"
+                                        },
+                                        true,
+                                        move |_, window, cx| {
+                                            trigger_delete_pending_comment(
+                                                &state,
+                                                comment_id.clone(),
+                                                window,
+                                                cx,
+                                            );
+                                        },
+                                    ))
+                                }),
+                        ),
                 )
-                .child(
-                    div().text_color(fg_subtle()).child(format_relative_time(
-                        comment
-                            .published_at
-                            .as_deref()
-                            .unwrap_or(&comment.created_at),
-                    )),
-                )
-                .when(is_unread, |el| el.child(badge("new")))
-                .when(is_pending, |el| el.child(badge("pending")))
-                .when(can_update && !is_editing, |el| {
-                    let state = state.clone();
-                    let comment_id = comment_id.clone();
-                    let body = comment.body.clone();
-                    el.child(ghost_button("Edit", move |_, _, cx| {
-                        state.update(cx, |state, cx| {
-                            state.editing_review_comment_id = Some(comment_id.clone());
-                            state.active_review_thread_reply_id = None;
-                            state.inline_comment_draft = body.clone();
-                            state.inline_comment_preview = false;
-                            state.review_thread_action_error = None;
-                            cx.notify();
-                        });
-                    }))
-                })
-                .when(can_delete, |el| {
-                    let state = state.clone();
-                    let comment_id = comment_id.clone();
-                    el.child(ghost_button(
-                        if comment_loading {
-                            "Deleting..."
-                        } else {
-                            "Delete"
-                        },
-                        move |_, window, cx| {
-                            trigger_delete_pending_comment(&state, comment_id.clone(), window, cx);
-                        },
-                    ))
+                .child(if is_editing {
+                    let state_for_cancel = state.clone();
+                    let state_for_save = state.clone();
+                    let comment_id_for_save = comment_id.clone();
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.0))
+                        .child(render_markdown_editor(
+                            state,
+                            AppTextFieldKind::InlineCommentDraft,
+                            format!("comment-edit-{comment_id}"),
+                            "Edit pending comment...",
+                            ui.inline_preview,
+                            82.0,
+                            cx,
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap(px(6.0))
+                                .child(ghost_button("Cancel", move |_, _, cx| {
+                                    state_for_cancel.update(cx, |state, cx| {
+                                        state.editing_review_comment_id = None;
+                                        state.inline_comment_draft.clear();
+                                        state.inline_comment_preview = false;
+                                        state.review_thread_action_error = None;
+                                        cx.notify();
+                                    });
+                                }))
+                                .child(review_button(
+                                    if comment_loading { "Saving..." } else { "Save" },
+                                    move |_, window, cx| {
+                                        trigger_update_pending_comment(
+                                            &state_for_save,
+                                            comment_id_for_save.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                    },
+                                )),
+                        )
+                        .into_any_element()
+                } else if comment.body.is_empty() {
+                    div()
+                        .text_size(px(14.0))
+                        .line_height(px(22.0))
+                        .text_color(fg_muted())
+                        .child("No comment body.")
+                        .into_any_element()
+                } else {
+                    div()
+                        .max_w(px(760.0))
+                        .child(render_markdown(
+                            &format!("thread-comment-{}", comment.id),
+                            &comment.body,
+                        ))
+                        .into_any_element()
                 }),
         )
-        .child(if is_editing {
-            let state_for_cancel = state.clone();
-            let state_for_save = state.clone();
-            let comment_id_for_save = comment_id.clone();
+}
+
+fn render_thread_timeline_avatar(
+    login: &str,
+    avatar_url: Option<&str>,
+    connector_above: bool,
+    connector_below: bool,
+) -> impl IntoElement {
+    div()
+        .relative()
+        .w(px(36.0))
+        .min_h(px(42.0))
+        .flex_shrink_0()
+        .flex()
+        .justify_center()
+        .child(user_avatar(login, avatar_url, 24.0, false))
+        .when(connector_above, |el| {
+            el.child(
+                div()
+                    .absolute()
+                    .top(px(0.0))
+                    .left(px(17.5))
+                    .w(px(1.0))
+                    .h(px(8.0))
+                    .bg(border_muted()),
+            )
+        })
+        .when(connector_below, |el| {
+            el.child(
+                div()
+                    .absolute()
+                    .top(px(30.0))
+                    .bottom(px(-10.0))
+                    .left(px(17.5))
+                    .w(px(1.0))
+                    .bg(border_muted()),
+            )
+        })
+}
+
+fn render_thread_reply_prompt(
+    viewer_login: &str,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .pt(px(8.0))
+        .pb(px(10.0))
+        .flex()
+        .items_start()
+        .gap(px(12.0))
+        .child(render_thread_timeline_avatar(
+            viewer_login,
+            None,
+            true,
+            false,
+        ))
+        .child(
+            div()
+                .h(px(36.0))
+                .flex_1()
+                .min_w_0()
+                .rounded(radius_sm())
+                .border_1()
+                .border_color(border_muted())
+                .bg(bg_surface())
+                .px(px(12.0))
+                .flex()
+                .items_center()
+                .text_size(px(14.0))
+                .line_height(px(20.0))
+                .text_color(fg_subtle())
+                .cursor_pointer()
+                .hover(|style| {
+                    style
+                        .bg(control_button_hover_bg())
+                        .border_color(border_default())
+                        .text_color(fg_muted())
+                })
+                .on_mouse_down(MouseButton::Left, on_click)
+                .child("Reply..."),
+        )
+}
+
+fn render_thread_reply_editor(
+    state: &Entity<AppState>,
+    thread_id: &str,
+    viewer_login: &str,
+    preview: bool,
+    thread_loading: bool,
+    on_cancel: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+    on_submit: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> impl IntoElement {
+    let animation_id = thread_reply_editor_animation_id(thread_id);
+
+    div()
+        .pt(px(8.0))
+        .pb(px(10.0))
+        .flex()
+        .items_start()
+        .gap(px(12.0))
+        .child(render_thread_timeline_avatar(
+            viewer_login,
+            None,
+            true,
+            false,
+        ))
+        .child(
             div()
                 .flex()
                 .flex_col()
+                .flex_1()
+                .min_w_0()
+                .rounded(radius_sm())
+                .border_1()
+                .border_color(border_muted())
+                .bg(bg_surface())
+                .p(px(10.0))
                 .gap(px(8.0))
                 .child(render_markdown_editor(
                     state,
                     AppTextFieldKind::InlineCommentDraft,
-                    format!("comment-edit-{comment_id}"),
-                    "Edit pending comment...",
-                    ui.inline_preview,
+                    format!("thread-reply-{thread_id}"),
+                    "Reply to this thread...",
+                    preview,
                     82.0,
                     cx,
                 ))
@@ -15599,38 +15868,84 @@ fn render_thread_comment(
                         .flex()
                         .justify_end()
                         .gap(px(6.0))
-                        .child(ghost_button("Cancel", move |_, _, cx| {
-                            state_for_cancel.update(cx, |state, cx| {
-                                state.editing_review_comment_id = None;
-                                state.inline_comment_draft.clear();
-                                state.inline_comment_preview = false;
-                                state.review_thread_action_error = None;
-                                cx.notify();
-                            });
-                        }))
+                        .child(ghost_button("Cancel", on_cancel))
                         .child(review_button(
-                            if comment_loading { "Saving..." } else { "Save" },
-                            move |_, window, cx| {
-                                trigger_update_pending_comment(
-                                    &state_for_save,
-                                    comment_id_for_save.clone(),
-                                    window,
-                                    cx,
-                                );
+                            if thread_loading {
+                                "Replying..."
+                            } else {
+                                "Reply"
                             },
+                            on_submit,
                         )),
-                )
-                .into_any_element()
-        } else if comment.body.is_empty() {
-            div()
-                .text_size(px(13.0))
-                .text_color(fg_muted())
-                .child("No comment body.")
-                .into_any_element()
-        } else {
-            render_markdown(&format!("thread-comment-{}", comment.id), &comment.body)
-                .into_any_element()
+                ),
+        )
+        .with_animation(
+            ("thread-reply-editor-open", animation_id),
+            Animation::new(Duration::from_millis(THREAD_REPLY_EDITOR_OPEN_ANIMATION_MS))
+                .with_easing(ease_in_out),
+            move |el, delta| {
+                let progress = delta.clamp(0.0, 1.0);
+                let el = el.opacity(progress).mt(lerp_px(-4.0, 0.0, progress));
+
+                if progress < 0.999 {
+                    el.max_h(lerp_px(
+                        THREAD_REPLY_PROMPT_REVEAL_HEIGHT,
+                        THREAD_REPLY_EDITOR_REVEAL_HEIGHT,
+                        progress,
+                    ))
+                    .overflow_hidden()
+                } else {
+                    el
+                }
+            },
+        )
+}
+
+const THREAD_REPLY_EDITOR_OPEN_ANIMATION_MS: u64 = 170;
+const THREAD_REPLY_PROMPT_REVEAL_HEIGHT: f32 = 54.0;
+const THREAD_REPLY_EDITOR_REVEAL_HEIGHT: f32 = 284.0;
+
+fn thread_reply_editor_animation_id(thread_id: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    thread_id.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn pending_comment_status_label() -> impl IntoElement {
+    div()
+        .px(px(6.0))
+        .py(px(1.0))
+        .rounded(px(999.0))
+        .bg(bg_subtle())
+        .text_size(px(11.0))
+        .line_height(px(16.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(fg_subtle())
+        .child("pending")
+}
+
+fn inline_comment_text_action(
+    label: &str,
+    danger_tone: bool,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let label = label.to_string();
+    div()
+        .px(px(4.0))
+        .py(px(2.0))
+        .rounded(px(4.0))
+        .text_size(px(12.0))
+        .line_height(px(16.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(fg_subtle())
+        .cursor_pointer()
+        .hover(move |style| {
+            style
+                .bg(hover_bg())
+                .text_color(if danger_tone { danger() } else { fg_emphasis() })
         })
+        .on_mouse_down(MouseButton::Left, on_click)
+        .child(label)
 }
 
 fn render_hunk_header(
@@ -16229,9 +16544,10 @@ mod tests {
 
     use super::{
         build_file_tree_rows, build_normal_side_by_side_diff_file, compute_inline_emphasis,
-        should_apply_structural_diff_update, should_reuse_structural_diff_state,
-        structural_diff_state_terminal_status, DiffFileCollapseScrollAdjustment,
-        ReviewFileTreeEntry, StructuralDiffTerminalStatus,
+        max_side_by_side_column_widths, should_apply_structural_diff_update,
+        should_reuse_structural_diff_state, structural_diff_state_terminal_status,
+        DiffFileCollapseScrollAdjustment, ReviewFileTreeEntry, SideBySideColumnWidths,
+        StructuralDiffTerminalStatus,
     };
 
     fn inline_range(column_start: usize, column_end: usize) -> DiffInlineRange {
@@ -16446,6 +16762,27 @@ mod tests {
         let scroll_top = list_state.logical_scroll_top();
         assert_eq!(scroll_top.item_ix, 4);
         assert_eq!(scroll_top.offset_in_item, px(7.0));
+    }
+
+    #[test]
+    fn combined_side_by_side_widths_use_widest_visible_content() {
+        let widths = max_side_by_side_column_widths(
+            [
+                SideBySideColumnWidths {
+                    left: 320.0,
+                    right: 480.0,
+                },
+                SideBySideColumnWidths {
+                    left: 640.0,
+                    right: 360.0,
+                },
+            ]
+            .into_iter(),
+        )
+        .expect("combined widths");
+
+        assert_eq!(widths.left, 640.0);
+        assert_eq!(widths.right, 480.0);
     }
 
     #[test]

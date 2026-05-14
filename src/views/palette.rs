@@ -7,7 +7,7 @@ use std::{
 use gpui::prelude::*;
 use gpui::*;
 
-use crate::app_assets::APP_MARK_ASSET;
+use crate::app_assets::APP_LOGO_ASSET;
 use crate::branding::APP_NAME;
 use crate::icons::{lucide_icon, LucideIcon};
 use crate::review_session::ReviewCenterMode;
@@ -113,7 +113,7 @@ pub fn render_palette(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                         .items_center()
                                         .gap(px(10.0))
                                         .child(
-                                            img(APP_MARK_ASSET)
+                                            img(APP_LOGO_ASSET)
                                                 .size(px(24.0))
                                                 .object_fit(ObjectFit::Contain),
                                         )

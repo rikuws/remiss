@@ -6,6 +6,8 @@ use std::{
 use gpui::prelude::*;
 use gpui::*;
 
+use crate::app_assets::APP_LOGO_ASSET;
+use crate::branding::APP_NAME;
 use crate::github;
 use crate::icons::{lucide_icon, LucideIcon};
 use crate::local_review::{self, LocalReviewStatusKind, RememberedLocalRepository};
@@ -694,10 +696,11 @@ fn render_app_sidebar(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                 .flex()
                 .flex_col()
                 .opacity(if hidden { 0.0 } else { 1.0 })
+                .child(render_sidebar_brand())
                 .child(
                     div()
                         .px(px(14.0))
-                        .pt(px(APP_SIDEBAR_TRAFFIC_LIGHT_CLEARANCE))
+                        .pt(px(4.0))
                         .pb(px(10.0))
                         .flex()
                         .flex_col()
@@ -797,6 +800,31 @@ fn render_app_sidebar(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                     progress,
                 ))
             },
+        )
+}
+
+fn render_sidebar_brand() -> impl IntoElement {
+    div()
+        .px(px(14.0))
+        .pt(px(APP_SIDEBAR_TRAFFIC_LIGHT_CLEARANCE))
+        .pb(px(8.0))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(9.0))
+                .child(
+                    img(APP_LOGO_ASSET)
+                        .size(px(28.0))
+                        .object_fit(ObjectFit::Contain),
+                )
+                .child(
+                    div()
+                        .text_size(px(14.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg_emphasis())
+                        .child(APP_NAME),
+                ),
         )
 }
 
@@ -1151,6 +1179,37 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
         .items_center()
         .gap(px(12.0))
         .child(render_workspace_tabs(state_for_tabs, active_pr_key, tabs))
+        .when(has_active_pr && !active_is_local_review, |el| {
+            el.child(chrome_segmented_control(vec![
+                chrome_segment(
+                    "Briefing",
+                    active_surface == PullRequestSurface::Overview,
+                    false,
+                    move |_, window, cx| {
+                        state_for_briefing.update(cx, |state, cx| {
+                            state.active_surface = PullRequestSurface::Overview;
+                            state.pr_header_compact = false;
+                            state.persist_active_review_session();
+                            cx.notify();
+                        });
+                        crate::review_intelligence::refresh_active_review_brief(
+                            &state_for_briefing,
+                            window,
+                            cx,
+                            true,
+                        );
+                    },
+                ),
+                chrome_segment(
+                    "Review",
+                    active_surface == PullRequestSurface::Files,
+                    false,
+                    move |_, window, cx| {
+                        enter_files_surface(&state_for_review, window, cx);
+                    },
+                ),
+            ]))
+        })
         .when(
             has_active_pr && active_surface == PullRequestSurface::Files && code_mode_active,
             |el| {
@@ -1198,82 +1257,44 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
             },
         )
         .when(has_active_pr, |el| {
-            el.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .flex_shrink_0()
-                    .when(!active_is_local_review, |el| {
-                        el.child(chrome_segmented_control(vec![
-                            chrome_segment(
-                                "Briefing",
-                                active_surface == PullRequestSurface::Overview,
-                                false,
-                                move |_, window, cx| {
-                                    state_for_briefing.update(cx, |state, cx| {
-                                        state.active_surface = PullRequestSurface::Overview;
-                                        state.pr_header_compact = false;
-                                        state.persist_active_review_session();
-                                        cx.notify();
-                                    });
-                                    crate::review_intelligence::refresh_active_review_brief(
-                                        &state_for_briefing,
-                                        window,
-                                        cx,
-                                        true,
-                                    );
-                                },
-                            ),
-                            chrome_segment(
-                                "Review",
-                                active_surface == PullRequestSurface::Files,
-                                false,
-                                move |_, window, cx| {
-                                    enter_files_surface(&state_for_review, window, cx);
-                                },
-                            ),
-                        ]))
-                    })
-                    .child(chrome_segmented_control(vec![
-                        chrome_segment(
-                            "Code",
-                            code_mode_active,
-                            active_surface != PullRequestSurface::Files,
-                            move |_, window, cx| {
-                                state_for_code.update(cx, |state, cx| {
-                                    state.active_surface = PullRequestSurface::Files;
-                                    state.enter_code_review_mode();
-                                    state.persist_active_review_session();
-                                    cx.notify();
-                                });
-                                ensure_active_review_focus_loaded(&state_for_code, window, cx);
-                            },
-                        ),
-                        chrome_segment(
-                            "AI Tour",
-                            active_center_mode == ReviewCenterMode::AiTour,
-                            active_surface != PullRequestSurface::Files,
-                            move |_, window, cx| {
-                                state_for_ai_tour.update(cx, |state, cx| {
-                                    state.active_surface = PullRequestSurface::Files;
-                                    state.set_review_center_mode(ReviewCenterMode::AiTour);
-                                    state.persist_active_review_session();
-                                    cx.notify();
-                                });
-                                refresh_active_tour(&state_for_ai_tour, window, cx, true);
-                            },
-                        ),
-                        chrome_segment(
-                            "Stack",
-                            active_center_mode == ReviewCenterMode::Stack,
-                            active_surface != PullRequestSurface::Files,
-                            move |_, window, cx| {
-                                enter_stack_review_mode(&state_for_stack, window, cx);
-                            },
-                        ),
-                    ])),
-            )
+            el.child(chrome_segmented_control(vec![
+                chrome_segment(
+                    "Code",
+                    code_mode_active,
+                    active_surface != PullRequestSurface::Files,
+                    move |_, window, cx| {
+                        state_for_code.update(cx, |state, cx| {
+                            state.active_surface = PullRequestSurface::Files;
+                            state.enter_code_review_mode();
+                            state.persist_active_review_session();
+                            cx.notify();
+                        });
+                        ensure_active_review_focus_loaded(&state_for_code, window, cx);
+                    },
+                ),
+                chrome_segment(
+                    "AI Tour",
+                    active_center_mode == ReviewCenterMode::AiTour,
+                    active_surface != PullRequestSurface::Files,
+                    move |_, window, cx| {
+                        state_for_ai_tour.update(cx, |state, cx| {
+                            state.active_surface = PullRequestSurface::Files;
+                            state.set_review_center_mode(ReviewCenterMode::AiTour);
+                            state.persist_active_review_session();
+                            cx.notify();
+                        });
+                        refresh_active_tour(&state_for_ai_tour, window, cx, true);
+                    },
+                ),
+                chrome_segment(
+                    "Stack",
+                    active_center_mode == ReviewCenterMode::Stack,
+                    active_surface != PullRequestSurface::Files,
+                    move |_, window, cx| {
+                        enter_stack_review_mode(&state_for_stack, window, cx);
+                    },
+                ),
+            ]))
         })
         .child(
             div()

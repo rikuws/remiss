@@ -35,7 +35,7 @@ impl ReviewCenterMode {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum NormalDiffLayout {
+pub enum DiffLayout {
     #[default]
     Unified,
     SideBySide,
@@ -185,7 +185,9 @@ pub struct ReviewSessionDocument {
     #[serde(default)]
     pub code_lens_mode: ReviewCenterMode,
     #[serde(default)]
-    pub normal_diff_layout: NormalDiffLayout,
+    pub normal_diff_layout: DiffLayout,
+    #[serde(default = "default_structural_diff_layout")]
+    pub structural_diff_layout: DiffLayout,
     #[serde(default = "default_false")]
     pub wrap_diff_lines: bool,
     #[serde(default = "default_true")]
@@ -228,7 +230,8 @@ pub struct ReviewSessionState {
     pub error: Option<String>,
     pub center_mode: ReviewCenterMode,
     pub code_lens_mode: ReviewCenterMode,
-    pub normal_diff_layout: NormalDiffLayout,
+    pub normal_diff_layout: DiffLayout,
+    pub structural_diff_layout: DiffLayout,
     pub wrap_diff_lines: bool,
     pub show_file_tree: bool,
     pub source_target: Option<ReviewSourceTarget>,
@@ -255,7 +258,8 @@ impl Default for ReviewSessionState {
             error: None,
             center_mode: ReviewCenterMode::SemanticDiff,
             code_lens_mode: ReviewCenterMode::SemanticDiff,
-            normal_diff_layout: NormalDiffLayout::Unified,
+            normal_diff_layout: DiffLayout::Unified,
+            structural_diff_layout: DiffLayout::SideBySide,
             wrap_diff_lines: false,
             show_file_tree: true,
             source_target: None,
@@ -301,6 +305,7 @@ impl ReviewSessionState {
             center_mode,
             code_lens_mode,
             normal_diff_layout: document.normal_diff_layout,
+            structural_diff_layout: document.structural_diff_layout,
             wrap_diff_lines: document.wrap_diff_lines,
             show_file_tree: document.show_file_tree,
             source_target: document.source_target,
@@ -332,6 +337,7 @@ impl ReviewSessionState {
             center_mode: self.center_mode,
             code_lens_mode: sanitize_code_lens_mode(self.code_lens_mode),
             normal_diff_layout: self.normal_diff_layout,
+            structural_diff_layout: self.structural_diff_layout,
             wrap_diff_lines: self.wrap_diff_lines,
             show_file_tree: self.show_file_tree,
             source_target: self.source_target.clone(),
@@ -365,6 +371,10 @@ impl ReviewSessionState {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_structural_diff_layout() -> DiffLayout {
+    DiffLayout::SideBySide
 }
 
 fn default_false() -> bool {
@@ -507,8 +517,7 @@ mod tests {
 
     use super::{
         add_waymark, location_label, push_history_location, push_route_location,
-        sanitize_code_lens_mode, NormalDiffLayout, ReviewCenterMode, ReviewLocation,
-        ReviewSessionState,
+        sanitize_code_lens_mode, DiffLayout, ReviewCenterMode, ReviewLocation, ReviewSessionState,
     };
 
     #[test]
@@ -634,10 +643,37 @@ mod tests {
 
         let restored = ReviewSessionState::from_document(document);
 
-        assert_eq!(restored.normal_diff_layout, NormalDiffLayout::SideBySide);
+        assert_eq!(restored.normal_diff_layout, DiffLayout::SideBySide);
         assert_eq!(
             restored.to_document(None, None).normal_diff_layout,
-            NormalDiffLayout::SideBySide
+            DiffLayout::SideBySide
+        );
+    }
+
+    #[test]
+    fn review_session_persists_structural_diff_layout() {
+        let legacy_document: super::ReviewSessionDocument =
+            serde_json::from_str(r#"{}"#).expect("legacy review session should deserialize");
+        let legacy_restored = ReviewSessionState::from_document(legacy_document);
+
+        assert_eq!(
+            legacy_restored.structural_diff_layout,
+            DiffLayout::SideBySide
+        );
+
+        let document: super::ReviewSessionDocument = serde_json::from_str(
+            r#"{
+                "structuralDiffLayout": "unified"
+            }"#,
+        )
+        .expect("structural diff layout should deserialize");
+
+        let restored = ReviewSessionState::from_document(document);
+
+        assert_eq!(restored.structural_diff_layout, DiffLayout::Unified);
+        assert_eq!(
+            restored.to_document(None, None).structural_diff_layout,
+            DiffLayout::Unified
         );
     }
 

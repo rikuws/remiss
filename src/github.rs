@@ -911,7 +911,7 @@ pub fn reply_to_review_thread(thread_id: &str, body: &str) -> Result<ActionResul
         mutation($threadId: ID!, $body: String!) {
           addPullRequestReviewThreadReply(
             input: { pullRequestReviewThreadId: $threadId, body: $body }
-          ) { thread { id } }
+          ) { comment { id } }
         }
     "#;
 
@@ -924,20 +924,14 @@ pub fn reply_to_review_thread(thread_id: &str, body: &str) -> Result<ActionResul
         });
     }
 
-    let success = response
-        .get("data")
-        .and_then(|v| v.get("addPullRequestReviewThreadReply"))
-        .and_then(|v| v.get("thread"))
-        .and_then(|v| v.get("id"))
-        .and_then(Value::as_str)
-        .is_some();
+    let success = review_thread_reply_comment_id(&response).is_some();
 
     Ok(ActionResult {
         success,
         message: if success {
             "Reply added to the thread.".to_string()
         } else {
-            "GitHub did not return the updated review thread.".to_string()
+            "GitHub did not return the new thread reply.".to_string()
         },
     })
 }
@@ -2274,6 +2268,15 @@ fn graphql_error_message(response: &Value) -> Option<String> {
         .filter(|m| !m.trim().is_empty())
 }
 
+fn review_thread_reply_comment_id(response: &Value) -> Option<&str> {
+    response
+        .get("data")
+        .and_then(|v| v.get("addPullRequestReviewThreadReply"))
+        .and_then(|v| v.get("comment"))
+        .and_then(|v| v.get("id"))
+        .and_then(Value::as_str)
+}
+
 fn split_repository(repository: &str) -> Result<(&str, &str), String> {
     repository
         .split_once('/')
@@ -2433,5 +2436,34 @@ mod tests {
         assert_eq!(threads[0].comments[0].id, "PRRC_draft");
         assert_eq!(threads[0].line, Some(42));
         assert_eq!(threads[0].start_line, Some(40));
+    }
+
+    #[test]
+    fn reads_review_thread_reply_comment_payload() {
+        let response = json!({
+            "data": {
+                "addPullRequestReviewThreadReply": {
+                    "comment": { "id": "PRRC_reply" }
+                }
+            }
+        });
+
+        assert_eq!(
+            review_thread_reply_comment_id(&response),
+            Some("PRRC_reply")
+        );
+    }
+
+    #[test]
+    fn ignores_legacy_thread_reply_payload_shape() {
+        let response = json!({
+            "data": {
+                "addPullRequestReviewThreadReply": {
+                    "thread": { "id": "PRRT_thread" }
+                }
+            }
+        });
+
+        assert_eq!(review_thread_reply_comment_id(&response), None);
     }
 }

@@ -16,6 +16,7 @@ use super::workspace_sync::trigger_sync_workspace;
 use std::{collections::BTreeMap, time::Duration};
 
 const DETAIL_AUTO_REFRESH_TTL_MS: i64 = 5 * 60 * 1000;
+const OVERVIEW_CONTENT_MAX_WIDTH: f32 = 1440.0;
 const KANBAN_LANE_WIDTH: f32 = 320.0;
 const KANBAN_LANE_SCROLLBAR_WIDTH: f32 = 8.0;
 
@@ -69,107 +70,128 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
         .min_h_0()
         .h_full()
         .overflow_hidden()
-        .child(overview_header(welcome_greeting))
+        .child(
+            div().w_full().flex().justify_center().child(
+                overview_content_shell()
+                    .flex_shrink_0()
+                    .child(overview_header(welcome_greeting)),
+            ),
+        )
         .child(
             div()
                 .id("overview-scroll")
+                .w_full()
                 .flex()
-                .flex_col()
-                .gap(px(18.0))
+                .justify_center()
                 .flex_grow()
                 .min_h_0()
                 .overflow_y_scroll()
                 .child(
-                    div()
-                        .w_full()
+                    overview_content_shell()
                         .flex()
-                        .flex_wrap()
-                        .gap(px(12.0))
-                        .child(overview_metric_card(
-                            LucideIcon::GitPullRequest,
-                            "Open Pull Requests",
-                            pull_count,
-                            is_auth,
-                            {
-                                let state = state_for_pull_requests.clone();
-                                move |_, _, cx| {
-                                    activate_queue(&state, SectionId::Pulls, "authored", cx);
-                                }
-                            },
-                        ))
-                        .child(overview_metric_card(
-                            LucideIcon::Inbox,
-                            "Open Issues",
-                            issue_count,
-                            false,
-                            |_, _, _| {},
-                        ))
-                        .child(overview_metric_card(
-                            LucideIcon::MessageSquareCheck,
-                            "Review Requests",
-                            review_count,
-                            is_auth,
-                            {
-                                let state = state_for_review_requests.clone();
-                                move |_, _, cx| {
-                                    activate_queue(
-                                        &state,
-                                        SectionId::Reviews,
-                                        "reviewRequested",
-                                        cx,
-                                    );
-                                }
-                            },
-                        )),
-                )
-                .when(show_empty_state, |el| {
-                    el.child(overview_empty_state_panel())
-                })
-                .when(!show_empty_state, |el| {
-                    el.child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .flex_wrap()
-                            .items_start()
-                            .gap(px(18.0))
-                            .child(div().flex_1().min_w(px(640.0)).child(
-                                overview_review_requests_panel(
-                                    review_items,
-                                    review_count,
-                                    workspace_loading,
-                                    workspace_error.clone(),
+                        .flex_col()
+                        .gap(px(18.0))
+                        .child(
+                            div()
+                                .w_full()
+                                .flex()
+                                .flex_wrap()
+                                .gap(px(12.0))
+                                .child(overview_metric_card(
+                                    LucideIcon::GitPullRequest,
+                                    "Open Pull Requests",
+                                    pull_count,
                                     is_auth,
-                                    state_for_items.clone(),
-                                ),
-                            ))
-                            .child(
+                                    {
+                                        let state = state_for_pull_requests.clone();
+                                        move |_, _, cx| {
+                                            activate_queue(
+                                                &state,
+                                                SectionId::Pulls,
+                                                "authored",
+                                                cx,
+                                            );
+                                        }
+                                    },
+                                ))
+                                .child(overview_metric_card(
+                                    LucideIcon::Inbox,
+                                    "Open Issues",
+                                    issue_count,
+                                    false,
+                                    |_, _, _| {},
+                                ))
+                                .child(overview_metric_card(
+                                    LucideIcon::MessageSquareCheck,
+                                    "Review Requests",
+                                    review_count,
+                                    is_auth,
+                                    {
+                                        let state = state_for_review_requests.clone();
+                                        move |_, _, cx| {
+                                            activate_queue(
+                                                &state,
+                                                SectionId::Reviews,
+                                                "reviewRequested",
+                                                cx,
+                                            );
+                                        }
+                                    },
+                                )),
+                        )
+                        .when(show_empty_state, |el| {
+                            el.child(overview_empty_state_panel())
+                        })
+                        .when(!show_empty_state, |el| {
+                            el.child(
                                 div()
-                                    .flex_1()
-                                    .min_w(px(380.0))
+                                    .w_full()
                                     .flex()
-                                    .flex_col()
+                                    .flex_wrap()
+                                    .items_start()
                                     .gap(px(18.0))
-                                    .child(overview_pull_request_comment_panel(
-                                        OverviewCommentBucket::Authored,
-                                        authored_comment_items.clone(),
-                                        workspace_loading,
-                                        workspace_error.clone(),
-                                        is_auth,
-                                        state_for_authored_comments.clone(),
+                                    .child(div().flex_1().min_w(px(640.0)).child(
+                                        overview_review_requests_panel(
+                                            review_items,
+                                            review_count,
+                                            workspace_loading,
+                                            workspace_error.clone(),
+                                            is_auth,
+                                            state_for_items.clone(),
+                                        ),
                                     ))
-                                    .child(overview_pull_request_comment_panel(
-                                        OverviewCommentBucket::Other,
-                                        other_comment_items.clone(),
-                                        workspace_loading,
-                                        workspace_error.clone(),
-                                        is_auth,
-                                        state_for_other_comments.clone(),
-                                    )),
-                            ),
-                    )
-                }),
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(380.0))
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(18.0))
+                                            .child(overview_pull_request_comment_panel(
+                                                OverviewCommentBucket::Authored,
+                                                authored_comment_items.clone(),
+                                                workspace_loading,
+                                                workspace_error.clone(),
+                                                is_auth,
+                                                state_for_authored_comments.clone(),
+                                            ))
+                                            .child(overview_pull_request_comment_panel(
+                                                OverviewCommentBucket::Other,
+                                                other_comment_items.clone(),
+                                                workspace_loading,
+                                                workspace_error.clone(),
+                                                is_auth,
+                                                state_for_other_comments.clone(),
+                                            )),
+                                    ),
+                            )
+                        }),
+                ),
         )
+}
+
+fn overview_content_shell() -> Div {
+    div().w_full().max_w(px(OVERVIEW_CONTENT_MAX_WIDTH))
 }
 
 #[derive(Clone, Copy)]
@@ -210,7 +232,6 @@ fn overview_header(welcome_greeting: String) -> impl IntoElement {
                 .child(welcome_greeting),
         )
 }
-
 fn overview_metric_card(
     icon: LucideIcon,
     label: &str,
@@ -615,14 +636,29 @@ fn overview_review_comment_row(
 
     div()
         .w_full()
-        .p(px(16.0))
-        .rounded(radius())
-        .bg(bg_overlay())
+        .relative()
+        .pl(px(34.0))
+        .pr(px(10.0))
+        .py(px(12.0))
+        .border_t(px(1.0))
+        .border_color(border_muted())
         .cursor_pointer()
         .hover(|style| style.bg(hover_bg()).text_color(fg_emphasis()))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             open_pull_request(&state, summary.clone(), window, cx);
         })
+        .child(
+            div()
+                .absolute()
+                .left(px(4.0))
+                .top(px(14.0))
+                .child(user_avatar(
+                    &author_login,
+                    author_avatar_url.as_deref(),
+                    22.0,
+                    false,
+                )),
+        )
         .child(
             div()
                 .flex()
@@ -676,12 +712,6 @@ fn overview_review_comment_row(
                         .gap(px(6.0))
                         .text_size(px(12.0))
                         .text_color(fg_muted())
-                        .child(user_avatar(
-                            &author_login,
-                            author_avatar_url.as_deref(),
-                            18.0,
-                            false,
-                        ))
                         .child(
                             div()
                                 .font_weight(FontWeight::MEDIUM)
@@ -692,8 +722,8 @@ fn overview_review_comment_row(
                 )
                 .child(
                     div()
-                        .text_size(px(13.0))
-                        .line_height(px(19.0))
+                        .text_size(px(14.0))
+                        .line_height(px(22.0))
                         .text_color(fg_default())
                         .line_clamp(2)
                         .child(preview),
@@ -944,6 +974,9 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
         .as_ref()
         .map(|w| w.loaded_from_cache)
         .unwrap_or(false);
+    let shader_picker = s.project_shader_picker.clone();
+    let shader_settings_error = s.project_shader_settings_error.clone();
+    let project_shader_settings = s.project_shader_settings.clone();
 
     let sync_state = state.clone();
     let state_for_lanes = state.clone();
@@ -960,17 +993,6 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
         .as_ref()
         .map(|q| q.id == "authored")
         .unwrap_or(false);
-    let board_shader_offset = if is_authored_queue {
-        2
-    } else if is_reviews {
-        1
-    } else {
-        0
-    };
-    let shader_debug_enabled = s.pr_swimlane_shader_debug;
-    let shader_debug_offset = s.pr_swimlane_shader_debug_offset;
-    let shader_debug_label = shader_debug_button_label(shader_debug_enabled, shader_debug_offset);
-    let shader_debug_state = state.clone();
 
     // Group items into kanban lanes by repository
     let mut my_items: Vec<github::PullRequestSummary> = Vec::new();
@@ -995,6 +1017,7 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let has_muted = !muted_list.is_empty();
 
     div()
+        .relative()
         .flex()
         .min_h_0()
         .flex_grow()
@@ -1117,38 +1140,17 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                         }),
                                 ),
                         )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(shader_debug_button(
-                                    shader_debug_label,
-                                    shader_debug_enabled,
-                                    {
-                                        let state = shader_debug_state.clone();
-                                        move |_, _, cx| {
-                                            state.update(cx, |s, cx| {
-                                                advance_swimlane_shader_debug(s);
-                                                cx.notify();
-                                            });
-                                        }
-                                    },
-                                ))
-                                .child(ghost_button(
-                                    if workspace_syncing {
-                                        "Syncing..."
-                                    } else {
-                                        "Refresh"
-                                    },
-                                    {
-                                        let state = sync_state.clone();
-                                        move |_, window, cx| {
-                                            trigger_sync_workspace(&state, window, cx)
-                                        }
-                                    },
-                                )),
-                        ),
+                        .child(div().flex().items_center().gap(px(8.0)).child(ghost_button(
+                            if workspace_syncing {
+                                "Syncing..."
+                            } else {
+                                "Refresh"
+                            },
+                            {
+                                let state = sync_state.clone();
+                                move |_, window, cx| trigger_sync_workspace(&state, window, cx)
+                            },
+                        ))),
                 )
                 .when(workspace_loading, |el| {
                     el.child(
@@ -1189,15 +1191,8 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                 .h_full()
                                 .when(has_my_items, |el| {
                                     let state = state_for_lanes.clone();
-                                    let shader_variant = swimlane_shader_variant(
-                                        "__mine__",
-                                        board_shader_offset + 2,
-                                        shader_debug_enabled,
-                                        shader_debug_offset,
-                                        0,
-                                    );
-                                    let shader_label =
-                                        shader_debug_enabled.then_some(shader_variant.label());
+                                    let shader_variant =
+                                        project_shader_settings.shader_for_project("__mine__");
                                     el.child(kanban_lane(
                                         "__mine__",
                                         "My Pull Requests",
@@ -1206,43 +1201,229 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                         accent(),
                                         true,
                                         shader_variant,
-                                        shader_label,
                                         state,
                                     ))
                                 })
-                                .children(repo_groups.into_iter().enumerate().map(
-                                    |(index, (repo, items))| {
-                                        let short_name =
-                                            repo.split('/').last().unwrap_or(&repo).to_string();
-                                        let count = items.len();
-                                        let subtitle = repo_lane_subtitle(&repo, count);
-                                        let accent_color = lane_accent_color(&repo);
-                                        let state = state_for_lanes.clone();
-                                        let lane_index = index + usize::from(has_my_items);
-                                        let shader_variant = swimlane_shader_variant(
-                                            &repo,
-                                            board_shader_offset,
-                                            shader_debug_enabled,
-                                            shader_debug_offset,
-                                            lane_index,
-                                        );
-                                        let shader_label =
-                                            shader_debug_enabled.then_some(shader_variant.label());
-                                        kanban_lane(
-                                            &repo,
-                                            &short_name,
-                                            &subtitle,
-                                            items,
-                                            accent_color,
-                                            false,
-                                            shader_variant,
-                                            shader_label,
-                                            state,
-                                        )
-                                    },
-                                )),
+                                .children(repo_groups.into_iter().map(|(repo, items)| {
+                                    let short_name =
+                                        repo.split('/').last().unwrap_or(&repo).to_string();
+                                    let count = items.len();
+                                    let subtitle = repo_lane_subtitle(&repo, count);
+                                    let accent_color = lane_accent_color(&repo);
+                                    let state = state_for_lanes.clone();
+                                    let shader_variant =
+                                        project_shader_settings.shader_for_project(&repo);
+                                    kanban_lane(
+                                        &repo,
+                                        &short_name,
+                                        &subtitle,
+                                        items,
+                                        accent_color,
+                                        false,
+                                        shader_variant,
+                                        state,
+                                    )
+                                })),
                         ),
                 ),
+        )
+        .when_some(shader_picker, |el, picker| {
+            el.child(render_project_shader_picker(
+                state,
+                picker,
+                shader_settings_error,
+                cx,
+            ))
+        })
+}
+
+fn render_project_shader_picker(
+    state: &Entity<AppState>,
+    picker: ProjectShaderPickerState,
+    settings_error: Option<String>,
+    cx: &App,
+) -> impl IntoElement {
+    let selected = state.read(cx).shader_for_project(&picker.project);
+    let close_state = state.clone();
+    let project_display = if picker.project == "__mine__" {
+        picker.label.clone()
+    } else {
+        picker.project.clone()
+    };
+
+    div()
+        .absolute()
+        .inset_0()
+        .occlude()
+        .flex()
+        .items_start()
+        .justify_center()
+        .pt(px(82.0))
+        .pb(px(28.0))
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .bg(palette_backdrop())
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    close_state.update(cx, |s, cx| {
+                        s.close_project_shader_picker();
+                        cx.notify();
+                    });
+                }),
+        )
+        .child(
+            div()
+                .relative()
+                .w(px(460.0))
+                .rounded(radius_lg())
+                .border_1()
+                .border_color(border_default())
+                .bg(bg_overlay())
+                .shadow_sm()
+                .occlude()
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .px(px(20.0))
+                        .py(px(15.0))
+                        .border_b(px(1.0))
+                        .border_color(border_muted())
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(4.0))
+                                .child(
+                                    div()
+                                        .text_size(px(16.0))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(fg_emphasis())
+                                        .child("Project shader"),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .font_family(mono_font_family())
+                                        .text_color(fg_subtle())
+                                        .child(project_display),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .w(px(28.0))
+                                .h(px(28.0))
+                                .rounded(radius_sm())
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .hover(|style| style.bg(hover_bg()))
+                                .on_mouse_down(MouseButton::Left, {
+                                    let state = state.clone();
+                                    move |_, _, cx| {
+                                        cx.stop_propagation();
+                                        state.update(cx, |s, cx| {
+                                            s.close_project_shader_picker();
+                                            cx.notify();
+                                        });
+                                    }
+                                })
+                                .child(lucide_icon(LucideIcon::X, 17.0, fg_muted())),
+                        ),
+                )
+                .child(
+                    div()
+                        .p(px(14.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.0))
+                        .children(OverviewShaderVariant::ALL.into_iter().map(|variant| {
+                            project_shader_choice_row(&picker.project, variant, selected, state)
+                        }))
+                        .when_some(settings_error, |el, error| {
+                            el.child(div().pt(px(4.0)).child(error_text(&error)))
+                        }),
+                ),
+        )
+}
+
+fn project_shader_choice_row(
+    project: &str,
+    variant: OverviewShaderVariant,
+    selected: OverviewShaderVariant,
+    state: &Entity<AppState>,
+) -> impl IntoElement {
+    let is_selected = variant == selected;
+    let project = project.to_string();
+    let label = variant.label();
+    let sample_seed = format!("shader-choice-{project}-{label}");
+    let state = state.clone();
+
+    div()
+        .w_full()
+        .rounded(radius())
+        .border_1()
+        .border_color(if is_selected {
+            focus_border()
+        } else {
+            border_muted()
+        })
+        .bg(if is_selected {
+            control_selected_bg()
+        } else {
+            bg_surface()
+        })
+        .cursor_pointer()
+        .hover(|style| style.bg(hover_bg()).border_color(border_default()))
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            state.update(cx, |s, cx| {
+                s.set_project_shader(&project, variant);
+                cx.notify();
+            });
+        })
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(12.0))
+                .p(px(8.0))
+                .child(
+                    shader_material_surface_variant(
+                        &sample_seed,
+                        variant,
+                        ShaderCornerMask::ALL,
+                        bg_surface(),
+                        radius_sm(),
+                    )
+                    .w(px(76.0))
+                    .h(px(40.0))
+                    .flex_shrink_0(),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(fg_emphasis())
+                                .child(label),
+                        ),
+                )
+                .when(is_selected, |el| {
+                    el.child(lucide_icon(LucideIcon::Check, 16.0, focus()))
+                }),
         )
 }
 
@@ -1351,62 +1532,15 @@ fn shader_material_surface_variant(
 }
 
 fn material_shader_variant(seed: &str, offset: usize) -> OverviewShaderVariant {
-    match (material_seed_index(seed) + offset) % 3 {
-        0 => OverviewShaderVariant::Ribbon,
-        1 => OverviewShaderVariant::Glow,
-        _ => OverviewShaderVariant::Interference,
-    }
-}
-
-fn swimlane_shader_variant(
-    seed: &str,
-    normal_offset: usize,
-    debug_enabled: bool,
-    debug_offset: usize,
-    lane_index: usize,
-) -> OverviewShaderVariant {
-    if debug_enabled {
-        let variants = OverviewShaderVariant::ALL;
-        variants[(lane_index + debug_offset) % variants.len()]
-    } else {
-        material_shader_variant(seed, normal_offset + 1)
-    }
-}
-
-fn shader_debug_button_label(enabled: bool, offset: usize) -> String {
-    if enabled {
-        format!(
-            "Shader debug {}/{}",
-            (offset % OverviewShaderVariant::ALL.len()) + 1,
-            OverviewShaderVariant::ALL.len()
-        )
-    } else {
-        "Shader debug".to_string()
-    }
-}
-
-fn advance_swimlane_shader_debug(state: &mut AppState) {
-    let variant_count = OverviewShaderVariant::ALL.len();
-    if !state.pr_swimlane_shader_debug {
-        state.pr_swimlane_shader_debug = true;
-        state.pr_swimlane_shader_debug_offset = 0;
-        return;
-    }
-
-    let next_offset = state.pr_swimlane_shader_debug_offset + 1;
-    if next_offset >= variant_count {
-        state.pr_swimlane_shader_debug = false;
-        state.pr_swimlane_shader_debug_offset = 0;
-    } else {
-        state.pr_swimlane_shader_debug_offset = next_offset;
-    }
+    let variants = OverviewShaderVariant::ALL;
+    variants[(material_seed_index(seed) + offset) % variants.len()]
 }
 
 fn material_seed_index(seed: &str) -> usize {
     let hash = seed.bytes().fold(2166136261u32, |acc, byte| {
         acc.wrapping_mul(16777619) ^ byte as u32
     });
-    (hash as usize) % 3
+    (hash as usize) % OverviewShaderVariant::ALL.len()
 }
 
 pub fn panel() -> Div {
@@ -1449,52 +1583,6 @@ pub fn ghost_button(
         })
         .on_mouse_down(MouseButton::Left, on_click)
         .child(label.to_string())
-}
-
-fn shader_debug_button(
-    label: String,
-    active: bool,
-    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    div()
-        .px(px(12.0))
-        .py(px(7.0))
-        .rounded(radius_sm())
-        .bg(if active {
-            control_selected_bg()
-        } else {
-            control_button_bg()
-        })
-        .border_1()
-        .border_color(if active {
-            focus_border()
-        } else {
-            border_muted()
-        })
-        .text_color(if active { fg_emphasis() } else { fg_default() })
-        .text_size(px(13.0))
-        .font_weight(FontWeight::MEDIUM)
-        .cursor_pointer()
-        .flex()
-        .items_center()
-        .gap(px(7.0))
-        .hover(move |style| {
-            style
-                .bg(control_button_hover_bg())
-                .border_color(if active {
-                    focus_border()
-                } else {
-                    border_default()
-                })
-                .text_color(fg_emphasis())
-        })
-        .on_mouse_down(MouseButton::Left, on_click)
-        .child(lucide_icon(
-            LucideIcon::Palette,
-            13.0,
-            if active { focus() } else { fg_muted() },
-        ))
-        .child(label)
 }
 
 pub fn review_button(
@@ -1922,17 +2010,16 @@ fn kanban_lane(
     _accent: Rgba,
     is_mine: bool,
     shader_variant: OverviewShaderVariant,
-    shader_debug_label: Option<&'static str>,
     state: Entity<AppState>,
 ) -> impl IntoElement {
     let label = label.to_string();
-    let subtitle = match shader_debug_label {
-        Some(shader_label) => format!("{subtitle} \u{00b7} shader {shader_label}"),
-        None => subtitle.to_string(),
-    };
+    let subtitle = subtitle.to_string();
     let count = items.len();
     let mute_state = state.clone();
     let mute_repo = lane_id.to_string();
+    let picker_project = lane_id.to_string();
+    let picker_label = label.clone();
+    let picker_state = state.clone();
     let show_repo_in_card_meta = is_mine;
     let lane_radius = radius_lg();
     let shader_visible_height = px(70.0);
@@ -1969,6 +2056,13 @@ fn kanban_lane(
                     .pt(px(16.0))
                     .pb(px(16.0) + lane_radius)
                     .text_color(fg_emphasis())
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                        picker_state.update(cx, |s, cx| {
+                            s.open_project_shader_picker(&picker_project, &picker_label);
+                            cx.notify();
+                        });
+                    })
                     .child(
                         div()
                             .absolute()
@@ -2024,6 +2118,7 @@ fn kanban_lane(
                                     s.bg(lane_header_control_hover_bg()).text_color(danger())
                                 })
                                 .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                    cx.stop_propagation();
                                     mute_state.update(cx, |s, cx| {
                                         s.muted_repos.insert(mute_repo.clone());
                                         cx.notify();

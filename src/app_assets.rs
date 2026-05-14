@@ -1,11 +1,12 @@
 use std::borrow::Cow;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::PathBuf;
 
 use gpui::{AssetSource, Result, SharedString};
 use lucide_icons::LUCIDE_FONT_BYTES;
 
-pub const APP_MARK_ASSET: &str = "brand/app-icon.png";
+pub const APP_LOGO_ASSET: &str = "brand/remiss-app-icon.png";
 
 pub struct AppAssets {
     base: PathBuf,
@@ -14,9 +15,25 @@ pub struct AppAssets {
 impl AppAssets {
     pub fn new() -> Self {
         Self {
-            base: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets"),
+            base: bundled_assets_dir()
+                .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets")),
         }
     }
+}
+
+fn bundled_assets_dir() -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    let macos_dir = executable.parent()?;
+    let contents_dir = macos_dir.parent()?;
+
+    if macos_dir.file_name() != Some(OsStr::new("MacOS"))
+        || contents_dir.file_name() != Some(OsStr::new("Contents"))
+    {
+        return None;
+    }
+
+    let assets_dir = contents_dir.join("Resources").join("assets");
+    assets_dir.is_dir().then_some(assets_dir)
 }
 
 pub fn load_bundled_fonts() -> Result<Vec<Cow<'static, [u8]>>> {

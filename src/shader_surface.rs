@@ -1,41 +1,86 @@
-use gpui::*;
+use std::collections::BTreeMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+use gpui::*;
+use serde::{Deserialize, Serialize};
+
+use crate::cache::CacheStore;
+
+const PROJECT_SHADER_SETTINGS_CACHE_KEY: &str = "project-shader-settings-v1";
+
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum OverviewShaderVariant {
-    Flow,
+    #[default]
     Bands,
     Ember,
-    Lagoon,
-    Aurora,
     Ribbon,
-    Glow,
     Interference,
 }
 
 impl OverviewShaderVariant {
-    pub const ALL: [Self; 8] = [
-        Self::Flow,
-        Self::Bands,
-        Self::Ember,
-        Self::Lagoon,
-        Self::Aurora,
-        Self::Ribbon,
-        Self::Glow,
-        Self::Interference,
-    ];
+    pub const ALL: [Self; 4] = [Self::Bands, Self::Ember, Self::Ribbon, Self::Interference];
 
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Flow => "Flow",
             Self::Bands => "Bands",
             Self::Ember => "Ember",
-            Self::Lagoon => "Lagoon",
-            Self::Aurora => "Aurora",
             Self::Ribbon => "Ribbon",
-            Self::Glow => "Glow",
             Self::Interference => "Interference",
         }
     }
+
+    pub fn for_project(project: &str) -> Self {
+        Self::ALL[stable_seed_index(project, Self::ALL.len())]
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectShaderSettings {
+    #[serde(default)]
+    pub projects: BTreeMap<String, OverviewShaderVariant>,
+}
+
+impl ProjectShaderSettings {
+    pub fn shader_for_project(&self, project: &str) -> OverviewShaderVariant {
+        self.projects
+            .get(project)
+            .copied()
+            .unwrap_or_else(|| OverviewShaderVariant::for_project(project))
+    }
+
+    pub fn set_project_shader(&mut self, project: &str, variant: OverviewShaderVariant) {
+        self.projects.insert(project.to_string(), variant);
+    }
+}
+
+pub fn load_project_shader_settings(cache: &CacheStore) -> Result<ProjectShaderSettings, String> {
+    Ok(cache
+        .get::<ProjectShaderSettings>(PROJECT_SHADER_SETTINGS_CACHE_KEY)?
+        .map(|document| document.value)
+        .unwrap_or_default())
+}
+
+pub fn save_project_shader_settings(
+    cache: &CacheStore,
+    settings: &ProjectShaderSettings,
+) -> Result<(), String> {
+    cache.put(PROJECT_SHADER_SETTINGS_CACHE_KEY, settings, now_ms())
+}
+
+fn stable_seed_index(seed: &str, len: usize) -> usize {
+    let hash = seed.bytes().fold(2166136261u32, |acc, byte| {
+        acc.wrapping_mul(16777619) ^ byte as u32
+    });
+    (hash as usize) % len
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
@@ -73,26 +118,8 @@ impl ShaderCornerMask {
     }
 }
 
-pub const OVERVIEW_SHADER_GLSL: &str = r#"
-void mainImage(out vec4 fragColor, vec2 fragCoord) {
-    float mr = min(iResolution.x, iResolution.y);
-    vec2 uv = (fragCoord * 2.0 - iResolution.xy) / mr;
-
-    float d = -iTime * 0.5;
-    float a = 0.0;
-    for (float i = 0.0; i < 8.0; ++i) {
-        a += cos(i - d - a * uv.x);
-        d += sin(uv.y * i + a);
-    }
-    d += iTime * 0.5;
-    vec3 col = vec3(cos(uv * vec2(d, a)) * 0.6 + 0.4, cos(a + d) * 0.5 + 0.5);
-    col = cos(col * cos(vec3(d, a, 2.5)) * 0.5 + 0.5);
-    fragColor = vec4(col, 1);
-}
-"#;
-
 pub fn opengl_shader_surface(seed: impl Into<String>) -> Div {
-    opengl_shader_surface_variant(seed, OverviewShaderVariant::Flow)
+    opengl_shader_surface_variant(seed, OverviewShaderVariant::Bands)
 }
 
 pub fn opengl_shader_surface_variant(
@@ -110,7 +137,7 @@ pub fn opengl_shader_surface_with_corner_mask(
 ) -> Div {
     opengl_shader_surface_variant_with_corner_mask(
         seed,
-        OverviewShaderVariant::Flow,
+        OverviewShaderVariant::Bands,
         radius,
         mask_color,
         corners,
@@ -234,6 +261,37 @@ fn paint_mask_path(window: &mut Window, builder: PathBuilder, color: Rgba) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{OverviewShaderVariant, ProjectShaderSettings};
+
+    #[test]
+    fn project_shader_fallback_is_stable() {
+        let first = OverviewShaderVariant::for_project("rikuws/gh-ui");
+        let second = OverviewShaderVariant::for_project("rikuws/gh-ui");
+
+        assert_eq!(first, second);
+        assert!(OverviewShaderVariant::ALL.contains(&first));
+    }
+
+    #[test]
+    fn project_shader_settings_override_fallback() {
+        let mut settings = ProjectShaderSettings::default();
+        let fallback = settings.shader_for_project("rikuws/gh-ui");
+
+        settings.set_project_shader("rikuws/gh-ui", OverviewShaderVariant::Ribbon);
+
+        assert_eq!(
+            settings.shader_for_project("rikuws/gh-ui"),
+            OverviewShaderVariant::Ribbon
+        );
+        assert_eq!(
+            ProjectShaderSettings::default().shader_for_project("rikuws/gh-ui"),
+            fallback
+        );
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod platform {
     use super::OverviewShaderVariant;
@@ -261,25 +319,6 @@ mod platform {
     use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString};
 
     const TARGET_FRAME_RATE: f32 = 30.0;
-
-    const FLOW_CORE_IMAGE_SHADER: &str = r#"
-kernel vec4 overviewShader(float iTime, vec2 iResolution) {
-    vec2 fragCoord = destCoord();
-    float mr = min(iResolution.x, iResolution.y);
-    vec2 uv = (fragCoord * 2.0 - iResolution) / mr;
-
-    float d = -iTime * 0.5;
-    float a = 0.0;
-    for (float i = 0.0; i < 8.0; ++i) {
-        a += cos(i - d - a * uv.x);
-        d += sin(uv.y * i + a);
-    }
-    d += iTime * 0.5;
-    vec3 col = vec3(cos(uv * vec2(d, a)) * 0.6 + 0.4, cos(a + d) * 0.5 + 0.5);
-    col = cos(col * cos(vec3(d, a, 2.5)) * 0.5 + 0.5);
-    return vec4(col, 1.0);
-}
-"#;
 
     const BANDS_CORE_IMAGE_SHADER: &str = r#"
 kernel vec4 overviewShader(float iTime, vec2 iResolution) {
@@ -338,70 +377,6 @@ kernel vec4 overviewShader(float iTime, vec2 iResolution) {
 }
 "#;
 
-    const LAGOON_CORE_IMAGE_SHADER: &str = r#"
-kernel vec4 overviewShader(float iTime, vec2 iResolution) {
-    vec2 fragCoord = destCoord();
-    vec2 uv = fragCoord / iResolution;
-
-    float t = iTime * 0.14;
-    float d = -t;
-    float a = 0.0;
-
-    for (float i = 0.0; i < 9.0; ++i) {
-        a += cos(d + i * uv.x - a);
-        d += 0.5 * sin(a + i * uv.y);
-    }
-
-    d += t;
-
-    float r = cos(uv.x * a) * 0.7 + 0.3;
-    float g = cos(uv.y * d) * 0.5 + 0.2;
-    float b = cos(a + d) * 0.3 + 0.5;
-    vec3 col = vec3(r, g, b);
-    col = cos(col * cos(vec3(d, a, 2.5)) * 0.5 + 0.5);
-    col = vec3(
-        col.g * 0.56 + col.b * 0.14 + 0.12,
-        col.b * 0.64 + col.r * 0.10 + 0.18,
-        col.r * 0.36 + col.g * 0.26 + 0.20
-    );
-    col = min(max(col, vec3(0.0)), vec3(1.0));
-
-    return vec4(col, 1.0);
-}
-"#;
-
-    const AURORA_CORE_IMAGE_SHADER: &str = r#"
-kernel vec4 overviewShader(float iTime, vec2 iResolution) {
-    vec2 fragCoord = destCoord();
-    vec2 uv = fragCoord / iResolution;
-
-    float t = iTime * 0.14;
-    float d = -t;
-    float a = 0.0;
-
-    for (float i = 0.0; i < 9.0; ++i) {
-        a += cos(d + i * uv.x - a);
-        d += 0.5 * sin(a + i * uv.y);
-    }
-
-    d += t;
-
-    float r = cos(uv.x * a) * 0.7 + 0.3;
-    float g = cos(uv.y * d) * 0.5 + 0.2;
-    float b = cos(a + d) * 0.3 + 0.5;
-    vec3 col = vec3(r, g, b);
-    col = cos(col * cos(vec3(d, a, 2.5)) * 0.5 + 0.5);
-    col = vec3(
-        col.b * 0.54 + col.r * 0.14 + 0.18,
-        col.r * 0.22 + col.g * 0.52 + 0.10,
-        col.g * 0.30 + col.b * 0.68 + 0.12
-    );
-    col = min(max(col, vec3(0.0)), vec3(1.0));
-
-    return vec4(col, 1.0);
-}
-"#;
-
     const RIBBON_CORE_IMAGE_SHADER: &str = r#"
 kernel vec4 overviewShader(float iTime, vec2 iResolution) {
     vec2 uv = destCoord() / iResolution;
@@ -427,42 +402,8 @@ kernel vec4 overviewShader(float iTime, vec2 iResolution) {
     float limeEdge = 1.0 - smoothstep(0.000, 0.026, abs(y - c1 - 0.145));
     col = col + (vec3(0.62, 1.00, 0.62) - col) * min(max(mintEdge * 0.58 + limeEdge * 0.36, 0.0), 1.0);
 
-    float rightGlow = 1.0 - smoothstep(0.0, 0.45, length((uv - vec2(1.03, 0.37 + 0.10 * sin(t * 6.2831853))) * vec2(0.9, 1.5)));
-    col = col + (vec3(0.56, 1.00, 0.68) - col) * (rightGlow * 0.38);
-    col = min(max(col, vec3(0.0)), vec3(1.0));
-
-    return vec4(col, 1.0);
-}
-"#;
-
-    const GLOW_CORE_IMAGE_SHADER: &str = r#"
-kernel vec4 overviewShader(float iTime, vec2 iResolution) {
-    vec2 uv = destCoord() / iResolution;
-    float x = uv.x;
-    float y = uv.y;
-    float t = iTime * 0.11;
-
-    vec3 col = vec3(0.68, 0.72, 1.0);
-    float baseSweep = min(max(x * 0.68 + y * 0.28, 0.0), 1.0);
-    col = col + (vec3(1.00, 0.32, 0.76) - col) * (baseSweep * 0.62);
-
-    vec2 p = uv - vec2(0.86 + 0.05 * sin(t * 6.2831853), 0.62 + 0.05 * cos(t * 4.6));
-    float magenta = 1.0 - smoothstep(0.0, 0.74, length(p * vec2(1.10, 0.85)));
-    col = col + (vec3(1.00, 0.18, 0.58) - col) * (magenta * 0.82);
-
-    p = uv - vec2(0.30 + 0.06 * sin(t * 4.1), 0.28 + 0.05 * cos(t * 5.0));
-    float orange = 1.0 - smoothstep(0.0, 0.62, length(p * vec2(1.35, 0.82)));
-    col = col + (vec3(1.00, 0.55, 0.18) - col) * (orange * 0.58);
-
-    p = uv - vec2(0.04 + 0.04 * cos(t * 5.5), 0.82);
-    float violet = 1.0 - smoothstep(0.0, 0.55, length(p * vec2(0.95, 1.10)));
-    col = col + (vec3(0.66, 0.64, 1.0) - col) * (violet * 0.70);
-
-    float diagonal = 1.0 - smoothstep(0.035, 0.220, abs(y - (0.12 + x * 0.56 + 0.08 * sin((x * 1.60 - t) * 6.2831853))));
-    col = col + (vec3(1.00, 0.74, 0.48) - col) * (diagonal * 0.28);
-
-    float softShade = 0.08 * sin((x * 2.0 + y * 1.4 + t * 1.7) * 6.2831853);
-    col += vec3(softShade, softShade * 0.38, softShade * 0.72);
+    float rightLight = 1.0 - smoothstep(0.0, 0.45, length((uv - vec2(1.03, 0.37 + 0.10 * sin(t * 6.2831853))) * vec2(0.9, 1.5)));
+    col = col + (vec3(0.56, 1.00, 0.68) - col) * (rightLight * 0.38);
     col = min(max(col, vec3(0.0)), vec3(1.0));
 
     return vec4(col, 1.0);
@@ -479,12 +420,12 @@ kernel vec4 overviewShader(float iTime, vec2 iResolution) {
     vec3 col = vec3(0.30, 0.72, 0.95);
 
     vec2 p = uv - vec2(0.78 + 0.05 * sin(t * 4.4), 0.62 + 0.08 * cos(t * 3.2));
-    float redGlow = 1.0 - smoothstep(0.0, 0.74, length(p * vec2(1.00, 1.24)));
-    col = col + (vec3(1.00, 0.22, 0.18) - col) * (redGlow * 0.82);
+    float redBloom = 1.0 - smoothstep(0.0, 0.74, length(p * vec2(1.00, 1.24)));
+    col = col + (vec3(1.00, 0.22, 0.18) - col) * (redBloom * 0.82);
 
     p = uv - vec2(0.34 + 0.04 * cos(t * 5.1), 0.24 + 0.05 * sin(t * 4.7));
-    float goldGlow = 1.0 - smoothstep(0.0, 0.64, length(p * vec2(1.18, 0.90)));
-    col = col + (vec3(1.00, 0.66, 0.16) - col) * (goldGlow * 0.64);
+    float goldBloom = 1.0 - smoothstep(0.0, 0.64, length(p * vec2(1.18, 0.90)));
+    col = col + (vec3(1.00, 0.66, 0.16) - col) * (goldBloom * 0.64);
 
     float wave = x * 25.5 + 0.44 * sin(y * 6.4 + t * 6.2831853) + 0.10 * sin(y * 18.0 - t * 8.0);
     float stripe = 0.5 + 0.5 * cos(wave * 6.2831853);
@@ -520,13 +461,9 @@ kernel vec4 overviewShader(float iTime, vec2 iResolution) {
 
     struct ShaderGpu {
         context: Retained<CIContext>,
-        flow_kernel: Retained<CIColorKernel>,
         bands_kernel: Retained<CIColorKernel>,
         ember_kernel: Retained<CIColorKernel>,
-        lagoon_kernel: Retained<CIColorKernel>,
-        aurora_kernel: Retained<CIColorKernel>,
         ribbon_kernel: Retained<CIColorKernel>,
-        glow_kernel: Retained<CIColorKernel>,
         interference_kernel: Retained<CIColorKernel>,
     }
 
@@ -641,17 +578,10 @@ kernel vec4 overviewShader(float iTime, vec2 iResolution) {
                     &[unsafe { kCIContextUseSoftwareRenderer }],
                     &[&*software_renderer],
                 );
-            let flow_source = NSString::from_str(FLOW_CORE_IMAGE_SHADER);
             let bands_source = NSString::from_str(BANDS_CORE_IMAGE_SHADER);
             let ember_source = NSString::from_str(EMBER_CORE_IMAGE_SHADER);
-            let lagoon_source = NSString::from_str(LAGOON_CORE_IMAGE_SHADER);
-            let aurora_source = NSString::from_str(AURORA_CORE_IMAGE_SHADER);
             let ribbon_source = NSString::from_str(RIBBON_CORE_IMAGE_SHADER);
-            let glow_source = NSString::from_str(GLOW_CORE_IMAGE_SHADER);
             let interference_source = NSString::from_str(INTERFERENCE_CORE_IMAGE_SHADER);
-            #[allow(deprecated)]
-            let flow_kernel = unsafe { CIColorKernel::kernelWithString(&flow_source) }
-                .expect("overview flow shader must compile as a Core Image GPU kernel");
             #[allow(deprecated)]
             let bands_kernel = unsafe { CIColorKernel::kernelWithString(&bands_source) }
                 .expect("overview bands shader must compile as a Core Image GPU kernel");
@@ -659,17 +589,8 @@ kernel vec4 overviewShader(float iTime, vec2 iResolution) {
             let ember_kernel = unsafe { CIColorKernel::kernelWithString(&ember_source) }
                 .expect("overview ember shader must compile as a Core Image GPU kernel");
             #[allow(deprecated)]
-            let lagoon_kernel = unsafe { CIColorKernel::kernelWithString(&lagoon_source) }
-                .expect("overview lagoon shader must compile as a Core Image GPU kernel");
-            #[allow(deprecated)]
-            let aurora_kernel = unsafe { CIColorKernel::kernelWithString(&aurora_source) }
-                .expect("overview aurora shader must compile as a Core Image GPU kernel");
-            #[allow(deprecated)]
             let ribbon_kernel = unsafe { CIColorKernel::kernelWithString(&ribbon_source) }
                 .expect("overview ribbon shader must compile as a Core Image GPU kernel");
-            #[allow(deprecated)]
-            let glow_kernel = unsafe { CIColorKernel::kernelWithString(&glow_source) }
-                .expect("overview glow shader must compile as a Core Image GPU kernel");
             #[allow(deprecated)]
             let interference_kernel =
                 unsafe { CIColorKernel::kernelWithString(&interference_source) }
@@ -678,13 +599,9 @@ kernel vec4 overviewShader(float iTime, vec2 iResolution) {
 
             ShaderGpu {
                 context,
-                flow_kernel,
                 bands_kernel,
                 ember_kernel,
-                lagoon_kernel,
-                aurora_kernel,
                 ribbon_kernel,
-                glow_kernel,
                 interference_kernel,
             }
         })
@@ -721,13 +638,9 @@ kernel vec4 overviewShader(float iTime, vec2 iResolution) {
 
         fn kernel(&self, variant: OverviewShaderVariant) -> &CIColorKernel {
             match variant {
-                OverviewShaderVariant::Flow => &self.flow_kernel,
                 OverviewShaderVariant::Bands => &self.bands_kernel,
                 OverviewShaderVariant::Ember => &self.ember_kernel,
-                OverviewShaderVariant::Lagoon => &self.lagoon_kernel,
-                OverviewShaderVariant::Aurora => &self.aurora_kernel,
                 OverviewShaderVariant::Ribbon => &self.ribbon_kernel,
-                OverviewShaderVariant::Glow => &self.glow_kernel,
                 OverviewShaderVariant::Interference => &self.interference_kernel,
             }
         }
@@ -741,13 +654,9 @@ kernel vec4 overviewShader(float iTime, vec2 iResolution) {
         #[::core::prelude::v1::test]
         fn overview_shader_kernels_compile() {
             let shaders = [
-                ("flow", super::FLOW_CORE_IMAGE_SHADER),
                 ("bands", super::BANDS_CORE_IMAGE_SHADER),
                 ("ember", super::EMBER_CORE_IMAGE_SHADER),
-                ("lagoon", super::LAGOON_CORE_IMAGE_SHADER),
-                ("aurora", super::AURORA_CORE_IMAGE_SHADER),
                 ("ribbon", super::RIBBON_CORE_IMAGE_SHADER),
-                ("glow", super::GLOW_CORE_IMAGE_SHADER),
                 ("interference", super::INTERFERENCE_CORE_IMAGE_SHADER),
             ];
 

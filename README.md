@@ -4,7 +4,7 @@ Remiss is a native Rust/GPUI desktop app for read-only pull request review. It c
 
 ## Status
 
-Remiss is an early alpha. The core workflow is usable for local development, but packaging, onboarding, and provider disclosure are still being hardened.
+Remiss is an early alpha. The core workflow is usable for local development, but onboarding and provider disclosure are still being hardened.
 
 Remiss uses a small fork of difftastic for embedded structural diffs. See
 `THIRD_PARTY_NOTICES.md` for attribution and fork details.
@@ -24,6 +24,15 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 cargo run
 ```
+
+## Packaging
+
+```sh
+./scripts/build-app.sh
+REMISS_ALLOW_DEVELOPMENT_PACKAGE=1 REMISS_SIGNING_MODE=adhoc ./scripts/package-app.sh
+```
+
+`./scripts/package-app.sh` creates `dist/remiss-<version>-macos-<arch>.dmg` and `.zip`. Downloadable release packages require a `Developer ID Application` certificate unless `REMISS_ALLOW_DEVELOPMENT_PACKAGE=1` is set for local-only testing. Tagged GitHub releases (`v*`) use the `REMISS_*` signing and notarization secrets from `.github/workflows/release.yml`.
 
 ## Data Model
 
