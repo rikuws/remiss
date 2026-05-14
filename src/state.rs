@@ -958,6 +958,8 @@ pub struct AppState {
     pub window_appearance: WindowAppearance,
     pub app_sidebar_collapsed: bool,
     pub notification_drawer_open: bool,
+    pub software_update_message: Option<String>,
+    pub software_update_error: Option<String>,
 
     // Selected file in diff view
     pub selected_file_path: Option<String>,
@@ -1097,6 +1099,8 @@ impl AppState {
             window_appearance: WindowAppearance::Light,
             app_sidebar_collapsed: false,
             notification_drawer_open: false,
+            software_update_message: None,
+            software_update_error: None,
             selected_file_path: None,
             selected_diff_anchor: None,
             review_scroll_focus: None,

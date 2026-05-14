@@ -7,6 +7,13 @@ use gpui::prelude::*;
 use gpui::*;
 
 use crate::app_assets::APP_LOGO_ASSET;
+use crate::app_menu::{
+    AddLocalRepository, AddWaypoint, CheckForUpdates, CycleCodeTheme, DecreaseCodeFontSize,
+    IncreaseCodeFontSize, JumpToNextReviewComment, OpenReviewFiles, OpenSelectedLineInSource,
+    RefreshLocalRepositories, ResetCodeFontSize, ShowPullRequestBriefing, ShowSettings,
+    SubmitReview, SwitchToAiTour, SwitchToCode, SwitchToDiff, SwitchToSource, SwitchToStack,
+    SwitchToStructuralDiff, SyncWorkspace, ToggleCommandPalette, ToggleWaypointSpotlight,
+};
 use crate::branding::APP_NAME;
 use crate::github;
 use crate::icons::{lucide_icon, LucideIcon};
@@ -18,12 +25,18 @@ use crate::theme::*;
 use super::ai_tour::refresh_active_tour;
 use super::diff_view::{
     ensure_active_review_focus_loaded, ensure_structural_diff_warmup_started, enter_files_surface,
-    enter_stack_review_mode, switch_review_code_mode, warm_structural_diffs_flow,
+    enter_stack_review_mode, switch_review_code_mode, toggle_waypoint_spotlight,
+    trigger_add_waypoint_shortcut, trigger_submit_inline_comment,
+    trigger_submit_review_from_review_mode, warm_structural_diffs_flow,
 };
-use super::palette::render_palette;
+use super::palette::{render_palette, toggle_palette};
 use super::pr_detail::render_pr_workspace;
 use super::sections::render_section_workspace;
-use super::settings::{prepare_settings_view, update_theme_preference};
+use super::settings::{
+    cycle_diff_color_theme_preference, decrease_code_font_size_preference,
+    increase_code_font_size_preference, prepare_settings_view, reset_code_font_size_preference,
+    trigger_software_update_check, update_theme_preference,
+};
 use super::workspace_sync::{
     sync_workspace_flow, trigger_sync_workspace, wait_for_workspace_poll_interval,
 };
@@ -62,6 +75,15 @@ struct WorkspaceRouteKey {
 #[derive(Clone, Copy)]
 struct WorkspaceRouteTransition {
     progress: f32,
+}
+
+#[derive(Clone, Copy)]
+struct AppMenuAvailability {
+    has_active_detail: bool,
+    has_active_remote_detail: bool,
+    has_local_repositories: bool,
+    has_next_review_comment: bool,
+    has_selected_diff_line: bool,
 }
 
 impl RootView {
@@ -618,11 +640,23 @@ fn mark_local_review_path_inspecting(state: &Entity<AppState>, path: &PathBuf, c
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let workspace_route_transition = self.workspace_route_transition(window, cx);
-        let state = self.state.read(cx);
-        let palette_visible = state.palette_open || state.palette_closing;
-        let notification_drawer_open = state.notification_drawer_open;
+        let (palette_visible, notification_drawer_open, app_menu_availability) = {
+            let state = self.state.read(cx);
+            (
+                state.palette_open || state.palette_closing,
+                state.notification_drawer_open,
+                AppMenuAvailability {
+                    has_active_detail: state.active_detail().is_some(),
+                    has_active_remote_detail: state.active_detail().is_some()
+                        && !state.active_is_local_review(),
+                    has_local_repositories: !state.local_review_repositories.is_empty(),
+                    has_next_review_comment: state.next_review_comment_location().is_some(),
+                    has_selected_diff_line: state.selected_diff_line_target().is_some(),
+                },
+            )
+        };
 
-        div()
+        let root = div()
             .relative()
             .size_full()
             .flex()
@@ -643,7 +677,280 @@ impl Render for RootView {
             })
             .when(palette_visible, |el| {
                 el.child(render_palette(&self.state, cx))
+            });
+
+        attach_app_menu_action_handlers(root, self.state.clone(), app_menu_availability)
+    }
+}
+
+fn attach_app_menu_action_handlers(
+    element: Div,
+    state: Entity<AppState>,
+    availability: AppMenuAvailability,
+) -> Div {
+    let state_for_palette = state.clone();
+    let element = element.on_action(move |_: &ToggleCommandPalette, _, cx| {
+        toggle_palette(&state_for_palette, cx);
+        cx.stop_propagation();
+    });
+
+    let state_for_settings = state.clone();
+    let element = element.on_action(move |_: &ShowSettings, window, cx| {
+        show_settings_from_menu(&state_for_settings, window, cx);
+        cx.stop_propagation();
+    });
+
+    let state_for_updates = state.clone();
+    let element = element.on_action(move |_: &CheckForUpdates, _, cx| {
+        trigger_software_update_check(&state_for_updates, cx);
+        cx.stop_propagation();
+    });
+
+    let state_for_sync = state.clone();
+    let element = element.on_action(move |_: &SyncWorkspace, window, cx| {
+        trigger_sync_workspace(&state_for_sync, window, cx);
+        cx.stop_propagation();
+    });
+
+    let state_for_add_local = state.clone();
+    let element = element.on_action(move |_: &AddLocalRepository, window, cx| {
+        trigger_add_local_repository(&state_for_add_local, window, cx);
+        cx.stop_propagation();
+    });
+
+    let state_for_refresh_local = state.clone();
+    let element = element.when(availability.has_local_repositories, move |element| {
+        element.on_action(move |_: &RefreshLocalRepositories, window, cx| {
+            refresh_local_review_repositories(&state_for_refresh_local, window, cx);
+            cx.stop_propagation();
+        })
+    });
+
+    let state_for_increase_font = state.clone();
+    let element = element.on_action(move |_: &IncreaseCodeFontSize, window, cx| {
+        increase_code_font_size_preference(&state_for_increase_font, window, cx);
+        cx.stop_propagation();
+    });
+
+    let state_for_decrease_font = state.clone();
+    let element = element.on_action(move |_: &DecreaseCodeFontSize, window, cx| {
+        decrease_code_font_size_preference(&state_for_decrease_font, window, cx);
+        cx.stop_propagation();
+    });
+
+    let state_for_reset_font = state.clone();
+    let element = element.on_action(move |_: &ResetCodeFontSize, window, cx| {
+        reset_code_font_size_preference(&state_for_reset_font, window, cx);
+        cx.stop_propagation();
+    });
+
+    let state_for_code_theme = state.clone();
+    let element = element.on_action(move |_: &CycleCodeTheme, window, cx| {
+        cycle_diff_color_theme_preference(&state_for_code_theme, window, cx);
+        cx.stop_propagation();
+    });
+
+    let state_for_waypoint_search = state.clone();
+    let element = element.on_action(move |_: &ToggleWaypointSpotlight, _, cx| {
+        toggle_waypoint_spotlight(&state_for_waypoint_search, cx);
+        cx.stop_propagation();
+    });
+
+    let state_for_add_waypoint = state.clone();
+    let element = element.when(availability.has_selected_diff_line, move |element| {
+        element.on_action(move |_: &AddWaypoint, _, cx| {
+            trigger_add_waypoint_shortcut(&state_for_add_waypoint, cx);
+            cx.stop_propagation();
+        })
+    });
+
+    let state_for_open_source = state.clone();
+    let element = element.when(availability.has_selected_diff_line, move |element| {
+        element.on_action(move |_: &OpenSelectedLineInSource, window, cx| {
+            crate::temp_source_window::open_temp_source_window_for_selected_diff_line(
+                &state_for_open_source,
+                window,
+                cx,
+            );
+            cx.stop_propagation();
+        })
+    });
+
+    let state_for_open_files = state.clone();
+    let state_for_switch_code = state.clone();
+    let state_for_diff = state.clone();
+    let state_for_structural = state.clone();
+    let state_for_source = state.clone();
+    let state_for_ai_tour = state.clone();
+    let state_for_stack = state.clone();
+    let element = element.when(availability.has_active_detail, move |element| {
+        element
+            .on_action(move |_: &OpenReviewFiles, window, cx| {
+                enter_files_surface(&state_for_open_files, window, cx);
+                cx.stop_propagation();
             })
+            .on_action(move |_: &SwitchToCode, window, cx| {
+                switch_to_code_from_menu(&state_for_switch_code, window, cx);
+                cx.stop_propagation();
+            })
+            .on_action(move |_: &SwitchToDiff, window, cx| {
+                switch_code_lens_from_menu(
+                    &state_for_diff,
+                    ReviewCenterMode::SemanticDiff,
+                    window,
+                    cx,
+                );
+                cx.stop_propagation();
+            })
+            .on_action(move |_: &SwitchToStructuralDiff, window, cx| {
+                switch_code_lens_from_menu(
+                    &state_for_structural,
+                    ReviewCenterMode::StructuralDiff,
+                    window,
+                    cx,
+                );
+                cx.stop_propagation();
+            })
+            .on_action(move |_: &SwitchToSource, window, cx| {
+                switch_code_lens_from_menu(
+                    &state_for_source,
+                    ReviewCenterMode::SourceBrowser,
+                    window,
+                    cx,
+                );
+                cx.stop_propagation();
+            })
+            .on_action(move |_: &SwitchToAiTour, window, cx| {
+                switch_to_ai_tour_from_menu(&state_for_ai_tour, window, cx);
+                cx.stop_propagation();
+            })
+            .on_action(move |_: &SwitchToStack, window, cx| {
+                enter_stack_review_mode(&state_for_stack, window, cx);
+                cx.stop_propagation();
+            })
+    });
+
+    let state_for_briefing = state.clone();
+    let state_for_submit = state.clone();
+    let element = element.when(availability.has_active_remote_detail, move |element| {
+        element
+            .on_action(move |_: &ShowPullRequestBriefing, _, cx| {
+                show_pull_request_briefing_from_menu(&state_for_briefing, cx);
+                cx.stop_propagation();
+            })
+            .on_action(move |_: &SubmitReview, window, cx| {
+                submit_review_from_menu(&state_for_submit, window, cx);
+                cx.stop_propagation();
+            })
+    });
+
+    let state_for_next_comment = state.clone();
+    element.when(availability.has_next_review_comment, move |element| {
+        element.on_action(move |_: &JumpToNextReviewComment, window, cx| {
+            jump_to_next_review_comment_from_menu(&state_for_next_comment, window, cx);
+            cx.stop_propagation();
+        })
+    })
+}
+
+fn show_settings_from_menu(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
+    prepare_settings_view(state, window, cx);
+    state.update(cx, |state, cx| {
+        state.set_active_section(SectionId::Settings);
+        state.active_pr_key = None;
+        state.palette_open = false;
+        state.palette_selected_index = 0;
+        cx.notify();
+    });
+}
+
+fn show_pull_request_briefing_from_menu(state: &Entity<AppState>, cx: &mut App) {
+    state.update(cx, |state, cx| {
+        if state.active_detail().is_none() || state.active_is_local_review() {
+            return;
+        }
+        state.active_surface = PullRequestSurface::Overview;
+        state.pr_header_compact = false;
+        state.persist_active_review_session();
+        cx.notify();
+    });
+}
+
+fn switch_to_code_from_menu(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
+    state.update(cx, |state, cx| {
+        if state.active_detail().is_none() {
+            return;
+        }
+        state.active_surface = PullRequestSurface::Files;
+        state.pr_header_compact = false;
+        state.enter_code_review_mode();
+        state.persist_active_review_session();
+        cx.notify();
+    });
+    ensure_active_review_focus_loaded(state, window, cx);
+}
+
+fn switch_code_lens_from_menu(
+    state: &Entity<AppState>,
+    mode: ReviewCenterMode,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    state.update(cx, |state, cx| {
+        if state.active_detail().is_none() {
+            return;
+        }
+        state.active_surface = PullRequestSurface::Files;
+        state.pr_header_compact = false;
+        cx.notify();
+    });
+    switch_review_code_mode(state, mode, window, cx);
+}
+
+fn switch_to_ai_tour_from_menu(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
+    state.update(cx, |state, cx| {
+        if state.active_detail().is_none() {
+            return;
+        }
+        state.active_surface = PullRequestSurface::Files;
+        state.pr_header_compact = false;
+        state.set_review_center_mode(ReviewCenterMode::AiTour);
+        state.persist_active_review_session();
+        cx.notify();
+    });
+    refresh_active_tour(state, window, cx, true);
+}
+
+fn jump_to_next_review_comment_from_menu(
+    state: &Entity<AppState>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let location = state.read(cx).next_review_comment_location();
+    if let Some(location) = location {
+        state.update(cx, |state, cx| {
+            state.active_surface = PullRequestSurface::Files;
+            state.pr_header_compact = false;
+            state.set_review_file_collapsed(&location.file_path, false);
+            state.navigate_to_review_location(location, true);
+            state.persist_active_review_session();
+            cx.notify();
+        });
+        ensure_active_review_focus_loaded(state, window, cx);
+    }
+}
+
+fn submit_review_from_menu(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
+    let submit_inline_comment = {
+        let state = state.read(cx);
+        state.active_review_line_action.is_some()
+            && state.review_line_action_mode == ReviewLineActionMode::Comment
+    };
+
+    if submit_inline_comment {
+        trigger_submit_inline_comment(state, window, cx);
+    } else {
+        trigger_submit_review_from_review_mode(state, window, cx);
     }
 }
 

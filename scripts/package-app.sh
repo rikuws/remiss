@@ -12,6 +12,10 @@ export REMISS_SIGNING_MODE="${REMISS_SIGNING_MODE:-developer-id}"
 SIGN_IDENTITY="$(remiss_resolve_sign_identity)"
 export REMISS_CODESIGN_IDENTITY="$SIGN_IDENTITY"
 
+if [[ "${REMISS_ALLOW_DEVELOPMENT_PACKAGE:-0}" != "1" ]]; then
+  export REMISS_REQUIRE_SPARKLE=1
+fi
+
 "$ROOT/scripts/build-app.sh" >/dev/null
 
 if [[ "${REMISS_ALLOW_DEVELOPMENT_PACKAGE:-0}" != "1" ]]; then
@@ -19,6 +23,16 @@ if [[ "${REMISS_ALLOW_DEVELOPMENT_PACKAGE:-0}" != "1" ]]; then
   if ! grep -q "Authority=Developer ID Application" <<<"$SIGN_DETAILS"; then
     echo "Package builds intended for downloads must use a Developer ID Application certificate." >&2
     echo "Install that certificate, or set REMISS_ALLOW_DEVELOPMENT_PACKAGE=1 for a local-only package." >&2
+    exit 1
+  fi
+
+  if ! /usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$APP/Contents/Info.plist" >/dev/null 2>&1; then
+    echo "Release packages must include Sparkle's SUPublicEDKey." >&2
+    echo "Set REMISS_SPARKLE_PUBLIC_ED_KEY before running ./scripts/package-app.sh." >&2
+    exit 1
+  fi
+  if [[ ! -d "$APP/Contents/Frameworks/Sparkle.framework" ]]; then
+    echo "Release packages must bundle Sparkle.framework." >&2
     exit 1
   fi
 fi

@@ -34,6 +34,8 @@ REMISS_ALLOW_DEVELOPMENT_PACKAGE=1 REMISS_SIGNING_MODE=adhoc ./scripts/package-a
 
 `./scripts/package-app.sh` creates `dist/remiss-<version>-macos-<arch>.dmg` and `.zip`. Downloadable release packages require a `Developer ID Application` certificate unless `REMISS_ALLOW_DEVELOPMENT_PACKAGE=1` is set for local-only testing. Tagged GitHub releases (`v*`) use the `REMISS_*` signing and notarization secrets from `.github/workflows/release.yml`.
 
+Release builds also bundle Sparkle for in-app updates. Set `REMISS_SPARKLE_PUBLIC_ED_KEY` when building a distributable package, and set both `REMISS_SPARKLE_PUBLIC_ED_KEY` and `REMISS_SPARKLE_PRIVATE_KEY` as GitHub secrets for tagged releases. Generate/export those keys with Sparkle's `generate_keys` tool from `./scripts/ensure-sparkle.sh`.
+
 ## Data Model
 
 Remiss uses GitHub CLI for live pull request data and caches snapshots locally. Local code intelligence prefers a checked-out repository at the pull request head, and committed file reads are cached by exact Git blob object. Worktree reads are not cached.

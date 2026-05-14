@@ -24,7 +24,7 @@ use super::sections::{badge, open_pull_request, panel_state_text};
 use super::settings::{
     decrease_code_font_size_preference, increase_code_font_size_preference, prepare_settings_view,
     reset_code_font_size_preference, save_diff_color_theme_preference,
-    update_code_font_size_preference,
+    trigger_software_update_check, update_code_font_size_preference,
 };
 use super::workspace_sync::trigger_sync_workspace;
 
@@ -567,6 +567,7 @@ enum CommandAction {
     EnterAiTour,
     EnterStack,
     SyncWorkspace,
+    CheckForUpdates,
     IncreaseCodeFontSize,
     DecreaseCodeFontSize,
     ResetCodeFontSize,
@@ -593,6 +594,11 @@ fn build_command_items(state: &AppState) -> Vec<CommandItem> {
     push_review_navigation_items(&mut items, state);
 
     push_command(&mut items, "Sync workspace", CommandAction::SyncWorkspace);
+    items.push(CommandItem::normal_with_keywords(
+        "Check for Updates",
+        CommandAction::CheckForUpdates,
+        &["software", "sparkle", "release", "upgrade"],
+    ));
 
     push_command(
         &mut items,
@@ -949,6 +955,10 @@ fn apply_command_action(
         }
         CommandAction::SyncWorkspace => {
             trigger_sync_workspace(state, window, cx);
+            close_palette(state, cx);
+        }
+        CommandAction::CheckForUpdates => {
+            trigger_software_update_check(state, cx);
             close_palette(state, cx);
         }
         CommandAction::IncreaseCodeFontSize => {

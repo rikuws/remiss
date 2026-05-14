@@ -3,7 +3,6 @@ use std::collections::BTreeSet;
 use gpui::prelude::*;
 use gpui::*;
 
-use crate::app_storage;
 use crate::branding::APP_NAME;
 use crate::code_tour::{self, CodeTourProvider, CodeTourProviderStatus};
 use crate::managed_lsp::{
@@ -12,6 +11,7 @@ use crate::managed_lsp::{
 use crate::selectable_text::SelectableText;
 use crate::state::{AppState, ManagedLspSettingsState};
 use crate::theme::*;
+use crate::{app_storage, platform_macos};
 
 use super::pr_detail::surface_tab;
 use super::sections::{
@@ -56,6 +56,24 @@ pub fn prepare_settings_view(state: &Entity<AppState>, window: &mut Window, cx: 
     scroll_handle.set_offset(point(px(0.0), px(0.0)));
     window.on_next_frame(move |_, _| {
         scroll_handle.set_offset(point(px(0.0), px(0.0)));
+    });
+}
+
+pub fn trigger_software_update_check(state: &Entity<AppState>, cx: &mut App) {
+    let result = platform_macos::updates::check_for_updates();
+    state.update(cx, |state, cx| {
+        match result {
+            Ok(()) => {
+                state.software_update_message =
+                    Some("Opened the Remiss update checker.".to_string());
+                state.software_update_error = None;
+            }
+            Err(error) => {
+                state.software_update_message = None;
+                state.software_update_error = Some(error);
+            }
+        }
+        cx.notify();
     });
 }
 
@@ -501,6 +519,7 @@ pub fn render_settings_view(state: &Entity<AppState>, cx: &App) -> impl IntoElem
                     .flex_col()
                     .gap(px(24.0))
                     .child(render_theme_settings_panel(state, &s))
+                    .child(render_software_update_panel(state, &s))
                     .child(render_code_tour_settings_panel(state, &s))
                     .child(
                         panel().child(
@@ -606,6 +625,56 @@ pub fn render_settings_view(state: &Entity<AppState>, cx: &App) -> impl IntoElem
                     ),
             ),
         )
+}
+
+fn render_software_update_panel(state: &Entity<AppState>, s: &AppState) -> impl IntoElement {
+    let status = platform_macos::updates::updater_status();
+    let message = s.software_update_message.clone();
+    let error = s.software_update_error.clone();
+
+    panel().child(
+        div()
+            .p(px(28.0))
+            .px(px(32.0))
+            .flex()
+            .flex_col()
+            .gap(px(18.0))
+            .child(eyebrow("Settings / Updates"))
+            .child(
+                div()
+                    .text_size(px(24.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(fg_emphasis())
+                    .child("Software updates"),
+            )
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(fg_muted())
+                    .max_w(px(760.0))
+                    .child(status.detail),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .flex_wrap()
+                    .child(badge(if status.available {
+                        "updater ready"
+                    } else {
+                        "updater unavailable"
+                    }))
+                    .child(ghost_button("Check for Updates", {
+                        let state = state.clone();
+                        move |_, _, cx| {
+                            trigger_software_update_check(&state, cx);
+                        }
+                    })),
+            )
+            .when_some(message, |el, message| el.child(success_text(&message)))
+            .when_some(error, |el, error| el.child(error_text(&error))),
+    )
 }
 
 fn render_theme_settings_panel(state: &Entity<AppState>, s: &AppState) -> impl IntoElement {

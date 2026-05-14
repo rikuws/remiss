@@ -22,6 +22,8 @@ jobs:
       REMISS_APPLE_ID: ${{ secrets.REMISS_APPLE_ID }}
       REMISS_APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.REMISS_APPLE_APP_SPECIFIC_PASSWORD }}
       REMISS_APPLE_TEAM_ID: ${{ secrets.REMISS_APPLE_TEAM_ID }}
+      REMISS_SPARKLE_PUBLIC_ED_KEY: ${{ secrets.REMISS_SPARKLE_PUBLIC_ED_KEY }}
+      REMISS_SPARKLE_PRIVATE_KEY: ${{ secrets.REMISS_SPARKLE_PRIVATE_KEY }}
       NOTARYTOOL_PROFILE: remiss-notary
 
     steps:
@@ -61,7 +63,9 @@ jobs:
             REMISS_DEVELOPER_ID_CERTIFICATE_PASSWORD \
             REMISS_APPLE_ID \
             REMISS_APPLE_APP_SPECIFIC_PASSWORD \
-            REMISS_APPLE_TEAM_ID; do
+            REMISS_APPLE_TEAM_ID \
+            REMISS_SPARKLE_PUBLIC_ED_KEY \
+            REMISS_SPARKLE_PRIVATE_KEY; do
             if [[ -z "${!name:-}" ]]; then
               missing+=("$name")
             fi
@@ -143,6 +147,26 @@ jobs:
 
           cp "$latest_dmg" release-assets/remiss-latest-macos.dmg
           cp "$latest_zip" release-assets/remiss-latest-macos.zip
+
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            sparkle_root="$(./scripts/ensure-sparkle.sh)"
+            appcast_source="$PWD/.build/appcast"
+            rm -rf "$appcast_source"
+            mkdir -p "$appcast_source"
+            cp "$latest_zip" "$appcast_source/$(basename "$latest_zip")"
+
+            printf '%s' "$REMISS_SPARKLE_PRIVATE_KEY" | "$sparkle_root/bin/generate_appcast" \
+              --ed-key-file - \
+              --download-url-prefix "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/" \
+              --link "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}" \
+              -o "$appcast_source/appcast.xml" \
+              "$appcast_source"
+
+            cp "$appcast_source/appcast.xml" release-assets/appcast.xml
+            if compgen -G "$appcast_source/*.delta" > /dev/null; then
+              cp "$appcast_source"/*.delta release-assets/
+            fi
+          fi
 
           shasum -a 256 release-assets/* > release-assets/SHA256SUMS.txt
 

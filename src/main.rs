@@ -34,6 +34,7 @@
 mod agents;
 mod app_assets;
 mod app_http;
+mod app_menu;
 mod app_storage;
 mod branding;
 mod cache;
@@ -98,12 +99,11 @@ use views::{
     move_palette_selection, move_waypoint_spotlight_selection, reset_code_font_size_preference,
     toggle_palette, toggle_waypoint_spotlight, trigger_add_waypoint_shortcut,
     trigger_submit_inline_comment, trigger_submit_review, trigger_submit_review_from_review_mode,
-    RootView, APP_CHROME_HEIGHT,
+    RootView,
 };
 
 const MACOS_TRAFFIC_LIGHT_LEFT: f32 = 18.0;
-const MACOS_TRAFFIC_LIGHT_SIZE: f32 = 14.0;
-const MACOS_TRAFFIC_LIGHT_TOP: f32 = (APP_CHROME_HEIGHT - MACOS_TRAFFIC_LIGHT_SIZE) / 2.0;
+const MACOS_TRAFFIC_LIGHT_TOP: f32 = 7.0;
 
 fn main() {
     cli_binary::repair_process_path_for_cli_tools();
@@ -129,6 +129,7 @@ fn start_app(cx: &mut App) -> Result<(), String> {
         .map_err(|error| format!("Failed to initialize cache: {error}"))?;
     let initial_window_size = window_settings::load_window_size(&cache);
     let app_state = cx.new(|_| AppState::new(cache));
+    app_menu::install(cx);
     install_temp_source_window_key_bindings(cx);
     let initial_window_appearance = cx.window_appearance();
     app_state.update(cx, |state, _| {
@@ -152,6 +153,10 @@ fn start_app(cx: &mut App) -> Result<(), String> {
         |window, cx| cx.new(|cx| RootView::new(app_state.clone(), window, cx)),
     )
     .map_err(|error| format!("Failed to open app window: {error:?}"))?;
+
+    if let Err(error) = platform_macos::updates::start_updater() {
+        eprintln!("{APP_NAME} updater disabled: {error}");
+    }
 
     let app_state_for_keys = app_state.clone();
     cx.observe_keystrokes(move |event, window, cx| {
