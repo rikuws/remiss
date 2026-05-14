@@ -102,9 +102,6 @@ use views::{
     RootView,
 };
 
-const MACOS_TRAFFIC_LIGHT_LEFT: f32 = 18.0;
-const MACOS_TRAFFIC_LIGHT_TOP: f32 = 7.0;
-
 fn main() {
     cli_binary::repair_process_path_for_cli_tools();
 
@@ -143,10 +140,7 @@ fn start_app(cx: &mut App) -> Result<(), String> {
             titlebar: Some(TitlebarOptions {
                 title: Some(APP_NAME.into()),
                 appears_transparent: true,
-                traffic_light_position: Some(point(
-                    px(MACOS_TRAFFIC_LIGHT_LEFT),
-                    px(MACOS_TRAFFIC_LIGHT_TOP),
-                )),
+                traffic_light_position: None,
             }),
             ..Default::default()
         },

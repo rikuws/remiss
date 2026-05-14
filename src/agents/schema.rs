@@ -128,22 +128,43 @@ pub const REVIEW_BRIEF_OUTPUT_SCHEMA_JSON: &str = r#"{
       "type": "string",
       "enum": ["low", "medium", "high"]
     },
-    "likelyIntent": { "type": "string" },
+    "briefParagraph": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 280
+    },
+    "likelyIntent": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    },
     "changedSummary": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100
+      },
       "minItems": 1,
-      "maxItems": 5
+      "maxItems": 2
     },
     "risksQuestions": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100
+      },
       "minItems": 1,
-      "maxItems": 5
+      "maxItems": 1
     },
     "warnings": {
       "type": "array",
-      "items": { "type": "string" }
+      "items": {
+        "type": "string",
+        "maxLength": 100
+      },
+      "maxItems": 1
     },
     "relatedFilePaths": {
       "type": "array",
@@ -152,6 +173,7 @@ pub const REVIEW_BRIEF_OUTPUT_SCHEMA_JSON: &str = r#"{
   },
   "required": [
     "confidence",
+    "briefParagraph",
     "likelyIntent",
     "changedSummary",
     "risksQuestions",
@@ -209,6 +231,35 @@ mod tests {
     fn review_brief_schema_parses() {
         let value = &*REVIEW_BRIEF_OUTPUT_SCHEMA_VALUE;
         assert_eq!(value["type"], "object");
+        assert!(value["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value.as_str() == Some("briefParagraph")));
+        assert_eq!(
+            value["properties"]["briefParagraph"]["maxLength"].as_u64(),
+            Some(280)
+        );
+        assert_eq!(
+            value["properties"]["likelyIntent"]["maxLength"].as_u64(),
+            Some(120)
+        );
+        assert_eq!(
+            value["properties"]["changedSummary"]["maxItems"].as_u64(),
+            Some(2)
+        );
+        assert_eq!(
+            value["properties"]["changedSummary"]["items"]["maxLength"].as_u64(),
+            Some(100)
+        );
+        assert_eq!(
+            value["properties"]["risksQuestions"]["maxItems"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(
+            value["properties"]["warnings"]["maxItems"].as_u64(),
+            Some(1)
+        );
         assert!(value["required"]
             .as_array()
             .unwrap()

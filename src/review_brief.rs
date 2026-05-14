@@ -14,7 +14,16 @@ use crate::{
     github::{PullRequestDetail, PullRequestFile, PullRequestReview, PullRequestReviewThread},
 };
 
-const REVIEW_BRIEF_CACHE_KEY_PREFIX: &str = "review-brief-v1";
+const REVIEW_BRIEF_CACHE_KEY_PREFIX: &str = "review-brief-v2";
+const REVIEW_BRIEF_BUDGET_ERROR_PREFIX: &str = "Review brief compact budget exceeded";
+const REVIEW_BRIEF_PARAGRAPH_MAX_CHARS: usize = 280;
+const REVIEW_BRIEF_RETRY_PARAGRAPH_TARGET_CHARS: usize = 220;
+const REVIEW_BRIEF_INTENT_MAX_CHARS: usize = 120;
+const REVIEW_BRIEF_ITEM_MAX_CHARS: usize = 100;
+const REVIEW_BRIEF_CHANGED_MIN_ITEMS: usize = 1;
+const REVIEW_BRIEF_CHANGED_MAX_ITEMS: usize = 2;
+const REVIEW_BRIEF_RISKS_REQUIRED_ITEMS: usize = 1;
+const REVIEW_BRIEF_WARNINGS_MAX_ITEMS: usize = 1;
 const MAX_BODY_CHARS: usize = 2_500;
 const MAX_RAW_DIFF_CHARS: usize = 48_000;
 const MAX_FILES: usize = 80;
@@ -53,6 +62,7 @@ pub struct ReviewBrief {
     pub generated_at_ms: i64,
     pub code_version_key: String,
     pub confidence: ReviewBriefConfidence,
+    pub brief_paragraph: String,
     pub likely_intent: String,
     pub changed_summary: Vec<String>,
     pub risks_questions: Vec<String>,
@@ -107,6 +117,7 @@ pub struct GenerateReviewBriefInput {
 #[serde(rename_all = "camelCase")]
 struct ReviewBriefResponse {
     confidence: ReviewBriefConfidence,
+    brief_paragraph: String,
     likely_intent: String,
     changed_summary: Vec<String>,
     risks_questions: Vec<String>,
@@ -146,11 +157,23 @@ pub fn generate_review_brief(
         return Err("Review brief generation needs pull request files or a raw diff.".to_string());
     }
 
-    let prompt = build_review_brief_prompt(&input);
-    let response = agents::run_json_prompt(input.provider, &input.working_directory, prompt)?;
-    let parsed = parse_tolerant::<ReviewBriefResponse>(&response.text)
-        .map_err(|error| format!("Failed to parse review brief JSON: {}", error.message))?;
-    let brief = merge_review_brief(parsed, &input, response.model)?;
+    let (parsed, model) = request_review_brief_response(&input, false)?;
+    let brief = match merge_review_brief(parsed, &input, model) {
+        Ok(brief) => brief,
+        Err(error) if is_review_brief_budget_error(&error) => {
+            let (retry_parsed, retry_model) = request_review_brief_response(&input, true)?;
+            merge_review_brief(retry_parsed, &input, retry_model).map_err(|retry_error| {
+                if is_review_brief_budget_error(&retry_error) {
+                    format!(
+                        "Review brief response still exceeded compact limits after retry. {retry_error}"
+                    )
+                } else {
+                    retry_error
+                }
+            })?
+        }
+        Err(error) => return Err(error),
+    };
 
     let cache_key = review_brief_cache_key_from_parts(
         &input.repository,
@@ -161,6 +184,18 @@ pub fn generate_review_brief(
     cache.put(&cache_key, &brief, now_ms())?;
 
     Ok(brief)
+}
+
+fn request_review_brief_response(
+    input: &GenerateReviewBriefInput,
+    compact_retry: bool,
+) -> Result<(ReviewBriefResponse, Option<String>), String> {
+    let prompt = build_review_brief_prompt_for_attempt(input, compact_retry);
+    let response = agents::run_json_prompt(input.provider, &input.working_directory, prompt)?;
+    let parsed = parse_tolerant::<ReviewBriefResponse>(&response.text)
+        .map_err(|error| format!("Failed to parse review brief JSON: {}", error.message))?;
+
+    Ok((parsed, response.model))
 }
 
 pub fn build_review_brief_generation_input(
@@ -245,6 +280,17 @@ pub fn review_brief_cache_key_from_parts(
 }
 
 pub fn build_review_brief_prompt(input: &GenerateReviewBriefInput) -> String {
+    build_review_brief_prompt_for_attempt(input, false)
+}
+
+fn build_retry_review_brief_prompt(input: &GenerateReviewBriefInput) -> String {
+    build_review_brief_prompt_for_attempt(input, true)
+}
+
+fn build_review_brief_prompt_for_attempt(
+    input: &GenerateReviewBriefInput,
+    compact_retry: bool,
+) -> String {
     let schema = serde_json::to_string_pretty(
         &serde_json::from_str::<Value>(crate::agents::schema::REVIEW_BRIEF_OUTPUT_SCHEMA_JSON)
             .expect("review brief schema must parse"),
@@ -253,27 +299,46 @@ pub fn build_review_brief_prompt(input: &GenerateReviewBriefInput) -> String {
     let context =
         serde_json::to_string_pretty(&build_prompt_context(input)).expect("context must serialize");
 
-    [
-        "You are generating a concise Review Brief for a GitHub pull request before the reviewer opens the diff.",
-        "Act like a senior reviewer orienting another reviewer who already knows the codebase.",
-        "Return strict JSON only. No markdown fences, no prose outside JSON.",
-        "Stay grounded in the provided PR metadata, author body when present, raw diff, parsed diff, files, review threads, reviews, and local checkout.",
-        "Use the local checkout only for quick read-only verification of changed files or direct supporting context.",
-        "Do not edit files, run write commands, create branches, or write back to GitHub.",
-        "If the author body is empty or unhelpful, infer intent neutrally from the title, diff, files, and discussion.",
-        "Phrase inferred intent as Likely intent inside the brief.",
-        "Do not call out an empty, missing, or weak author description as a warning.",
-        "Keep the brief short enough for a compact native desktop overview panel.",
-        "Use changedSummary for concrete code changes, not repository background.",
-        "Use risksQuestions for review risks, checks, and unresolved questions.",
-        "",
-        "JSON schema:",
-        &schema,
-        "",
-        "Pull-request context:",
-        &context,
-    ]
-    .join("\n")
+    let mut lines = vec![
+        "You are generating a compact Review Brief for a GitHub pull request before the reviewer opens the diff.".to_string(),
+        "Act like a senior reviewer orienting another reviewer who already knows the codebase.".to_string(),
+        "Return strict JSON only. No markdown fences, no prose outside JSON.".to_string(),
+        "Stay grounded in the provided PR metadata, author body when present, raw diff, parsed diff, files, review threads, reviews, and local checkout.".to_string(),
+        "Use the local checkout only for quick read-only verification of changed files or direct supporting context.".to_string(),
+        "Do not edit files, run write commands, create branches, or write back to GitHub.".to_string(),
+        "If the author body is empty or unhelpful, infer intent neutrally from the title, diff, files, and discussion.".to_string(),
+        "Use likelyIntent for the neutral inferred intent; do not prefix any field with 'Likely intent:'.".to_string(),
+        "Do not call out an empty, missing, or weak author description as a warning.".to_string(),
+        format!(
+            "briefParagraph must be one natural-prose paragraph under {REVIEW_BRIEF_PARAGRAPH_MAX_CHARS} characters: no bullets, no markdown, no newlines, and no section labels like Likely intent, Changes, Watch, or Risk."
+        ),
+        format!(
+            "Use changedSummary for {REVIEW_BRIEF_CHANGED_MIN_ITEMS}-{REVIEW_BRIEF_CHANGED_MAX_ITEMS} concrete code-change points, each under {REVIEW_BRIEF_ITEM_MAX_CHARS} characters."
+        ),
+        format!(
+            "Use risksQuestions for exactly {REVIEW_BRIEF_RISKS_REQUIRED_ITEMS} concrete review risk, check, or unresolved question under {REVIEW_BRIEF_ITEM_MAX_CHARS} characters."
+        ),
+        format!(
+            "Keep likelyIntent under {REVIEW_BRIEF_INTENT_MAX_CHARS} characters and warnings to at most {REVIEW_BRIEF_WARNINGS_MAX_ITEMS} hidden item."
+        ),
+    ];
+
+    if compact_retry {
+        lines.push(format!(
+            "Your previous response violated the compact output limits. Rewrite more aggressively: keep briefParagraph under {REVIEW_BRIEF_RETRY_PARAGRAPH_TARGET_CHARS} characters, keep changedSummary to one item unless the second is essential, and use terse natural prose."
+        ));
+    }
+
+    lines.extend([
+        "".to_string(),
+        "JSON schema:".to_string(),
+        schema,
+        "".to_string(),
+        "Pull-request context:".to_string(),
+        context,
+    ]);
+
+    lines.join("\n")
 }
 
 fn build_prompt_context(input: &GenerateReviewBriefInput) -> Value {
@@ -403,13 +468,38 @@ fn merge_review_brief(
     input: &GenerateReviewBriefInput,
     model: Option<String>,
 ) -> Result<ReviewBrief, String> {
-    let likely_intent = normalized_required_text(response.likely_intent, "likelyIntent")?;
-    let changed_summary = normalize_text_items(response.changed_summary, "changedSummary")?;
-    let risks_questions = normalize_text_items(response.risks_questions, "risksQuestions")?;
-    let warnings = normalize_optional_text_items(response.warnings)
-        .into_iter()
-        .filter(|warning| !is_missing_author_body_warning(warning))
-        .collect();
+    let brief_paragraph = normalize_brief_paragraph(response.brief_paragraph)?;
+    let likely_intent = normalized_required_limited_text(
+        response.likely_intent,
+        "likelyIntent",
+        REVIEW_BRIEF_INTENT_MAX_CHARS,
+    )?;
+    let changed_summary = normalize_text_items(
+        response.changed_summary,
+        "changedSummary",
+        REVIEW_BRIEF_CHANGED_MIN_ITEMS,
+        REVIEW_BRIEF_CHANGED_MAX_ITEMS,
+        REVIEW_BRIEF_ITEM_MAX_CHARS,
+    )?;
+    let risks_questions = normalize_text_items(
+        response.risks_questions,
+        "risksQuestions",
+        REVIEW_BRIEF_RISKS_REQUIRED_ITEMS,
+        REVIEW_BRIEF_RISKS_REQUIRED_ITEMS,
+        REVIEW_BRIEF_ITEM_MAX_CHARS,
+    )?;
+    let warnings =
+        normalize_optional_text_items(response.warnings, "warnings", REVIEW_BRIEF_ITEM_MAX_CHARS)?
+            .into_iter()
+            .filter(|warning| !is_missing_author_body_warning(warning))
+            .collect::<Vec<_>>();
+    if warnings.len() > REVIEW_BRIEF_WARNINGS_MAX_ITEMS {
+        return Err(compact_budget_error(format!(
+            "warnings returned {} items, max {}.",
+            warnings.len(),
+            REVIEW_BRIEF_WARNINGS_MAX_ITEMS
+        )));
+    }
     let related_file_paths = response
         .related_file_paths
         .into_iter()
@@ -423,6 +513,7 @@ fn merge_review_brief(
         generated_at_ms: now_ms(),
         code_version_key: input.code_version_key.clone(),
         confidence: response.confidence,
+        brief_paragraph,
         likely_intent,
         changed_summary,
         risks_questions,
@@ -441,22 +532,117 @@ fn normalized_required_text(value: String, field: &str) -> Result<String, String
     }
 }
 
-fn normalize_text_items(values: Vec<String>, field: &str) -> Result<Vec<String>, String> {
-    let normalized = normalize_optional_text_items(values);
-    if normalized.is_empty() {
+fn normalize_brief_paragraph(value: String) -> Result<String, String> {
+    let value = normalized_required_limited_text(
+        value,
+        "briefParagraph",
+        REVIEW_BRIEF_PARAGRAPH_MAX_CHARS,
+    )?;
+    let trimmed = value.trim_start();
+    let lower = value.to_ascii_lowercase();
+
+    if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
+        return Err(compact_budget_error(
+            "briefParagraph must be natural prose, not a bullet.".to_string(),
+        ));
+    }
+
+    if value.contains('`') || value.contains("**") {
+        return Err(compact_budget_error(
+            "briefParagraph must not use markdown formatting.".to_string(),
+        ));
+    }
+
+    if lower.contains("likely intent:")
+        || lower.contains("changes:")
+        || lower.contains("watch:")
+        || lower.contains("risk:")
+        || lower.contains("risks/questions")
+    {
+        return Err(compact_budget_error(
+            "briefParagraph must not include section labels.".to_string(),
+        ));
+    }
+
+    Ok(value)
+}
+
+fn normalized_required_limited_text(
+    value: String,
+    field: &str,
+    max_chars: usize,
+) -> Result<String, String> {
+    let value = normalized_required_text(value, field)?;
+    validate_compact_text(&value, field, max_chars)?;
+    Ok(value)
+}
+
+fn validate_compact_text(value: &str, field: &str, max_chars: usize) -> Result<(), String> {
+    let char_count = value.chars().count();
+    if char_count > max_chars {
+        return Err(compact_budget_error(format!(
+            "{field} has {char_count} characters, max {max_chars}."
+        )));
+    }
+
+    if value.contains('\n') || value.contains('\r') {
+        return Err(compact_budget_error(format!(
+            "{field} must be a single line."
+        )));
+    }
+
+    Ok(())
+}
+
+fn normalize_text_items(
+    values: Vec<String>,
+    field: &str,
+    min_items: usize,
+    max_items: usize,
+    max_chars: usize,
+) -> Result<Vec<String>, String> {
+    let normalized = normalize_optional_text_items(values, field, max_chars)?;
+    if normalized.len() < min_items {
         Err(format!("Review brief response omitted {field}."))
+    } else if normalized.len() > max_items {
+        Err(compact_budget_error(format!(
+            "{field} returned {} items, max {max_items}.",
+            normalized.len()
+        )))
     } else {
         Ok(normalized)
     }
 }
 
-fn normalize_optional_text_items(values: Vec<String>) -> Vec<String> {
+fn normalize_optional_text_items(
+    values: Vec<String>,
+    field: &str,
+    max_chars: usize,
+) -> Result<Vec<String>, String> {
     values
         .into_iter()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .take(8)
+        .enumerate()
+        .filter_map(|(index, value)| {
+            let value = value.trim().to_string();
+            if value.is_empty() {
+                None
+            } else {
+                Some((index, value))
+            }
+        })
+        .map(|(index, value)| {
+            validate_compact_text(&value, &format!("{field}[{index}]"), max_chars)?;
+            Ok(value)
+        })
         .collect()
+}
+
+fn compact_budget_error(message: String) -> String {
+    format!("{REVIEW_BRIEF_BUDGET_ERROR_PREFIX}: {message}")
+}
+
+fn is_review_brief_budget_error(error: &str) -> bool {
+    error.starts_with(REVIEW_BRIEF_BUDGET_ERROR_PREFIX)
 }
 
 fn is_missing_author_body_warning(value: &str) -> bool {
@@ -606,6 +792,9 @@ mod tests {
             review_brief_cache_key(&first, CodeTourProvider::Codex),
             review_brief_cache_key(&changed, CodeTourProvider::Codex)
         );
+        assert!(
+            review_brief_cache_key(&first, CodeTourProvider::Codex).starts_with("review-brief-v2:")
+        );
     }
 
     #[test]
@@ -650,14 +839,36 @@ mod tests {
         let prompt = build_review_brief_prompt(&input);
 
         assert!(prompt.contains("JSON schema:"));
+        assert!(prompt.contains("briefParagraph"));
+        assert!(prompt.contains("one natural-prose paragraph"));
+        assert!(prompt.contains("no bullets, no markdown, no newlines"));
+        assert!(prompt.contains("no section labels"));
         assert!(prompt.contains("\"workingDirectory\": \"/tmp/acme-api\""));
         assert!(prompt.contains("\"rawDiff\""));
         assert!(prompt.contains("\"parsedDiff\""));
         assert!(prompt.contains("src/session.rs"));
-        assert!(prompt.contains("Phrase inferred intent as Likely intent"));
+        assert!(prompt.contains("Use likelyIntent for the neutral inferred intent"));
         assert!(prompt.contains(
             "Do not call out an empty, missing, or weak author description as a warning"
         ));
+    }
+
+    #[test]
+    fn review_brief_retry_prompt_is_stricter() {
+        let input = build_review_brief_generation_input(
+            &detail(
+                "2026-04-17T10:00:00Z",
+                Some("head123"),
+                "diff --git a/a b/a\n+one\n",
+            ),
+            CodeTourProvider::Copilot,
+            "/tmp/acme-api",
+        );
+        let prompt = build_retry_review_brief_prompt(&input);
+
+        assert!(prompt.contains("previous response violated the compact output limits"));
+        assert!(prompt.contains("under 220 characters"));
+        assert!(prompt.contains("keep changedSummary to one item unless the second is essential"));
     }
 
     #[test]
@@ -674,7 +885,8 @@ mod tests {
         let brief = merge_review_brief(
             ReviewBriefResponse {
                 confidence: ReviewBriefConfidence::High,
-                likely_intent: "Likely intent: tighten session checks.".to_string(),
+                brief_paragraph: "This tightens session checks by requiring a token before allowing access; verify existing sessions still authenticate cleanly.".to_string(),
+                likely_intent: "Tighten session checks.".to_string(),
                 changed_summary: vec!["Adds a token requirement.".to_string()],
                 risks_questions: vec!["Verify existing sessions still work.".to_string()],
                 warnings: vec![
@@ -689,5 +901,69 @@ mod tests {
         .expect("brief should merge");
 
         assert_eq!(brief.warnings, vec!["Generated file is large."]);
+    }
+
+    #[test]
+    fn review_brief_merge_rejects_overlong_compact_fields() {
+        let input = build_review_brief_generation_input(
+            &detail(
+                "2026-04-17T10:00:00Z",
+                Some("head123"),
+                "diff --git a/a b/a\n+one\n",
+            ),
+            CodeTourProvider::Codex,
+            "/tmp/acme-api",
+        );
+        let error = merge_review_brief(
+            ReviewBriefResponse {
+                confidence: ReviewBriefConfidence::High,
+                brief_paragraph: "a".repeat(REVIEW_BRIEF_PARAGRAPH_MAX_CHARS + 1),
+                likely_intent: "Tighten session checks.".to_string(),
+                changed_summary: vec!["Adds a token requirement.".to_string()],
+                risks_questions: vec!["Verify existing sessions still work.".to_string()],
+                warnings: Vec::new(),
+                related_file_paths: Vec::new(),
+            },
+            &input,
+            Some("model".to_string()),
+        )
+        .expect_err("overlong paragraph should be rejected");
+
+        assert!(is_review_brief_budget_error(&error));
+        assert!(error.contains("briefParagraph"));
+    }
+
+    #[test]
+    fn review_brief_merge_rejects_too_many_summary_items() {
+        let input = build_review_brief_generation_input(
+            &detail(
+                "2026-04-17T10:00:00Z",
+                Some("head123"),
+                "diff --git a/a b/a\n+one\n",
+            ),
+            CodeTourProvider::Codex,
+            "/tmp/acme-api",
+        );
+        let error = merge_review_brief(
+            ReviewBriefResponse {
+                confidence: ReviewBriefConfidence::High,
+                brief_paragraph: "This tightens session checks by requiring a token before allowing access; verify existing sessions still authenticate cleanly.".to_string(),
+                likely_intent: "Tighten session checks.".to_string(),
+                changed_summary: vec![
+                    "Adds a token requirement.".to_string(),
+                    "Updates the session guard.".to_string(),
+                    "Refreshes related checks.".to_string(),
+                ],
+                risks_questions: vec!["Verify existing sessions still work.".to_string()],
+                warnings: Vec::new(),
+                related_file_paths: Vec::new(),
+            },
+            &input,
+            Some("model".to_string()),
+        )
+        .expect_err("too many summary items should be rejected");
+
+        assert!(is_review_brief_budget_error(&error));
+        assert!(error.contains("changedSummary"));
     }
 }

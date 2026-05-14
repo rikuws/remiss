@@ -892,7 +892,7 @@ fn render_review_brief_panel(
                 .when(local_repository_loading, |el| {
                     el.child(badge("Preparing checkout"))
                 })
-                .when(!busy && !provider_needs_setup, |el| {
+                .when(!busy && !provider_needs_setup && has_brief, |el| {
                     let trigger_generate =
                         move |_: &MouseDownEvent, window: &mut Window, cx: &mut App| {
                             review_intelligence::trigger_review_intelligence(
@@ -904,11 +904,7 @@ fn render_review_brief_panel(
                             );
                         };
 
-                    if has_brief {
-                        el.child(review_brief_icon_button(trigger_generate))
-                    } else {
-                        el.child(ghost_button("Generate", trigger_generate))
-                    }
+                    el.child(review_brief_icon_button(trigger_generate))
                 }),
         );
 
@@ -998,99 +994,18 @@ impl Render for ReviewBriefTooltip {
 }
 
 fn render_review_brief_document(brief: &ReviewBrief) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(14.0))
-        .child(render_review_brief_text_block(
-            "Likely intent",
-            std::slice::from_ref(&brief.likely_intent),
-            true,
-        ))
-        .child(render_review_brief_text_block(
-            "What changed",
-            &brief.changed_summary,
-            false,
-        ))
-        .child(render_review_brief_text_block(
-            "Review risks/questions",
-            &brief.risks_questions,
-            false,
-        ))
-        .when(!brief.warnings.is_empty(), |el| {
-            el.child(render_review_brief_text_block(
-                "Notes",
-                &brief.warnings,
-                false,
-            ))
-        })
-        .when(!brief.related_file_paths.is_empty(), |el| {
-            el.child(
-                div().flex().gap(px(6.0)).flex_wrap().children(
-                    brief
-                        .related_file_paths
-                        .iter()
-                        .take(8)
-                        .map(|path| badge(path)),
-                ),
-            )
-        })
-}
-
-fn render_review_brief_text_block(
-    title: &str,
-    items: &[String],
-    emphasized: bool,
-) -> impl IntoElement {
-    div()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .gap(px(7.0))
-        .child(
-            div()
-                .text_size(px(12.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(fg_muted())
-                .child(title.to_string()),
-        )
-        .children(items.iter().map(move |item| {
-            div()
-                .flex()
-                .items_start()
-                .gap(px(10.0))
-                .w_full()
-                .min_w_0()
-                .child(
-                    div()
-                        .mt(px(9.0))
-                        .w(px(3.0))
-                        .h(px(3.0))
-                        .rounded(px(999.0))
-                        .bg(if emphasized { accent() } else { fg_muted() }),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .w_full()
-                        .min_w_0()
-                        .whitespace_normal()
-                        .max_w(px(760.0))
-                        .text_size(px(14.0))
-                        .line_height(px(22.0))
-                        .font_weight(if emphasized {
-                            FontWeight::MEDIUM
-                        } else {
-                            FontWeight::NORMAL
-                        })
-                        .text_color(if emphasized {
-                            fg_emphasis()
-                        } else {
-                            fg_default()
-                        })
-                        .child(item.clone()),
-                )
-        }))
+    div().w_full().min_w_0().flex().child(
+        div()
+            .w_full()
+            .min_w_0()
+            .max_w(px(760.0))
+            .whitespace_normal()
+            .text_size(px(13.0))
+            .line_height(px(20.0))
+            .font_weight(FontWeight::NORMAL)
+            .text_color(fg_default())
+            .child(brief.brief_paragraph.clone()),
+    )
 }
 
 fn render_review_brief_progress(
