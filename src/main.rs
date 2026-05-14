@@ -98,8 +98,9 @@ use views::{
     execute_waypoint_spotlight_selection, increase_code_font_size_preference,
     move_palette_selection, move_waypoint_spotlight_selection, reset_code_font_size_preference,
     toggle_palette, toggle_waypoint_spotlight, trigger_add_waypoint_shortcut,
-    trigger_submit_inline_comment, trigger_submit_review, trigger_submit_review_from_review_mode,
-    RootView,
+    trigger_software_update_check, trigger_submit_inline_comment, trigger_submit_review,
+    trigger_submit_review_from_review_mode, RootView, APP_TRAFFIC_LIGHT_LEFT,
+    APP_TRAFFIC_LIGHT_TOP,
 };
 
 fn main() {
@@ -127,6 +128,10 @@ fn start_app(cx: &mut App) -> Result<(), String> {
     let initial_window_size = window_settings::load_window_size(&cache);
     let app_state = cx.new(|_| AppState::new(cache));
     app_menu::install(cx);
+    let app_state_for_updates = app_state.clone();
+    cx.on_action(move |_: &app_menu::CheckForUpdates, cx| {
+        trigger_software_update_check(&app_state_for_updates, cx);
+    });
     install_temp_source_window_key_bindings(cx);
     let initial_window_appearance = cx.window_appearance();
     app_state.update(cx, |state, _| {
@@ -140,7 +145,10 @@ fn start_app(cx: &mut App) -> Result<(), String> {
             titlebar: Some(TitlebarOptions {
                 title: Some(APP_NAME.into()),
                 appears_transparent: true,
-                traffic_light_position: None,
+                traffic_light_position: Some(point(
+                    px(APP_TRAFFIC_LIGHT_LEFT),
+                    px(APP_TRAFFIC_LIGHT_TOP),
+                )),
             }),
             ..Default::default()
         },

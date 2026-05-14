@@ -51,11 +51,12 @@ const APP_SIDEBAR_EXPANDED_WIDTH: f32 = 216.0;
 const APP_SIDEBAR_HIDDEN_WIDTH: f32 = 0.0;
 const APP_SIDEBAR_TRAFFIC_LIGHT_CLEARANCE: f32 = 58.0;
 pub(crate) const APP_CHROME_HEIGHT: f32 = 64.0;
-const APP_TITLEBAR_TOGGLE_LEFT: f32 = 88.0;
-const APP_TITLEBAR_TOGGLE_SIZE: f32 = 24.0;
-const APP_TITLEBAR_TOGGLE_TOP: f32 = 5.0;
-const APP_TITLEBAR_TOGGLE_ICON_SIZE: f32 = 13.0;
-const APP_TITLEBAR_TOGGLE_GAP: f32 = 4.0;
+pub(crate) const APP_TRAFFIC_LIGHT_LEFT: f32 = 12.0;
+pub(crate) const APP_TRAFFIC_LIGHT_TOP: f32 = 11.0;
+const APP_TITLEBAR_SIDEBAR_TOGGLE_LEFT: f32 = 76.0;
+const APP_TITLEBAR_CONTROL_SIZE: f32 = 24.0;
+const APP_TITLEBAR_CONTROL_TOP: f32 = 5.0;
+const APP_TITLEBAR_CONTROL_ICON_SIZE: f32 = 13.0;
 const APP_CHROME_HIDDEN_LEFT_INSET: f32 = 206.0;
 const APP_SIDEBAR_ANIMATION_MS: u64 = 220;
 const NOTIFICATION_DRAWER_ANIMATION_MS: u64 = 160;
@@ -671,7 +672,7 @@ impl Render for RootView {
                 workspace_route_transition,
                 cx,
             ))
-            .child(render_titlebar_panel_toggles(&self.state, cx))
+            .child(render_titlebar_sidebar_toggle(&self.state, cx))
             .when(notification_drawer_open, |el| {
                 el.child(render_notification_drawer(&self.state, cx))
             })
@@ -1371,43 +1372,28 @@ fn render_main_column(
         .child(render_workspace_body(state, workspace_route_transition, cx))
 }
 
-fn render_titlebar_panel_toggles(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
+fn render_titlebar_sidebar_toggle(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let s = state.read(cx);
     let sidebar_hidden = s.app_sidebar_collapsed;
-    let show_file_tree_toggle =
-        s.active_surface == PullRequestSurface::Files && s.active_detail().is_some();
-    let file_tree_visible = s
-        .active_review_session()
-        .map(|session| session.show_file_tree)
-        .unwrap_or(true);
     let state_for_sidebar = state.clone();
-    let state_for_file_tree = state.clone();
     let sidebar_tooltip = if sidebar_hidden {
         "Show sidebar"
     } else {
         "Hide sidebar"
     };
-    let file_tree_tooltip = if file_tree_visible {
-        "Hide file tree"
-    } else {
-        "Show file tree"
-    };
-    let file_tree_icon = if file_tree_visible {
-        LucideIcon::PanelLeftClose
-    } else {
+    let sidebar_icon = if sidebar_hidden {
         LucideIcon::PanelLeftOpen
+    } else {
+        LucideIcon::PanelLeftClose
     };
 
     div()
         .absolute()
-        .left(px(APP_TITLEBAR_TOGGLE_LEFT))
-        .top(px(APP_TITLEBAR_TOGGLE_TOP))
-        .flex()
-        .items_center()
-        .gap(px(APP_TITLEBAR_TOGGLE_GAP))
+        .left(px(APP_TITLEBAR_SIDEBAR_TOGGLE_LEFT))
+        .top(px(APP_TITLEBAR_CONTROL_TOP))
         .child(titlebar_icon_button(
             "titlebar-sidebar-toggle",
-            LucideIcon::PanelLeft,
+            sidebar_icon,
             sidebar_tooltip,
             false,
             move |_, _, cx| {
@@ -1417,21 +1403,6 @@ fn render_titlebar_panel_toggles(state: &Entity<AppState>, cx: &App) -> impl Int
                 });
             },
         ))
-        .when(show_file_tree_toggle, |el| {
-            el.child(titlebar_icon_button(
-                "titlebar-file-tree-toggle",
-                file_tree_icon,
-                file_tree_tooltip,
-                false,
-                move |_, _, cx| {
-                    state_for_file_tree.update(cx, |state, cx| {
-                        state.set_review_file_tree_visible(!file_tree_visible);
-                        state.persist_active_review_session();
-                        cx.notify();
-                    });
-                },
-            ))
-        })
 }
 
 fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
@@ -1451,6 +1422,22 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
         .unwrap_or(0);
     let drawer_open = s.notification_drawer_open;
     let sidebar_hidden = s.app_sidebar_collapsed;
+    let show_file_tree_toggle =
+        active_surface == PullRequestSurface::Files && s.active_detail().is_some();
+    let file_tree_visible = s
+        .active_review_session()
+        .map(|session| session.show_file_tree)
+        .unwrap_or(true);
+    let file_tree_tooltip = if file_tree_visible {
+        "Hide file tree"
+    } else {
+        "Show file tree"
+    };
+    let file_tree_icon = if file_tree_visible {
+        LucideIcon::PanelLeftClose
+    } else {
+        LucideIcon::PanelLeftOpen
+    };
     let tabs: Vec<_> = s.open_tabs.clone();
     let state_for_tabs = state.clone();
     let state_for_notifications = state.clone();
@@ -1462,6 +1449,7 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
     let state_for_diff_lens = state.clone();
     let state_for_structural_lens = state.clone();
     let state_for_source_lens = state.clone();
+    let state_for_file_tree = state.clone();
     let code_mode_active = matches!(
         active_center_mode,
         ReviewCenterMode::SemanticDiff
@@ -1563,6 +1551,21 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                 ]))
             },
         )
+        .when(show_file_tree_toggle, |el| {
+            el.child(chrome_icon_button(
+                "workspace-file-tree-toggle",
+                file_tree_icon,
+                file_tree_tooltip,
+                file_tree_visible,
+                move |_, _, cx| {
+                    state_for_file_tree.update(cx, |state, cx| {
+                        state.set_review_file_tree_visible(!file_tree_visible);
+                        state.persist_active_review_session();
+                        cx.notify();
+                    });
+                },
+            ))
+        })
         .when(has_active_pr, |el| {
             el.child(chrome_segmented_control(vec![
                 chrome_segment(
@@ -1654,8 +1657,8 @@ fn titlebar_icon_button(
 
     div()
         .id(id)
-        .w(px(APP_TITLEBAR_TOGGLE_SIZE))
-        .h(px(APP_TITLEBAR_TOGGLE_SIZE))
+        .w(px(APP_TITLEBAR_CONTROL_SIZE))
+        .h(px(APP_TITLEBAR_CONTROL_SIZE))
         .rounded(px(6.0))
         .bg(if active { bg_emphasis() } else { transparent() })
         .flex()
@@ -1671,7 +1674,7 @@ fn titlebar_icon_button(
         .on_mouse_down(MouseButton::Left, on_click)
         .child(lucide_icon(
             icon,
-            APP_TITLEBAR_TOGGLE_ICON_SIZE,
+            APP_TITLEBAR_CONTROL_ICON_SIZE,
             if active { fg_emphasis() } else { fg_subtle() },
         ))
         .with_animation(

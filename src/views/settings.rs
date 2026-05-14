@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use gpui::prelude::*;
 use gpui::*;
 
-use crate::branding::APP_NAME;
+use crate::branding::{APP_NAME, APP_VERSION};
 use crate::code_tour::{self, CodeTourProvider, CodeTourProviderStatus};
 use crate::managed_lsp::{
     self, ManagedServerInstallState, ManagedServerInstallStatus, ManagedServerKind,
@@ -631,6 +631,7 @@ fn render_software_update_panel(state: &Entity<AppState>, s: &AppState) -> impl 
     let status = platform_macos::updates::updater_status();
     let message = s.software_update_message.clone();
     let error = s.software_update_error.clone();
+    let running_version = format!("{APP_NAME} v{APP_VERSION}");
 
     panel().child(
         div()
@@ -653,6 +654,30 @@ fn render_software_update_panel(state: &Entity<AppState>, s: &AppState) -> impl 
                     .text_color(fg_muted())
                     .max_w(px(760.0))
                     .child(status.detail),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .flex_wrap()
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(fg_emphasis())
+                            .child("Running version"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .font_family(mono_font_family())
+                            .text_color(fg_subtle())
+                            .child(SelectableText::new(
+                                "settings-remiss-version",
+                                running_version,
+                            )),
+                    ),
             )
             .child(
                 div()

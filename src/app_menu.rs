@@ -1,10 +1,11 @@
 use gpui::{actions, App, KeyBinding, Menu, MenuItem, SystemMenuType};
 
-use crate::branding::APP_NAME;
+use crate::{branding::APP_NAME, platform_macos};
 
 actions!(
     remiss,
     [
+        ShowAbout,
         ToggleCommandPalette,
         ShowSettings,
         CheckForUpdates,
@@ -34,6 +35,7 @@ actions!(
 
 pub fn install(cx: &mut App) {
     bind_menu_key_equivalents(cx);
+    cx.on_action(show_about);
     cx.on_action(|_: &Quit, cx| cx.quit());
     cx.set_menus(vec![
         app_menu(),
@@ -67,6 +69,8 @@ fn app_menu() -> Menu {
     Menu {
         name: APP_NAME.into(),
         items: vec![
+            MenuItem::action(format!("About {APP_NAME}"), ShowAbout),
+            MenuItem::separator(),
             MenuItem::action("Settings...", ShowSettings),
             MenuItem::action("Check for Updates...", CheckForUpdates),
             MenuItem::separator(),
@@ -74,6 +78,12 @@ fn app_menu() -> Menu {
             MenuItem::separator(),
             MenuItem::action(format!("Quit {APP_NAME}"), Quit),
         ],
+    }
+}
+
+fn show_about(_: &ShowAbout, _: &mut App) {
+    if let Err(error) = platform_macos::show_about_panel() {
+        eprintln!("{APP_NAME} about panel unavailable: {error}");
     }
 }
 

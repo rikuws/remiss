@@ -17,8 +17,9 @@ pub use palette::{
     close_palette, execute_palette_selection, move_palette_selection, toggle_palette,
 };
 pub use pr_detail::{blur_review_editor, trigger_submit_review};
-pub(crate) use root::RootView;
+pub(crate) use root::{RootView, APP_TRAFFIC_LIGHT_LEFT, APP_TRAFFIC_LIGHT_TOP};
 pub use settings::{
     cycle_diff_color_theme_preference, decrease_code_font_size_preference,
     increase_code_font_size_preference, reset_code_font_size_preference,
+    trigger_software_update_check,
 };

@@ -1,4 +1,32 @@
 #[cfg(target_os = "macos")]
+pub fn show_about_panel() -> Result<(), String> {
+    use std::ffi::CString;
+
+    use objc2::{
+        msg_send,
+        runtime::{AnyClass, AnyObject},
+    };
+
+    let class_name = CString::new("NSApplication").unwrap();
+    let app_class = AnyClass::get(&class_name)
+        .ok_or_else(|| "NSApplication is unavailable on this process.".to_string())?;
+    let app: *mut AnyObject = unsafe { msg_send![app_class, sharedApplication] };
+    if app.is_null() {
+        return Err("NSApplication.sharedApplication returned null.".to_string());
+    }
+
+    unsafe {
+        let _: () = msg_send![app, orderFrontStandardAboutPanel: Option::<&AnyObject>::None];
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn show_about_panel() -> Result<(), String> {
+    Err("The native About panel is only available on macOS.".to_string())
+}
+
+#[cfg(target_os = "macos")]
 pub fn deliver_system_notification(title: &str, body: &str) -> Result<(), String> {
     use std::process::Command;
 

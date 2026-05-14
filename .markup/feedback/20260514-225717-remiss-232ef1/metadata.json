@@ -1,0 +1,30 @@
+{
+  "app" : {
+    "bundleId" : "dev.rikuwikman.remiss",
+    "name" : "Remiss",
+    "windowTitle" : "Remiss"
+  },
+  "assets" : {
+    "annotatedScreenshot" : "screenshot.png",
+    "originalScreenshot" : "screenshot-original.png"
+  },
+  "capture" : {
+    "region" : {
+      "height" : 43,
+      "width" : 141,
+      "x" : 0,
+      "y" : 0
+    },
+    "screenshotSize" : {
+      "height" : 1200,
+      "width" : 1992
+    },
+    "type" : "activeWindow"
+  },
+  "createdAt" : "2026-05-14T19:57:17Z",
+  "id" : "20260514-225717-remiss-232ef1",
+  "project" : {
+    "feedbackPath" : ".markup\/feedback",
+    "root" : "\/Users\/rikuwikman\/Dev\/gh-ui"
+  }
+}
