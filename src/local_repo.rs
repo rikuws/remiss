@@ -8,7 +8,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{app_storage, cache::CacheStore, command_runner::CommandRunner, gh};
+use crate::{app_storage, cache::CacheStore, cli_binary, command_runner::CommandRunner, gh};
 
 const LOCAL_REPO_LINK_KEY_PREFIX: &str = "local-repo-link-v1:";
 const CHECKOUT_LOGS_DIR: &str = "checkout-logs";
@@ -175,6 +175,10 @@ fn format_command_args(args: &[String]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn quote_command(command: &str) -> String {
+    format_command_args(&[command.to_string()])
 }
 
 fn summarize_status(status: &LocalRepositoryStatus) -> String {
@@ -1119,13 +1123,19 @@ fn run_gh_logged(
     working_directory: Option<&Path>,
     label: &str,
 ) -> Result<gh::CommandOutput, String> {
+    let Some(binary) = cli_binary::find_gh_binary() else {
+        let error = "GitHub CLI (`gh`) is not installed or not discoverable. Install `gh`, or set REMISS_GH_BINARY to its full path.".to_string();
+        log.event(format!("command launch skipped: {label}; error={error}"));
+        return Err(error);
+    };
+
     log.command_start(
         label,
-        &format!("gh {}", format_command_args(&args)),
+        &format!("{} {}", quote_command(&binary), format_command_args(&args)),
         working_directory,
     );
 
-    let mut runner = CommandRunner::new("gh")
+    let mut runner = CommandRunner::new(binary)
         .args(args)
         .timeout(Duration::from_secs(120));
     if let Some(path) = working_directory {

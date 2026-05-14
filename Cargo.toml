@@ -1,6 +1,6 @@
 [package]
 name = "remiss"
-version = "0.1.0"
+version = "0.1.1"
 description = "Human-centered desktop code review where computers and humans review together"
 authors = ["Riku Wikman"]
 edition = "2021"

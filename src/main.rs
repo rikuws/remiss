@@ -37,6 +37,7 @@ mod app_http;
 mod app_storage;
 mod branding;
 mod cache;
+mod cli_binary;
 mod code_display;
 mod code_tour;
 mod code_tour_background;
@@ -105,6 +106,8 @@ const MACOS_TRAFFIC_LIGHT_SIZE: f32 = 14.0;
 const MACOS_TRAFFIC_LIGHT_TOP: f32 = (APP_CHROME_HEIGHT - MACOS_TRAFFIC_LIGHT_SIZE) / 2.0;
 
 fn main() {
+    cli_binary::repair_process_path_for_cli_tools();
+
     Application::new()
         .with_assets(AppAssets::new())
         .with_http_client(Arc::new(UreqHttpClient::new()))

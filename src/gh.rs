@@ -2,7 +2,7 @@ use std::{path::Path, time::Duration};
 
 pub use crate::command_runner::CommandOutput;
 
-use crate::command_runner::CommandRunner;
+use crate::{cli_binary::find_gh_binary, command_runner::CommandRunner};
 
 pub fn run(args: &[&str]) -> Result<CommandOutput, String> {
     let owned_args = args
@@ -23,7 +23,11 @@ pub fn run_owned_in<P>(
 where
     P: AsRef<Path>,
 {
-    let mut runner = CommandRunner::new("gh")
+    let Some(binary) = find_gh_binary() else {
+        return Err("GitHub CLI (`gh`) is not installed or not discoverable. Install `gh`, or set REMISS_GH_BINARY to its full path.".to_string());
+    };
+
+    let mut runner = CommandRunner::new(binary)
         .args(args)
         .timeout(Duration::from_secs(120));
 
