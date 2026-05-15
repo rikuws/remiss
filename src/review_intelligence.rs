@@ -519,11 +519,7 @@ pub(crate) async fn run_review_intelligence_flow(
                 }
                 tour_state.loading = !force;
                 tour_state.generating = force;
-                tour_state.progress_summary = Some(if scope.includes_stack() {
-                    "Preparing Guided Review".to_string()
-                } else {
-                    "Preparing Guided Review".to_string()
-                });
+                tour_state.progress_summary = Some("Preparing Guided Review".to_string());
                 tour_state.progress_detail = Some(
                     "Preparing the local checkout and checking cached intelligence for this pull request."
                         .to_string(),

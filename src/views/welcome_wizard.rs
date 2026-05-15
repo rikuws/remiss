@@ -500,7 +500,7 @@ fn render_wizard_progress(step_number: usize, step_count: usize, tone: Rgba) -> 
                 .w(px(if index + 1 == step_number { 18.0 } else { 7.0 }))
                 .h(px(7.0))
                 .rounded(px(4.0))
-                .bg(if index + 1 <= step_number {
+                .bg(if index < step_number {
                     tone
                 } else {
                     border_muted()
