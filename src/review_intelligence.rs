@@ -470,7 +470,7 @@ pub(crate) async fn run_review_intelligence_flow(
                 }
                 detail_state.ai_stack_state.error = None;
                 detail_state.ai_stack_state.message =
-                    Some("Preparing local checkout for AI stack review.".to_string());
+                    Some("Preparing local checkout for Guided Review.".to_string());
                 detail_state.ai_stack_state.success = false;
 
                 let guide_request_changed = detail_state
@@ -520,9 +520,9 @@ pub(crate) async fn run_review_intelligence_flow(
                 tour_state.loading = !force;
                 tour_state.generating = force;
                 tour_state.progress_summary = Some(if scope.includes_stack() {
-                    "Preparing AI tour and stack".to_string()
+                    "Preparing Guided Review".to_string()
                 } else {
-                    "Preparing AI tour".to_string()
+                    "Preparing Guided Review".to_string()
                 });
                 tour_state.progress_detail = Some(
                     "Preparing the local checkout and checking cached intelligence for this pull request."
@@ -767,7 +767,7 @@ async fn generate_or_load_stack(
                 detail_key,
                 request_key,
                 stack,
-                Some("Loaded cached AI stack review.".to_string()),
+                Some("Loaded cached Guided Review layers.".to_string()),
                 cx,
             )
             .await;
@@ -781,8 +781,8 @@ async fn generate_or_load_stack(
                                 tour_request_key,
                                 true,
                                 false,
-                                "Loaded cached AI stack review",
-                                "Starting the AI tour generation step.",
+                                "Loaded cached Guided Review layers",
+                                "Starting the Guided Review walkthrough step.",
                             );
                         }
                         cx.notify();
@@ -813,7 +813,7 @@ async fn generate_or_load_stack(
                     detail_state.ai_stack_state.loading = false;
                     detail_state.ai_stack_state.generating = true;
                     detail_state.ai_stack_state.message =
-                        Some("Building structural evidence for AI stack review.".to_string());
+                        Some("Building structural evidence for Guided Review.".to_string());
                 }
 
                 if reflect_tour_progress {
@@ -823,9 +823,9 @@ async fn generate_or_load_stack(
                         tour_request_key,
                         false,
                         true,
-                        "Generating AI stack review",
+                        "Generating Guided Review layers",
                         &format!(
-                            "{} is planning review layers first. The AI tour starts after that phase finishes.",
+                            "{} is planning review layers first. The walkthrough starts after that phase finishes.",
                             provider.label()
                         ),
                     );
@@ -899,7 +899,7 @@ async fn generate_or_load_stack(
                 detail_key,
                 request_key,
                 stack,
-                Some("Generated AI stack review.".to_string()),
+                Some("Generated Guided Review layers.".to_string()),
                 cx,
             )
             .await;
@@ -1225,7 +1225,7 @@ async fn generate_or_load_tour(
                             tour_state.generating = false;
                             tour_state.document = Some(tour);
                             tour_state.error = None;
-                            tour_state.message = Some("Loaded cached AI tour.".to_string());
+                            tour_state.message = Some("Loaded cached Guided Review.".to_string());
                             tour_state.success = true;
                         }
                     }
@@ -1676,7 +1676,7 @@ mod tests {
             "tour-key",
             false,
             true,
-            "Generating AI stack review",
+            "Generating Guided Review layers",
             "Copilot is planning review layers first.",
         );
 
@@ -1689,7 +1689,7 @@ mod tests {
         assert!(tour_state.generating);
         assert_eq!(
             tour_state.progress_summary.as_deref(),
-            Some("Generating AI stack review")
+            Some("Generating Guided Review layers")
         );
         assert_eq!(
             tour_state.progress_detail.as_deref(),
@@ -1712,7 +1712,7 @@ mod tests {
             "older-tour-key",
             false,
             true,
-            "Generating AI stack review",
+            "Generating Guided Review layers",
             "Copilot is planning review layers first.",
         );
 

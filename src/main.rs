@@ -57,6 +57,7 @@ mod lsp;
 mod managed_lsp;
 mod markdown;
 mod notifications;
+mod onboarding;
 mod platform_macos;
 mod review_brief;
 mod review_file_header;
@@ -77,6 +78,7 @@ mod structural_evidence;
 mod syntax;
 mod temp_source_window;
 mod theme;
+mod tutorial_pr;
 mod views;
 mod window_settings;
 
@@ -120,6 +122,7 @@ fn main() {
 }
 
 fn start_app(cx: &mut App) -> Result<(), String> {
+    let startup_wizard_options = onboarding::StartupWizardOptions::from_env_and_args();
     let bundled_fonts =
         load_bundled_fonts().map_err(|error| format!("Failed to load bundled fonts: {error}"))?;
     cx.text_system()
@@ -129,7 +132,7 @@ fn start_app(cx: &mut App) -> Result<(), String> {
     let cache = CacheStore::new(cache_path())
         .map_err(|error| format!("Failed to initialize cache: {error}"))?;
     let initial_window_size = window_settings::load_window_size(&cache);
-    let app_state = cx.new(|_| AppState::new(cache));
+    let app_state = cx.new(move |_| AppState::new(cache, startup_wizard_options));
     app_menu::install(cx);
     let app_state_for_updates = app_state.clone();
     cx.on_action(move |_: &app_menu::CheckForUpdates, cx| {
@@ -175,6 +178,35 @@ fn start_app(cx: &mut App) -> Result<(), String> {
             && !keystroke.modifiers.function;
         let is_platform_plain = is_platform_only && !keystroke.modifiers.shift;
         let is_platform_shift = is_platform_only && keystroke.modifiers.shift;
+
+        let onboarding_wizard_open = app_state_for_keys
+            .read(cx)
+            .active_onboarding_wizard
+            .is_some();
+        if onboarding_wizard_open {
+            match keystroke.key.as_str() {
+                "escape" => {
+                    app_state_for_keys.update(cx, |state, cx| {
+                        state.complete_active_onboarding_wizard();
+                        cx.notify();
+                    });
+                }
+                "left" => {
+                    app_state_for_keys.update(cx, |state, cx| {
+                        state.previous_onboarding_step();
+                        cx.notify();
+                    });
+                }
+                "right" | "enter" => {
+                    app_state_for_keys.update(cx, |state, cx| {
+                        state.next_onboarding_step();
+                        cx.notify();
+                    });
+                }
+                _ => {}
+            }
+            return;
+        }
 
         if is_platform_plain && keystroke.key == "k" {
             toggle_palette(&app_state_for_keys, cx);

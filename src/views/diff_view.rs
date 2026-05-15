@@ -39,12 +39,15 @@ use crate::local_documents;
 use crate::local_repo;
 use crate::lsp;
 use crate::markdown::render_markdown;
+use crate::onboarding::WizardStepTarget;
 use crate::review_file_header::{
     render_review_file_header, render_review_file_header_with_controls, ReviewFileHeaderProps,
 };
 use crate::review_queue::{build_review_queue, ReviewQueue, ReviewQueueBucket};
 use crate::review_session::{
     DiffLayout, ReviewCenterMode, ReviewGuideLens, ReviewLocation, ReviewSourceTarget,
+    GUIDED_REVIEW_PANEL_DEFAULT_WIDTH, GUIDED_REVIEW_PANEL_MAX_WIDTH,
+    GUIDED_REVIEW_PANEL_MIN_WIDTH,
 };
 use crate::selectable_text::{AppTextFieldKind, AppTextInput, SelectableText};
 use crate::semantic_diff::{build_semantic_diff_file, SemanticDiffFile, SemanticDiffSection};
@@ -145,6 +148,7 @@ pub fn enter_stack_review_mode(state: &Entity<AppState>, window: &mut Window, cx
         state.pr_header_compact = false;
         state.set_review_file_tree_visible(true);
         state.set_review_center_mode(ReviewCenterMode::GuidedReview);
+        reset_stack_timeline_list_state(state);
 
         if let Some((layer_id, layer_file)) = stack_defaults.clone() {
             if let Some(session) = state.active_review_session_mut() {
@@ -2279,8 +2283,8 @@ fn render_ai_tour_navigation_pane(state: &Entity<AppState>, cx: &App) -> impl In
                 .flex()
                 .flex_col()
                 .child(render_sidebar_header(
-                    "AI Tour",
-                    "Semantic groups",
+                    "Guided Review",
+                    "Review groups",
                     tour.sections.len().to_string(),
                 ))
                 .child(
@@ -2330,8 +2334,8 @@ fn render_ai_tour_navigation_pane(state: &Entity<AppState>, cx: &App) -> impl In
             .flex()
             .flex_col()
             .child(render_sidebar_header(
-                "AI Tour",
-                "Semantic groups",
+                "Guided Review",
+                "Review groups",
                 "0".to_string(),
             ))
             .child(
@@ -2341,7 +2345,7 @@ fn render_ai_tour_navigation_pane(state: &Entity<AppState>, cx: &App) -> impl In
                     .text_size(px(12.0))
                     .line_height(px(18.0))
                     .text_color(fg_muted())
-                    .child("Generate an AI tour to navigate semantic groups here."),
+                    .child("Generate Guided Review to navigate review groups here."),
             ),
     }
 }
@@ -2529,16 +2533,13 @@ fn render_stack_navigation_pane(
         file_tree_list_state.reset(tree_rows.len());
     }
     let selected_path = state.read(cx).selected_file_path.clone();
-    let stack_nav_item_count = review_stack.layers.len() + 1;
-    if list_state.item_count() != stack_nav_item_count {
-        list_state.reset(stack_nav_item_count);
-    }
+    sync_stack_timeline_item_count(&list_state, review_stack.layers.len() + 1);
     let stack_timeline_height = px(((review_stack.layers.len() as f32 * 36.0) + 26.0).min(220.0));
 
     let mut stack_warnings = Vec::<String>::new();
     if showing_temporary_guide_stack {
         stack_warnings.push(
-            "Guided Review is still generating. This is a temporary fallback layer map; labels may change when AI guidance is ready."
+            "Guided Review is still generating. This is a temporary fallback layer map; labels may change when the generated guidance is ready."
                 .to_string(),
         );
     }
@@ -3097,15 +3098,44 @@ fn prepare_review_nav_list_state(app_state: &AppState) -> ListState {
 }
 
 fn prepare_stack_timeline_list_state(app_state: &AppState) -> ListState {
-    let state_key = format!(
-        "{}:stack-timeline",
-        app_state.active_pr_key.as_deref().unwrap_or("detached"),
-    );
+    let state_key = stack_timeline_state_key(app_state);
     let mut list_states = app_state.review_nav_list_states.borrow_mut();
     list_states
         .entry(state_key)
         .or_insert_with(|| ListState::new(0, ListAlignment::Top, px(36.0)))
         .clone()
+}
+
+fn reset_stack_timeline_list_state(app_state: &AppState) {
+    let state_key = stack_timeline_state_key(app_state);
+    app_state
+        .review_nav_list_states
+        .borrow_mut()
+        .remove(&state_key);
+}
+
+fn stack_timeline_state_key(app_state: &AppState) -> String {
+    format!(
+        "{}:stack-timeline",
+        app_state.active_pr_key.as_deref().unwrap_or("detached"),
+    )
+}
+
+fn sync_stack_timeline_item_count(list_state: &ListState, item_count: usize) {
+    if list_state.item_count() == item_count {
+        return;
+    }
+
+    let should_scroll_to_bottom = list_state.item_count() == 0 && item_count > 0;
+    if should_scroll_to_bottom {
+        list_state.reset(item_count);
+        list_state.scroll_to(ListOffset {
+            item_ix: item_count,
+            offset_in_item: px(0.0),
+        });
+    } else {
+        reset_list_state_preserving_scroll(list_state, item_count);
+    }
 }
 
 fn build_review_nav_items(
@@ -7295,6 +7325,7 @@ fn render_diff_panel(
             active_diff_layout,
             (center_mode == ReviewCenterMode::GuidedReview).then_some(guided_review_lens),
             !has_textual_diff,
+            app_state.is_onboarding_target(WizardStepTarget::ReviewFeedback),
         ))
         .child(
             div()
@@ -7384,6 +7415,7 @@ fn render_diff_toolbar(
     active_diff_layout: DiffLayout,
     guided_review_lens: Option<ReviewGuideLens>,
     layout_toggle_disabled: bool,
+    highlight_review_feedback: bool,
 ) -> impl IntoElement {
     let mut focus_meta = Vec::new();
     focus_meta.push(format!("+{total_additions} / -{total_deletions}"));
@@ -7480,6 +7512,7 @@ fn render_diff_toolbar(
         .when(!is_local_review, |el| {
             el.child(diff_toolbar_primary_button(
                 &submit_label,
+                highlight_review_feedback,
                 move |_, _, cx| {
                     state_for_submit.update(cx, |state, cx| {
                         state.review_finish_modal_open = true;
@@ -7500,20 +7533,37 @@ fn render_diff_toolbar(
 
 fn diff_toolbar_primary_button(
     label: &str,
+    highlighted: bool,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     div()
-        .px(px(12.0))
-        .py(px(6.0))
-        .rounded(radius_sm())
-        .bg(primary_action_bg())
-        .text_color(fg_on_primary_action())
-        .text_size(px(12.0))
-        .font_weight(FontWeight::SEMIBOLD)
-        .cursor_pointer()
-        .hover(|style| style.bg(primary_action_hover()))
-        .on_mouse_down(MouseButton::Left, on_click)
-        .child(label.to_string())
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(if highlighted {
+            focus_border()
+        } else {
+            transparent()
+        })
+        .bg(if highlighted {
+            with_alpha(focus_border(), 0.12)
+        } else {
+            transparent()
+        })
+        .p(px(2.0))
+        .child(
+            div()
+                .px(px(12.0))
+                .py(px(6.0))
+                .rounded(radius_sm())
+                .bg(primary_action_bg())
+                .text_color(fg_on_primary_action())
+                .text_size(px(12.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .cursor_pointer()
+                .hover(|style| style.bg(primary_action_hover()))
+                .on_mouse_down(MouseButton::Left, on_click)
+                .child(label.to_string()),
+        )
 }
 
 fn render_guided_review_view(
@@ -7564,17 +7614,67 @@ fn render_guided_review_view(
         .into_any_element()
 }
 
+#[derive(Clone)]
+struct GuidedReviewPanelResizeDrag {
+    id: String,
+    state: Entity<AppState>,
+    start_pointer_x: Rc<RefCell<Option<Pixels>>>,
+    start_width: f32,
+}
+
+impl GuidedReviewPanelResizeDrag {
+    fn new(id: String, state: Entity<AppState>, start_width: f32) -> Self {
+        Self {
+            id,
+            state,
+            start_pointer_x: Rc::new(RefCell::new(None)),
+            start_width,
+        }
+    }
+
+    fn drag_to(&self, pointer_x: Pixels, window: &mut Window, cx: &mut App) {
+        let start_pointer_x = {
+            let mut start_pointer_x = self.start_pointer_x.borrow_mut();
+            *start_pointer_x.get_or_insert(pointer_x)
+        };
+        let delta = f32::from(start_pointer_x - pointer_x);
+        let width = (self.start_width + delta)
+            .clamp(GUIDED_REVIEW_PANEL_MIN_WIDTH, GUIDED_REVIEW_PANEL_MAX_WIDTH);
+
+        self.state.update(cx, |state, cx| {
+            state.set_guided_review_panel_width(width);
+            state.persist_active_review_session();
+            cx.notify();
+        });
+        window.refresh();
+    }
+}
+
 fn render_guided_review_panel(
     state: &Entity<AppState>,
     review_stack: &ReviewStack,
     cx: &App,
 ) -> impl IntoElement {
-    let (guide, loading, generating, progress_text, error, message, selected_layer, provider) = {
+    let (
+        guide,
+        loading,
+        generating,
+        progress_text,
+        error,
+        message,
+        selected_layer,
+        provider,
+        panel_width,
+    ) = {
         let app_state = state.read(cx);
         let guide_state = app_state
             .active_detail_state()
             .map(|detail_state| detail_state.review_guide_state.clone())
             .unwrap_or_default();
+        let panel_width = app_state
+            .active_review_session()
+            .map(|session| session.guided_review_panel_width)
+            .unwrap_or(GUIDED_REVIEW_PANEL_DEFAULT_WIDTH);
         let selected_layer = app_state
             .active_review_session()
             .and_then(|session| {
@@ -7591,15 +7691,21 @@ fn render_guided_review_panel(
             guide_state.message,
             selected_layer,
             app_state.selected_tour_provider(),
+            crate::review_session::sanitize_guided_review_panel_width(panel_width),
         )
     };
     let state_for_retry = state.clone();
+    let resize_drag_id = "guided-review-panel-resize".to_string();
+    let resize_drag =
+        GuidedReviewPanelResizeDrag::new(resize_drag_id.clone(), state.clone(), panel_width);
+    let resize_drag_id_for_move = resize_drag_id.clone();
     let selected_guide_layer = selected_layer
         .as_ref()
         .and_then(|layer| guide.as_ref().and_then(|guide| guide.layer(&layer.id)));
 
     div()
-        .w(px(330.0))
+        .relative()
+        .w(px(panel_width))
         .flex_shrink_0()
         .min_h_0()
         .bg(diff_editor_chrome())
@@ -7607,6 +7713,37 @@ fn render_guided_review_panel(
         .border_color(diff_annotation_border())
         .flex()
         .flex_col()
+        .child(
+            div()
+                .absolute()
+                .left(px(-3.0))
+                .top(px(0.0))
+                .bottom(px(0.0))
+                .w(px(6.0))
+                .id(ElementId::Name(resize_drag_id.into()))
+                .cursor(CursorStyle::ResizeLeftRight)
+                .on_drag(resize_drag, |_, _, _, cx| {
+                    cx.new(|_| DiffScrollbarDragPreview)
+                })
+                .on_drag_move(
+                    move |event: &DragMoveEvent<GuidedReviewPanelResizeDrag>, window, cx| {
+                        let drag = event.drag(cx).clone();
+                        if drag.id != resize_drag_id_for_move {
+                            return;
+                        }
+                        drag.drag_to(event.event.position.x, window, cx);
+                    },
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(2.0))
+                        .top(px(0.0))
+                        .bottom(px(0.0))
+                        .w(px(1.0))
+                        .bg(diff_annotation_border()),
+                ),
+        )
         .child(
             div()
                 .px(px(14.0))
@@ -7625,7 +7762,7 @@ fn render_guided_review_panel(
                                 .text_size(px(12.0))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(fg_emphasis())
-                                .child("Guided Review"),
+                                .child("Review Partner"),
                         )
                         .child(
                             div()
@@ -7633,7 +7770,11 @@ fn render_guided_review_panel(
                                 .text_size(px(10.0))
                                 .font_family(mono_font_family())
                                 .text_color(fg_muted())
-                                .child(provider.label().to_string()),
+                                .child(format!(
+                                    "{}{}",
+                                    provider.label(),
+                                    if message.is_some() { " · ready" } else { "" }
+                                )),
                         ),
                 )
                 .child(ghost_button("Retry", move |_, window, cx| {
@@ -7658,259 +7799,443 @@ fn render_guided_review_panel(
                 .flex_col()
                 .gap(px(12.0))
                 .when(loading || generating, |el| {
-                    el.child(render_guided_review_status_panel(
+                    el.child(render_guided_review_partner_status(
                         "Preparing guide",
                         progress_text
                             .as_deref()
                             .unwrap_or("Generating layer guidance and structural evidence."),
+                        LucideIcon::Sparkles,
+                        accent(),
                     ))
                 })
                 .when_some(error.clone(), |el, error| {
-                    el.child(render_guided_review_status_panel(
+                    el.child(render_guided_review_partner_status(
                         "Guidance unavailable",
                         &error,
+                        LucideIcon::CircleHelp,
+                        danger(),
                     ))
                 })
-                .when_some(message.clone(), |el, message| {
-                    el.child(render_guided_review_status_panel("Status", &message))
-                })
-                .when_some(guide.as_ref(), |el, guide| {
-                    el.child(render_guided_review_overview(guide.as_ref()))
-                })
-                .when_some(selected_layer.as_ref(), |el, layer| {
-                    el.child(render_guided_review_layer_panel(
-                        layer,
-                        selected_guide_layer,
-                    ))
+                .when(guide.is_some(), |el| {
+                    el.when_some(selected_layer.as_ref(), |el, layer| {
+                        el.child(render_guided_review_partner_panel(
+                            state,
+                            guide.as_deref(),
+                            layer,
+                            selected_guide_layer,
+                            cx,
+                        ))
+                    })
                 })
                 .when(
                     guide.is_none() && !loading && !generating && error.is_none(),
                     |el| {
-                        el.child(render_guided_review_status_panel(
+                        el.child(render_guided_review_partner_status(
                             "No guide yet",
                             "Generate Guided Review to see stack-aware layer notes here.",
+                            LucideIcon::Sparkles,
+                            fg_muted(),
                         ))
                     },
                 ),
         )
 }
 
-fn render_guided_review_status_panel(title: &str, message: &str) -> impl IntoElement {
-    div()
-        .py(px(8.0))
-        .border_b(px(1.0))
-        .border_color(border_muted())
-        .child(
-            div()
-                .text_size(px(12.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(fg_emphasis())
-                .child(title.to_string()),
-        )
-        .child(
-            div()
-                .mt(px(5.0))
-                .text_size(px(12.0))
-                .line_height(px(18.0))
-                .text_color(fg_muted())
-                .child(message.to_string()),
-        )
-}
-
-fn render_guided_review_overview(
-    guide: &crate::review_guide::GeneratedReviewGuide,
+fn render_guided_review_partner_status(
+    title: &str,
+    message: &str,
+    icon: LucideIcon,
+    tone: Rgba,
 ) -> impl IntoElement {
-    guided_review_section("Guide")
+    div()
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(border_muted())
+        .bg(bg_overlay())
+        .p(px(12.0))
+        .flex()
+        .gap(px(10.0))
+        .items_start()
+        .child(review_partner_icon_chip(icon, tone))
         .child(
             div()
-                .text_size(px(13.0))
-                .line_height(px(19.0))
-                .text_color(fg_emphasis())
-                .child(SelectableText::new(
-                    "guided-review-summary",
-                    guide.summary.clone(),
-                )),
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(5.0))
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg_emphasis())
+                        .child(title.to_string()),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .line_height(px(18.0))
+                        .text_color(fg_muted())
+                        .child(message.to_string()),
+                ),
         )
-        .when(!guide.review_focus.trim().is_empty(), |el| {
-            el.child(
-                div()
-                    .mt(px(9.0))
-                    .pt(px(9.0))
-                    .border_t(px(1.0))
-                    .border_color(border_muted())
-                    .text_size(px(12.0))
-                    .line_height(px(18.0))
-                    .text_color(fg_muted())
-                    .child(SelectableText::new(
-                        "guided-review-focus",
-                        guide.review_focus.clone(),
-                    )),
-            )
-        })
 }
 
-fn render_guided_review_layer_panel(
+fn render_guided_review_partner_panel(
+    state: &Entity<AppState>,
+    guide: Option<&crate::review_guide::GeneratedReviewGuide>,
     layer: &ReviewStackLayer,
     guide_layer: Option<&crate::review_guide::ReviewGuideLayer>,
+    cx: &App,
 ) -> impl IntoElement {
-    let summary = guide_layer
-        .map(|layer| layer.summary.as_str())
+    let what_changed = guide_layer
+        .map(|layer| layer.what_changed.as_str())
         .unwrap_or(layer.summary.as_str());
-    let rationale = guide_layer
-        .map(|layer| layer.rationale.as_str())
+    let why_it_matters = guide_layer
+        .map(|layer| layer.why_it_matters.as_str())
         .unwrap_or(layer.rationale.as_str());
-    let review_question = guide_layer
-        .map(|layer| layer.review_question.as_str())
-        .unwrap_or(layer.rationale.as_str());
+    let how_to_review = guide_layer
+        .map(|layer| layer.how_to_review.clone())
+        .filter(|items| !items.is_empty())
+        .unwrap_or_else(|| vec![format!("Review the diff for {}", layer.title)]);
+    let bug_risks = guide_layer
+        .map(|layer| layer.bug_risks.clone())
+        .unwrap_or_default();
+    let evidence_notes = guide_layer
+        .map(|layer| layer.evidence_notes.clone())
+        .unwrap_or_default();
+    let follow_ups = guide_layer
+        .map(|layer| layer.follow_ups.clone())
+        .unwrap_or_default();
+    let global_notes = guide
+        .map(|guide| {
+            guide
+                .warnings
+                .iter()
+                .chain(guide.open_questions.iter())
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let partner_overview = guide
+        .map(|guide| guide.partner_overview.as_str())
+        .unwrap_or_default();
+    let review_strategy = guide
+        .map(|guide| guide.review_strategy.as_str())
+        .unwrap_or_default();
     let structural_status = guide_layer
         .map(|layer| layer.structural_evidence_status.label())
         .unwrap_or("Structural evidence pending");
 
     div()
-        .pt(px(12.0))
-        .border_t(px(1.0))
-        .border_color(border_muted())
         .flex()
         .flex_col()
         .gap(px(10.0))
-        .child(eyebrow("Selected layer"))
+        .child(render_review_partner_what_card(
+            layer,
+            what_changed,
+            partner_overview,
+        ))
+        .child(render_review_partner_guidance_card(
+            &layer.id,
+            why_it_matters,
+            &how_to_review,
+        ))
+        .when(!bug_risks.is_empty() || !follow_ups.is_empty(), |el| {
+            el.child(render_review_partner_risk_card(
+                &layer.id,
+                &bug_risks,
+                &follow_ups,
+            ))
+        })
+        .child(render_review_partner_detail_card(
+            state,
+            &format!("guided-review-evidence-open-{}", layer.id),
+            "Evidence",
+            structural_status,
+            LucideIcon::GitCompareArrows,
+            accent(),
+            &evidence_notes,
+            "evidence",
+            &layer.id,
+            cx,
+        ))
+        .when(
+            !review_strategy.trim().is_empty() || !global_notes.is_empty(),
+            |el| {
+                let mut notes = global_notes;
+                if !review_strategy.trim().is_empty() {
+                    notes.insert(0, review_strategy.to_string());
+                }
+                el.child(render_review_partner_detail_card(
+                    state,
+                    &format!("guided-review-strategy-open-{}", layer.id),
+                    "Strategy",
+                    "PR-level review context",
+                    LucideIcon::ListChecks,
+                    fg_muted(),
+                    &notes,
+                    "strategy",
+                    &layer.id,
+                    cx,
+                ))
+            },
+        )
+}
+
+fn render_review_partner_what_card(
+    layer: &ReviewStackLayer,
+    what_changed: &str,
+    partner_overview: &str,
+) -> impl IntoElement {
+    div()
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(border_muted())
+        .bg(bg_overlay())
+        .p(px(12.0))
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
         .child(
             div()
-                .text_size(px(14.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(fg_emphasis())
-                .line_clamp(2)
-                .child(layer.title.clone()),
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(review_partner_icon_chip(LucideIcon::Sparkles, accent()))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .font_family(mono_font_family())
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(fg_subtle())
+                                .child("WHAT CHANGED"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(14.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(fg_emphasis())
+                                .line_clamp(2)
+                                .child(layer.title.clone()),
+                        ),
+                ),
         )
-        .child(guided_review_question_block(
-            "Review question",
-            review_question,
-            format!("guided-review-layer-question-{}", layer.id),
-        ))
-        .child(guided_review_text_block(
-            "Summary",
-            summary,
-            format!("guided-review-layer-summary-{}", layer.id),
-        ))
-        .child(guided_review_text_block(
-            "Why this layer",
-            rationale,
-            format!("guided-review-layer-rationale-{}", layer.id),
-        ))
-        .when_some(guide_layer, |el, guide_layer| {
-            el.when(!guide_layer.review_points.is_empty(), |el| {
-                el.child(render_guided_review_list(
-                    "Review points",
-                    &guide_layer.review_points,
-                    "review-point",
-                    &layer.id,
-                ))
-            })
-            .when(!guide_layer.risk_notes.is_empty(), |el| {
-                el.child(render_guided_review_list(
-                    "Risk notes",
-                    &guide_layer.risk_notes,
-                    "risk-note",
-                    &layer.id,
-                ))
-            })
-            .when(!guide_layer.structural_notes.is_empty(), |el| {
-                el.child(render_guided_review_list(
-                    structural_status,
-                    &guide_layer.structural_notes,
-                    "structural-note",
-                    &layer.id,
-                ))
-            })
+        .child(
+            div()
+                .text_size(px(12.0))
+                .line_height(px(18.0))
+                .text_color(fg_default())
+                .child(SelectableText::new(
+                    format!("guided-review-what-{}", layer.id),
+                    what_changed.to_string(),
+                )),
+        )
+        .when(!partner_overview.trim().is_empty(), |el| {
+            el.child(
+                div()
+                    .pt(px(8.0))
+                    .border_t(px(1.0))
+                    .border_color(border_muted())
+                    .text_size(px(11.0))
+                    .line_height(px(16.0))
+                    .text_color(fg_muted())
+                    .line_clamp(2)
+                    .child(partner_overview.to_string()),
+            )
         })
-        .when(guide_layer.is_none(), |el| {
-            el.child(guided_review_text_block(
-                "Structural evidence",
-                structural_status,
-                format!("guided-review-layer-structural-{}", layer.id),
+}
+
+fn render_review_partner_guidance_card(
+    layer_id: &str,
+    why_it_matters: &str,
+    how_to_review: &[String],
+) -> impl IntoElement {
+    review_partner_card("Why it matters", LucideIcon::Zap, accent())
+        .child(
+            div()
+                .text_size(px(12.0))
+                .line_height(px(18.0))
+                .text_color(fg_default())
+                .child(SelectableText::new(
+                    format!("guided-review-why-{layer_id}"),
+                    why_it_matters.to_string(),
+                )),
+        )
+        .child(
+            div()
+                .mt(px(10.0))
+                .pt(px(10.0))
+                .border_t(px(1.0))
+                .border_color(border_muted())
+                .flex()
+                .flex_col()
+                .gap(px(7.0))
+                .child(review_partner_micro_label(
+                    LucideIcon::ListChecks,
+                    "How to review",
+                    fg_muted(),
+                ))
+                .children(how_to_review.iter().enumerate().map(|(ix, value)| {
+                    render_review_partner_check_row(
+                        format!("guided-review-how-{layer_id}-{ix}"),
+                        value,
+                    )
+                })),
+        )
+}
+
+fn render_review_partner_risk_card(
+    layer_id: &str,
+    bug_risks: &[String],
+    follow_ups: &[String],
+) -> impl IntoElement {
+    review_partner_card("Bugs & risks", LucideIcon::ShieldCheck, danger())
+        .when(!bug_risks.is_empty(), |el| {
+            el.child(render_review_partner_bullet_list(
+                bug_risks,
+                "risk",
+                layer_id,
+                danger(),
+            ))
+        })
+        .when(!follow_ups.is_empty(), |el| {
+            el.child(
+                div()
+                    .when(!bug_risks.is_empty(), |el| {
+                        el.mt(px(10.0))
+                            .pt(px(10.0))
+                            .border_t(px(1.0))
+                            .border_color(border_muted())
+                    })
+                    .flex()
+                    .flex_col()
+                    .gap(px(7.0))
+                    .child(review_partner_micro_label(
+                        LucideIcon::CircleHelp,
+                        "Follow-ups",
+                        warning(),
+                    ))
+                    .child(render_review_partner_bullet_list(
+                        follow_ups,
+                        "follow-up",
+                        layer_id,
+                        warning(),
+                    )),
+            )
+        })
+}
+
+fn render_review_partner_detail_card(
+    state: &Entity<AppState>,
+    section_id: &str,
+    label: &str,
+    summary: &str,
+    icon: LucideIcon,
+    tone: Rgba,
+    values: &[String],
+    id_prefix: &str,
+    layer_id: &str,
+    cx: &App,
+) -> impl IntoElement {
+    let expanded = state.read(cx).is_review_section_collapsed(section_id);
+    let state_for_toggle = state.clone();
+    let section_id_for_toggle = section_id.to_string();
+
+    div()
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(border_muted())
+        .bg(bg_overlay())
+        .p(px(10.0))
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(review_partner_icon_chip(icon, tone))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.0))
+                                .child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(fg_emphasis())
+                                        .child(label.to_string()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .text_color(fg_muted())
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .overflow_x_hidden()
+                                        .child(summary.to_string()),
+                                ),
+                        ),
+                )
+                .when(!values.is_empty(), |el| {
+                    el.child(review_partner_small_button(
+                        if expanded { "Hide" } else { "Show" },
+                        move |_, _, cx| {
+                            state_for_toggle.update(cx, |state, cx| {
+                                state.toggle_review_section_collapse(&section_id_for_toggle);
+                                state.persist_active_review_session();
+                                cx.notify();
+                            });
+                        },
+                    ))
+                }),
+        )
+        .when(expanded && !values.is_empty(), |el| {
+            el.child(render_review_partner_bullet_list(
+                values, id_prefix, layer_id, tone,
             ))
         })
 }
 
-fn guided_review_section(label: &str) -> gpui::Div {
-    div()
-        .pt(px(10.0))
-        .border_t(px(1.0))
-        .border_color(border_muted())
-        .flex()
-        .flex_col()
-        .child(guided_review_section_label(label))
-}
-
-fn guided_review_section_label(label: &str) -> impl IntoElement {
-    div()
-        .mb(px(7.0))
-        .text_size(px(10.0))
-        .font_family(mono_font_family())
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(fg_subtle())
-        .child(label.to_ascii_uppercase())
-}
-
-fn guided_review_question_block(
-    label: &str,
-    value: &str,
-    id: impl Into<SharedString>,
-) -> impl IntoElement {
-    guided_review_section(label).child(
-        div()
-            .px(px(10.0))
-            .py(px(8.0))
-            .rounded(px(5.0))
-            .bg(bg_selected())
-            .border_1()
-            .border_color(border_muted())
-            .text_size(px(12.0))
-            .line_height(px(18.0))
-            .text_color(fg_emphasis())
-            .child(SelectableText::new(id, value.to_string())),
-    )
-}
-
-fn guided_review_text_block(
-    label: &str,
-    value: &str,
-    id: impl Into<SharedString>,
-) -> impl IntoElement {
-    guided_review_section(label).child(
-        div()
-            .text_size(px(12.0))
-            .line_height(px(18.0))
-            .text_color(fg_default())
-            .child(SelectableText::new(id, value.to_string())),
-    )
-}
-
-fn render_guided_review_list(
-    label: &str,
+fn render_review_partner_bullet_list(
     values: &[String],
     id_prefix: &str,
     layer_id: &str,
+    tone: Rgba,
 ) -> impl IntoElement {
-    guided_review_section(label).child(div().flex().flex_col().children(
-        values.iter().enumerate().map(|(ix, value)| {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(7.0))
+        .children(values.iter().enumerate().map(|(ix, value)| {
             div()
                 .flex()
                 .items_start()
-                .gap(px(8.0))
-                .py(px(6.0))
-                .when(ix > 0, |el| {
-                    el.border_t(px(1.0)).border_color(border_muted())
-                })
+                .gap(px(7.0))
                 .child(
                     div()
-                        .w(px(18.0))
+                        .mt(px(7.0))
+                        .w(px(5.0))
+                        .h(px(5.0))
                         .flex_shrink_0()
-                        .text_align(gpui::TextAlign::Right)
-                        .text_size(px(10.0))
-                        .font_family(mono_font_family())
-                        .text_color(fg_subtle())
-                        .child(format!("{}.", ix + 1)),
+                        .rounded(px(2.5))
+                        .bg(tone),
                 )
                 .child(
                     div()
@@ -7924,8 +8249,106 @@ fn render_guided_review_list(
                             value.clone(),
                         )),
                 )
-        }),
-    ))
+        }))
+}
+
+fn render_review_partner_check_row(id: impl Into<SharedString>, value: &str) -> impl IntoElement {
+    div()
+        .flex()
+        .items_start()
+        .gap(px(7.0))
+        .child(
+            div()
+                .mt(px(2.0))
+                .w(px(16.0))
+                .h(px(16.0))
+                .rounded(px(4.0))
+                .border_1()
+                .border_color(border_muted())
+                .bg(bg_selected())
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(lucide_icon(LucideIcon::Check, 10.0, success())),
+        )
+        .child(
+            div()
+                .flex_grow()
+                .min_w_0()
+                .text_size(px(12.0))
+                .line_height(px(18.0))
+                .text_color(fg_default())
+                .child(SelectableText::new(id, value.to_string())),
+        )
+}
+
+fn review_partner_card(label: &str, icon: LucideIcon, tone: Rgba) -> gpui::Div {
+    div()
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(border_muted())
+        .bg(bg_overlay())
+        .p(px(12.0))
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .child(review_partner_micro_label(icon, label, tone))
+}
+
+fn review_partner_micro_label(icon: LucideIcon, label: &str, tone: Rgba) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .child(lucide_icon(icon, 12.0, tone))
+        .child(
+            div()
+                .text_size(px(10.0))
+                .font_family(mono_font_family())
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_subtle())
+                .child(label.to_ascii_uppercase()),
+        )
+}
+
+fn review_partner_icon_chip(icon: LucideIcon, tone: Rgba) -> impl IntoElement {
+    div()
+        .w(px(24.0))
+        .h(px(24.0))
+        .flex_shrink_0()
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(with_alpha(tone, 0.35))
+        .bg(with_alpha(tone, 0.10))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(lucide_icon(icon, 13.0, tone))
+}
+
+fn review_partner_small_button(
+    label: &str,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .px(px(8.0))
+        .py(px(4.0))
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(border_muted())
+        .bg(control_button_bg())
+        .text_size(px(11.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(fg_muted())
+        .cursor_pointer()
+        .hover(|style| {
+            style
+                .bg(control_button_hover_bg())
+                .border_color(border_default())
+                .text_color(fg_emphasis())
+        })
+        .on_mouse_down(MouseButton::Left, on_click)
+        .child(label.to_string())
 }
 
 fn render_local_review_empty_state(
@@ -8306,7 +8729,7 @@ fn render_ai_tour_view(
                                 .px(px(18.0))
                                 .pb(px(14.0))
                                 .child(nested_panel().child(panel_state_text(
-                                    "No AI tour sections were returned for this pull request.",
+                                    "No Guided Review sections were returned for this pull request.",
                                 )))
                                 .into_any_element(),
                             AiTourContentItem::Section(section_ix) => {
@@ -8459,7 +8882,7 @@ fn render_ai_tour_pending_panel(
         (
             progress_summary
                 .map(str::to_string)
-                .unwrap_or_else(|| "Looking for a cached AI tour".to_string()),
+                .unwrap_or_else(|| "Looking for cached Guided Review".to_string()),
             progress_detail.map(str::to_string).unwrap_or_else(|| {
                 "The app is checking whether this pull request head already has a stored tour."
                     .to_string()
@@ -8469,7 +8892,7 @@ fn render_ai_tour_pending_panel(
         (
             progress_summary
                 .map(str::to_string)
-                .unwrap_or_else(|| format!("{} is building the AI tour", provider.label())),
+                .unwrap_or_else(|| format!("{} is building Guided Review", provider.label())),
             progress_detail.map(str::to_string).unwrap_or_else(|| {
                 "The provider is reading the diff, review threads, and local checkout.".to_string()
             }),
@@ -8482,13 +8905,13 @@ fn render_ai_tour_pending_panel(
             )
         } else {
             (
-                "Generate an AI tour".to_string(),
+                "Generate Guided Review".to_string(),
                 "Create a short guided walkthrough that groups related changes and shows the matching diff under each explanation.".to_string(),
             )
         }
     } else {
         (
-            "Preparing AI tour".to_string(),
+            "Preparing Guided Review".to_string(),
             "Waiting for the provider configured in Settings to finish loading.".to_string(),
         )
     };
@@ -8506,7 +8929,7 @@ fn render_ai_tour_pending_panel(
                     .flex_col()
                     .gap(px(6.0))
                     .min_w_0()
-                    .child(eyebrow("AI tour"))
+                    .child(eyebrow("Guided Review"))
                     .child(
                         div()
                             .text_size(px(20.0))
@@ -8561,11 +8984,11 @@ fn render_ai_tour_progress_panel(
             .map(str::to_string)
             .unwrap_or_else(|| format!("{} is updating the tour", provider.label()))
     } else {
-        "Preparing AI tour".to_string()
+        "Preparing Guided Review".to_string()
     };
     let body = progress_detail
         .map(str::to_string)
-        .unwrap_or_else(|| "The AI tour will update here when the provider returns.".to_string());
+        .unwrap_or_else(|| "Guided Review will update here when the provider returns.".to_string());
 
     nested_panel()
         .child(eyebrow("Status"))
@@ -16867,8 +17290,8 @@ mod tests {
         build_file_tree_rows, build_normal_side_by_side_diff_file, compute_inline_emphasis,
         max_side_by_side_column_widths, should_apply_structural_diff_update,
         should_reuse_structural_diff_state, structural_diff_state_terminal_status,
-        DiffFileCollapseScrollAdjustment, ReviewFileTreeEntry, SideBySideColumnWidths,
-        StructuralDiffTerminalStatus,
+        sync_stack_timeline_item_count, DiffFileCollapseScrollAdjustment, ReviewFileTreeEntry,
+        SideBySideColumnWidths, StructuralDiffTerminalStatus,
     };
 
     fn inline_range(column_start: usize, column_end: usize) -> DiffInlineRange {
@@ -17041,6 +17464,32 @@ mod tests {
         assert_file_row(&rows[0], "README.md", "README.md", 0, 1, 0);
         assert_directory_row(&rows[1], "src", 1);
         assert_file_row(&rows[2], "src/lib.rs", "lib.rs", 2, 2, 1);
+    }
+
+    #[test]
+    fn stack_timeline_initializes_at_base_branch_row() {
+        let list_state = ListState::new(0, ListAlignment::Top, px(36.0));
+
+        sync_stack_timeline_item_count(&list_state, 5);
+
+        let scroll_top = list_state.logical_scroll_top();
+        assert_eq!(scroll_top.item_ix, 5);
+        assert_eq!(scroll_top.offset_in_item, px(0.0));
+    }
+
+    #[test]
+    fn stack_timeline_preserves_manual_scroll_after_count_change() {
+        let list_state = ListState::new(5, ListAlignment::Top, px(36.0));
+        list_state.scroll_to(ListOffset {
+            item_ix: 2,
+            offset_in_item: px(7.0),
+        });
+
+        sync_stack_timeline_item_count(&list_state, 7);
+
+        let scroll_top = list_state.logical_scroll_top();
+        assert_eq!(scroll_top.item_ix, 2);
+        assert_eq!(scroll_top.offset_in_item, px(7.0));
     }
 
     #[test]

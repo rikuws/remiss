@@ -1848,6 +1848,10 @@ fn refresh_auth_state(cache: &CacheStore) -> Result<AuthState, String> {
     Ok(auth)
 }
 
+pub fn check_live_auth_state() -> Result<AuthState, String> {
+    live_auth_state()
+}
+
 fn live_auth_state() -> Result<AuthState, String> {
     let hostname = std::env::var("GH_HOST")
         .ok()

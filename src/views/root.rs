@@ -18,6 +18,7 @@ use crate::branding::APP_NAME;
 use crate::github;
 use crate::icons::{lucide_icon, LucideIcon};
 use crate::local_review::{self, LocalReviewStatusKind, RememberedLocalRepository};
+use crate::onboarding::WizardStepTarget;
 use crate::review_session::{load_review_session, ReviewCenterMode};
 use crate::state::*;
 use crate::theme::*;
@@ -36,6 +37,7 @@ use super::settings::{
     increase_code_font_size_preference, prepare_settings_view, reset_code_font_size_preference,
     trigger_software_update_check, update_theme_preference,
 };
+use super::welcome_wizard::{refresh_onboarding_gh_status, render_onboarding_wizard};
 use super::workspace_sync::{
     sync_workspace_flow, trigger_sync_workspace, wait_for_workspace_poll_interval,
 };
@@ -208,6 +210,7 @@ impl RootView {
         })
         .detach();
 
+        refresh_onboarding_gh_status(&state, window, cx);
         refresh_local_review_repositories(&state, window, cx);
 
         Self {
@@ -640,11 +643,17 @@ fn mark_local_review_path_inspecting(state: &Entity<AppState>, path: &PathBuf, c
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let workspace_route_transition = self.workspace_route_transition(window, cx);
-        let (palette_visible, notification_drawer_open, app_menu_availability) = {
+        let (
+            palette_visible,
+            notification_drawer_open,
+            onboarding_wizard_visible,
+            app_menu_availability,
+        ) = {
             let state = self.state.read(cx);
             (
                 state.palette_open || state.palette_closing,
                 state.notification_drawer_open,
+                state.active_onboarding_wizard.is_some(),
                 AppMenuAvailability {
                     has_active_detail: state.active_detail().is_some(),
                     has_active_remote_detail: state.active_detail().is_some()
@@ -677,6 +686,9 @@ impl Render for RootView {
             })
             .when(palette_visible, |el| {
                 el.child(render_palette(&self.state, cx))
+            })
+            .when(onboarding_wizard_visible, |el| {
+                el.child(render_onboarding_wizard(&self.state, cx))
             });
 
         attach_app_menu_action_handlers(root, self.state.clone(), app_menu_availability)
@@ -1130,6 +1142,7 @@ fn render_local_review_sidebar_section(state: &Entity<AppState>, cx: &App) -> im
     let repositories = s.local_review_repositories.clone();
     let error = s.local_review_error.clone();
     let loading = s.local_review_loading;
+    let highlight_add = s.is_onboarding_target(WizardStepTarget::LocalReview);
     let active_local_repository = s
         .active_detail()
         .filter(|detail| local_review::is_local_review_detail(detail))
@@ -1162,17 +1175,20 @@ fn render_local_review_sidebar_section(state: &Entity<AppState>, cx: &App) -> im
                         .flex()
                         .items_center()
                         .gap(px(4.0))
-                        .child(sidebar_utility_button(
-                            if loading {
-                                LucideIcon::RefreshCw
-                            } else {
-                                LucideIcon::Plus
-                            },
-                            false,
-                            false,
-                            move |_, window, cx| {
-                                trigger_add_local_repository(&state_for_add, window, cx);
-                            },
+                        .child(onboarding_highlight_shell(
+                            highlight_add,
+                            sidebar_utility_button(
+                                if loading {
+                                    LucideIcon::RefreshCw
+                                } else {
+                                    LucideIcon::Plus
+                                },
+                                false,
+                                false,
+                                move |_, window, cx| {
+                                    trigger_add_local_repository(&state_for_add, window, cx);
+                                },
+                            ),
                         )),
                 ),
         )
@@ -1421,6 +1437,8 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
     let file_tree_tooltip = "Show file tree";
     let file_tree_icon = LucideIcon::PanelLeftOpen;
     let tabs: Vec<_> = s.open_tabs.clone();
+    let highlight_review_surface = s.is_onboarding_target(WizardStepTarget::TutorialReview);
+    let highlight_guided_review = s.is_onboarding_target(WizardStepTarget::GuidedReview);
     let state_for_tabs = state.clone();
     let state_for_notifications = state.clone();
     let state_for_briefing = state.clone();
@@ -1456,35 +1474,38 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
         .gap(px(12.0))
         .child(render_workspace_tabs(state_for_tabs, active_pr_key, tabs))
         .when(has_active_pr && !active_is_local_review, |el| {
-            el.child(chrome_segmented_control(vec![
-                chrome_segment(
-                    "Briefing",
-                    active_surface == PullRequestSurface::Overview,
-                    false,
-                    move |_, window, cx| {
-                        state_for_briefing.update(cx, |state, cx| {
-                            state.active_surface = PullRequestSurface::Overview;
-                            state.pr_header_compact = false;
-                            state.persist_active_review_session();
-                            cx.notify();
-                        });
-                        crate::review_intelligence::refresh_active_review_brief(
-                            &state_for_briefing,
-                            window,
-                            cx,
-                            true,
-                        );
-                    },
-                ),
-                chrome_segment(
-                    "Review",
-                    active_surface == PullRequestSurface::Files,
-                    false,
-                    move |_, window, cx| {
-                        enter_files_surface(&state_for_review, window, cx);
-                    },
-                ),
-            ]))
+            el.child(onboarding_highlight_shell(
+                highlight_review_surface,
+                chrome_segmented_control(vec![
+                    chrome_segment(
+                        "Briefing",
+                        active_surface == PullRequestSurface::Overview,
+                        false,
+                        move |_, window, cx| {
+                            state_for_briefing.update(cx, |state, cx| {
+                                state.active_surface = PullRequestSurface::Overview;
+                                state.pr_header_compact = false;
+                                state.persist_active_review_session();
+                                cx.notify();
+                            });
+                            crate::review_intelligence::refresh_active_review_brief(
+                                &state_for_briefing,
+                                window,
+                                cx,
+                                true,
+                            );
+                        },
+                    ),
+                    chrome_segment(
+                        "Review",
+                        active_surface == PullRequestSurface::Files,
+                        false,
+                        move |_, window, cx| {
+                            enter_files_surface(&state_for_review, window, cx);
+                        },
+                    ),
+                ]),
+            ))
         })
         .when(
             has_active_pr && active_surface == PullRequestSurface::Files && code_mode_active,
@@ -1548,30 +1569,33 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
             ))
         })
         .when(has_active_pr, |el| {
-            el.child(chrome_segmented_control(vec![
-                chrome_segment(
-                    "Code",
-                    code_mode_active,
-                    active_surface != PullRequestSurface::Files,
-                    move |_, window, cx| {
-                        state_for_code.update(cx, |state, cx| {
-                            state.active_surface = PullRequestSurface::Files;
-                            state.enter_code_review_mode();
-                            state.persist_active_review_session();
-                            cx.notify();
-                        });
-                        ensure_active_review_focus_loaded(&state_for_code, window, cx);
-                    },
-                ),
-                chrome_segment(
-                    "Guided Review",
-                    active_center_mode == ReviewCenterMode::GuidedReview,
-                    active_surface != PullRequestSurface::Files,
-                    move |_, window, cx| {
-                        enter_stack_review_mode(&state_for_stack, window, cx);
-                    },
-                ),
-            ]))
+            el.child(onboarding_highlight_shell(
+                highlight_guided_review,
+                chrome_segmented_control(vec![
+                    chrome_segment(
+                        "Code",
+                        code_mode_active,
+                        active_surface != PullRequestSurface::Files,
+                        move |_, window, cx| {
+                            state_for_code.update(cx, |state, cx| {
+                                state.active_surface = PullRequestSurface::Files;
+                                state.enter_code_review_mode();
+                                state.persist_active_review_session();
+                                cx.notify();
+                            });
+                            ensure_active_review_focus_loaded(&state_for_code, window, cx);
+                        },
+                    ),
+                    chrome_segment(
+                        "Guided Review",
+                        active_center_mode == ReviewCenterMode::GuidedReview,
+                        active_surface != PullRequestSurface::Files,
+                        move |_, window, cx| {
+                            enter_stack_review_mode(&state_for_stack, window, cx);
+                        },
+                    ),
+                ]),
+            ))
         })
         .child(
             div()
@@ -1921,6 +1945,25 @@ fn chrome_segmented_control(children: Vec<AnyElement>) -> impl IntoElement {
         .items_center()
         .gap(px(1.0))
         .children(children)
+}
+
+fn onboarding_highlight_shell(active: bool, child: impl IntoElement) -> AnyElement {
+    div()
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(if active {
+            focus_border()
+        } else {
+            transparent()
+        })
+        .bg(if active {
+            with_alpha(focus_border(), 0.12)
+        } else {
+            transparent()
+        })
+        .p(px(2.0))
+        .child(child)
+        .into_any_element()
 }
 
 fn chrome_segment(

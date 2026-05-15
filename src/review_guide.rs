@@ -12,8 +12,8 @@ use crate::{
     structural_evidence::{StructuralEvidencePack, StructuralEvidenceStatus},
 };
 
-pub const REVIEW_GUIDE_GENERATOR_VERSION: &str = "review-guide-v1";
-const REVIEW_GUIDE_CACHE_KEY_PREFIX: &str = "review-guide-v1";
+pub const REVIEW_GUIDE_GENERATOR_VERSION: &str = "review-guide-v2";
+const REVIEW_GUIDE_CACHE_KEY_PREFIX: &str = "review-guide-v2";
 const MAX_GUIDE_LAYERS: usize = 24;
 const MAX_LAYER_ATOMS: usize = 32;
 const MAX_EVIDENCE_FILES: usize = 40;
@@ -30,8 +30,8 @@ pub struct GeneratedReviewGuide {
     pub code_version_key: String,
     pub generator_version: String,
     pub structural_evidence_version: String,
-    pub summary: String,
-    pub review_focus: String,
+    pub partner_overview: String,
+    pub review_strategy: String,
     #[serde(default)]
     pub open_questions: Vec<String>,
     #[serde(default)]
@@ -52,17 +52,16 @@ impl GeneratedReviewGuide {
 pub struct ReviewGuideLayer {
     pub layer_id: String,
     pub title: String,
-    pub summary: String,
-    pub rationale: String,
-    pub review_question: String,
+    pub what_changed: String,
+    pub why_it_matters: String,
     #[serde(default)]
-    pub review_points: Vec<String>,
+    pub how_to_review: Vec<String>,
     #[serde(default)]
-    pub open_questions: Vec<String>,
+    pub bug_risks: Vec<String>,
     #[serde(default)]
-    pub risk_notes: Vec<String>,
+    pub evidence_notes: Vec<String>,
     #[serde(default)]
-    pub structural_notes: Vec<String>,
+    pub follow_ups: Vec<String>,
     pub structural_evidence_status: StructuralEvidenceStatus,
 }
 
@@ -86,8 +85,8 @@ pub struct GenerateReviewGuideInput {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ReviewGuideResponse {
-    summary: String,
-    review_focus: String,
+    partner_overview: String,
+    review_strategy: String,
     #[serde(default)]
     open_questions: Vec<String>,
     #[serde(default)]
@@ -100,17 +99,16 @@ struct ReviewGuideResponse {
 #[serde(rename_all = "camelCase")]
 struct ReviewGuideLayerResponse {
     layer_id: String,
-    summary: String,
-    rationale: String,
-    review_question: String,
+    what_changed: String,
+    why_it_matters: String,
     #[serde(default)]
-    review_points: Vec<String>,
+    how_to_review: Vec<String>,
     #[serde(default)]
-    open_questions: Vec<String>,
+    bug_risks: Vec<String>,
     #[serde(default)]
-    risk_notes: Vec<String>,
+    evidence_notes: Vec<String>,
     #[serde(default)]
-    structural_notes: Vec<String>,
+    follow_ups: Vec<String>,
 }
 
 pub fn load_review_guide(
@@ -176,8 +174,8 @@ pub fn fallback_review_guide(
         code_version_key: input.code_version_key.clone(),
         generator_version: REVIEW_GUIDE_GENERATOR_VERSION.to_string(),
         structural_evidence_version: input.structural_evidence.version.clone(),
-        summary: fallback_summary(&input.stack),
-        review_focus: "Review each generated layer in order and use structural evidence as supporting context where available.".to_string(),
+        partner_overview: fallback_summary(&input.stack),
+        review_strategy: "Review each generated layer in order, using the partner notes to focus the diff pass on behavior, risks, and supporting evidence.".to_string(),
         open_questions: Vec::new(),
         warnings,
         stack: input.stack.clone(),
@@ -266,12 +264,14 @@ pub fn build_review_guide_prompt(input: &GenerateReviewGuideInput) -> String {
         serde_json::to_string_pretty(&review_guide_output_schema()).expect("schema must serialize");
 
     [
-        "You are generating Guided Review layer notes for Remiss, a read-only pull request review IDE.",
+        "You are generating Review Partner guidance for Remiss, a read-only pull request review IDE.",
         "The stack layers are already validated. Do not change the layer order, layer IDs, or atom coverage.",
         "Use structural evidence as deterministic support for explaining what changed, but do not claim it is complete when a file is partial or unavailable.",
         "Return strict JSON only. No markdown fences or prose outside JSON.",
         "Every response layer must use an existing layerId from pullRequest.stack.layers. Do not invent layer IDs or atom IDs.",
-        "Keep prose short and reviewer-facing. Focus on what to verify, why the layer matters, and what structural diffs make clearer.",
+        "Write like a senior review partner beside the reviewer, not like a questionnaire or report.",
+        "For each layer, explain what changed, why it matters, how to review it, and where bugs may hide.",
+        "Keep prose compact and concrete: whatChanged and whyItMatters should each be one short sentence; howToReview should be 2-4 action bullets; bugRisks should name concrete failure modes, not generic caution.",
         "",
         "JSON schema:",
         &schema,
@@ -331,8 +331,8 @@ fn merge_review_guide(
         code_version_key: input.code_version_key.clone(),
         generator_version: REVIEW_GUIDE_GENERATOR_VERSION.to_string(),
         structural_evidence_version: input.structural_evidence.version.clone(),
-        summary: response.summary,
-        review_focus: response.review_focus,
+        partner_overview: response.partner_overview,
+        review_strategy: response.review_strategy,
         open_questions: response.open_questions,
         warnings: response.warnings,
         stack: input.stack.clone(),
@@ -349,13 +349,12 @@ fn merge_layer(
     ReviewGuideLayer {
         layer_id: layer.id.clone(),
         title: layer.title.clone(),
-        summary: default_if_empty(response.summary, &layer.summary),
-        rationale: default_if_empty(response.rationale, &layer.rationale),
-        review_question: default_if_empty(response.review_question, &layer.rationale),
-        review_points: response.review_points,
-        open_questions: response.open_questions,
-        risk_notes: response.risk_notes,
-        structural_notes: response.structural_notes,
+        what_changed: default_if_empty(response.what_changed, &layer.summary),
+        why_it_matters: default_if_empty(response.why_it_matters, &layer.rationale),
+        how_to_review: response.how_to_review,
+        bug_risks: response.bug_risks,
+        evidence_notes: response.evidence_notes,
+        follow_ups: response.follow_ups,
         structural_evidence_status: evidence.status_for_atom_ids(&layer.atom_ids),
     }
 }
@@ -365,13 +364,16 @@ fn fallback_layer(layer: &ReviewStackLayer, evidence: &StructuralEvidencePack) -
     ReviewGuideLayer {
         layer_id: layer.id.clone(),
         title: layer.title.clone(),
-        summary: layer.summary.clone(),
-        rationale: layer.rationale.clone(),
-        review_question: layer.rationale.clone(),
-        review_points: vec![format!("Verify {}", layer.title)],
-        open_questions: Vec::new(),
-        risk_notes: Vec::new(),
-        structural_notes: vec![status.label().to_string()],
+        what_changed: layer.summary.clone(),
+        why_it_matters: layer.rationale.clone(),
+        how_to_review: vec![format!("Review the diff for {}", layer.title)],
+        bug_risks: layer
+            .warnings
+            .iter()
+            .map(|warning| warning.message.clone())
+            .collect(),
+        evidence_notes: vec![status.label().to_string()],
+        follow_ups: Vec::new(),
         structural_evidence_status: status,
     }
 }
@@ -491,8 +493,8 @@ fn review_guide_output_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "summary": { "type": "string" },
-            "reviewFocus": { "type": "string" },
+            "partnerOverview": { "type": "string" },
+            "reviewStrategy": { "type": "string" },
             "openQuestions": { "type": "array", "items": { "type": "string" } },
             "warnings": { "type": "array", "items": { "type": "string" } },
             "layers": {
@@ -501,20 +503,19 @@ fn review_guide_output_schema() -> Value {
                     "type": "object",
                     "properties": {
                         "layerId": { "type": "string" },
-                        "summary": { "type": "string" },
-                        "rationale": { "type": "string" },
-                        "reviewQuestion": { "type": "string" },
-                        "reviewPoints": { "type": "array", "items": { "type": "string" } },
-                        "openQuestions": { "type": "array", "items": { "type": "string" } },
-                        "riskNotes": { "type": "array", "items": { "type": "string" } },
-                        "structuralNotes": { "type": "array", "items": { "type": "string" } }
+                        "whatChanged": { "type": "string" },
+                        "whyItMatters": { "type": "string" },
+                        "howToReview": { "type": "array", "items": { "type": "string" } },
+                        "bugRisks": { "type": "array", "items": { "type": "string" } },
+                        "evidenceNotes": { "type": "array", "items": { "type": "string" } },
+                        "followUps": { "type": "array", "items": { "type": "string" } }
                     },
-                    "required": ["layerId", "summary", "rationale", "reviewQuestion", "reviewPoints", "openQuestions", "riskNotes", "structuralNotes"],
+                    "required": ["layerId", "whatChanged", "whyItMatters", "howToReview", "bugRisks", "evidenceNotes", "followUps"],
                     "additionalProperties": false
                 }
             }
         },
-        "required": ["summary", "reviewFocus", "openQuestions", "warnings", "layers"],
+        "required": ["partnerOverview", "reviewStrategy", "openQuestions", "warnings", "layers"],
         "additionalProperties": false
     })
 }
@@ -565,19 +566,18 @@ mod tests {
     fn merge_rejects_unknown_layer_ids() {
         let input = input();
         let response = ReviewGuideResponse {
-            summary: "summary".to_string(),
-            review_focus: "focus".to_string(),
+            partner_overview: "overview".to_string(),
+            review_strategy: "strategy".to_string(),
             open_questions: Vec::new(),
             warnings: Vec::new(),
             layers: vec![ReviewGuideLayerResponse {
                 layer_id: "invented".to_string(),
-                summary: "summary".to_string(),
-                rationale: "rationale".to_string(),
-                review_question: "question".to_string(),
-                review_points: Vec::new(),
-                open_questions: Vec::new(),
-                risk_notes: Vec::new(),
-                structural_notes: Vec::new(),
+                what_changed: "changed".to_string(),
+                why_it_matters: "matters".to_string(),
+                how_to_review: Vec::new(),
+                bug_risks: Vec::new(),
+                evidence_notes: Vec::new(),
+                follow_ups: Vec::new(),
             }],
         };
 
@@ -589,8 +589,8 @@ mod tests {
     fn merge_fills_missing_layers_from_stack() {
         let input = input();
         let response = ReviewGuideResponse {
-            summary: "summary".to_string(),
-            review_focus: "focus".to_string(),
+            partner_overview: "overview".to_string(),
+            review_strategy: "strategy".to_string(),
             open_questions: Vec::new(),
             warnings: Vec::new(),
             layers: Vec::new(),
@@ -600,7 +600,8 @@ mod tests {
 
         assert_eq!(guide.layers.len(), 1);
         assert_eq!(guide.layers[0].layer_id, "layer-1");
-        assert_eq!(guide.layers[0].summary, "Layer summary");
+        assert_eq!(guide.layers[0].what_changed, "Layer summary");
+        assert_eq!(guide.layers[0].why_it_matters, "Layer rationale");
         assert_eq!(guide.model.as_deref(), Some("model"));
     }
 

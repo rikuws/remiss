@@ -9,6 +9,9 @@ const REVIEW_SESSION_CACHE_KEY_PREFIX: &str = "review-session-v2";
 const MAX_WAYMARKS: usize = 16;
 const MAX_ROUTE_LOCATIONS: usize = 24;
 const MAX_HISTORY_LOCATIONS: usize = 48;
+pub const GUIDED_REVIEW_PANEL_DEFAULT_WIDTH: f32 = 390.0;
+pub const GUIDED_REVIEW_PANEL_MIN_WIDTH: f32 = 320.0;
+pub const GUIDED_REVIEW_PANEL_MAX_WIDTH: f32 = 560.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -209,6 +212,8 @@ pub struct ReviewSessionDocument {
     pub structural_diff_layout: DiffLayout,
     #[serde(default)]
     pub guided_review_lens: ReviewGuideLens,
+    #[serde(default = "default_guided_review_panel_width")]
+    pub guided_review_panel_width: f32,
     #[serde(default = "default_false")]
     pub wrap_diff_lines: bool,
     #[serde(default = "default_true")]
@@ -254,6 +259,7 @@ pub struct ReviewSessionState {
     pub normal_diff_layout: DiffLayout,
     pub structural_diff_layout: DiffLayout,
     pub guided_review_lens: ReviewGuideLens,
+    pub guided_review_panel_width: f32,
     pub wrap_diff_lines: bool,
     pub show_file_tree: bool,
     pub source_target: Option<ReviewSourceTarget>,
@@ -283,6 +289,7 @@ impl Default for ReviewSessionState {
             normal_diff_layout: DiffLayout::Unified,
             structural_diff_layout: DiffLayout::SideBySide,
             guided_review_lens: ReviewGuideLens::Diff,
+            guided_review_panel_width: GUIDED_REVIEW_PANEL_DEFAULT_WIDTH,
             wrap_diff_lines: false,
             show_file_tree: true,
             source_target: None,
@@ -330,6 +337,9 @@ impl ReviewSessionState {
             normal_diff_layout: document.normal_diff_layout,
             structural_diff_layout: document.structural_diff_layout,
             guided_review_lens: document.guided_review_lens,
+            guided_review_panel_width: sanitize_guided_review_panel_width(
+                document.guided_review_panel_width,
+            ),
             wrap_diff_lines: document.wrap_diff_lines,
             show_file_tree: document.show_file_tree,
             source_target: document.source_target,
@@ -379,6 +389,9 @@ impl ReviewSessionState {
             normal_diff_layout: self.normal_diff_layout,
             structural_diff_layout: self.structural_diff_layout,
             guided_review_lens: self.guided_review_lens,
+            guided_review_panel_width: sanitize_guided_review_panel_width(
+                self.guided_review_panel_width,
+            ),
             wrap_diff_lines: self.wrap_diff_lines,
             show_file_tree: self.show_file_tree,
             source_target: self.source_target.clone(),
@@ -412,6 +425,18 @@ impl ReviewSessionState {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_guided_review_panel_width() -> f32 {
+    GUIDED_REVIEW_PANEL_DEFAULT_WIDTH
+}
+
+pub fn sanitize_guided_review_panel_width(width: f32) -> f32 {
+    if width.is_finite() {
+        width.clamp(GUIDED_REVIEW_PANEL_MIN_WIDTH, GUIDED_REVIEW_PANEL_MAX_WIDTH)
+    } else {
+        GUIDED_REVIEW_PANEL_DEFAULT_WIDTH
+    }
 }
 
 fn default_structural_diff_layout() -> DiffLayout {
@@ -709,6 +734,36 @@ mod tests {
     }
 
     #[test]
+    fn review_session_persists_guided_review_panel_width_with_clamp() {
+        let document: super::ReviewSessionDocument = serde_json::from_str(
+            r#"{
+                "centerMode": "guidedReview",
+                "guidedReviewPanelWidth": 420.0
+            }"#,
+        )
+        .expect("guided review session should deserialize");
+
+        let restored = ReviewSessionState::from_document(document);
+        assert_eq!(restored.guided_review_panel_width, 420.0);
+        assert_eq!(
+            restored.to_document(None, None).guided_review_panel_width,
+            420.0
+        );
+
+        let too_narrow: super::ReviewSessionDocument = serde_json::from_str(
+            r#"{
+                "guidedReviewPanelWidth": 120.0
+            }"#,
+        )
+        .expect("guided review session should deserialize");
+        let restored = ReviewSessionState::from_document(too_narrow);
+        assert_eq!(
+            restored.guided_review_panel_width,
+            super::GUIDED_REVIEW_PANEL_MIN_WIDTH
+        );
+    }
+
+    #[test]
     fn review_session_restores_legacy_sessions_with_code_lens_defaults() {
         let document: super::ReviewSessionDocument =
             serde_json::from_str(r#"{}"#).expect("legacy review session should deserialize");
@@ -719,6 +774,10 @@ mod tests {
         assert_eq!(
             restored.active_code_lens_mode(),
             ReviewCenterMode::SemanticDiff
+        );
+        assert_eq!(
+            restored.guided_review_panel_width,
+            super::GUIDED_REVIEW_PANEL_DEFAULT_WIDTH
         );
     }
 

@@ -5,6 +5,7 @@ mod pr_detail;
 mod root;
 mod sections;
 mod settings;
+mod welcome_wizard;
 mod workspace_sync;
 
 pub use diff_view::{

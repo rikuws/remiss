@@ -20,6 +20,9 @@ use crate::local_review::{self, RememberedLocalRepository};
 use crate::lsp::{LspServerStatus, LspSessionManager, LspSymbolDetails};
 use crate::managed_lsp::{ManagedServerInstallStatus, ManagedServerKind};
 use crate::notifications;
+use crate::onboarding::{
+    self, GhSetupStatus, OnboardingProgress, StartupWizardOptions, WizardSession, WizardStepTarget,
+};
 use crate::review_brief::ReviewBrief;
 use crate::review_guide::GeneratedReviewGuide;
 use crate::review_queue::{default_review_file, ReviewQueue};
@@ -948,6 +951,16 @@ pub struct ProjectShaderPickerState {
     pub label: String,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct OnboardingRouteSnapshot {
+    pub active_section: SectionId,
+    pub active_surface: PullRequestSurface,
+    pub active_pr_key: Option<String>,
+    pub selected_file_path: Option<String>,
+    pub selected_diff_anchor: Option<DiffAnchor>,
+    pub pr_header_compact: bool,
+}
+
 pub struct AppState {
     pub cache: Arc<CacheStore>,
     pub lsp_session_manager: Arc<LspSessionManager>,
@@ -990,6 +1003,10 @@ pub struct AppState {
     pub notification_drawer_open: bool,
     pub software_update_message: Option<String>,
     pub software_update_error: Option<String>,
+    pub onboarding_progress: OnboardingProgress,
+    pub active_onboarding_wizard: Option<WizardSession>,
+    pub onboarding_gh_status: GhSetupStatus,
+    pub onboarding_route_before_tutorial: Option<OnboardingRouteSnapshot>,
 
     // Selected file in diff view
     pub selected_file_path: Option<String>,
@@ -1065,7 +1082,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(cache: CacheStore) -> Self {
+    pub fn new(cache: CacheStore, startup_wizard_options: StartupWizardOptions) -> Self {
         let theme_settings = theme::load_theme_settings(&cache).unwrap_or_default();
         let theme_preference = theme_settings.preference;
         let code_font_size_preference = theme_settings.code_font_size;
@@ -1097,6 +1114,15 @@ impl AppState {
                 Ok(settings) => (settings, None),
                 Err(error) => (ProjectShaderSettings::default(), Some(error)),
             };
+        let onboarding_progress = match onboarding::load_onboarding_progress(&cache) {
+            Ok(progress) => progress,
+            Err(error) => {
+                eprintln!("Failed to load onboarding progress: {error}");
+                OnboardingProgress::default()
+            }
+        };
+        let active_onboarding_wizard =
+            onboarding::initial_wizard_session(&onboarding_progress, &startup_wizard_options);
         let mut state = Self {
             cache: Arc::new(cache),
             lsp_session_manager: Arc::new(LspSessionManager::new()),
@@ -1131,6 +1157,10 @@ impl AppState {
             notification_drawer_open: false,
             software_update_message: None,
             software_update_error: None,
+            onboarding_progress,
+            active_onboarding_wizard,
+            onboarding_gh_status: GhSetupStatus::checking(),
+            onboarding_route_before_tutorial: None,
             selected_file_path: None,
             selected_diff_anchor: None,
             review_scroll_focus: None,
@@ -1197,6 +1227,7 @@ impl AppState {
         };
 
         state.restore_debug_pull_request_from_cache();
+        state.apply_active_onboarding_step();
         state
     }
 
@@ -1206,6 +1237,189 @@ impl AppState {
 
     pub fn set_active_section(&mut self, section: SectionId) {
         self.active_section = section;
+    }
+
+    pub fn next_onboarding_step(&mut self) {
+        let Some(session) = self.active_onboarding_wizard.as_mut() else {
+            return;
+        };
+
+        if session.is_last_step() {
+            self.complete_active_onboarding_wizard();
+        } else {
+            session.step_index += 1;
+            self.apply_active_onboarding_step();
+        }
+    }
+
+    pub fn previous_onboarding_step(&mut self) {
+        let Some(session) = self.active_onboarding_wizard.as_mut() else {
+            return;
+        };
+
+        session.step_index = session.step_index.saturating_sub(1);
+        self.apply_active_onboarding_step();
+    }
+
+    pub fn set_onboarding_step(&mut self, step_index: usize) {
+        let Some(session) = self.active_onboarding_wizard.as_mut() else {
+            return;
+        };
+
+        session.step_index = step_index.min(session.step_count().saturating_sub(1));
+        self.apply_active_onboarding_step();
+    }
+
+    pub fn complete_active_onboarding_wizard(&mut self) {
+        let Some(session) = self.active_onboarding_wizard.take() else {
+            return;
+        };
+
+        self.cleanup_onboarding_tutorial_pr();
+        onboarding::mark_wizard_completed(&mut self.onboarding_progress, &session.definition);
+        self.persist_onboarding_progress();
+        self.active_onboarding_wizard = onboarding::next_pending_wizard(&self.onboarding_progress);
+        self.apply_active_onboarding_step();
+    }
+
+    pub fn active_onboarding_target(&self) -> Option<WizardStepTarget> {
+        self.active_onboarding_wizard
+            .as_ref()
+            .map(|session| session.active_step().target)
+    }
+
+    pub fn is_onboarding_target(&self, target: WizardStepTarget) -> bool {
+        self.active_onboarding_target() == Some(target)
+    }
+
+    pub fn set_onboarding_gh_status(&mut self, status: GhSetupStatus) {
+        self.onboarding_gh_status = status;
+    }
+
+    fn apply_active_onboarding_step(&mut self) {
+        let Some(target) = self.active_onboarding_target() else {
+            return;
+        };
+
+        match target {
+            WizardStepTarget::GithubSetup => {
+                self.cleanup_onboarding_tutorial_pr();
+            }
+            WizardStepTarget::TutorialReview => {
+                self.open_onboarding_tutorial_pr(ReviewCenterMode::SemanticDiff);
+            }
+            WizardStepTarget::GuidedReview => {
+                self.open_onboarding_tutorial_pr(ReviewCenterMode::GuidedReview);
+            }
+            WizardStepTarget::LocalReview => {
+                if self.active_pr_key.as_deref() == Some(crate::tutorial_pr::TUTORIAL_PR_KEY) {
+                    self.active_pr_key = None;
+                    self.selected_file_path = None;
+                    self.selected_diff_anchor = None;
+                }
+                self.active_section = SectionId::Overview;
+                self.active_surface = PullRequestSurface::Overview;
+                self.pr_header_compact = false;
+            }
+            WizardStepTarget::ReviewFeedback => {
+                self.open_onboarding_tutorial_pr(ReviewCenterMode::SemanticDiff);
+            }
+        }
+    }
+
+    fn open_onboarding_tutorial_pr(&mut self, center_mode: ReviewCenterMode) {
+        if self.onboarding_route_before_tutorial.is_none()
+            && self.active_pr_key.as_deref() != Some(crate::tutorial_pr::TUTORIAL_PR_KEY)
+        {
+            self.onboarding_route_before_tutorial = Some(OnboardingRouteSnapshot {
+                active_section: self.active_section,
+                active_surface: self.active_surface,
+                active_pr_key: self.active_pr_key.clone(),
+                selected_file_path: self.selected_file_path.clone(),
+                selected_diff_anchor: self.selected_diff_anchor.clone(),
+                pr_header_compact: self.pr_header_compact,
+            });
+        }
+
+        let summary = crate::tutorial_pr::summary();
+        self.open_tabs
+            .retain(|tab| summary_key(tab) != crate::tutorial_pr::TUTORIAL_PR_KEY);
+        self.open_tabs.insert(0, summary);
+
+        let detail_key = crate::tutorial_pr::TUTORIAL_PR_KEY.to_string();
+        {
+            let detail_state = self.detail_states.entry(detail_key.clone()).or_default();
+            crate::tutorial_pr::apply_fixture_to_detail_state(detail_state);
+            detail_state.review_session.center_mode = center_mode;
+            if matches!(
+                center_mode,
+                ReviewCenterMode::SemanticDiff
+                    | ReviewCenterMode::StructuralDiff
+                    | ReviewCenterMode::SourceBrowser
+            ) {
+                detail_state.review_session.code_lens_mode = center_mode;
+            }
+            if center_mode == ReviewCenterMode::GuidedReview {
+                detail_state.review_session.stack_rail_expanded = true;
+                detail_state.review_session.stack_diff_mode = StackDiffMode::CurrentLayerOnly;
+                detail_state.review_session.selected_stack_layer_id =
+                    Some("tutorial-layer-feedback-ui".to_string());
+            }
+        }
+
+        self.active_section = SectionId::Pulls;
+        self.active_surface = PullRequestSurface::Files;
+        self.active_pr_key = Some(detail_key);
+        self.selected_file_path = Some("src/review_toolbar.rs".to_string());
+        self.selected_diff_anchor = Some(DiffAnchor {
+            file_path: "src/review_toolbar.rs".to_string(),
+            hunk_header: Some("@@ -1,18 +1,28 @@".to_string()),
+            line: Some(7),
+            side: Some("RIGHT".to_string()),
+            thread_id: None,
+        });
+        self.review_body.clear();
+        self.review_editor_active = false;
+        self.review_finish_modal_open = false;
+        self.review_message = None;
+        self.review_success = false;
+        self.active_review_line_action = None;
+        self.active_review_line_action_position = None;
+        self.pr_header_compact = false;
+        self.reset_review_focus_scroll();
+    }
+
+    fn cleanup_onboarding_tutorial_pr(&mut self) {
+        self.open_tabs
+            .retain(|tab| summary_key(tab) != crate::tutorial_pr::TUTORIAL_PR_KEY);
+        self.detail_states
+            .remove(crate::tutorial_pr::TUTORIAL_PR_KEY);
+
+        if let Some(route) = self.onboarding_route_before_tutorial.take() {
+            self.active_section = route.active_section;
+            self.active_surface = route.active_surface;
+            self.active_pr_key = route.active_pr_key;
+            self.selected_file_path = route.selected_file_path;
+            self.selected_diff_anchor = route.selected_diff_anchor;
+            self.pr_header_compact = route.pr_header_compact;
+        } else if self.active_pr_key.as_deref() == Some(crate::tutorial_pr::TUTORIAL_PR_KEY) {
+            self.active_pr_key = None;
+            self.selected_file_path = None;
+            self.selected_diff_anchor = None;
+        }
+
+        self.active_review_line_action = None;
+        self.active_review_line_action_position = None;
+        self.review_finish_modal_open = false;
+        self.reset_review_focus_scroll();
+    }
+
+    fn persist_onboarding_progress(&self) {
+        if let Err(error) =
+            onboarding::save_onboarding_progress(self.cache.as_ref(), &self.onboarding_progress)
+        {
+            eprintln!("Failed to save onboarding progress: {error}");
+        }
     }
 
     pub fn shader_for_project(&self, project: &str) -> OverviewShaderVariant {
@@ -2103,6 +2317,13 @@ impl AppState {
         }
     }
 
+    pub fn set_guided_review_panel_width(&mut self, width: f32) {
+        if let Some(session) = self.active_review_session_mut() {
+            session.guided_review_panel_width =
+                crate::review_session::sanitize_guided_review_panel_width(width);
+        }
+    }
+
     pub fn set_stack_rail_expanded(&mut self, expanded: bool) {
         if let Some(session) = self.active_review_session_mut() {
             session.stack_rail_expanded = expanded;
@@ -2217,18 +2438,35 @@ fn parse_debug_pull_request_target(target: &str) -> Option<(String, i64)> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
+    use crate::cache::CacheStore;
     use crate::diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk, ParsedDiffLine};
     use crate::github::{
         PullRequestComment, PullRequestDataCompleteness, PullRequestDetail, PullRequestFile,
         PullRequestReview, PullRequestReviewComment, PullRequestReviewThread,
     };
+    use crate::onboarding::StartupWizardOptions;
     use crate::review_session::ReviewCenterMode;
+    use crate::tutorial_pr::TUTORIAL_PR_KEY;
 
     use super::{
         diff_anchor_for_line, first_review_comment_after_focus_index,
-        review_comment_navigation_items, ReviewModeFocus, StructuralDiffWarmupState,
+        review_comment_navigation_items, summary_key, AppState, PullRequestSurface,
+        ReviewModeFocus, SectionId, StructuralDiffWarmupState,
     };
+
+    fn temp_cache_store(name: &str) -> CacheStore {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = PathBuf::from(format!(
+            "/tmp/remiss-state-test-{name}-{suffix}/cache.sqlite"
+        ));
+        CacheStore::new(path).expect("cache")
+    }
 
     #[test]
     fn diff_anchor_for_line_preserves_requested_side() {
@@ -2272,6 +2510,52 @@ mod tests {
         assert_eq!(right.side.as_deref(), Some("RIGHT"));
         assert_eq!(right.hunk_header.as_deref(), Some("@@ -1,2 +1,2 @@"));
         assert_eq!(left.side.as_deref(), Some("LEFT"));
+    }
+
+    #[test]
+    fn onboarding_tutorial_pr_is_injected_and_removed_without_workspace_queue_pollution() {
+        let cache = temp_cache_store("tutorial-onboarding");
+        let mut state = AppState::new(cache, StartupWizardOptions::force_welcome());
+        state.active_section = SectionId::Settings;
+        state.active_surface = PullRequestSurface::Overview;
+        state.active_pr_key = None;
+
+        state.set_onboarding_step(1);
+
+        assert_eq!(state.active_pr_key.as_deref(), Some(TUTORIAL_PR_KEY));
+        assert!(state
+            .open_tabs
+            .iter()
+            .any(|tab| summary_key(tab) == TUTORIAL_PR_KEY));
+        assert!(state.detail_states.contains_key(TUTORIAL_PR_KEY));
+        assert!(state.workspace.is_none());
+
+        state.set_onboarding_step(2);
+        assert_eq!(
+            state
+                .detail_states
+                .get(TUTORIAL_PR_KEY)
+                .map(|detail| detail.review_session.center_mode),
+            Some(ReviewCenterMode::GuidedReview)
+        );
+
+        state.set_onboarding_step(3);
+        assert_eq!(state.active_section, SectionId::Overview);
+        assert_eq!(state.active_pr_key, None);
+        assert!(state
+            .open_tabs
+            .iter()
+            .any(|tab| summary_key(tab) == TUTORIAL_PR_KEY));
+
+        state.complete_active_onboarding_wizard();
+
+        assert!(!state
+            .open_tabs
+            .iter()
+            .any(|tab| summary_key(tab) == TUTORIAL_PR_KEY));
+        assert!(!state.detail_states.contains_key(TUTORIAL_PR_KEY));
+        assert_eq!(state.active_section, SectionId::Settings);
+        assert_eq!(state.active_pr_key, None);
     }
 
     #[test]
