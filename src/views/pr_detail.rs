@@ -26,6 +26,8 @@ use super::sections::{
 };
 
 const PR_OVERVIEW_CONTENT_MAX_WIDTH: f32 = 1440.0;
+const REVIEW_BRIEF_STATUS_TEXT_MIN_WIDTH: f32 = 260.0;
+const REVIEW_BRIEF_STATUS_TEXT_MAX_WIDTH: f32 = 760.0;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct ReviewStatusSummary {
@@ -1025,25 +1027,30 @@ fn render_review_brief_progress(
         .border_1()
         .border_color(border_muted())
         .flex()
-        .items_center()
+        .items_start()
         .justify_between()
         .gap(px(12.0))
         .flex_wrap()
         .child(
             div()
-                .min_w_0()
+                .flex_grow()
+                .min_w(px(REVIEW_BRIEF_STATUS_TEXT_MIN_WIDTH))
+                .max_w(px(REVIEW_BRIEF_STATUS_TEXT_MAX_WIDTH))
                 .flex()
-                .items_center()
+                .items_start()
                 .gap(px(9.0))
                 .child(lucide_icon(LucideIcon::Sparkles, 15.0, accent()))
                 .child(
                     div()
+                        .flex_1()
                         .min_w_0()
                         .flex()
                         .flex_col()
                         .gap(px(3.0))
                         .child(
                             div()
+                                .min_w_0()
+                                .whitespace_normal()
                                 .text_size(px(13.0))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(fg_emphasis())
@@ -1051,6 +1058,8 @@ fn render_review_brief_progress(
                         )
                         .child(
                             div()
+                                .min_w_0()
+                                .whitespace_normal()
                                 .text_size(px(12.0))
                                 .text_color(fg_muted())
                                 .child("Start review remains available while this finishes."),
@@ -1060,6 +1069,7 @@ fn render_review_brief_progress(
         .child(
             div()
                 .flex()
+                .flex_shrink_0()
                 .items_center()
                 .gap(px(6.0))
                 .flex_wrap()
@@ -1085,35 +1095,43 @@ fn render_review_brief_error(error: &str, state: &Entity<AppState>) -> impl Into
         .border_1()
         .border_color(border_muted())
         .flex()
-        .items_center()
+        .items_start()
         .justify_between()
         .gap(px(12.0))
         .flex_wrap()
         .child(
             div()
-                .min_w_0()
+                .flex_grow()
+                .min_w(px(REVIEW_BRIEF_STATUS_TEXT_MIN_WIDTH))
+                .max_w(px(REVIEW_BRIEF_STATUS_TEXT_MAX_WIDTH))
                 .flex()
-                .items_center()
+                .items_start()
                 .gap(px(9.0))
                 .child(lucide_icon(LucideIcon::CircleHelp, 15.0, danger()))
                 .child(
                     div()
+                        .flex_1()
                         .min_w_0()
+                        .whitespace_normal()
                         .text_size(px(12.0))
                         .line_height(px(18.0))
                         .text_color(danger())
                         .child(error.to_string()),
                 ),
         )
-        .child(ghost_button("Retry", move |_, window, cx| {
-            review_intelligence::trigger_review_intelligence(
-                &state_for_retry,
-                window,
-                cx,
-                ReviewIntelligenceScope::BriefOnly,
-                true,
-            );
-        }))
+        .child(
+            div()
+                .flex_shrink_0()
+                .child(ghost_button("Retry", move |_, window, cx| {
+                    review_intelligence::trigger_review_intelligence(
+                        &state_for_retry,
+                        window,
+                        cx,
+                        ReviewIntelligenceScope::BriefOnly,
+                        true,
+                    );
+                })),
+        )
 }
 
 fn render_review_brief_setup_needed(
@@ -1137,20 +1155,24 @@ fn render_review_brief_setup_needed(
         .border_1()
         .border_color(border_muted())
         .flex()
-        .items_center()
+        .items_start()
         .justify_between()
         .gap(px(12.0))
         .flex_wrap()
         .child(
             div()
-                .min_w_0()
+                .flex_grow()
+                .min_w(px(REVIEW_BRIEF_STATUS_TEXT_MIN_WIDTH))
+                .max_w(px(REVIEW_BRIEF_STATUS_TEXT_MAX_WIDTH))
                 .flex()
-                .items_center()
+                .items_start()
                 .gap(px(9.0))
                 .child(lucide_icon(LucideIcon::Settings, 15.0, fg_muted()))
                 .child(
                     div()
+                        .flex_1()
                         .min_w_0()
+                        .whitespace_normal()
                         .text_size(px(12.0))
                         .line_height(px(18.0))
                         .text_color(fg_muted())
@@ -1160,6 +1182,7 @@ fn render_review_brief_setup_needed(
         .child(
             div()
                 .flex()
+                .flex_shrink_0()
                 .gap(px(6.0))
                 .flex_wrap()
                 .child(ghost_button("Retry", move |_, window, cx| {
@@ -1198,13 +1221,16 @@ fn render_review_brief_idle(
         .border_1()
         .border_color(border_muted())
         .flex()
-        .items_center()
+        .items_start()
         .justify_between()
         .gap(px(12.0))
         .flex_wrap()
         .child(
             div()
-                .min_w_0()
+                .flex_grow()
+                .min_w(px(REVIEW_BRIEF_STATUS_TEXT_MIN_WIDTH))
+                .max_w(px(REVIEW_BRIEF_STATUS_TEXT_MAX_WIDTH))
+                .whitespace_normal()
                 .text_size(px(12.0))
                 .line_height(px(18.0))
                 .text_color(fg_muted())
@@ -1213,6 +1239,7 @@ fn render_review_brief_idle(
         .child(
             div()
                 .flex()
+                .flex_shrink_0()
                 .gap(px(6.0))
                 .flex_wrap()
                 .child(ghost_button("Generate", move |_, window, cx| {

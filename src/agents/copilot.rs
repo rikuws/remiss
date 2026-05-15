@@ -12,7 +12,7 @@ use crate::code_tour::{
     GeneratedCodeTour,
 };
 
-use super::binary::find_copilot_binary;
+use super::binary::{find_copilot_binary, prepend_binary_parent_to_command_path};
 use super::errors::{generation_abort_message, AbortKind, AbortReason};
 use super::jsonrepair::parse_tolerant;
 use super::merge::{build_copilot_fallback_tour, merge_tour, TourResponse};
@@ -85,8 +85,8 @@ impl CodingAgentBackend for CopilotBackend {
                 label: "Copilot".to_string(),
                 available: false,
                 authenticated: false,
-                message: "GitHub Copilot CLI is not installed on PATH.".to_string(),
-                detail: "Install the GitHub Copilot CLI and sign in with `copilot login` to enable AI code tours.".to_string(),
+                message: "GitHub Copilot CLI was not found.".to_string(),
+                detail: "Install the GitHub Copilot CLI, or set REMISS_COPILOT_BINARY to its full path, then sign in with `copilot login` to enable AI code tours.".to_string(),
                 default_model: None,
             });
         };
@@ -112,7 +112,10 @@ impl CodingAgentBackend for CopilotBackend {
         on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
     ) -> Result<GeneratedCodeTour, String> {
         let Some(binary) = find_copilot_binary() else {
-            return Err("GitHub Copilot CLI is not installed on PATH.".to_string());
+            return Err(
+                "GitHub Copilot CLI was not found. Install it or set REMISS_COPILOT_BINARY."
+                    .to_string(),
+            );
         };
 
         if !Path::new(&input.working_directory).is_dir() {
@@ -216,7 +219,10 @@ pub fn run_json_prompt(
     mut prompt: String,
 ) -> Result<AgentTextResponse, String> {
     let Some(binary) = find_copilot_binary() else {
-        return Err("GitHub Copilot CLI is not installed on PATH.".to_string());
+        return Err(
+            "GitHub Copilot CLI was not found. Install it or set REMISS_COPILOT_BINARY."
+                .to_string(),
+        );
     };
 
     if !Path::new(working_directory).is_dir() {
@@ -334,7 +340,10 @@ fn run_copilot_cli(
     emit_progress: bool,
     on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
 ) -> Result<CopilotRun, String> {
-    let mut child = Command::new(binary)
+    let mut command = Command::new(binary);
+    prepend_binary_parent_to_command_path(&mut command, binary);
+
+    let mut child = command
         .arg("-p")
         .arg(prompt)
         .arg("--output-format")
@@ -816,7 +825,10 @@ fn truncate_to_byte_limit(value: &mut String, max_bytes: usize) {
 }
 
 fn probe_version(binary: &str) -> Result<String, String> {
-    let output = Command::new(binary)
+    let mut command = Command::new(binary);
+    prepend_binary_parent_to_command_path(&mut command, binary);
+
+    let output = command
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
