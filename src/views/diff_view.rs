@@ -24,10 +24,7 @@ use crate::diff::{
     find_parsed_diff_file_with_index, DiffLineKind, DiffRenderRow, ParsedDiffFile, ParsedDiffHunk,
     ParsedDiffLine,
 };
-use crate::difftastic::{
-    adapt_difftastic_file, build_adapted_diff_highlights, run_difftastic_for_texts,
-    DifftasticAdaptOptions,
-};
+use crate::difftastic::build_adapted_diff_highlights;
 use crate::emoji::{emoji_shortcode_suggestions, EmojiSuggestion};
 use crate::github::{
     PullRequestDetail, PullRequestFile, PullRequestReviewComment, PullRequestReviewThread,
@@ -46,7 +43,9 @@ use crate::review_file_header::{
     render_review_file_header, render_review_file_header_with_controls, ReviewFileHeaderProps,
 };
 use crate::review_queue::{build_review_queue, ReviewQueue, ReviewQueueBucket};
-use crate::review_session::{DiffLayout, ReviewCenterMode, ReviewLocation, ReviewSourceTarget};
+use crate::review_session::{
+    DiffLayout, ReviewCenterMode, ReviewGuideLens, ReviewLocation, ReviewSourceTarget,
+};
 use crate::selectable_text::{AppTextFieldKind, AppTextInput, SelectableText};
 use crate::semantic_diff::{build_semantic_diff_file, SemanticDiffFile, SemanticDiffSection};
 use crate::source_browser::render_source_browser;
@@ -59,10 +58,12 @@ use crate::stacks::{
     },
 };
 use crate::state::*;
-use crate::structural_diff_cache::{
-    load_cached_structural_diff, save_cached_structural_diff, structural_diff_cache_key,
-    CachedStructuralDiffResult,
+use crate::structural_diff::{
+    build_and_cache_structural_diff, build_structural_diff_request, checkout_head_oid,
+    structural_diff_warmup_request_key, structural_result_from_cached, StructuralDiffBuildResult,
+    StructuralDiffRequest, StructuralDiffTerminalStatus,
 };
+use crate::structural_diff_cache::load_cached_structural_diff;
 use crate::syntax::{self, SyntaxSpan};
 use crate::temp_source_window::{
     open_temp_source_window_for_diff_target, temp_source_target_for_diff_line,
@@ -71,7 +72,7 @@ use crate::temp_source_window::{
 use crate::theme::*;
 use crate::{github, notifications, review_intelligence};
 
-use super::ai_tour::{refresh_active_tour, trigger_generate_tour};
+use super::ai_tour::trigger_generate_tour;
 use super::root::refresh_active_local_review;
 use super::sections::{
     badge, badge_success, error_text, eyebrow, format_relative_time, ghost_button, nested_panel,
@@ -143,7 +144,7 @@ pub fn enter_stack_review_mode(state: &Entity<AppState>, window: &mut Window, cx
         state.active_surface = PullRequestSurface::Files;
         state.pr_header_compact = false;
         state.set_review_file_tree_visible(true);
-        state.set_review_center_mode(ReviewCenterMode::Stack);
+        state.set_review_center_mode(ReviewCenterMode::GuidedReview);
 
         if let Some((layer_id, layer_file)) = stack_defaults.clone() {
             if let Some(session) = state.active_review_session_mut() {
@@ -1915,6 +1916,7 @@ fn review_stack_repo_context(app_state: &AppState) -> RepoContext {
             .and_then(|status| status.path.as_ref())
             .map(PathBuf::from),
         trunk_branch: None,
+        structural_evidence: None,
     }
 }
 
@@ -2117,8 +2119,7 @@ fn render_review_sidebar_pane(
         ReviewCenterMode::SourceBrowser => {
             render_source_file_tree(state, detail, selected_path, cx).into_any_element()
         }
-        ReviewCenterMode::AiTour => render_ai_tour_navigation_pane(state, cx).into_any_element(),
-        ReviewCenterMode::Stack => {
+        ReviewCenterMode::GuidedReview | ReviewCenterMode::AiTour | ReviewCenterMode::Stack => {
             render_stack_navigation_pane(state, detail, review_stack, cx).into_any_element()
         }
     }
@@ -2168,6 +2169,7 @@ fn render_changed_files_pane(
         .flex()
         .flex_col()
         .child(render_file_tree_header(
+            state.clone(),
             "Changed Files",
             file_count,
             Some((additions, deletions)),
@@ -2462,6 +2464,22 @@ fn render_stack_navigation_pane(
         .active_review_session()
         .cloned()
         .unwrap_or_default();
+    let guided_review_generation_state = {
+        let app_state = state.read(cx);
+        app_state
+            .active_detail_state()
+            .map(|detail_state| {
+                let guide = &detail_state.review_guide_state;
+                let ai_stack = &detail_state.ai_stack_state;
+                let guide_pending = guide.document.is_none() && (guide.loading || guide.generating);
+                let fallback_stack_visible =
+                    ai_stack.stack.is_none() && review_stack.source != StackSource::GitHubNative;
+                (guide_pending, fallback_stack_visible)
+            })
+            .unwrap_or((false, false))
+    };
+    let showing_temporary_guide_stack =
+        guided_review_generation_state.0 && guided_review_generation_state.1;
     let selected_layer_id = review_stack
         .selected_layer(session.selected_stack_layer_id.as_deref())
         .map(|layer| layer.id.clone());
@@ -2517,10 +2535,20 @@ fn render_stack_navigation_pane(
     }
     let stack_timeline_height = px(((review_stack.layers.len() as f32 * 36.0) + 26.0).min(220.0));
 
-    let stack_warning = review_stack
-        .warnings
-        .first()
-        .map(|warning| warning.message.clone());
+    let mut stack_warnings = Vec::<String>::new();
+    if showing_temporary_guide_stack {
+        stack_warnings.push(
+            "Guided Review is still generating. This is a temporary fallback layer map; labels may change when AI guidance is ready."
+                .to_string(),
+        );
+    }
+    stack_warnings.extend(
+        review_stack
+            .warnings
+            .iter()
+            .take(2)
+            .map(|warning| warning.message.clone()),
+    );
 
     div()
         .w(file_tree_width())
@@ -2531,10 +2559,11 @@ fn render_stack_navigation_pane(
         .border_color(diff_annotation_border())
         .flex()
         .flex_col()
-        .child(render_stack_view_header(progress_label))
-        .when_some(stack_warning, |el, warning_message| {
-            el.child(render_stack_view_warning(warning_message))
-        })
+        .child(render_stack_view_header(
+            progress_label,
+            showing_temporary_guide_stack,
+        ))
+        .children(stack_warnings.into_iter().map(render_stack_view_warning))
         .child(
             div()
                 .id("stack-nav-scroll")
@@ -2610,6 +2639,7 @@ fn render_stack_file_tree_section(
         .border_t(px(1.0))
         .border_color(diff_annotation_border())
         .child(render_file_tree_header(
+            state.clone(),
             file_tree_label,
             visible_file_count,
             Some((visible_additions, visible_deletions)),
@@ -2672,7 +2702,8 @@ fn render_stack_file_tree_section(
         )
 }
 
-fn render_stack_view_header(progress_label: String) -> impl IntoElement {
+fn render_stack_view_header(progress_label: String, draft: bool) -> impl IntoElement {
+    let label = if draft { "GUIDE DRAFT" } else { "GUIDE" };
     div()
         .px(px(14.0))
         .pt(px(20.0))
@@ -2687,7 +2718,7 @@ fn render_stack_view_header(progress_label: String) -> impl IntoElement {
                 .font_family(mono_font_family())
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(fg_muted())
-                .child("STACK"),
+                .child(label),
         )
         .child(
             div()
@@ -2760,7 +2791,7 @@ fn render_stack_view_layer_card(
                     state_for_open.update(cx, |state, cx| {
                         state.set_selected_stack_layer(Some(layer_id.clone()));
                         state.set_stack_diff_mode(StackDiffMode::CurrentLayerOnly);
-                        state.set_review_center_mode(ReviewCenterMode::Stack);
+                        state.set_review_center_mode(ReviewCenterMode::GuidedReview);
                         if is_current_pr_layer {
                             if let Some(path) = first_file.clone() {
                                 state.selected_file_path = Some(path);
@@ -3691,22 +3722,22 @@ fn open_review_location_card(
             });
             ensure_active_review_focus_loaded(state, window, cx);
         }
-        ReviewCenterMode::AiTour => {
+        ReviewCenterMode::AiTour | ReviewCenterMode::Stack | ReviewCenterMode::GuidedReview => {
+            let mut location = location.clone();
+            location.mode = ReviewCenterMode::GuidedReview;
             state.update(cx, |state, cx| {
-                state.navigate_to_review_location(location.clone(), true);
+                state.navigate_to_review_location(location, true);
                 state.persist_active_review_session();
                 cx.notify();
             });
             ensure_active_review_focus_loaded(state, window, cx);
-            refresh_active_tour(state, window, cx, true);
-        }
-        ReviewCenterMode::Stack => {
-            state.update(cx, |state, cx| {
-                state.navigate_to_review_location(location.clone(), true);
-                state.persist_active_review_session();
-                cx.notify();
-            });
-            ensure_active_review_focus_loaded(state, window, cx);
+            review_intelligence::trigger_review_intelligence(
+                state,
+                window,
+                cx,
+                review_intelligence::ReviewIntelligenceScope::StackOnly,
+                false,
+            );
         }
         ReviewCenterMode::SourceBrowser => open_review_source_location(
             state,
@@ -4161,7 +4192,7 @@ fn render_stack_layer_row(
             state_for_open.update(cx, |state, cx| {
                 state.set_selected_stack_layer(Some(layer_id.clone()));
                 state.set_stack_diff_mode(StackDiffMode::CurrentLayerOnly);
-                state.set_review_center_mode(ReviewCenterMode::Stack);
+                state.set_review_center_mode(ReviewCenterMode::GuidedReview);
                 if is_current_pr_layer {
                     if let Some(path) = first_file.clone() {
                         state.selected_file_path = Some(path);
@@ -4289,10 +4320,13 @@ fn subtle_stack_chip(label: &str) -> impl IntoElement {
 }
 
 fn render_file_tree_header(
+    state: Entity<AppState>,
     file_tree_label: &str,
     visible_file_count: usize,
     diff_totals: Option<(i64, i64)>,
 ) -> impl IntoElement {
+    let state_for_close = state.clone();
+
     div()
         .px(px(12.0))
         .py(px(10.0))
@@ -4311,30 +4345,50 @@ fn render_file_tree_header(
         )
         .child(
             div()
-                .text_size(px(12.0))
-                .font_family(mono_font_family())
                 .flex()
-                .gap(px(6.0))
                 .items_center()
+                .gap(px(6.0))
                 .child(
                     div()
-                        .text_color(fg_muted())
-                        .child(visible_file_count.to_string()),
+                        .text_size(px(12.0))
+                        .font_family(mono_font_family())
+                        .flex()
+                        .gap(px(6.0))
+                        .items_center()
+                        .child(
+                            div()
+                                .text_color(fg_muted())
+                                .child(visible_file_count.to_string()),
+                        )
+                        .when_some(diff_totals, |el, (visible_additions, visible_deletions)| {
+                            el.child(div().text_color(fg_subtle()).child("\u{2022}"))
+                                .child(
+                                    div()
+                                        .text_color(success())
+                                        .child(format!("+{visible_additions}")),
+                                )
+                                .child(div().text_color(fg_subtle()).child("/"))
+                                .child(
+                                    div()
+                                        .text_color(danger())
+                                        .child(format!("-{visible_deletions}")),
+                                )
+                        }),
                 )
-                .when_some(diff_totals, |el, (visible_additions, visible_deletions)| {
-                    el.child(div().text_color(fg_subtle()).child("\u{2022}"))
-                        .child(
-                            div()
-                                .text_color(success())
-                                .child(format!("+{visible_additions}")),
-                        )
-                        .child(div().text_color(fg_subtle()).child("/"))
-                        .child(
-                            div()
-                                .text_color(danger())
-                                .child(format!("-{visible_deletions}")),
-                        )
-                }),
+                .child(toolbar_icon_button(
+                    "review-file-tree-close",
+                    "Hide file tree",
+                    false,
+                    false,
+                    lucide_icon(LucideIcon::PanelLeftClose, 14.0, fg_muted()).into_any_element(),
+                    move |_, _, cx| {
+                        state_for_close.update(cx, |state, cx| {
+                            state.set_review_file_tree_visible(false);
+                            state.persist_active_review_session();
+                            cx.notify();
+                        });
+                    },
+                )),
         )
 }
 
@@ -4418,6 +4472,7 @@ fn render_source_file_tree(
         .flex()
         .flex_col()
         .child(render_file_tree_header(
+            state.clone(),
             "Repository",
             visible_file_count,
             diff_totals,
@@ -4991,7 +5046,7 @@ fn render_file_tree_file_row(
                         state.set_review_center_mode(ReviewCenterMode::StructuralDiff);
                     }
                     ReviewFileRowOpenMode::Stack => {
-                        state.set_review_center_mode(ReviewCenterMode::Stack);
+                        state.set_review_center_mode(ReviewCenterMode::GuidedReview);
                     }
                     ReviewFileRowOpenMode::Source => {
                         state.set_review_source_target(ReviewSourceTarget {
@@ -6868,59 +6923,6 @@ struct FileContentRequest {
 
 const STRUCTURAL_DIFF_WARMUP_CONCURRENCY: usize = 2;
 
-#[derive(Clone)]
-struct StructuralDiffRequest {
-    path: String,
-    previous_path: Option<String>,
-    old_side: StructuralDiffSideRequest,
-    new_side: StructuralDiffSideRequest,
-    request_key: String,
-    cache_key: String,
-}
-
-#[derive(Clone)]
-struct StructuralDiffSideRequest {
-    path: String,
-    reference: String,
-    fetch: bool,
-    prefer_worktree: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum StructuralDiffTerminalStatus {
-    Ready,
-    Error,
-}
-
-#[derive(Clone, Debug)]
-enum StructuralDiffBuildResult {
-    Ready(crate::difftastic::AdaptedDifftasticDiffFile),
-    TerminalError(String),
-    TransientError(String),
-}
-
-impl StructuralDiffBuildResult {
-    fn cached_result(&self) -> Option<CachedStructuralDiffResult> {
-        match self {
-            StructuralDiffBuildResult::Ready(diff) => {
-                Some(CachedStructuralDiffResult::Ready { diff: diff.clone() })
-            }
-            StructuralDiffBuildResult::TerminalError(message) => {
-                Some(CachedStructuralDiffResult::TerminalError {
-                    message: message.clone(),
-                })
-            }
-            StructuralDiffBuildResult::TransientError(_) => None,
-        }
-    }
-}
-
-#[derive(Debug)]
-enum StructuralDiffBuildError {
-    Terminal(String),
-    Transient(String),
-}
-
 fn build_file_content_request(
     detail: &PullRequestDetail,
     file: &PullRequestFile,
@@ -6972,121 +6974,6 @@ fn build_file_content_request(
     })
 }
 
-fn build_structural_diff_request(
-    detail: &PullRequestDetail,
-    file: &PullRequestFile,
-    parsed: Option<&ParsedDiffFile>,
-    head_oid: &str,
-) -> Option<StructuralDiffRequest> {
-    if file.path.is_empty() {
-        return None;
-    }
-
-    let base_reference = detail.base_ref_oid.clone()?;
-    let head_reference = head_oid.trim().to_string();
-    if base_reference.is_empty() || head_reference.is_empty() {
-        return None;
-    }
-
-    let previous_path = parsed
-        .and_then(|parsed| parsed.previous_path.clone())
-        .filter(|path| !path.is_empty());
-    let old_path = previous_path.clone().unwrap_or_else(|| file.path.clone());
-    let old_fetch = file.change_type != "ADDED";
-    let new_fetch = file.change_type != "DELETED";
-    let is_local_review = crate::local_review::is_local_review_detail(detail);
-    let cache_head_reference = if is_local_review {
-        detail.id.clone()
-    } else {
-        head_reference.clone()
-    };
-    let cache_key = structural_diff_cache_key(
-        detail,
-        &cache_head_reference,
-        file,
-        previous_path.as_deref(),
-    );
-
-    Some(StructuralDiffRequest {
-        path: file.path.clone(),
-        previous_path,
-        old_side: StructuralDiffSideRequest {
-            path: old_path,
-            reference: base_reference.clone(),
-            fetch: old_fetch,
-            prefer_worktree: false,
-        },
-        new_side: StructuralDiffSideRequest {
-            path: file.path.clone(),
-            reference: head_reference.clone(),
-            fetch: new_fetch,
-            prefer_worktree: is_local_review && new_fetch,
-        },
-        request_key: cache_key.clone(),
-        cache_key,
-    })
-}
-
-fn load_structural_side_text(
-    cache: &crate::cache::CacheStore,
-    repository: &str,
-    checkout_root: &std::path::Path,
-    side: &StructuralDiffSideRequest,
-) -> Result<String, StructuralDiffBuildError> {
-    if !side.fetch {
-        return Ok(String::new());
-    }
-
-    let document = local_documents::load_local_repository_file_content(
-        cache,
-        repository,
-        checkout_root,
-        &side.reference,
-        &side.path,
-        side.prefer_worktree,
-    )
-    .map_err(StructuralDiffBuildError::Transient)?;
-    if document.is_binary {
-        return Err(StructuralDiffBuildError::Terminal(format!(
-            "Structural diff is not available for binary file {}.",
-            side.path
-        )));
-    }
-
-    Ok(document.content.unwrap_or_default())
-}
-
-fn checkout_head_oid(status: &local_repo::LocalRepositoryStatus) -> Option<String> {
-    status
-        .ready_for_snapshot_features()
-        .then(|| status.current_head_oid.as_deref())
-        .flatten()
-        .map(str::trim)
-        .filter(|head| !head.is_empty())
-        .map(str::to_string)
-}
-
-fn structural_diff_warmup_request_key(detail: &PullRequestDetail, head_oid: &str) -> String {
-    let identity = if crate::local_review::is_local_review_detail(detail) {
-        detail.id.as_str()
-    } else {
-        head_oid
-    };
-    format!(
-        "structural-diff-warmup-v1:{}:{}:{}",
-        detail.repository, detail.number, identity
-    )
-}
-
-fn structural_result_from_cached(cached: CachedStructuralDiffResult) -> StructuralDiffBuildResult {
-    match cached {
-        CachedStructuralDiffResult::Ready { diff } => StructuralDiffBuildResult::Ready(diff),
-        CachedStructuralDiffResult::TerminalError { message } => {
-            StructuralDiffBuildResult::TerminalError(message)
-        }
-    }
-}
-
 fn should_reuse_structural_diff_state(
     file_state: &StructuralDiffFileState,
     request_key: &str,
@@ -7118,65 +7005,6 @@ fn should_apply_structural_diff_update(
     request_key: &str,
 ) -> bool {
     active_pr_key == Some(detail_key) && current_request_key == Some(request_key)
-}
-
-fn build_and_cache_structural_diff(
-    cache: &crate::cache::CacheStore,
-    repository: &str,
-    checkout_root: &std::path::Path,
-    request: &StructuralDiffRequest,
-) -> StructuralDiffBuildResult {
-    let result = build_structural_diff_from_local(cache, repository, checkout_root, request);
-    if let Some(cached) = result.cached_result() {
-        let _ = save_cached_structural_diff(cache, &request.cache_key, &cached);
-    }
-    result
-}
-
-fn build_structural_diff_from_local(
-    cache: &crate::cache::CacheStore,
-    repository: &str,
-    checkout_root: &std::path::Path,
-    request: &StructuralDiffRequest,
-) -> StructuralDiffBuildResult {
-    let old_text =
-        match load_structural_side_text(cache, repository, checkout_root, &request.old_side) {
-            Ok(text) => text,
-            Err(StructuralDiffBuildError::Terminal(error)) => {
-                return StructuralDiffBuildResult::TerminalError(error);
-            }
-            Err(StructuralDiffBuildError::Transient(error)) => {
-                return StructuralDiffBuildResult::TransientError(error);
-            }
-        };
-    let new_text =
-        match load_structural_side_text(cache, repository, checkout_root, &request.new_side) {
-            Ok(text) => text,
-            Err(StructuralDiffBuildError::Terminal(error)) => {
-                return StructuralDiffBuildResult::TerminalError(error);
-            }
-            Err(StructuralDiffBuildError::Transient(error)) => {
-                return StructuralDiffBuildResult::TransientError(error);
-            }
-        };
-    let file = match run_difftastic_for_texts(
-        request.old_side.path.as_str(),
-        old_text.as_str(),
-        request.new_side.path.as_str(),
-        new_text.as_str(),
-    ) {
-        Ok(file) => file,
-        Err(error) => return StructuralDiffBuildResult::TerminalError(error),
-    };
-
-    StructuralDiffBuildResult::Ready(adapt_difftastic_file(
-        &file,
-        old_text.as_str(),
-        new_text.as_str(),
-        request.path.clone(),
-        request.previous_path.clone(),
-        &DifftasticAdaptOptions { context_lines: 3 },
-    ))
 }
 
 fn apply_structural_diff_file_result(
@@ -7392,24 +7220,33 @@ fn render_diff_panel(
         .active_review_session()
         .cloned()
         .unwrap_or_default();
-    let center_mode = review_session.center_mode;
+    let center_mode = match review_session.center_mode {
+        ReviewCenterMode::AiTour | ReviewCenterMode::Stack => ReviewCenterMode::GuidedReview,
+        mode => mode,
+    };
     let normal_diff_layout = review_session.normal_diff_layout;
     let structural_diff_layout = review_session.structural_diff_layout;
-    let active_diff_layout = if center_mode == ReviewCenterMode::StructuralDiff {
-        structural_diff_layout
-    } else {
-        normal_diff_layout
+    let guided_review_lens = review_session.guided_review_lens;
+    let active_diff_layout = match center_mode {
+        ReviewCenterMode::StructuralDiff => structural_diff_layout,
+        ReviewCenterMode::GuidedReview if guided_review_lens == ReviewGuideLens::Structural => {
+            structural_diff_layout
+        }
+        _ => normal_diff_layout,
     };
-    let stack_filter = (center_mode == ReviewCenterMode::Stack)
-        .then(|| {
-            build_layer_diff_filter(
-                review_stack.as_ref(),
-                review_session.stack_diff_mode,
-                review_session.selected_stack_layer_id.as_deref(),
-                &review_session.reviewed_stack_atom_ids,
-            )
-        })
-        .flatten();
+    let stack_filter = matches!(
+        center_mode,
+        ReviewCenterMode::GuidedReview | ReviewCenterMode::Stack
+    )
+    .then(|| {
+        build_layer_diff_filter(
+            review_stack.as_ref(),
+            review_session.stack_diff_mode,
+            review_session.selected_stack_layer_id.as_deref(),
+            &review_session.reviewed_stack_atom_ids,
+        )
+    })
+    .flatten();
     let has_textual_diff = detail
         .parsed_diff
         .iter()
@@ -7427,7 +7264,9 @@ fn render_diff_panel(
     let source_parsed = source_target
         .as_ref()
         .and_then(|target| find_parsed_diff_file(&detail.parsed_diff, &target.path));
-    let structural_warmup_status = (center_mode == ReviewCenterMode::StructuralDiff)
+    let structural_warmup_status = (center_mode == ReviewCenterMode::StructuralDiff
+        || (center_mode == ReviewCenterMode::GuidedReview
+            && guided_review_lens == ReviewGuideLens::Structural))
         .then(|| {
             app_state
                 .active_detail_state()
@@ -7454,6 +7293,7 @@ fn render_diff_panel(
             structural_warmup_status,
             center_mode,
             active_diff_layout,
+            (center_mode == ReviewCenterMode::GuidedReview).then_some(guided_review_lens),
             !has_textual_diff,
         ))
         .child(
@@ -7483,8 +7323,20 @@ fn render_diff_panel(
                                 )
                                 .into_any_element()
                             })
-                    } else if center_mode == ReviewCenterMode::AiTour {
-                        render_ai_tour_view(state, detail, cx)
+                    } else if center_mode == ReviewCenterMode::GuidedReview {
+                        render_guided_review_view(
+                            state,
+                            app_state,
+                            detail,
+                            selected_path,
+                            selected_anchor,
+                            review_stack.clone(),
+                            stack_filter.clone(),
+                            guided_review_lens,
+                            normal_diff_layout,
+                            structural_diff_layout,
+                            cx,
+                        )
                     } else if center_mode == ReviewCenterMode::StructuralDiff {
                         render_combined_diff_files(
                             state,
@@ -7530,6 +7382,7 @@ fn render_diff_toolbar(
     structural_warmup_status: Option<String>,
     center_mode: ReviewCenterMode,
     active_diff_layout: DiffLayout,
+    guided_review_lens: Option<ReviewGuideLens>,
     layout_toggle_disabled: bool,
 ) -> impl IntoElement {
     let mut focus_meta = Vec::new();
@@ -7554,7 +7407,10 @@ fn render_diff_toolbar(
     let focus_summary = focus_meta.join(" / ");
     let show_layout_toggle = matches!(
         center_mode,
-        ReviewCenterMode::SemanticDiff | ReviewCenterMode::StructuralDiff | ReviewCenterMode::Stack
+        ReviewCenterMode::SemanticDiff
+            | ReviewCenterMode::StructuralDiff
+            | ReviewCenterMode::GuidedReview
+            | ReviewCenterMode::Stack
     );
     let is_local_review = crate::local_review::is_local_review_detail(detail);
     let state_for_refresh = state.clone();
@@ -7605,10 +7461,18 @@ fn render_diff_toolbar(
                         .child(focus_summary),
                 ),
         )
+        .when_some(guided_review_lens, |el, lens| {
+            el.child(render_guided_review_lens_toggle(state, lens))
+        })
         .when(show_layout_toggle, |el| {
+            let layout_center_mode = if guided_review_lens == Some(ReviewGuideLens::Structural) {
+                ReviewCenterMode::StructuralDiff
+            } else {
+                center_mode
+            };
             el.child(render_diff_layout_toggle(
                 state,
-                center_mode,
+                layout_center_mode,
                 active_diff_layout,
                 layout_toggle_disabled,
             ))
@@ -7650,6 +7514,418 @@ fn diff_toolbar_primary_button(
         .hover(|style| style.bg(primary_action_hover()))
         .on_mouse_down(MouseButton::Left, on_click)
         .child(label.to_string())
+}
+
+fn render_guided_review_view(
+    state: &Entity<AppState>,
+    app_state: &AppState,
+    detail: &PullRequestDetail,
+    selected_path: Option<&str>,
+    selected_anchor: Option<&DiffAnchor>,
+    review_stack: Arc<ReviewStack>,
+    stack_filter: Option<LayerDiffFilter>,
+    guided_review_lens: ReviewGuideLens,
+    normal_diff_layout: DiffLayout,
+    structural_diff_layout: DiffLayout,
+    cx: &App,
+) -> AnyElement {
+    let diff_center_mode = if guided_review_lens == ReviewGuideLens::Structural {
+        ReviewCenterMode::StructuralDiff
+    } else {
+        ReviewCenterMode::Stack
+    };
+    let diff_layout = if guided_review_lens == ReviewGuideLens::Structural {
+        structural_diff_layout
+    } else {
+        normal_diff_layout
+    };
+
+    div()
+        .flex_grow()
+        .min_h_0()
+        .min_w_0()
+        .flex()
+        .child(
+            render_combined_diff_files(
+                state,
+                app_state,
+                detail,
+                selected_path,
+                selected_anchor,
+                review_stack.clone(),
+                stack_filter,
+                diff_center_mode,
+                diff_layout,
+                cx,
+            )
+            .into_any_element(),
+        )
+        .child(render_guided_review_panel(state, review_stack.as_ref(), cx))
+        .into_any_element()
+}
+
+fn render_guided_review_panel(
+    state: &Entity<AppState>,
+    review_stack: &ReviewStack,
+    cx: &App,
+) -> impl IntoElement {
+    let (guide, loading, generating, progress_text, error, message, selected_layer, provider) = {
+        let app_state = state.read(cx);
+        let guide_state = app_state
+            .active_detail_state()
+            .map(|detail_state| detail_state.review_guide_state.clone())
+            .unwrap_or_default();
+        let selected_layer = app_state
+            .active_review_session()
+            .and_then(|session| {
+                review_stack.selected_layer(session.selected_stack_layer_id.as_deref())
+            })
+            .cloned()
+            .or_else(|| review_stack.layers.first().cloned());
+        (
+            guide_state.document.clone(),
+            guide_state.loading,
+            guide_state.generating,
+            guide_state.progress_text,
+            guide_state.error,
+            guide_state.message,
+            selected_layer,
+            app_state.selected_tour_provider(),
+        )
+    };
+    let state_for_retry = state.clone();
+    let selected_guide_layer = selected_layer
+        .as_ref()
+        .and_then(|layer| guide.as_ref().and_then(|guide| guide.layer(&layer.id)));
+
+    div()
+        .w(px(330.0))
+        .flex_shrink_0()
+        .min_h_0()
+        .bg(diff_editor_chrome())
+        .border_l(px(1.0))
+        .border_color(diff_annotation_border())
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .px(px(14.0))
+                .py(px(11.0))
+                .border_b(px(1.0))
+                .border_color(diff_annotation_border())
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(fg_emphasis())
+                                .child("Guided Review"),
+                        )
+                        .child(
+                            div()
+                                .mt(px(2.0))
+                                .text_size(px(10.0))
+                                .font_family(mono_font_family())
+                                .text_color(fg_muted())
+                                .child(provider.label().to_string()),
+                        ),
+                )
+                .child(ghost_button("Retry", move |_, window, cx| {
+                    review_intelligence::trigger_review_intelligence(
+                        &state_for_retry,
+                        window,
+                        cx,
+                        review_intelligence::ReviewIntelligenceScope::StackOnly,
+                        true,
+                    );
+                })),
+        )
+        .child(
+            div()
+                .flex_grow()
+                .min_h_0()
+                .id("guided-review-scroll")
+                .overflow_y_scroll()
+                .px(px(14.0))
+                .py(px(12.0))
+                .flex()
+                .flex_col()
+                .gap(px(12.0))
+                .when(loading || generating, |el| {
+                    el.child(render_guided_review_status_panel(
+                        "Preparing guide",
+                        progress_text
+                            .as_deref()
+                            .unwrap_or("Generating layer guidance and structural evidence."),
+                    ))
+                })
+                .when_some(error.clone(), |el, error| {
+                    el.child(render_guided_review_status_panel(
+                        "Guidance unavailable",
+                        &error,
+                    ))
+                })
+                .when_some(message.clone(), |el, message| {
+                    el.child(render_guided_review_status_panel("Status", &message))
+                })
+                .when_some(guide.as_ref(), |el, guide| {
+                    el.child(render_guided_review_overview(guide.as_ref()))
+                })
+                .when_some(selected_layer.as_ref(), |el, layer| {
+                    el.child(render_guided_review_layer_panel(
+                        layer,
+                        selected_guide_layer,
+                    ))
+                })
+                .when(
+                    guide.is_none() && !loading && !generating && error.is_none(),
+                    |el| {
+                        el.child(render_guided_review_status_panel(
+                            "No guide yet",
+                            "Generate Guided Review to see stack-aware layer notes here.",
+                        ))
+                    },
+                ),
+        )
+}
+
+fn render_guided_review_status_panel(title: &str, message: &str) -> impl IntoElement {
+    div()
+        .py(px(8.0))
+        .border_b(px(1.0))
+        .border_color(border_muted())
+        .child(
+            div()
+                .text_size(px(12.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_emphasis())
+                .child(title.to_string()),
+        )
+        .child(
+            div()
+                .mt(px(5.0))
+                .text_size(px(12.0))
+                .line_height(px(18.0))
+                .text_color(fg_muted())
+                .child(message.to_string()),
+        )
+}
+
+fn render_guided_review_overview(
+    guide: &crate::review_guide::GeneratedReviewGuide,
+) -> impl IntoElement {
+    guided_review_section("Guide")
+        .child(
+            div()
+                .text_size(px(13.0))
+                .line_height(px(19.0))
+                .text_color(fg_emphasis())
+                .child(SelectableText::new(
+                    "guided-review-summary",
+                    guide.summary.clone(),
+                )),
+        )
+        .when(!guide.review_focus.trim().is_empty(), |el| {
+            el.child(
+                div()
+                    .mt(px(9.0))
+                    .pt(px(9.0))
+                    .border_t(px(1.0))
+                    .border_color(border_muted())
+                    .text_size(px(12.0))
+                    .line_height(px(18.0))
+                    .text_color(fg_muted())
+                    .child(SelectableText::new(
+                        "guided-review-focus",
+                        guide.review_focus.clone(),
+                    )),
+            )
+        })
+}
+
+fn render_guided_review_layer_panel(
+    layer: &ReviewStackLayer,
+    guide_layer: Option<&crate::review_guide::ReviewGuideLayer>,
+) -> impl IntoElement {
+    let summary = guide_layer
+        .map(|layer| layer.summary.as_str())
+        .unwrap_or(layer.summary.as_str());
+    let rationale = guide_layer
+        .map(|layer| layer.rationale.as_str())
+        .unwrap_or(layer.rationale.as_str());
+    let review_question = guide_layer
+        .map(|layer| layer.review_question.as_str())
+        .unwrap_or(layer.rationale.as_str());
+    let structural_status = guide_layer
+        .map(|layer| layer.structural_evidence_status.label())
+        .unwrap_or("Structural evidence pending");
+
+    div()
+        .pt(px(12.0))
+        .border_t(px(1.0))
+        .border_color(border_muted())
+        .flex()
+        .flex_col()
+        .gap(px(10.0))
+        .child(eyebrow("Selected layer"))
+        .child(
+            div()
+                .text_size(px(14.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_emphasis())
+                .line_clamp(2)
+                .child(layer.title.clone()),
+        )
+        .child(guided_review_question_block(
+            "Review question",
+            review_question,
+            format!("guided-review-layer-question-{}", layer.id),
+        ))
+        .child(guided_review_text_block(
+            "Summary",
+            summary,
+            format!("guided-review-layer-summary-{}", layer.id),
+        ))
+        .child(guided_review_text_block(
+            "Why this layer",
+            rationale,
+            format!("guided-review-layer-rationale-{}", layer.id),
+        ))
+        .when_some(guide_layer, |el, guide_layer| {
+            el.when(!guide_layer.review_points.is_empty(), |el| {
+                el.child(render_guided_review_list(
+                    "Review points",
+                    &guide_layer.review_points,
+                    "review-point",
+                    &layer.id,
+                ))
+            })
+            .when(!guide_layer.risk_notes.is_empty(), |el| {
+                el.child(render_guided_review_list(
+                    "Risk notes",
+                    &guide_layer.risk_notes,
+                    "risk-note",
+                    &layer.id,
+                ))
+            })
+            .when(!guide_layer.structural_notes.is_empty(), |el| {
+                el.child(render_guided_review_list(
+                    structural_status,
+                    &guide_layer.structural_notes,
+                    "structural-note",
+                    &layer.id,
+                ))
+            })
+        })
+        .when(guide_layer.is_none(), |el| {
+            el.child(guided_review_text_block(
+                "Structural evidence",
+                structural_status,
+                format!("guided-review-layer-structural-{}", layer.id),
+            ))
+        })
+}
+
+fn guided_review_section(label: &str) -> gpui::Div {
+    div()
+        .pt(px(10.0))
+        .border_t(px(1.0))
+        .border_color(border_muted())
+        .flex()
+        .flex_col()
+        .child(guided_review_section_label(label))
+}
+
+fn guided_review_section_label(label: &str) -> impl IntoElement {
+    div()
+        .mb(px(7.0))
+        .text_size(px(10.0))
+        .font_family(mono_font_family())
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(fg_subtle())
+        .child(label.to_ascii_uppercase())
+}
+
+fn guided_review_question_block(
+    label: &str,
+    value: &str,
+    id: impl Into<SharedString>,
+) -> impl IntoElement {
+    guided_review_section(label).child(
+        div()
+            .px(px(10.0))
+            .py(px(8.0))
+            .rounded(px(5.0))
+            .bg(bg_selected())
+            .border_1()
+            .border_color(border_muted())
+            .text_size(px(12.0))
+            .line_height(px(18.0))
+            .text_color(fg_emphasis())
+            .child(SelectableText::new(id, value.to_string())),
+    )
+}
+
+fn guided_review_text_block(
+    label: &str,
+    value: &str,
+    id: impl Into<SharedString>,
+) -> impl IntoElement {
+    guided_review_section(label).child(
+        div()
+            .text_size(px(12.0))
+            .line_height(px(18.0))
+            .text_color(fg_default())
+            .child(SelectableText::new(id, value.to_string())),
+    )
+}
+
+fn render_guided_review_list(
+    label: &str,
+    values: &[String],
+    id_prefix: &str,
+    layer_id: &str,
+) -> impl IntoElement {
+    guided_review_section(label).child(div().flex().flex_col().children(
+        values.iter().enumerate().map(|(ix, value)| {
+            div()
+                .flex()
+                .items_start()
+                .gap(px(8.0))
+                .py(px(6.0))
+                .when(ix > 0, |el| {
+                    el.border_t(px(1.0)).border_color(border_muted())
+                })
+                .child(
+                    div()
+                        .w(px(18.0))
+                        .flex_shrink_0()
+                        .text_align(gpui::TextAlign::Right)
+                        .text_size(px(10.0))
+                        .font_family(mono_font_family())
+                        .text_color(fg_subtle())
+                        .child(format!("{}.", ix + 1)),
+                )
+                .child(
+                    div()
+                        .flex_grow()
+                        .min_w_0()
+                        .text_size(px(12.0))
+                        .line_height(px(18.0))
+                        .text_color(fg_default())
+                        .child(SelectableText::new(
+                            format!("guided-review-{id_prefix}-{layer_id}-{ix}"),
+                            value.clone(),
+                        )),
+                )
+        }),
+    ))
 }
 
 fn render_local_review_empty_state(
@@ -7724,6 +8000,51 @@ fn render_local_review_empty_state(
 
 fn short_oid(oid: &str) -> String {
     oid.chars().take(12).collect()
+}
+
+fn render_guided_review_lens_toggle(
+    state: &Entity<AppState>,
+    active_lens: ReviewGuideLens,
+) -> impl IntoElement {
+    let state_for_diff = state.clone();
+    let state_for_structural = state.clone();
+
+    div()
+        .id("guided-review-lens-toggle")
+        .h(px(28.0))
+        .p(px(2.0))
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(border_muted())
+        .bg(control_track_bg())
+        .flex()
+        .items_center()
+        .gap(px(1.0))
+        .tooltip(|_, cx| build_static_tooltip("Guided Review diff lens", cx))
+        .child(diff_layout_segment(
+            "Diff",
+            active_lens == ReviewGuideLens::Diff,
+            false,
+            move |_, _, cx| {
+                state_for_diff.update(cx, |state, cx| {
+                    state.set_guided_review_lens(ReviewGuideLens::Diff);
+                    state.persist_active_review_session();
+                    cx.notify();
+                });
+            },
+        ))
+        .child(diff_layout_segment(
+            "Structural",
+            active_lens == ReviewGuideLens::Structural,
+            false,
+            move |_, _, cx| {
+                state_for_structural.update(cx, |state, cx| {
+                    state.set_guided_review_lens(ReviewGuideLens::Structural);
+                    state.persist_active_review_session();
+                    cx.notify();
+                });
+            },
+        ))
 }
 
 fn render_diff_layout_toggle(

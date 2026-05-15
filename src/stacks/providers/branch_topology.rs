@@ -286,6 +286,7 @@ mod tests {
             ],
             local_repo_path: None,
             trunk_branch: Some("main".to_string()),
+            structural_evidence: None,
         };
 
         let stack = discover(&detail, &context).unwrap().unwrap();
@@ -308,6 +309,7 @@ mod tests {
             ],
             local_repo_path: None,
             trunk_branch: Some("main".to_string()),
+            structural_evidence: None,
         };
 
         let stack = discover(&detail, &context).unwrap().unwrap();

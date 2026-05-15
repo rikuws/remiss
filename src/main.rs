@@ -60,6 +60,7 @@ mod notifications;
 mod platform_macos;
 mod review_brief;
 mod review_file_header;
+mod review_guide;
 mod review_intelligence;
 mod review_queue;
 mod review_routes;
@@ -70,7 +71,9 @@ mod shader_surface;
 mod source_browser;
 mod stacks;
 mod state;
+mod structural_diff;
 mod structural_diff_cache;
+mod structural_evidence;
 mod syntax;
 mod temp_source_window;
 mod theme;
@@ -158,6 +161,9 @@ fn start_app(cx: &mut App) -> Result<(), String> {
 
     if let Err(error) = platform_macos::updates::start_updater() {
         eprintln!("{APP_NAME} updater disabled: {error}");
+    }
+    if let Err(error) = platform_macos::prepare_system_notifications() {
+        eprintln!("{APP_NAME} notifications disabled: {error}");
     }
 
     let app_state_for_keys = app_state.clone();

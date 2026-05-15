@@ -230,10 +230,11 @@ fn split_large_group<'a>(
             if metrics.changed_lines <= sizing.max_layer_changed_lines
                 && metrics.file_count <= sizing.max_layer_files
             {
+                let split_label = layer_scope_label(&atoms, &dir);
                 vec![LayerGroup {
                     role,
                     atoms,
-                    split_label: Some(dir),
+                    split_label: Some(split_label),
                 }]
             } else {
                 split_by_file(role, atoms, dir, sizing.max_layer_changed_lines)
@@ -255,10 +256,11 @@ fn split_by_file<'a>(
     for atom in atoms {
         let atom_lines = atom.additions + atom.deletions;
         if !current.is_empty() && current_lines + atom_lines > max_changed_lines {
+            let split_label = layer_scope_label(&current, &directory);
             groups.push(LayerGroup {
                 role,
                 atoms: std::mem::take(&mut current),
-                split_label: Some(directory.clone()),
+                split_label: Some(split_label),
             });
             current_lines = 0;
         }
@@ -267,14 +269,71 @@ fn split_by_file<'a>(
     }
 
     if !current.is_empty() {
+        let split_label = layer_scope_label(&current, &directory);
         groups.push(LayerGroup {
             role,
             atoms: current,
-            split_label: Some(directory),
+            split_label: Some(split_label),
         });
     }
 
     groups
+}
+
+fn layer_scope_label(atoms: &[&ChangeAtom], directory: &str) -> String {
+    let mut symbols = atoms
+        .iter()
+        .filter_map(|atom| atom.symbol_name.as_deref())
+        .map(str::trim)
+        .filter(|symbol| !symbol.is_empty())
+        .filter(|symbol| *symbol != directory)
+        .collect::<Vec<_>>();
+    symbols.sort_unstable();
+    symbols.dedup();
+
+    if !symbols.is_empty() {
+        return compact_scope_items(symbols);
+    }
+
+    let mut paths = atoms
+        .iter()
+        .map(|atom| atom.path.as_str())
+        .filter(|path| !path.is_empty())
+        .collect::<Vec<_>>();
+    paths.sort_unstable();
+    paths.dedup();
+
+    if paths.is_empty() {
+        return directory.to_string();
+    }
+
+    if paths.len() == 1 {
+        return paths[0].to_string();
+    }
+
+    let mut file_names = paths
+        .iter()
+        .filter_map(|path| path.rsplit('/').next())
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+    file_names.sort_unstable();
+    file_names.dedup();
+
+    if (1..=2).contains(&file_names.len()) {
+        return format!("{}: {}", directory, file_names.join(" + "));
+    }
+
+    format!("{}: {} files", directory, paths.len())
+}
+
+fn compact_scope_items(mut items: Vec<&str>) -> String {
+    const MAX_ITEMS: usize = 2;
+    if items.len() <= MAX_ITEMS {
+        return items.join(" + ");
+    }
+
+    items.truncate(MAX_ITEMS);
+    format!("{} + more", items.join(" + "))
 }
 
 fn merge_excess_layers<'a>(
@@ -509,7 +568,10 @@ mod tests {
         diff::parse_unified_diff,
         github::{PullRequestDataCompleteness, PullRequestDetail, PullRequestFile},
         stacks::{
-            model::{RepoContext, VirtualStackSizing},
+            model::{
+                ChangeAtom, ChangeAtomSource, ChangeRole, LineRange, RepoContext, StackWarning,
+                VirtualStackSizing,
+            },
             providers::virtual_semantic::discover,
         },
     };
@@ -554,6 +616,57 @@ diff --git a/tests/service_test.rs b/tests/service_test.rs
             .flat_map(|layer| layer.atom_ids.iter())
             .collect::<Vec<_>>();
         assert_eq!(assigned.len(), stack.atoms.len());
+    }
+
+    #[test]
+    fn split_core_layers_use_specific_symbols_instead_of_repeating_directory() {
+        let atoms = vec![
+            atom("atom-parse", "src/lib.rs", Some("parse_config"), 80),
+            atom("atom-render", "src/main.rs", Some("render_diff"), 80),
+        ];
+        let groups = super::split_by_file(
+            ChangeRole::CoreLogic,
+            atoms.iter().collect::<Vec<_>>(),
+            "src".to_string(),
+            100,
+        );
+        let titles = groups
+            .iter()
+            .enumerate()
+            .map(|(index, group)| {
+                super::layer_title(group.role, index, group.split_label.as_deref())
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            titles,
+            vec!["Core behavior: parse_config", "Core behavior: render_diff"]
+        );
+        assert!(!titles.iter().any(|title| title == "Core behavior: src"));
+    }
+
+    fn atom(id: &str, path: &str, symbol_name: Option<&str>, changed_lines: usize) -> ChangeAtom {
+        ChangeAtom {
+            id: id.to_string(),
+            source: ChangeAtomSource::Hunk { hunk_index: 0 },
+            path: path.to_string(),
+            previous_path: None,
+            role: ChangeRole::CoreLogic,
+            semantic_kind: Some("function".to_string()),
+            symbol_name: symbol_name.map(str::to_string),
+            defined_symbols: symbol_name.map(str::to_string).into_iter().collect(),
+            referenced_symbols: Vec::new(),
+            old_range: Some(LineRange { start: 1, end: 2 }),
+            new_range: Some(LineRange { start: 1, end: 3 }),
+            hunk_headers: Vec::new(),
+            hunk_indices: vec![0],
+            additions: changed_lines,
+            deletions: 0,
+            patch_hash: format!("hash-{id}"),
+            risk_score: changed_lines as i64,
+            review_thread_ids: Vec::new(),
+            warnings: Vec::<StackWarning>::new(),
+        }
     }
 
     fn detail(raw_diff: &str) -> PullRequestDetail {

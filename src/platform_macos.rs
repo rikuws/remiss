@@ -27,33 +27,243 @@ pub fn show_about_panel() -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
+pub fn prepare_system_notifications() -> Result<(), String> {
+    system_notifications::prepare()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn prepare_system_notifications() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
 pub fn deliver_system_notification(title: &str, body: &str) -> Result<(), String> {
-    use std::process::Command;
-
-    let escape = |value: &str| value.replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!(
-        "display notification \"{}\" with title \"{}\"",
-        escape(body),
-        escape(title)
-    );
-    let output = Command::new("osascript")
-        .args(["-e", &script])
-        .output()
-        .map_err(|error| format!("Failed to launch osascript: {error}"))?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    Err(format!(
-        "osascript notification failed: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
-    ))
+    system_notifications::deliver(title, body)
 }
 
 #[cfg(not(target_os = "macos"))]
 pub fn deliver_system_notification(_title: &str, _body: &str) -> Result<(), String> {
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+mod system_notifications {
+    use std::{
+        ffi::{c_void, CString},
+        path::PathBuf,
+        ptr,
+        sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    };
+
+    use block2::RcBlock;
+    use objc2::{
+        define_class, msg_send,
+        rc::Retained,
+        runtime::{AnyClass, AnyObject, Bool, ProtocolObject},
+        ClassType,
+    };
+    use objc2_foundation::{NSError, NSObject, NSObjectProtocol, NSString};
+    use objc2_user_notifications::{
+        UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,
+        UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
+        UNUserNotificationCenter, UNUserNotificationCenterDelegate,
+    };
+
+    static DELEGATE_INSTALLED: AtomicBool = AtomicBool::new(false);
+    static AUTHORIZATION_REQUESTED: AtomicBool = AtomicBool::new(false);
+    static NOTIFICATION_ID: AtomicU64 = AtomicU64::new(1);
+
+    define_class!(
+        // SAFETY:
+        // - The superclass NSObject has no subclassing requirements.
+        // - The delegate stores no Rust ivars and is intentionally retained
+        //   for the full process lifetime after registration.
+        #[unsafe(super(NSObject))]
+        struct RemissNotificationDelegate;
+
+        // SAFETY: NSObjectProtocol has no additional safety requirements.
+        unsafe impl NSObjectProtocol for RemissNotificationDelegate {}
+
+        // SAFETY: UNUserNotificationCenterDelegate has no additional safety
+        // requirements. Both methods use the exact Objective-C signatures.
+        unsafe impl UNUserNotificationCenterDelegate for RemissNotificationDelegate {
+            #[unsafe(method(userNotificationCenter:willPresentNotification:withCompletionHandler:))]
+            fn will_present_notification(
+                &self,
+                _center: &UNUserNotificationCenter,
+                _notification: &UNNotification,
+                completion_handler: &block2::DynBlock<dyn Fn(UNNotificationPresentationOptions)>,
+            ) {
+                completion_handler.call((UNNotificationPresentationOptions::Banner
+                    | UNNotificationPresentationOptions::List,));
+            }
+
+            #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
+            fn did_receive_notification_response(
+                &self,
+                _center: &UNUserNotificationCenter,
+                _response: &UNNotificationResponse,
+                completion_handler: &block2::DynBlock<dyn Fn()>,
+            ) {
+                activate_remiss_application();
+                completion_handler.call(());
+            }
+        }
+    );
+
+    impl RemissNotificationDelegate {
+        fn new() -> Retained<Self> {
+            unsafe { msg_send![Self::class(), new] }
+        }
+    }
+
+    pub fn prepare() -> Result<(), String> {
+        if app_contents_dir().is_none() {
+            return Ok(());
+        }
+
+        ensure_setup();
+        Ok(())
+    }
+
+    pub fn deliver(title: &str, body: &str) -> Result<(), String> {
+        if app_contents_dir().is_none() {
+            return Err("Native Remiss notifications require running from Remiss.app.".to_string());
+        }
+
+        let center = ensure_setup();
+        let content = UNMutableNotificationContent::new();
+        content.setTitle(&NSString::from_str(title));
+        content.setBody(&NSString::from_str(body));
+
+        let notification_id = NOTIFICATION_ID.fetch_add(1, Ordering::Relaxed);
+        let identifier = NSString::from_str(&format!("dev.rikuwikman.remiss.{notification_id}"));
+        let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
+            &identifier,
+            content.as_super(),
+            None,
+        );
+        let title_for_log = title.to_string();
+        let completion = RcBlock::new(move |error: *mut NSError| {
+            if let Some(message) = ns_error_message(error) {
+                eprintln!("Failed to deliver Remiss notification '{title_for_log}': {message}");
+            }
+        });
+        center.addNotificationRequest_withCompletionHandler(&request, Some(&completion));
+
+        Ok(())
+    }
+
+    fn ensure_setup() -> Retained<UNUserNotificationCenter> {
+        let center = UNUserNotificationCenter::currentNotificationCenter();
+        install_delegate(&center);
+        request_authorization(&center);
+        center
+    }
+
+    fn install_delegate(center: &UNUserNotificationCenter) {
+        if DELEGATE_INSTALLED.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        let delegate = RemissNotificationDelegate::new();
+        center.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+
+        let _ = Retained::into_raw(delegate);
+    }
+
+    fn request_authorization(center: &UNUserNotificationCenter) {
+        if AUTHORIZATION_REQUESTED.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        let completion = RcBlock::new(|granted: Bool, error: *mut NSError| {
+            if let Some(message) = ns_error_message(error) {
+                eprintln!("Remiss notification authorization failed: {message}");
+            }
+
+            if !granted.as_bool() {
+                eprintln!("Remiss notifications are disabled in System Settings.");
+            }
+        });
+        center.requestAuthorizationWithOptions_completionHandler(
+            UNAuthorizationOptions::Alert,
+            &completion,
+        );
+    }
+
+    fn app_contents_dir() -> Option<PathBuf> {
+        let executable = std::env::current_exe().ok()?;
+        let macos_dir = executable.parent()?;
+        if macos_dir.file_name().and_then(|name| name.to_str()) != Some("MacOS") {
+            return None;
+        }
+
+        let contents_dir = macos_dir.parent()?;
+        if contents_dir.file_name().and_then(|name| name.to_str()) != Some("Contents") {
+            return None;
+        }
+
+        let app_dir = contents_dir.parent()?;
+        if app_dir.extension().and_then(|extension| extension.to_str()) != Some("app") {
+            return None;
+        }
+
+        Some(contents_dir.to_path_buf())
+    }
+
+    fn ns_error_message(error: *mut NSError) -> Option<String> {
+        if error.is_null() {
+            return None;
+        }
+
+        let description: *mut NSString = unsafe { msg_send![error, localizedDescription] };
+        if description.is_null() {
+            None
+        } else {
+            Some(unsafe { &*description }.to_string())
+        }
+    }
+
+    #[repr(C)]
+    struct DispatchQueue {
+        _private: [u8; 0],
+    }
+
+    extern "C" {
+        static _dispatch_main_q: DispatchQueue;
+        fn dispatch_async_f(
+            queue: *const DispatchQueue,
+            context: *mut c_void,
+            work: extern "C" fn(*mut c_void),
+        );
+    }
+
+    fn activate_remiss_application() {
+        unsafe {
+            dispatch_async_f(
+                ptr::addr_of!(_dispatch_main_q),
+                ptr::null_mut(),
+                activate_remiss_application_now,
+            );
+        }
+    }
+
+    extern "C" fn activate_remiss_application_now(_context: *mut c_void) {
+        let class_name = CString::new("NSApplication").unwrap();
+        let Some(app_class) = AnyClass::get(&class_name) else {
+            return;
+        };
+        let app: *mut AnyObject = unsafe { msg_send![app_class, sharedApplication] };
+        if app.is_null() {
+            return;
+        }
+
+        unsafe {
+            let _: () = msg_send![app, unhide: Option::<&AnyObject>::None];
+            let _: () = msg_send![app, activateIgnoringOtherApps: Bool::YES];
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]

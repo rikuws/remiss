@@ -19,7 +19,6 @@ use crate::selectable_text::{AppTextFieldKind, AppTextInput};
 use crate::state::*;
 use crate::theme::*;
 
-use super::ai_tour::refresh_active_tour_flow;
 use super::diff_view::{enter_files_surface, render_files_view, warm_structural_diffs_flow};
 use super::sections::{
     badge, error_text, eyebrow, format_relative_time, ghost_button, panel_state_text,
@@ -3799,19 +3798,26 @@ fn trigger_sync_pr(
                     .await;
             }
 
-            let should_refresh_tour = model
+            let should_refresh_guide = model
                 .read_with(cx, |s, _| {
                     s.active_surface == PullRequestSurface::Files
                         && s.active_pr_key.as_deref() == Some(&detail_key)
                         && s.active_review_session()
-                            .map(|session| session.center_mode == ReviewCenterMode::AiTour)
+                            .map(|session| session.center_mode == ReviewCenterMode::GuidedReview)
                             .unwrap_or(false)
                 })
                 .ok()
                 .unwrap_or(false);
 
-            if should_refresh_tour {
-                refresh_active_tour_flow(model.clone(), true, cx).await;
+            if should_refresh_guide {
+                review_intelligence::run_review_intelligence_flow(
+                    model.clone(),
+                    ReviewIntelligenceScope::StackOnly,
+                    false,
+                    true,
+                    cx,
+                )
+                .await;
             }
         })
         .detach();

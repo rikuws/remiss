@@ -22,7 +22,6 @@ use crate::review_session::{load_review_session, ReviewCenterMode};
 use crate::state::*;
 use crate::theme::*;
 
-use super::ai_tour::refresh_active_tour;
 use super::diff_view::{
     ensure_active_review_focus_loaded, ensure_structural_diff_warmup_started, enter_files_surface,
     enter_stack_review_mode, switch_review_code_mode, toggle_waypoint_spotlight,
@@ -55,7 +54,7 @@ pub(crate) const APP_TRAFFIC_LIGHT_LEFT: f32 = 12.0;
 pub(crate) const APP_TRAFFIC_LIGHT_TOP: f32 = 11.0;
 const APP_TITLEBAR_SIDEBAR_TOGGLE_LEFT: f32 = 76.0;
 const APP_TITLEBAR_CONTROL_SIZE: f32 = 24.0;
-const APP_TITLEBAR_CONTROL_TOP: f32 = 5.0;
+const APP_TITLEBAR_CONTROL_TOP: f32 = 8.0;
 const APP_TITLEBAR_CONTROL_ICON_SIZE: f32 = 13.0;
 const APP_CHROME_HIDDEN_LEFT_INSET: f32 = 206.0;
 const APP_SIDEBAR_ANIMATION_MS: u64 = 220;
@@ -909,17 +908,7 @@ fn switch_code_lens_from_menu(
 }
 
 fn switch_to_ai_tour_from_menu(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
-    state.update(cx, |state, cx| {
-        if state.active_detail().is_none() {
-            return;
-        }
-        state.active_surface = PullRequestSurface::Files;
-        state.pr_header_compact = false;
-        state.set_review_center_mode(ReviewCenterMode::AiTour);
-        state.persist_active_review_session();
-        cx.notify();
-    });
-    refresh_active_tour(state, window, cx, true);
+    enter_stack_review_mode(state, window, cx);
 }
 
 fn jump_to_next_review_comment_from_menu(
@@ -1422,29 +1411,21 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
         .unwrap_or(0);
     let drawer_open = s.notification_drawer_open;
     let sidebar_hidden = s.app_sidebar_collapsed;
-    let show_file_tree_toggle =
-        active_surface == PullRequestSurface::Files && s.active_detail().is_some();
     let file_tree_visible = s
         .active_review_session()
         .map(|session| session.show_file_tree)
         .unwrap_or(true);
-    let file_tree_tooltip = if file_tree_visible {
-        "Hide file tree"
-    } else {
-        "Show file tree"
-    };
-    let file_tree_icon = if file_tree_visible {
-        LucideIcon::PanelLeftClose
-    } else {
-        LucideIcon::PanelLeftOpen
-    };
+    let show_file_tree_toggle = active_surface == PullRequestSurface::Files
+        && s.active_detail().is_some()
+        && !file_tree_visible;
+    let file_tree_tooltip = "Show file tree";
+    let file_tree_icon = LucideIcon::PanelLeftOpen;
     let tabs: Vec<_> = s.open_tabs.clone();
     let state_for_tabs = state.clone();
     let state_for_notifications = state.clone();
     let state_for_briefing = state.clone();
     let state_for_review = state.clone();
     let state_for_code = state.clone();
-    let state_for_ai_tour = state.clone();
     let state_for_stack = state.clone();
     let state_for_diff_lens = state.clone();
     let state_for_structural_lens = state.clone();
@@ -1583,22 +1564,8 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                     },
                 ),
                 chrome_segment(
-                    "AI Tour",
-                    active_center_mode == ReviewCenterMode::AiTour,
-                    active_surface != PullRequestSurface::Files,
-                    move |_, window, cx| {
-                        state_for_ai_tour.update(cx, |state, cx| {
-                            state.active_surface = PullRequestSurface::Files;
-                            state.set_review_center_mode(ReviewCenterMode::AiTour);
-                            state.persist_active_review_session();
-                            cx.notify();
-                        });
-                        refresh_active_tour(&state_for_ai_tour, window, cx, true);
-                    },
-                ),
-                chrome_segment(
-                    "Stack",
-                    active_center_mode == ReviewCenterMode::Stack,
+                    "Guided Review",
+                    active_center_mode == ReviewCenterMode::GuidedReview,
                     active_surface != PullRequestSurface::Files,
                     move |_, window, cx| {
                         enter_stack_review_mode(&state_for_stack, window, cx);

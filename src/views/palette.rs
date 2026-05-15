@@ -15,7 +15,6 @@ use crate::selectable_text::{AppTextFieldKind, AppTextInput};
 use crate::state::*;
 use crate::theme::*;
 
-use super::ai_tour::refresh_active_tour;
 use super::diff_view::{
     ensure_active_review_focus_loaded, enter_files_surface, enter_stack_review_mode,
     switch_review_code_mode,
@@ -712,14 +711,18 @@ fn push_review_navigation_items(items: &mut Vec<CommandItem>, state: &AppState) 
         &["source browser", "repository", "full tree", "files", "code"],
     ));
     items.push(CommandItem::normal_with_keywords(
-        "Switch to AI Tour",
-        CommandAction::EnterAiTour,
-        &["ai", "tour", "guide", "generated review"],
-    ));
-    items.push(CommandItem::normal_with_keywords(
-        "Switch to Stack",
+        "Switch to Guided Review",
         CommandAction::EnterStack,
-        &["ai stack", "virtual stack", "layers", "review plan"],
+        &[
+            "ai",
+            "tour",
+            "guide",
+            "generated review",
+            "ai stack",
+            "virtual stack",
+            "layers",
+            "review plan",
+        ],
     ));
 }
 
@@ -937,17 +940,7 @@ fn apply_command_action(
         }
         CommandAction::EnterAiTour => {
             close_palette(state, cx);
-            state.update(cx, |s, cx| {
-                if s.active_detail().is_none() {
-                    return;
-                }
-                s.active_surface = PullRequestSurface::Files;
-                s.pr_header_compact = false;
-                s.set_review_center_mode(ReviewCenterMode::AiTour);
-                s.persist_active_review_session();
-                cx.notify();
-            });
-            refresh_active_tour(state, window, cx, true);
+            enter_stack_review_mode(state, window, cx);
         }
         CommandAction::EnterStack => {
             close_palette(state, cx);
@@ -1308,7 +1301,7 @@ mod tests {
                 &["struct difftastic"],
             ),
             CommandItem::normal_with_keywords(
-                "Switch to AI Tour",
+                "Switch to Guided Review",
                 CommandAction::SyncWorkspace,
                 &["ai guide"],
             ),
@@ -1322,13 +1315,13 @@ mod tests {
     #[test]
     fn fuzzy_match_uses_command_keywords() {
         let items = vec![CommandItem::normal_with_keywords(
-            "Switch to Stack",
+            "Switch to Guided Review",
             CommandAction::SyncWorkspace,
             &["ai stack virtual layers"],
         )];
 
         let ranked = ranked_command_items(items, &fuzzy_query_chars("ai"));
 
-        assert_eq!(ranked[0].label, "Switch to Stack");
+        assert_eq!(ranked[0].label, "Switch to Guided Review");
     }
 }

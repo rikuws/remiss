@@ -3927,6 +3927,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-user-notifications"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9df9128cbbfef73cda168416ccf7f837b62737d748333bfe9ab71c245d76613e"
+dependencies = [
+ "bitflags 2.11.0",
+ "block2",
+ "objc2",
+ "objc2-foundation",
+]
+
+[[package]]
 name = "objc_exception"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4861,6 +4873,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 name = "remiss"
 version = "0.1.1"
 dependencies = [
+ "block2",
  "codex-codes",
  "core-foundation 0.10.0",
  "core-video",
@@ -4878,6 +4891,7 @@ dependencies = [
  "objc2-core-image",
  "objc2-core-video",
  "objc2-foundation",
+ "objc2-user-notifications",
  "once_cell",
  "pulldown-cmark",
  "rusqlite",

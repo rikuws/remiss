@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::structural_evidence::StructuralEvidencePack;
+
 pub const STACK_GENERATOR_VERSION: &str = "virtual-stacks-v1";
 
 pub type ReviewStackId = String;
@@ -411,6 +413,7 @@ pub struct RepoContext {
     pub open_pull_requests: Vec<StackPullRequestRef>,
     pub local_repo_path: Option<PathBuf>,
     pub trunk_branch: Option<String>,
+    pub structural_evidence: Option<StructuralEvidencePack>,
 }
 
 impl RepoContext {
@@ -419,6 +422,7 @@ impl RepoContext {
             open_pull_requests: Vec::new(),
             local_repo_path: None,
             trunk_branch: None,
+            structural_evidence: None,
         }
     }
 }

@@ -17,6 +17,7 @@ pub enum ReviewCenterMode {
     SemanticDiff,
     StructuralDiff,
     SourceBrowser,
+    GuidedReview,
     AiTour,
     Stack,
 }
@@ -27,8 +28,8 @@ impl ReviewCenterMode {
             Self::SemanticDiff => "Diff",
             Self::StructuralDiff => "Structural",
             Self::SourceBrowser => "Source",
-            Self::AiTour => "AI Tour",
-            Self::Stack => "Stack",
+            Self::GuidedReview => "Guided Review",
+            Self::AiTour | Self::Stack => "Guided Review",
         }
     }
 }
@@ -39,6 +40,23 @@ pub enum DiffLayout {
     #[default]
     Unified,
     SideBySide,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReviewGuideLens {
+    #[default]
+    Diff,
+    Structural,
+}
+
+impl ReviewGuideLens {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Diff => "Diff",
+            Self::Structural => "Structural",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,7 +127,7 @@ impl ReviewLocation {
 
     pub fn from_ai_tour(file_path: impl Into<String>, anchor: Option<DiffAnchor>) -> Self {
         let mut location = Self::from_diff(file_path, anchor);
-        location.mode = ReviewCenterMode::AiTour;
+        location.mode = ReviewCenterMode::GuidedReview;
         location
     }
 
@@ -125,6 +143,7 @@ impl ReviewLocation {
         match self.mode {
             ReviewCenterMode::SemanticDiff
             | ReviewCenterMode::StructuralDiff
+            | ReviewCenterMode::GuidedReview
             | ReviewCenterMode::AiTour
             | ReviewCenterMode::Stack => format!(
                 "diff:{}:{}:{}:{}",
@@ -188,6 +207,8 @@ pub struct ReviewSessionDocument {
     pub normal_diff_layout: DiffLayout,
     #[serde(default = "default_structural_diff_layout")]
     pub structural_diff_layout: DiffLayout,
+    #[serde(default)]
+    pub guided_review_lens: ReviewGuideLens,
     #[serde(default = "default_false")]
     pub wrap_diff_lines: bool,
     #[serde(default = "default_true")]
@@ -232,6 +253,7 @@ pub struct ReviewSessionState {
     pub code_lens_mode: ReviewCenterMode,
     pub normal_diff_layout: DiffLayout,
     pub structural_diff_layout: DiffLayout,
+    pub guided_review_lens: ReviewGuideLens,
     pub wrap_diff_lines: bool,
     pub show_file_tree: bool,
     pub source_target: Option<ReviewSourceTarget>,
@@ -260,6 +282,7 @@ impl Default for ReviewSessionState {
             code_lens_mode: ReviewCenterMode::SemanticDiff,
             normal_diff_layout: DiffLayout::Unified,
             structural_diff_layout: DiffLayout::SideBySide,
+            guided_review_lens: ReviewGuideLens::Diff,
             wrap_diff_lines: false,
             show_file_tree: true,
             source_target: None,
@@ -285,13 +308,13 @@ impl ReviewSessionState {
     pub fn from_document(document: ReviewSessionDocument) -> Self {
         let code_lens_mode = sanitize_code_lens_mode(document.code_lens_mode);
         let center_mode = match document.center_mode {
-            ReviewCenterMode::AiTour => ReviewCenterMode::AiTour,
-            ReviewCenterMode::Stack => ReviewCenterMode::Stack,
+            ReviewCenterMode::AiTour | ReviewCenterMode::Stack => ReviewCenterMode::GuidedReview,
+            ReviewCenterMode::GuidedReview => ReviewCenterMode::GuidedReview,
             ReviewCenterMode::SourceBrowser => ReviewCenterMode::SourceBrowser,
             ReviewCenterMode::StructuralDiff => ReviewCenterMode::StructuralDiff,
             ReviewCenterMode::SemanticDiff => ReviewCenterMode::SemanticDiff,
         };
-        let stack_diff_mode = if center_mode == ReviewCenterMode::Stack
+        let stack_diff_mode = if center_mode == ReviewCenterMode::GuidedReview
             && document.stack_diff_mode == StackDiffMode::WholePr
             && document.selected_stack_layer_id.is_none()
         {
@@ -306,15 +329,32 @@ impl ReviewSessionState {
             code_lens_mode,
             normal_diff_layout: document.normal_diff_layout,
             structural_diff_layout: document.structural_diff_layout,
+            guided_review_lens: document.guided_review_lens,
             wrap_diff_lines: document.wrap_diff_lines,
             show_file_tree: document.show_file_tree,
             source_target: document.source_target,
-            waymarks: document.waymarks,
-            task_route: document.task_route,
-            route: document.route,
-            history_back: document.history_back,
-            history_forward: document.history_forward,
-            last_read: document.last_read,
+            waymarks: document
+                .waymarks
+                .into_iter()
+                .map(normalize_review_waymark)
+                .collect(),
+            task_route: document.task_route.map(normalize_review_task_route),
+            route: document
+                .route
+                .into_iter()
+                .map(normalize_review_location)
+                .collect(),
+            history_back: document
+                .history_back
+                .into_iter()
+                .map(normalize_review_location)
+                .collect(),
+            history_forward: document
+                .history_forward
+                .into_iter()
+                .map(normalize_review_location)
+                .collect(),
+            last_read: document.last_read.map(normalize_review_location),
             collapsed_sections: document.collapsed_sections.into_iter().collect(),
             collapsed_file_paths: document.collapsed_file_paths.into_iter().collect(),
             reviewed_file_paths: document.reviewed_file_paths.into_iter().collect(),
@@ -338,6 +378,7 @@ impl ReviewSessionState {
             code_lens_mode: sanitize_code_lens_mode(self.code_lens_mode),
             normal_diff_layout: self.normal_diff_layout,
             structural_diff_layout: self.structural_diff_layout,
+            guided_review_lens: self.guided_review_lens,
             wrap_diff_lines: self.wrap_diff_lines,
             show_file_tree: self.show_file_tree,
             source_target: self.source_target.clone(),
@@ -386,8 +427,34 @@ pub fn sanitize_code_lens_mode(mode: ReviewCenterMode) -> ReviewCenterMode {
         ReviewCenterMode::SemanticDiff
         | ReviewCenterMode::StructuralDiff
         | ReviewCenterMode::SourceBrowser => mode,
-        ReviewCenterMode::AiTour | ReviewCenterMode::Stack => ReviewCenterMode::SemanticDiff,
+        ReviewCenterMode::GuidedReview | ReviewCenterMode::AiTour | ReviewCenterMode::Stack => {
+            ReviewCenterMode::SemanticDiff
+        }
     }
+}
+
+fn normalize_review_waymark(mut waymark: ReviewWaymark) -> ReviewWaymark {
+    waymark.location = normalize_review_location(waymark.location);
+    waymark
+}
+
+fn normalize_review_task_route(mut route: ReviewTaskRoute) -> ReviewTaskRoute {
+    route.stops = route
+        .stops
+        .into_iter()
+        .map(normalize_review_location)
+        .collect();
+    route
+}
+
+fn normalize_review_location(mut location: ReviewLocation) -> ReviewLocation {
+    if matches!(
+        location.mode,
+        ReviewCenterMode::AiTour | ReviewCenterMode::Stack
+    ) {
+        location.mode = ReviewCenterMode::GuidedReview;
+    }
+    location
 }
 
 pub fn location_label(file_path: &str, line: Option<usize>) -> String {
@@ -571,9 +638,9 @@ mod tests {
     }
 
     #[test]
-    fn review_session_persists_code_lens_separately_from_ai_tour() {
+    fn review_session_routes_ai_tour_to_guided_review_without_promoting_code_lens() {
         let mut state = ReviewSessionState {
-            center_mode: ReviewCenterMode::AiTour,
+            center_mode: ReviewCenterMode::GuidedReview,
             code_lens_mode: ReviewCenterMode::SourceBrowser,
             ..ReviewSessionState::default()
         };
@@ -581,7 +648,7 @@ mod tests {
         let document = state.to_document(Some("src/lib.rs"), None);
         let restored = ReviewSessionState::from_document(document);
 
-        assert_eq!(restored.center_mode, ReviewCenterMode::AiTour);
+        assert_eq!(restored.center_mode, ReviewCenterMode::GuidedReview);
         assert_eq!(
             restored.active_code_lens_mode(),
             ReviewCenterMode::SourceBrowser
@@ -606,7 +673,7 @@ mod tests {
 
         let restored = ReviewSessionState::from_document(document);
 
-        assert_eq!(restored.center_mode, ReviewCenterMode::Stack);
+        assert_eq!(restored.center_mode, ReviewCenterMode::GuidedReview);
         assert_eq!(
             restored.active_code_lens_mode(),
             ReviewCenterMode::SemanticDiff
@@ -614,8 +681,31 @@ mod tests {
         assert_eq!(restored.stack_diff_mode, StackDiffMode::CurrentLayerOnly);
 
         let persisted = restored.to_document(None, None);
-        assert_eq!(persisted.center_mode, ReviewCenterMode::Stack);
+        assert_eq!(persisted.center_mode, ReviewCenterMode::GuidedReview);
         assert_eq!(persisted.code_lens_mode, ReviewCenterMode::SemanticDiff);
+    }
+
+    #[test]
+    fn review_session_persists_guided_review_lens() {
+        let document: super::ReviewSessionDocument = serde_json::from_str(
+            r#"{
+                "centerMode": "guidedReview",
+                "guidedReviewLens": "structural"
+            }"#,
+        )
+        .expect("guided review session should deserialize");
+
+        let restored = ReviewSessionState::from_document(document);
+
+        assert_eq!(restored.center_mode, ReviewCenterMode::GuidedReview);
+        assert_eq!(
+            restored.guided_review_lens,
+            super::ReviewGuideLens::Structural
+        );
+        assert_eq!(
+            restored.to_document(None, None).guided_review_lens,
+            super::ReviewGuideLens::Structural
+        );
     }
 
     #[test]

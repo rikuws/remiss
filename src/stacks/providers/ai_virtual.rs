@@ -12,6 +12,7 @@ use crate::{
     app_storage,
     code_tour::CodeTourProvider,
     github::PullRequestDetail,
+    structural_evidence::{StructuralEvidencePack, STRUCTURAL_EVIDENCE_VERSION},
 };
 
 use super::super::{
@@ -110,7 +111,12 @@ pub fn discover(
         }
     }
 
-    let input_json = build_stack_planning_input(selected_pr, &atoms, &commit_context);
+    let input_json = build_stack_planning_input(
+        selected_pr,
+        &atoms,
+        &commit_context,
+        repo_context.structural_evidence.as_ref(),
+    );
     let initial_prompt = build_stack_planning_prompt(&input_json);
 
     let mut prompt = initial_prompt.clone();
@@ -923,6 +929,7 @@ fn build_stack_planning_input(
     selected_pr: &PullRequestDetail,
     atoms: &[ChangeAtom],
     commit_context: &CommitContext,
+    structural_evidence: Option<&StructuralEvidencePack>,
 ) -> Value {
     let commits_by_path = commits_by_path(&commit_context.commits);
     let dependencies = build_atom_dependencies(atoms);
@@ -957,6 +964,7 @@ fn build_stack_planning_input(
         "candidate_layers": candidate_layers_json(atoms, &depths),
         "hard_validation_rules": [
             "Every layer needs at least one substantive atom unless it is a coherent mechanical formatting/comment layer.",
+            "Structural evidence is advisory and may be partial; atom coverage is still authoritative.",
             "Import-only and mostly import layers are invalid; attach import atoms to the substantive atom that requires them.",
             "The final layer must not contain more than 40% of substantive atoms or more than two concerns.",
             "Tests usually travel with the behavior they validate; generic tests-only layers are invalid.",
@@ -968,6 +976,65 @@ fn build_stack_planning_input(
             .iter()
             .map(|atom| atom_summary_json(atom, &commits_by_path, &depths))
             .collect::<Vec<_>>(),
+        "structural_evidence": structural_evidence_json(structural_evidence),
+    })
+}
+
+fn structural_evidence_json(evidence: Option<&StructuralEvidencePack>) -> Value {
+    const MAX_FILES: usize = 32;
+    const MAX_CHANGES: usize = 72;
+    const MAX_SNIPPET_CHARS: usize = 260;
+
+    let Some(evidence) = evidence else {
+        return json!({
+            "version": STRUCTURAL_EVIDENCE_VERSION,
+            "status": "unavailable",
+            "warnings": ["Structural evidence was not available for this stack planning run."],
+            "files": [],
+        });
+    };
+
+    let mut emitted_changes = 0usize;
+    let files = evidence
+        .files
+        .iter()
+        .take(MAX_FILES)
+        .map(|file| {
+            let remaining = MAX_CHANGES.saturating_sub(emitted_changes);
+            let changes = file
+                .changes
+                .iter()
+                .take(remaining)
+                .map(|change| {
+                    emitted_changes += 1;
+                    json!({
+                        "hunk_index": change.hunk_index,
+                        "hunk_header": change.hunk_header,
+                        "old_range": change.old_range,
+                        "new_range": change.new_range,
+                        "atom_ids": change.atom_ids,
+                        "changed_line_count": change.changed_line_count,
+                        "snippet": change.snippet.as_deref().map(|snippet| crate::agents::prompt::trim_text(snippet, MAX_SNIPPET_CHARS)),
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            json!({
+                "path": file.path,
+                "previous_path": file.previous_path,
+                "status": file.status,
+                "message": file.message,
+                "matched_atom_ids": file.matched_atom_ids,
+                "unmatched_hunk_count": file.unmatched_hunk_count,
+                "changes": changes,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "version": evidence.version,
+        "warnings": evidence.warnings,
+        "files": files,
     })
 }
 
@@ -1383,6 +1450,9 @@ mod tests {
             model::{LineRange, StackWarning},
             validation::{AiStackPlan, AiStackPlanStrategy},
         },
+        structural_evidence::{
+            StructuralEvidenceChange, StructuralEvidenceFile, StructuralEvidenceStatus,
+        },
     };
 
     #[test]
@@ -1546,6 +1616,50 @@ mod tests {
             warning.code == "ai-virtual-stack-unavailable"
                 && warning.message.contains("invalid output")
         }));
+    }
+
+    #[test]
+    fn stack_planning_input_includes_structural_evidence_without_relaxing_atom_coverage() {
+        let atoms = vec![atom("atom_1", ChangeRole::CoreLogic, 12)];
+        let evidence = StructuralEvidencePack {
+            version: STRUCTURAL_EVIDENCE_VERSION.to_string(),
+            warnings: vec!["partial file".to_string()],
+            files: vec![StructuralEvidenceFile {
+                path: "src/atom_1.rs".to_string(),
+                previous_path: None,
+                status: StructuralEvidenceStatus::Full,
+                message: None,
+                matched_atom_ids: vec!["atom_1".to_string()],
+                unmatched_hunk_count: 0,
+                changes: vec![StructuralEvidenceChange {
+                    hunk_index: 0,
+                    hunk_header: "@@ -1,2 +1,3 @@".to_string(),
+                    old_range: Some(LineRange { start: 1, end: 2 }),
+                    new_range: Some(LineRange { start: 1, end: 3 }),
+                    atom_ids: vec!["atom_1".to_string()],
+                    changed_line_count: 2,
+                    snippet: Some("-old\n+new".to_string()),
+                }],
+            }],
+        };
+        let commit_context = CommitContext {
+            commits: Vec::new(),
+            suitability: CommitSuitability {
+                score: 0.0,
+                suitable_for_layers: false,
+                reasons: vec!["No commits.".to_string()],
+            },
+        };
+
+        let input = build_stack_planning_input(&detail(), &atoms, &commit_context, Some(&evidence));
+        let prompt = build_stack_planning_prompt(&input);
+
+        assert_eq!(
+            input["structural_evidence"]["files"][0]["path"],
+            "src/atom_1.rs"
+        );
+        assert!(prompt.contains("input.structural_evidence"));
+        assert!(prompt.contains("Assign every atom exactly once"));
     }
 
     fn plan_layer(title: &str, atom_ids: Vec<&str>, deps: Vec<usize>) -> AiStackPlanLayer {

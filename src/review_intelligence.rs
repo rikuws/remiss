@@ -16,12 +16,16 @@ use crate::{
     github::PullRequestDetail,
     local_repo, local_review,
     review_brief::{self, build_review_brief_request_key},
+    review_guide::{self, build_review_guide_request_key},
     stacks::{
+        atoms::extract_change_atoms,
         cache::{load_ai_review_stack, save_ai_review_stack},
         discover_review_stack,
         model::{Confidence, RepoContext, ReviewStack, StackDiscoveryOptions},
     },
     state::{AppState, DetailState},
+    structural_diff::checkout_head_oid,
+    structural_evidence,
 };
 
 static REVIEW_INTELLIGENCE_JOB_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
@@ -42,6 +46,10 @@ impl ReviewIntelligenceScope {
 
     fn includes_stack(self) -> bool {
         matches!(self, Self::All | Self::StackOnly)
+    }
+
+    fn includes_guide(self) -> bool {
+        self.includes_stack()
     }
 
     fn includes_tour(self) -> bool {
@@ -363,7 +371,13 @@ pub(crate) async fn run_review_intelligence_flow(
     ) = initial;
     let request_key = review_intelligence_request_key(&detail, provider);
     let code_version_key = tour_code_version_key(&detail);
+    let stack_code_version_key = format!(
+        "{}:{}",
+        code_version_key,
+        structural_evidence::STRUCTURAL_EVIDENCE_VERSION
+    );
     let brief_request_key = build_review_brief_request_key(&detail, provider);
+    let guide_request_key = build_review_guide_request_key(&detail, provider);
     let tour_request_key = build_tour_request_key(&detail, provider);
     let local_review_repository_status =
         local_review::reusable_local_repository_status(&detail, existing_local_repository_status);
@@ -397,6 +411,19 @@ pub(crate) async fn run_review_intelligence_flow(
                         detail_state.ai_stack_state.message =
                             Some("Generation is already in progress.".to_string());
                         detail_state.ai_stack_state.success = false;
+                    }
+
+                    if scope.includes_guide() {
+                        detail_state.review_guide_state.request_key =
+                            Some(guide_request_key.clone());
+                        detail_state.review_guide_state.loading = false;
+                        detail_state.review_guide_state.generating = true;
+                        detail_state.review_guide_state.error = None;
+                        detail_state.review_guide_state.message =
+                            Some("Generation is already in progress.".to_string());
+                        detail_state.review_guide_state.progress_text =
+                            Some("Generation is already in progress.".to_string());
+                        detail_state.review_guide_state.success = false;
                     }
 
                     if scope.includes_tour() {
@@ -445,6 +472,23 @@ pub(crate) async fn run_review_intelligence_flow(
                 detail_state.ai_stack_state.message =
                     Some("Preparing local checkout for AI stack review.".to_string());
                 detail_state.ai_stack_state.success = false;
+
+                let guide_request_changed = detail_state
+                    .review_guide_state
+                    .request_key
+                    .as_deref()
+                    != Some(&guide_request_key);
+                detail_state.review_guide_state.request_key = Some(guide_request_key.clone());
+                detail_state.review_guide_state.loading = true;
+                detail_state.review_guide_state.generating = false;
+                if force || guide_request_changed {
+                    detail_state.review_guide_state.document = None;
+                }
+                detail_state.review_guide_state.error = None;
+                detail_state.review_guide_state.message = None;
+                detail_state.review_guide_state.progress_text =
+                    Some("Preparing local checkout for Guided Review.".to_string());
+                detail_state.review_guide_state.success = false;
             }
 
             if scope.includes_brief() {
@@ -597,7 +641,7 @@ pub(crate) async fn run_review_intelligence_flow(
         }
     };
 
-    if scope.includes_stack() {
+    let generated_stack = if scope.includes_stack() {
         generate_or_load_stack(
             &model,
             cache.as_ref(),
@@ -605,7 +649,7 @@ pub(crate) async fn run_review_intelligence_flow(
             &detail,
             provider,
             &request_key,
-            &code_version_key,
+            &stack_code_version_key,
             &local_repo_status,
             open_pull_requests,
             force,
@@ -613,7 +657,37 @@ pub(crate) async fn run_review_intelligence_flow(
             &tour_request_key,
             cx,
         )
-        .await;
+        .await
+    } else {
+        None
+    };
+
+    if scope.includes_guide() {
+        if let Some(stack) = generated_stack {
+            generate_or_load_guide(
+                &model,
+                cache.as_ref(),
+                &detail_key,
+                &detail,
+                provider,
+                &guide_request_key,
+                &local_repo_status,
+                stack,
+                force,
+                cx,
+            )
+            .await;
+        } else {
+            set_guide_error(
+                &model,
+                &detail_key,
+                &guide_request_key,
+                "Guided Review needs a generated stack before it can build layer guidance."
+                    .to_string(),
+                cx,
+            )
+            .await;
+        }
     }
 
     if scope.includes_brief() {
@@ -665,7 +739,7 @@ async fn generate_or_load_stack(
     reflect_tour_progress: bool,
     tour_request_key: &str,
     cx: &mut AsyncWindowContext,
-) {
+) -> Option<ReviewStack> {
     if !force {
         let cached = cx
             .background_executor()
@@ -687,6 +761,7 @@ async fn generate_or_load_stack(
             .await;
 
         if let Ok(Some(stack)) = cached {
+            let loaded_stack = stack.clone();
             set_stack_success(
                 model,
                 detail_key,
@@ -714,7 +789,7 @@ async fn generate_or_load_stack(
                     })
                     .ok();
             }
-            return;
+            return Some(loaded_stack);
         }
     }
 
@@ -728,7 +803,7 @@ async fn generate_or_load_stack(
             cx,
         )
         .await;
-        return;
+        return None;
     };
 
     model
@@ -738,7 +813,7 @@ async fn generate_or_load_stack(
                     detail_state.ai_stack_state.loading = false;
                     detail_state.ai_stack_state.generating = true;
                     detail_state.ai_stack_state.message =
-                        Some("Generating AI stack review.".to_string());
+                        Some("Building structural evidence for AI stack review.".to_string());
                 }
 
                 if reflect_tour_progress {
@@ -763,10 +838,33 @@ async fn generate_or_load_stack(
     let stack_result = cx
         .background_executor()
         .spawn({
+            let cache = CacheStore::clone(cache);
             let detail = detail.clone();
             let working_directory = PathBuf::from(working_directory);
+            let head_oid = checkout_head_oid(local_repo_status);
             async move {
                 run_foreground_blocking(|| {
+                    let atoms = extract_change_atoms(&detail);
+                    let structural_evidence = head_oid
+                        .as_deref()
+                        .map(|head_oid| {
+                            structural_evidence::build_structural_evidence_pack(
+                                &cache,
+                                &detail,
+                                &atoms,
+                                &detail.repository,
+                                working_directory.as_path(),
+                                head_oid,
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            let mut pack = structural_evidence::StructuralEvidencePack::empty();
+                            pack.warnings.push(
+                                "Structural evidence could not be built because checkout head was unavailable."
+                                    .to_string(),
+                            );
+                            pack
+                        });
                     let options = StackDiscoveryOptions {
                         enable_github_native: false,
                         enable_branch_topology: false,
@@ -782,6 +880,7 @@ async fn generate_or_load_stack(
                         open_pull_requests,
                         local_repo_path: Some(working_directory),
                         trunk_branch: None,
+                        structural_evidence: Some(structural_evidence),
                     };
 
                     discover_review_stack(&detail, &repo_context, options)
@@ -794,6 +893,7 @@ async fn generate_or_load_stack(
     match stack_result {
         Ok(stack) if !stack_is_ai_unavailable(&stack) => {
             let _ = save_ai_review_stack(cache, &stack, provider, code_version_key);
+            let generated_stack = stack.clone();
             set_stack_success(
                 model,
                 detail_key,
@@ -803,6 +903,7 @@ async fn generate_or_load_stack(
                 cx,
             )
             .await;
+            Some(generated_stack)
         }
         Ok(stack) => {
             let message = stack
@@ -813,12 +914,146 @@ async fn generate_or_load_stack(
                     "AI stack planning was unavailable. Retry after checkout and provider issues are resolved."
                         .to_string()
                 });
+            let unavailable_stack = stack.clone();
             set_stack_transient_failure(model, detail_key, request_key, stack, message, cx).await;
+            Some(unavailable_stack)
         }
         Err(error) => {
             set_stack_error(model, detail_key, request_key, detail, error, cx).await;
+            None
         }
     }
+}
+
+async fn generate_or_load_guide(
+    model: &Entity<AppState>,
+    cache: &CacheStore,
+    detail_key: &str,
+    detail: &PullRequestDetail,
+    provider: CodeTourProvider,
+    guide_request_key: &str,
+    local_repo_status: &local_repo::LocalRepositoryStatus,
+    stack: ReviewStack,
+    force: bool,
+    cx: &mut AsyncWindowContext,
+) {
+    if !force {
+        let cached = cx
+            .background_executor()
+            .spawn({
+                let cache = CacheStore::clone(cache);
+                let detail = detail.clone();
+                async move { review_guide::load_review_guide(&cache, &detail, provider) }
+            })
+            .await;
+
+        if let Ok(Some(guide)) = cached {
+            set_guide_success(
+                model,
+                detail_key,
+                guide_request_key,
+                guide,
+                Some("Loaded cached Guided Review.".to_string()),
+                cx,
+            )
+            .await;
+            return;
+        }
+    }
+
+    let Some(working_directory) = local_repo_status.path.as_ref() else {
+        set_guide_error(
+            model,
+            detail_key,
+            guide_request_key,
+            local_repo_status.message.clone(),
+            cx,
+        )
+        .await;
+        return;
+    };
+
+    model
+        .update(cx, |state, cx| {
+            if let Some(detail_state) = state.detail_states.get_mut(detail_key) {
+                if detail_state.review_guide_state.request_key.as_deref() == Some(guide_request_key)
+                {
+                    detail_state.review_guide_state.loading = false;
+                    detail_state.review_guide_state.generating = true;
+                    detail_state.review_guide_state.progress_text =
+                        Some("Building structural evidence for Guided Review.".to_string());
+                    detail_state.review_guide_state.error = None;
+                    detail_state.review_guide_state.message = None;
+                    detail_state.review_guide_state.success = false;
+                }
+            }
+            cx.notify();
+        })
+        .ok();
+
+    let guide_result = cx
+        .background_executor()
+        .spawn({
+            let cache = CacheStore::clone(cache);
+            let detail = detail.clone();
+            let stack = stack.clone();
+            let working_directory = PathBuf::from(working_directory);
+            let head_oid = checkout_head_oid(local_repo_status);
+            async move {
+                run_foreground_blocking(|| {
+                    let structural_evidence = head_oid
+                        .as_deref()
+                        .map(|head_oid| {
+                            structural_evidence::build_structural_evidence_pack(
+                                &cache,
+                                &detail,
+                                &stack.atoms,
+                                &detail.repository,
+                                working_directory.as_path(),
+                                head_oid,
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            let mut pack = structural_evidence::StructuralEvidencePack::empty();
+                            pack.warnings.push(
+                                "Structural evidence could not be built because checkout head was unavailable."
+                                    .to_string(),
+                            );
+                            pack
+                        });
+                    let input = review_guide::build_review_guide_generation_input(
+                        &detail,
+                        provider,
+                        working_directory.to_string_lossy().as_ref(),
+                        stack,
+                        structural_evidence,
+                    );
+
+                    match review_guide::generate_review_guide(&cache, input.clone()) {
+                        Ok(guide) => guide,
+                        Err(error) => {
+                            let guide = review_guide::fallback_review_guide(
+                                &input,
+                                Some(format!("AI layer guidance unavailable: {error}")),
+                            );
+                            let _ = review_guide::save_review_guide(&cache, &guide);
+                            guide
+                        }
+                    }
+                })
+            }
+        })
+        .await;
+
+    set_guide_success(
+        model,
+        detail_key,
+        guide_request_key,
+        guide_result,
+        Some("Generated Guided Review.".to_string()),
+        cx,
+    )
+    .await;
 }
 
 async fn generate_or_load_brief(
@@ -1047,6 +1282,15 @@ async fn fail_checkout(
                     detail_state.ai_stack_state.success = false;
                 }
 
+                if scope.includes_guide() {
+                    detail_state.review_guide_state.loading = false;
+                    detail_state.review_guide_state.generating = false;
+                    detail_state.review_guide_state.error = Some(error.to_string());
+                    detail_state.review_guide_state.progress_text = None;
+                    detail_state.review_guide_state.message = None;
+                    detail_state.review_guide_state.success = false;
+                }
+
                 if scope.includes_tour() {
                     let tour_state = detail_state.tour_states.entry(provider).or_default();
                     tour_state.loading = false;
@@ -1121,6 +1365,59 @@ async fn set_brief_message(
                     detail_state.review_brief_state.error = None;
                     detail_state.review_brief_state.message = Some(message.clone());
                     detail_state.review_brief_state.success = false;
+                }
+            }
+            cx.notify();
+        })
+        .ok();
+}
+
+async fn set_guide_success(
+    model: &Entity<AppState>,
+    detail_key: &str,
+    request_key: &str,
+    guide: review_guide::GeneratedReviewGuide,
+    message: Option<String>,
+    cx: &mut AsyncWindowContext,
+) {
+    model
+        .update(cx, |state, cx| {
+            if let Some(detail_state) = state.detail_states.get_mut(detail_key) {
+                if detail_state.review_guide_state.request_key.as_deref() == Some(request_key) {
+                    detail_state.ai_stack_state.stack =
+                        Some(std::sync::Arc::new(guide.stack.clone()));
+                    detail_state.review_guide_state.document = Some(std::sync::Arc::new(guide));
+                    detail_state.review_guide_state.loading = false;
+                    detail_state.review_guide_state.generating = false;
+                    detail_state.review_guide_state.progress_text = None;
+                    detail_state.review_guide_state.error = None;
+                    detail_state.review_guide_state.message = message;
+                    detail_state.review_guide_state.success = true;
+                    state.review_stack_cache.borrow_mut().clear();
+                }
+            }
+            cx.notify();
+        })
+        .ok();
+}
+
+async fn set_guide_error(
+    model: &Entity<AppState>,
+    detail_key: &str,
+    request_key: &str,
+    error: String,
+    cx: &mut AsyncWindowContext,
+) {
+    model
+        .update(cx, |state, cx| {
+            if let Some(detail_state) = state.detail_states.get_mut(detail_key) {
+                if detail_state.review_guide_state.request_key.as_deref() == Some(request_key) {
+                    detail_state.review_guide_state.loading = false;
+                    detail_state.review_guide_state.generating = false;
+                    detail_state.review_guide_state.progress_text = None;
+                    detail_state.review_guide_state.error = Some(error.clone());
+                    detail_state.review_guide_state.message = None;
+                    detail_state.review_guide_state.success = false;
                 }
             }
             cx.notify();

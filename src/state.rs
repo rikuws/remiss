@@ -21,12 +21,13 @@ use crate::lsp::{LspServerStatus, LspSessionManager, LspSymbolDetails};
 use crate::managed_lsp::{ManagedServerInstallStatus, ManagedServerKind};
 use crate::notifications;
 use crate::review_brief::ReviewBrief;
+use crate::review_guide::GeneratedReviewGuide;
 use crate::review_queue::{default_review_file, ReviewQueue};
 use crate::review_session::{
     add_waymark, load_review_session, location_label, push_history_location, push_route_location,
     remove_waymark, sanitize_code_lens_mode, save_review_session, DiffLayout, ReviewCenterMode,
-    ReviewLocation, ReviewSessionDocument, ReviewSessionState, ReviewSourceTarget, ReviewTaskRoute,
-    ReviewWaymark,
+    ReviewGuideLens, ReviewLocation, ReviewSessionDocument, ReviewSessionState, ReviewSourceTarget,
+    ReviewTaskRoute, ReviewWaymark,
 };
 use crate::semantic_diff::SemanticDiffFile;
 use crate::shader_surface::{
@@ -115,6 +116,7 @@ pub struct DetailState {
     pub review_intelligence_request_key: Option<String>,
     pub review_intelligence_loading: bool,
     pub review_brief_state: ReviewBriefState,
+    pub review_guide_state: ReviewGuideState,
     pub ai_stack_state: AiStackState,
     pub tour_states: std::collections::HashMap<CodeTourProvider, CodeTourState>,
     pub file_content_states: std::collections::HashMap<String, FileContentState>,
@@ -146,6 +148,7 @@ impl Default for DetailState {
             review_intelligence_request_key: None,
             review_intelligence_loading: false,
             review_brief_state: ReviewBriefState::default(),
+            review_guide_state: ReviewGuideState::default(),
             ai_stack_state: AiStackState::default(),
             tour_states: std::collections::HashMap::new(),
             file_content_states: std::collections::HashMap::new(),
@@ -187,6 +190,33 @@ pub struct ReviewBriefState {
 }
 
 impl Default for ReviewBriefState {
+    fn default() -> Self {
+        Self {
+            request_key: None,
+            document: None,
+            loading: false,
+            generating: false,
+            progress_text: None,
+            error: None,
+            message: None,
+            success: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ReviewGuideState {
+    pub request_key: Option<String>,
+    pub document: Option<Arc<GeneratedReviewGuide>>,
+    pub loading: bool,
+    pub generating: bool,
+    pub progress_text: Option<String>,
+    pub error: Option<String>,
+    pub message: Option<String>,
+    pub success: bool,
+}
+
+impl Default for ReviewGuideState {
     fn default() -> Self {
         Self {
             request_key: None,
@@ -1477,9 +1507,11 @@ impl AppState {
 
         self.selected_file_path.clone().map(|file_path| {
             match session.map(|session| session.center_mode) {
-                Some(ReviewCenterMode::AiTour) => {
-                    ReviewLocation::from_ai_tour(file_path, self.selected_diff_anchor.clone())
-                }
+                Some(
+                    ReviewCenterMode::GuidedReview
+                    | ReviewCenterMode::AiTour
+                    | ReviewCenterMode::Stack,
+                ) => ReviewLocation::from_ai_tour(file_path, self.selected_diff_anchor.clone()),
                 Some(ReviewCenterMode::StructuralDiff) => ReviewLocation::from_structural_diff(
                     file_path,
                     self.selected_diff_anchor.clone(),
@@ -1537,7 +1569,18 @@ impl AppState {
         self.ensure_active_selected_file_is_valid();
     }
 
-    pub fn navigate_to_review_location(&mut self, location: ReviewLocation, push_history: bool) {
+    pub fn navigate_to_review_location(
+        &mut self,
+        mut location: ReviewLocation,
+        push_history: bool,
+    ) {
+        if matches!(
+            location.mode,
+            ReviewCenterMode::AiTour | ReviewCenterMode::Stack
+        ) {
+            location.mode = ReviewCenterMode::GuidedReview;
+        }
+
         let previous = if push_history {
             self.current_review_location()
         } else {
@@ -1563,6 +1606,7 @@ impl AppState {
         match location.mode {
             ReviewCenterMode::SemanticDiff
             | ReviewCenterMode::StructuralDiff
+            | ReviewCenterMode::GuidedReview
             | ReviewCenterMode::AiTour
             | ReviewCenterMode::Stack => {
                 self.selected_file_path = Some(location.file_path.clone());
@@ -1934,13 +1978,18 @@ impl AppState {
                     }
                 }
             }
-            ReviewCenterMode::AiTour | ReviewCenterMode::Stack => {}
+            ReviewCenterMode::GuidedReview | ReviewCenterMode::AiTour | ReviewCenterMode::Stack => {
+            }
         }
 
         self.reset_review_focus_scroll();
     }
 
     pub fn set_review_center_mode(&mut self, mode: ReviewCenterMode) {
+        let mode = match mode {
+            ReviewCenterMode::AiTour | ReviewCenterMode::Stack => ReviewCenterMode::GuidedReview,
+            mode => mode,
+        };
         if let Some(session) = self.active_review_session_mut() {
             session.center_mode = mode;
             if matches!(
@@ -2045,6 +2094,12 @@ impl AppState {
     pub fn set_stack_diff_mode(&mut self, mode: StackDiffMode) {
         if let Some(session) = self.active_review_session_mut() {
             session.stack_diff_mode = mode;
+        }
+    }
+
+    pub fn set_guided_review_lens(&mut self, lens: ReviewGuideLens) {
+        if let Some(session) = self.active_review_session_mut() {
+            session.guided_review_lens = lens;
         }
     }
 

@@ -91,6 +91,7 @@ pub fn build_stack_planning_prompt(input_json: &Value) -> String {
         "- Do not omit atom IDs.",
         "- Assign every atom exactly once.",
         "- Every atom id from input.atoms MUST appear exactly once across all layer atom_ids and manual_review_atom_ids combined. If you are unsure where an atom belongs, put it in manual_review_atom_ids rather than dropping it.",
+        "- input.structural_evidence is deterministic support, not a replacement for atom coverage. Use it when it clarifies syntactic movement, localized rewrites, or structural risk, and ignore it when it is partial or unavailable.",
         "- Do not create Git branches or PRs.",
         "- Do not suggest rewriting history.",
         "- Start from candidate_layers, dependency_edges, and atom metadata. Repair them when needed; do not perform free-form clustering from raw file categories.",
