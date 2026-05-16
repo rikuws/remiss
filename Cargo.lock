@@ -5369,6 +5369,7 @@ checksum = "b12e76d157a900eb52e81bc6e9f3069344290341720e9178cde2407113ac8d89"
 [[package]]
 name = "sem-core"
 version = "0.5.4"
+source = "git+https://github.com/rikuws/sem?rev=83403d1325d8130d8df39793fbf23891bfd5d3bd#83403d1325d8130d8df39793fbf23891bfd5d3bd"
 dependencies = [
  "git2",
  "rayon",
