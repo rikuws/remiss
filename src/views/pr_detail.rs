@@ -989,7 +989,7 @@ impl Render for ReviewBriefTooltip {
             .py(px(4.0))
             .rounded(radius_sm())
             .border_1()
-            .border_color(border_muted())
+            .border_color(transparent())
             .bg(bg_overlay())
             .text_size(px(11.0))
             .font_weight(FontWeight::MEDIUM)
@@ -1029,7 +1029,7 @@ fn render_review_brief_progress(
         .rounded(radius_sm())
         .bg(bg_subtle())
         .border_1()
-        .border_color(border_muted())
+        .border_color(transparent())
         .flex()
         .items_start()
         .justify_between()
@@ -1097,7 +1097,7 @@ fn render_review_brief_error(error: &str, state: &Entity<AppState>) -> impl Into
         .rounded(radius_sm())
         .bg(bg_subtle())
         .border_1()
-        .border_color(border_muted())
+        .border_color(transparent())
         .flex()
         .items_start()
         .justify_between()
@@ -1157,7 +1157,7 @@ fn render_review_brief_setup_needed(
         .rounded(radius_sm())
         .bg(bg_subtle())
         .border_1()
-        .border_color(border_muted())
+        .border_color(transparent())
         .flex()
         .items_start()
         .justify_between()
@@ -1229,7 +1229,7 @@ fn render_review_brief_idle(
         .rounded(radius_sm())
         .bg(bg_subtle())
         .border_1()
-        .border_color(border_muted())
+        .border_color(transparent())
         .flex()
         .items_start()
         .justify_between()
@@ -1961,7 +1961,7 @@ fn render_activity_card(
                 .flex_col()
                 .when(clickable, |el| {
                     el.cursor_pointer()
-                        .hover(|style| style.bg(hover_bg()).border_color(border_muted()))
+                        .hover(|style| style.bg(hover_bg()))
                         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                             state.update(cx, |state, cx| {
                                 state.selected_file_path = file_path.clone();
@@ -2083,7 +2083,7 @@ fn render_activity_thread_card(
                         .flex_col()
                         .when(clickable, |el| {
                             el.cursor_pointer()
-                                .hover(|style| style.bg(hover_bg()).border_color(border_muted()))
+                                .hover(|style| style.bg(hover_bg()))
                                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                                     state.update(cx, |state, cx| {
                                         state.selected_file_path = file_path.clone();
@@ -2301,7 +2301,7 @@ fn render_activity_timeline_icon(
                 .rounded(px(999.0))
                 .bg(bg_emphasis())
                 .border_1()
-                .border_color(border_muted())
+                .border_color(transparent())
                 .flex()
                 .items_center()
                 .justify_center()
@@ -2426,7 +2426,7 @@ fn render_automation_activity_group(
                         .justify_between()
                         .gap(px(12.0))
                         .cursor_pointer()
-                        .hover(|style| style.bg(hover_bg()).border_color(border_muted()))
+                        .hover(|style| style.bg(hover_bg()))
                         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                             toggle_state.update(cx, |state, cx| {
                                 if !state.expanded_automation_activity_keys.insert(key.clone()) {
@@ -2809,11 +2809,7 @@ fn render_submit_review_panel(
             div()
                 .rounded(radius())
                 .border_1()
-                .border_color(if review_editor_active {
-                    border_default()
-                } else {
-                    border_muted()
-                })
+                .border_color(transparent())
                 .bg(bg_surface())
                 .cursor(CursorStyle::IBeam)
                 .on_mouse_down(MouseButton::Left, move |_, _, cx| {
@@ -3208,14 +3204,14 @@ fn overflow_safe_code_label(label: &str, color: Rgba) -> impl IntoElement {
         .child(label.to_string())
 }
 
-fn tone_badge(label: &str, fg: Rgba, bg: Rgba, border: Rgba) -> impl IntoElement {
+fn tone_badge(label: &str, fg: Rgba, bg: Rgba, _border: Rgba) -> impl IntoElement {
     div()
         .px(px(8.0))
         .py(px(2.0))
         .rounded(px(999.0))
         .bg(bg)
         .border_1()
-        .border_color(border)
+        .border_color(transparent())
         .text_size(px(11.0))
         .font_weight(FontWeight::MEDIUM)
         .text_color(fg)

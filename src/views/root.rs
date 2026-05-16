@@ -1200,7 +1200,7 @@ fn render_local_review_sidebar_section(state: &Entity<AppState>, cx: &App) -> im
                     .py(px(8.0))
                     .rounded(radius_sm())
                     .border_1()
-                    .border_color(border_muted())
+                    .border_color(transparent())
                     .bg(bg_surface())
                     .text_size(px(11.0))
                     .line_height(px(15.0))
@@ -1273,11 +1273,7 @@ fn local_review_sidebar_row(
         .py(px(7.0))
         .rounded(radius_sm())
         .border_1()
-        .border_color(if active {
-            transparent()
-        } else {
-            border_muted()
-        })
+        .border_color(transparent())
         .bg(if active { bg_emphasis() } else { bg_surface() })
         .flex()
         .items_center()
@@ -1919,11 +1915,7 @@ fn chrome_icon_button(
         .h(px(34.0))
         .rounded(radius_sm())
         .border_1()
-        .border_color(if active {
-            transparent()
-        } else {
-            border_muted()
-        })
+        .border_color(transparent())
         .bg(if active {
             bg_emphasis()
         } else {
@@ -1953,7 +1945,7 @@ fn chrome_segmented_control(children: Vec<AnyElement>) -> impl IntoElement {
         .p(px(3.0))
         .rounded(radius_sm())
         .border_1()
-        .border_color(border_muted())
+        .border_color(transparent())
         .bg(control_track_bg())
         .flex()
         .items_center()
@@ -1965,11 +1957,7 @@ fn onboarding_highlight_shell(active: bool, child: impl IntoElement) -> AnyEleme
     div()
         .rounded(px(8.0))
         .border_1()
-        .border_color(if active {
-            focus_border()
-        } else {
-            transparent()
-        })
+        .border_color(transparent())
         .bg(if active {
             with_alpha(focus_border(), 0.12)
         } else {
@@ -2074,7 +2062,7 @@ fn render_notification_drawer(state: &Entity<AppState>, cx: &App) -> impl IntoEl
         .max_h(px(520.0))
         .rounded(radius())
         .border_1()
-        .border_color(border_default())
+        .border_color(transparent())
         .bg(bg_overlay())
         .shadow_md()
         .flex()
@@ -2164,7 +2152,7 @@ fn render_notification_drawer(state: &Entity<AppState>, cx: &App) -> impl IntoEl
                             .py(px(18.0))
                             .rounded(radius_sm())
                             .border_1()
-                            .border_color(border_muted())
+                            .border_color(transparent())
                             .bg(bg_surface())
                             .text_size(px(12.0))
                             .text_color(fg_muted())
@@ -2178,7 +2166,7 @@ fn render_notification_drawer(state: &Entity<AppState>, cx: &App) -> impl IntoEl
                             div()
                                 .rounded(radius_sm())
                                 .border_1()
-                                .border_color(border_muted())
+                                .border_color(transparent())
                                 .bg(bg_surface())
                                 .px(px(10.0))
                                 .py(px(9.0))
@@ -2284,7 +2272,7 @@ impl Render for ChromeTooltipView {
             .py(px(4.0))
             .rounded(radius_sm())
             .border_1()
-            .border_color(border_muted())
+            .border_color(transparent())
             .bg(bg_overlay())
             .text_size(px(11.0))
             .text_color(fg_default())
@@ -2405,11 +2393,7 @@ fn sidebar_theme_button(
         .when(!collapsed, |el| el.flex_1())
         .rounded(radius_sm())
         .border_1()
-        .border_color(if active {
-            transparent()
-        } else {
-            border_muted()
-        })
+        .border_color(transparent())
         .bg(if active {
             bg_emphasis()
         } else {
@@ -2439,7 +2423,7 @@ fn sidebar_theme_button(
 fn sidebar_utility_button(
     icon: LucideIcon,
     active: bool,
-    bordered: bool,
+    _bordered: bool,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     div()
@@ -2447,11 +2431,7 @@ fn sidebar_utility_button(
         .h(px(30.0))
         .rounded(radius_sm())
         .border_1()
-        .border_color(if bordered {
-            border_muted()
-        } else {
-            transparent()
-        })
+        .border_color(transparent())
         .bg(if active {
             bg_emphasis()
         } else {
@@ -2481,7 +2461,7 @@ fn sidebar_action_button(
         .h(px(36.0))
         .rounded(radius_sm())
         .border_1()
-        .border_color(border_muted())
+        .border_color(transparent())
         .bg(control_button_bg())
         .flex()
         .items_center()

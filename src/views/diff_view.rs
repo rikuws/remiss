@@ -1462,7 +1462,7 @@ fn render_waypoint_spotlight(state: &Entity<AppState>, cx: &App) -> impl IntoEle
                 .max_h(px(620.0))
                 .rounded(radius_lg())
                 .border_1()
-                .border_color(border_default())
+                .border_color(transparent())
                 .bg(bg_overlay())
                 .shadow_sm()
                 .occlude()
@@ -1509,7 +1509,7 @@ fn render_waypoint_spotlight(state: &Entity<AppState>, cx: &App) -> impl IntoEle
                                 .py(px(14.0))
                                 .rounded(radius())
                                 .border_1()
-                                .border_color(focus_border())
+                                .border_color(transparent())
                                 .bg(bg_surface())
                                 .text_size(px(15.0))
                                 .text_color(if query.is_empty() {
@@ -2392,10 +2392,10 @@ fn render_ai_tour_nav_row(
             .py(px(8.0))
             .rounded(radius_sm())
             .border_1()
-            .border_color(border_muted())
+            .border_color(transparent())
             .bg(bg_surface())
             .cursor_pointer()
-            .hover(|style| style.bg(hover_bg()).border_color(border_default()))
+            .hover(|style| style.bg(hover_bg()))
             .on_mouse_down(MouseButton::Left, move |_, _, _| {
                 list_state.scroll_to(ListOffset {
                     item_ix: target_index,
@@ -3789,7 +3789,7 @@ fn metric_pill(label: impl Into<String>, fg: gpui::Rgba, bg: gpui::Rgba) -> impl
         .rounded(px(999.0))
         .bg(bg)
         .border_1()
-        .border_color(border_muted())
+        .border_color(transparent())
         .text_size(px(12.0))
         .font_weight(FontWeight::MEDIUM)
         .font_family(mono_font_family())
@@ -4104,7 +4104,7 @@ fn render_stack_layer_summary_row(
                                 .rounded(radius_sm())
                                 .bg(accent_muted())
                                 .border_1()
-                                .border_color(accent())
+                                .border_color(transparent())
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -4198,11 +4198,7 @@ fn render_stack_layer_row(
         .py(px(7.0))
         .rounded(radius_sm())
         .border_1()
-        .border_color(if is_active {
-            transparent()
-        } else {
-            border_muted()
-        })
+        .border_color(transparent())
         .bg(if is_active {
             bg_emphasis()
         } else {
@@ -4257,11 +4253,7 @@ fn render_stack_layer_row(
                                     bg_subtle()
                                 })
                                 .border_1()
-                                .border_color(if is_active {
-                                    transparent()
-                                } else {
-                                    border_muted()
-                                })
+                                .border_color(transparent())
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -4340,7 +4332,7 @@ fn subtle_stack_chip(label: &str) -> impl IntoElement {
         .rounded(px(999.0))
         .bg(bg_subtle())
         .border_1()
-        .border_color(border_muted())
+        .border_color(transparent())
         .text_size(px(9.0))
         .font_family(mono_font_family())
         .text_color(fg_muted())
@@ -7539,11 +7531,7 @@ fn diff_toolbar_primary_button(
     div()
         .rounded(px(8.0))
         .border_1()
-        .border_color(if highlighted {
-            focus_border()
-        } else {
-            transparent()
-        })
+        .border_color(transparent())
         .bg(if highlighted {
             with_alpha(focus_border(), 0.12)
         } else {
@@ -8727,14 +8715,14 @@ fn review_partner_action_icon_button(
         .flex_shrink_0()
         .rounded(radius_sm())
         .border_1()
-        .border_color(diff_annotation_border())
+        .border_color(transparent())
         .bg(diff_annotation_bg())
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
         .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
-        .hover(|style| style.bg(bg_selected()).border_color(border_default()))
+        .hover(|style| style.bg(bg_selected()))
         .on_mouse_down(MouseButton::Left, on_click)
         .child(lucide_icon(icon, 14.0, fg_muted()))
 }
@@ -8826,7 +8814,7 @@ fn render_guided_review_lens_toggle(
         .p(px(2.0))
         .rounded(radius_sm())
         .border_1()
-        .border_color(border_muted())
+        .border_color(transparent())
         .bg(control_track_bg())
         .flex()
         .items_center()
@@ -8880,7 +8868,7 @@ fn render_diff_layout_toggle(
         .p(px(2.0))
         .rounded(radius_sm())
         .border_1()
-        .border_color(border_muted())
+        .border_color(transparent())
         .bg(control_track_bg())
         .flex()
         .items_center()
@@ -9626,7 +9614,7 @@ fn render_ai_tour_category_icon(
         .h(px(tile_size))
         .rounded(radius_sm())
         .border_1()
-        .border_color(ai_tour_category_border(category))
+        .border_color(transparent())
         .bg(ai_tour_category_bg(category))
         .flex()
         .items_center()
@@ -9646,7 +9634,7 @@ fn render_ai_tour_priority_chip(priority: TourSectionPriority) -> impl IntoEleme
         .rounded(px(999.0))
         .bg(ai_tour_priority_bg(priority))
         .border_1()
-        .border_color(ai_tour_priority_border(priority))
+        .border_color(transparent())
         .flex_shrink_0()
         .text_size(px(10.0))
         .font_weight(FontWeight::SEMIBOLD)
@@ -9754,23 +9742,6 @@ fn ai_tour_category_bg(category: TourSectionCategory) -> Rgba {
     }
 }
 
-fn ai_tour_category_border(category: TourSectionCategory) -> Rgba {
-    match category {
-        TourSectionCategory::AuthSecurity => danger(),
-        TourSectionCategory::DataState => accent(),
-        TourSectionCategory::ApiIo => warning(),
-        TourSectionCategory::UiUx => border_default(),
-        TourSectionCategory::Tests => success(),
-        TourSectionCategory::Docs => border_muted(),
-        TourSectionCategory::Config => warning(),
-        TourSectionCategory::Infra => accent(),
-        TourSectionCategory::Refactor => border_default(),
-        TourSectionCategory::Performance => warning(),
-        TourSectionCategory::Reliability => success(),
-        TourSectionCategory::Other => border_muted(),
-    }
-}
-
 fn ai_tour_priority_fg(priority: TourSectionPriority) -> Rgba {
     match priority {
         TourSectionPriority::Low => success(),
@@ -9784,14 +9755,6 @@ fn ai_tour_priority_bg(priority: TourSectionPriority) -> Rgba {
         TourSectionPriority::Low => success_muted(),
         TourSectionPriority::Medium => warning_muted(),
         TourSectionPriority::High => danger_muted(),
-    }
-}
-
-fn ai_tour_priority_border(priority: TourSectionPriority) -> Rgba {
-    match priority {
-        TourSectionPriority::Low => success(),
-        TourSectionPriority::Medium => warning(),
-        TourSectionPriority::High => danger(),
     }
 }
 
@@ -11561,7 +11524,7 @@ fn render_diff_file_collapse_toggle(
         .justify_center()
         .cursor_pointer()
         .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
-        .hover(|style| style.bg(bg_selected()).border_color(border_muted()))
+        .hover(|style| style.bg(bg_selected()))
         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
             if let Some(adjustment) = collapse_scroll_for_toggle.as_ref() {
                 adjustment.apply_for_toggle(collapsed);
@@ -11599,11 +11562,7 @@ fn render_diff_file_review_toggle(
         .flex_shrink_0()
         .rounded(radius_sm())
         .border_1()
-        .border_color(if reviewed {
-            success()
-        } else {
-            diff_annotation_border()
-        })
+        .border_color(transparent())
         .bg(if reviewed {
             success_muted()
         } else {
@@ -11614,7 +11573,7 @@ fn render_diff_file_review_toggle(
         .justify_center()
         .cursor_pointer()
         .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
-        .hover(|style| style.bg(bg_selected()).border_color(border_default()))
+        .hover(|style| style.bg(bg_selected()))
         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
             state_for_toggle.update(cx, |state, cx| {
                 state.set_review_file_reviewed(review_stack.as_ref(), &key, !reviewed);
@@ -11657,11 +11616,7 @@ fn render_diff_line_wrap_toggle(
         .flex_shrink_0()
         .rounded(radius_sm())
         .border_1()
-        .border_color(if wrap_diff_lines {
-            accent()
-        } else {
-            diff_annotation_border()
-        })
+        .border_color(transparent())
         .bg(if wrap_diff_lines {
             accent_muted()
         } else {
@@ -13083,7 +13038,7 @@ fn render_diff_gap_row(
                                 .rounded(px(999.0))
                                 .bg(diff_editor_chrome())
                                 .border_1()
-                                .border_color(diff_annotation_border())
+                                .border_color(transparent())
                                 .text_color(accent())
                                 .child(marker)
                         })),
@@ -14466,7 +14421,7 @@ fn render_diff_waypoint_icon() -> impl IntoElement {
         .h(px(12.0))
         .rounded(px(4.0))
         .border_1()
-        .border_color(waypoint_icon_border())
+        .border_color(transparent())
         .bg(waypoint_icon_bg())
         .child(
             div()
@@ -14512,7 +14467,7 @@ impl Render for StaticTooltipView {
             .py(px(4.0))
             .rounded(radius_sm())
             .border_1()
-            .border_color(border_default())
+            .border_color(transparent())
             .bg(bg_overlay())
             .text_size(px(11.0))
             .font_weight(FontWeight::MEDIUM)
@@ -14529,11 +14484,7 @@ fn render_waypoint_pill(label: &str, active: bool) -> impl IntoElement {
         .py(px(4.0))
         .rounded(px(999.0))
         .border_1()
-        .border_color(if active {
-            transparent()
-        } else {
-            waypoint_border()
-        })
+        .border_color(transparent())
         .bg(if active {
             waypoint_active_bg()
         } else {
@@ -14643,7 +14594,7 @@ fn render_finish_review_modal(
                 .max_h(px(640.0))
                 .rounded(radius_lg())
                 .border_1()
-                .border_color(border_default())
+                .border_color(transparent())
                 .bg(bg_overlay())
                 .shadow_sm()
                 .occlude()
@@ -14805,7 +14756,7 @@ fn render_pending_review_summary(comments: Vec<&PullRequestReviewComment>) -> im
     div()
         .rounded(radius())
         .border_1()
-        .border_color(border_muted())
+        .border_color(transparent())
         .bg(bg_surface())
         .overflow_hidden()
         .child(
@@ -14895,7 +14846,7 @@ fn render_review_action_choice(
         .p(px(10.0))
         .rounded(radius_sm())
         .border_1()
-        .border_color(if active { accent() } else { border_muted() })
+        .border_color(transparent())
         .bg(if active { bg_selected() } else { bg_surface() })
         .opacity(if disabled { 0.48 } else { 1.0 })
         .when(!disabled, |el| {
@@ -15008,7 +14959,7 @@ fn render_review_line_action_popup(
         .max_w(px(560.0))
         .rounded(radius())
         .border_1()
-        .border_color(border_default())
+        .border_color(transparent())
         .bg(bg_overlay())
         // Prevent diff rows behind the popup from receiving mouse interactions.
         .occlude()
@@ -15123,7 +15074,7 @@ fn render_review_line_action_popup(
             move |el, delta| {
                 el.mt(lerp_px(8.0, 0.0, delta))
                     .opacity(delta.clamp(0.0, 1.0))
-                    .border_color(lerp_rgba(transparent(), border_default(), delta))
+                    .border_color(transparent())
                     .bg(lerp_rgba(bg_surface(), bg_overlay(), delta))
             },
         )
@@ -15149,11 +15100,7 @@ fn render_markdown_editor(
         .min_w_0()
         .rounded(radius())
         .border_1()
-        .border_color(if preview {
-            border_default()
-        } else {
-            border_muted()
-        })
+        .border_color(transparent())
         .bg(bg_surface())
         .overflow_hidden()
         .flex()
@@ -15350,7 +15297,7 @@ fn render_emoji_suggestions(
                 .rounded(radius_sm())
                 .bg(bg_surface())
                 .border_1()
-                .border_color(border_muted())
+                .border_color(transparent())
                 .text_size(px(12.0))
                 .text_color(fg_default())
                 .cursor_pointer()
@@ -15464,11 +15411,7 @@ fn line_action_button(
         .py(px(8.0))
         .rounded(px(999.0))
         .border_1()
-        .border_color(if active {
-            transparent()
-        } else {
-            border_default()
-        })
+        .border_color(transparent())
         .bg(if active { waypoint_bg() } else { bg_surface() })
         .text_size(px(12.0))
         .font_weight(FontWeight::MEDIUM)
@@ -15486,7 +15429,7 @@ fn line_action_button(
             move |el, delta| {
                 let progress = selected_reveal_progress(active, delta);
                 el.bg(mix_rgba(bg_surface(), waypoint_bg(), progress))
-                    .border_color(mix_rgba(border_default(), transparent(), progress))
+                    .border_color(transparent())
                     .text_color(mix_rgba(fg_emphasis(), waypoint_fg(), progress))
             },
         )
@@ -16631,7 +16574,7 @@ fn render_review_thread(
         .max_w(px(REVIEW_THREAD_MAX_WIDTH))
         .rounded(radius_sm())
         .border_1()
-        .border_color(diff_annotation_border())
+        .border_color(transparent())
         .bg(diff_editor_surface())
         .overflow_hidden()
         .flex()
@@ -17020,7 +16963,7 @@ fn render_thread_reply_prompt(
                 .min_w_0()
                 .rounded(radius_sm())
                 .border_1()
-                .border_color(border_muted())
+                .border_color(transparent())
                 .bg(bg_surface())
                 .px(px(12.0))
                 .flex()
@@ -17029,12 +16972,7 @@ fn render_thread_reply_prompt(
                 .line_height(px(20.0))
                 .text_color(fg_subtle())
                 .cursor_pointer()
-                .hover(|style| {
-                    style
-                        .bg(control_button_hover_bg())
-                        .border_color(border_default())
-                        .text_color(fg_muted())
-                })
+                .hover(|style| style.bg(control_button_hover_bg()).text_color(fg_muted()))
                 .on_mouse_down(MouseButton::Left, on_click)
                 .child("Reply..."),
         )
@@ -17072,7 +17010,7 @@ fn render_thread_reply_editor(
                 .min_w_0()
                 .rounded(radius_sm())
                 .border_1()
-                .border_color(border_muted())
+                .border_color(transparent())
                 .bg(bg_surface())
                 .p(px(10.0))
                 .gap(px(8.0))
@@ -17427,7 +17365,7 @@ fn render_tour_diff_preview(
         .flex_col()
         .rounded(radius())
         .border_1()
-        .border_color(diff_annotation_border())
+        .border_color(transparent())
         .bg(diff_editor_bg())
         .overflow_hidden()
         .when(preview_items.focused_excerpt, |el| {

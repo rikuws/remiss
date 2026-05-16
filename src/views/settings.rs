@@ -1113,7 +1113,7 @@ fn render_code_tour_repository_row(
         .p(px(16.0))
         .rounded(radius_sm())
         .border_1()
-        .border_color(border_muted())
+        .border_color(transparent())
         .bg(bg_surface())
         .flex()
         .justify_between()

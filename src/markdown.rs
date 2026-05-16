@@ -523,7 +523,7 @@ fn render_code_block(_id: &str, text: &str, lang: Option<&str>) -> AnyElement {
             .my(px(8.0))
             .rounded(radius())
             .border_1()
-            .border_color(success_muted())
+            .border_color(transparent())
             .bg(bg_surface())
             .overflow_hidden()
             .child(
