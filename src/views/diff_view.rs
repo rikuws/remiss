@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
     rc::Rc,
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use gpui::prelude::*;
@@ -1637,7 +1637,11 @@ fn render_waypoint_spotlight_row(
         )
 }
 
-pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
+pub fn render_files_view(
+    state: &Entity<AppState>,
+    window: &mut Window,
+    cx: &App,
+) -> impl IntoElement {
     let s = state.read(cx);
     let detail = s.active_detail();
 
@@ -1740,6 +1744,7 @@ pub fn render_files_view(state: &Entity<AppState>, cx: &App) -> impl IntoElement
                     selected_path,
                     selected_anchor.as_ref(),
                     review_stack.clone(),
+                    window,
                     cx,
                 )),
         )
@@ -1802,6 +1807,7 @@ fn prepare_review_stack(app_state: &AppState, detail: &PullRequestDetail) -> Arc
         "review-stack:real",
         StackDiscoveryOptions {
             enable_ai_virtual: false,
+            enable_sem_virtual: false,
             enable_virtual_commits: false,
             enable_virtual_semantic: false,
             ..StackDiscoveryOptions::default()
@@ -1828,6 +1834,7 @@ fn prepare_review_stack(app_state: &AppState, detail: &PullRequestDetail) -> Arc
             enable_branch_topology: false,
             enable_local_metadata: false,
             enable_ai_virtual: false,
+            enable_sem_virtual: false,
             enable_virtual_commits: true,
             enable_virtual_semantic: true,
             ..StackDiscoveryOptions::default()
@@ -1921,6 +1928,7 @@ fn review_stack_repo_context(app_state: &AppState) -> RepoContext {
             .map(PathBuf::from),
         trunk_branch: None,
         structural_evidence: None,
+        semantic_review: None,
     }
 }
 
@@ -2473,7 +2481,7 @@ fn render_stack_navigation_pane(
         app_state
             .active_detail_state()
             .map(|detail_state| {
-                let guide = &detail_state.review_guide_state;
+                let guide = &detail_state.review_partner_state;
                 let ai_stack = &detail_state.ai_stack_state;
                 let guide_pending = guide.document.is_none() && (guide.loading || guide.generating);
                 let fallback_stack_visible =
@@ -2534,22 +2542,8 @@ fn render_stack_navigation_pane(
     }
     let selected_path = state.read(cx).selected_file_path.clone();
     sync_stack_timeline_item_count(&list_state, review_stack.layers.len() + 1);
-    let stack_timeline_height = px(((review_stack.layers.len() as f32 * 36.0) + 26.0).min(220.0));
-
-    let mut stack_warnings = Vec::<String>::new();
-    if showing_temporary_guide_stack {
-        stack_warnings.push(
-            "Guided Review is still generating. This is a temporary fallback layer map; labels may change when the generated guidance is ready."
-                .to_string(),
-        );
-    }
-    stack_warnings.extend(
-        review_stack
-            .warnings
-            .iter()
-            .take(2)
-            .map(|warning| warning.message.clone()),
-    );
+    let stack_timeline_height =
+        px(((review_stack.layers.len().max(3) as f32 * 36.0) + 26.0).min(220.0));
 
     div()
         .w(file_tree_width())
@@ -2564,7 +2558,6 @@ fn render_stack_navigation_pane(
             progress_label,
             showing_temporary_guide_stack,
         ))
-        .children(stack_warnings.into_iter().map(render_stack_view_warning))
         .child(
             div()
                 .id("stack-nav-scroll")
@@ -2729,21 +2722,6 @@ fn render_stack_view_header(progress_label: String, draft: bool) -> impl IntoEle
                 .text_color(fg_muted())
                 .child(progress_label),
         )
-}
-
-fn render_stack_view_warning(warning_message: String) -> impl IntoElement {
-    div()
-        .mx(px(14.0))
-        .mb(px(8.0))
-        .px(px(8.0))
-        .py(px(6.0))
-        .rounded(px(5.0))
-        .bg(warning_muted())
-        .text_size(px(11.0))
-        .line_height(px(16.0))
-        .text_color(fg_emphasis())
-        .line_clamp(2)
-        .child(warning_message)
 }
 
 fn render_stack_view_layer_card(
@@ -3858,6 +3836,16 @@ fn render_stack_rail(
             "Virtual stack · AI-assisted · {} layers",
             stack.layers.len()
         ),
+        (
+            crate::stacks::model::StackKind::Virtual,
+            crate::stacks::model::StackSource::VirtualSemantic,
+        ) if stack
+            .provider
+            .as_ref()
+            .is_some_and(|provider| provider.provider == "sem_virtual_stack") =>
+        {
+            format!("Virtual stack · Sem · {} layers", stack.layers.len())
+        }
         (crate::stacks::model::StackKind::Virtual, _) => "Virtual stack".to_string(),
     };
     let source_label = match (&stack.kind, stack.source) {
@@ -3870,6 +3858,16 @@ fn render_stack_rail(
             crate::stacks::model::StackKind::Virtual,
             crate::stacks::model::StackSource::VirtualAi,
         ) => "Generated locally by Remiss as a review lens, not GitHub PRs",
+        (
+            crate::stacks::model::StackKind::Virtual,
+            crate::stacks::model::StackSource::VirtualSemantic,
+        ) if stack
+            .provider
+            .as_ref()
+            .is_some_and(|provider| provider.provider == "sem_virtual_stack") =>
+        {
+            "Generated locally from Sem semantic evidence"
+        }
         (crate::stacks::model::StackKind::Virtual, _) => "Generated locally by Remiss",
     };
     let stack_refs_loading = state
@@ -7226,6 +7224,7 @@ fn render_diff_panel(
     selected_path: Option<&str>,
     selected_anchor: Option<&DiffAnchor>,
     review_stack: Arc<ReviewStack>,
+    window: &mut Window,
     cx: &App,
 ) -> impl IntoElement {
     let files = &detail.files;
@@ -7366,6 +7365,7 @@ fn render_diff_panel(
                             guided_review_lens,
                             normal_diff_layout,
                             structural_diff_layout,
+                            window,
                             cx,
                         )
                     } else if center_mode == ReviewCenterMode::StructuralDiff {
@@ -7577,6 +7577,7 @@ fn render_guided_review_view(
     guided_review_lens: ReviewGuideLens,
     normal_diff_layout: DiffLayout,
     structural_diff_layout: DiffLayout,
+    window: &mut Window,
     cx: &App,
 ) -> AnyElement {
     let diff_center_mode = if guided_review_lens == ReviewGuideLens::Structural {
@@ -7610,7 +7611,12 @@ fn render_guided_review_view(
             )
             .into_any_element(),
         )
-        .child(render_guided_review_panel(state, review_stack.as_ref(), cx))
+        .child(render_guided_review_panel(
+            state,
+            review_stack.as_ref(),
+            window,
+            cx,
+        ))
         .into_any_element()
 }
 
@@ -7653,6 +7659,7 @@ impl GuidedReviewPanelResizeDrag {
 fn render_guided_review_panel(
     state: &Entity<AppState>,
     review_stack: &ReviewStack,
+    window: &mut Window,
     cx: &App,
 ) -> impl IntoElement {
     let (
@@ -7661,35 +7668,97 @@ fn render_guided_review_panel(
         generating,
         progress_text,
         error,
-        message,
-        selected_layer,
+        fallback_reason,
+        focus_key,
+        focus_label,
+        focus_record,
+        focus_loading,
+        focus_error,
         provider,
         panel_width,
     ) = {
         let app_state = state.read(cx);
         let guide_state = app_state
             .active_detail_state()
-            .map(|detail_state| detail_state.review_guide_state.clone())
+            .map(|detail_state| detail_state.review_partner_state.clone())
             .unwrap_or_default();
         let panel_width = app_state
             .active_review_session()
             .map(|session| session.guided_review_panel_width)
             .unwrap_or(GUIDED_REVIEW_PANEL_DEFAULT_WIDTH);
-        let selected_layer = app_state
-            .active_review_session()
-            .and_then(|session| {
-                review_stack.selected_layer(session.selected_stack_layer_id.as_deref())
+        let selected_layer_id = app_state.active_review_session().and_then(|session| {
+            review_stack
+                .selected_layer(session.selected_stack_layer_id.as_deref())
+                .map(|layer| layer.id.clone())
+        });
+        let selected_focus_target = guide_state.document.as_ref().and_then(|partner| {
+            selected_layer_id.as_deref().and_then(|layer_id| {
+                crate::review_partner::focus_target_for_layer(partner, layer_id)
             })
-            .cloned()
-            .or_else(|| review_stack.layers.first().cloned());
+        });
+        let focus_key = selected_focus_target
+            .as_ref()
+            .map(|target| target.key.clone())
+            .or_else(|| guide_state.active_focus_key.clone())
+            .or_else(|| {
+                guide_state
+                    .document
+                    .as_ref()
+                    .and_then(|partner| partner.focus_records.first())
+                    .map(|record| record.key.clone())
+            });
+        let focus_record = guide_state.document.as_ref().and_then(|partner| {
+            focus_key
+                .as_deref()
+                .and_then(|focus_key| partner.focus_record(focus_key))
+                .cloned()
+        });
+        let focus_target = focus_record
+            .as_ref()
+            .map(|record| record.target.clone())
+            .or(selected_focus_target)
+            .or_else(|| {
+                guide_state
+                    .document
+                    .as_ref()
+                    .and_then(|partner| partner.focus_targets.first())
+                    .cloned()
+            });
+        let focus_label = guide_state
+            .active_focus_label
+            .clone()
+            .or_else(|| focus_target.as_ref().map(|target| target.subtitle.clone()))
+            .or_else(|| focus_record.as_ref().map(|record| record.subtitle.clone()))
+            .map(|label| review_partner_display_subtitle(&label));
+        let focus_loading = focus_key
+            .as_ref()
+            .map(|key| guide_state.loading_focus_keys.contains(key))
+            .unwrap_or(false);
+        let focus_error = focus_key
+            .as_ref()
+            .and_then(|key| guide_state.focus_errors.get(key))
+            .cloned();
+        let fallback_reason = guide_state.document.as_ref().and_then(|document| {
+            document.fallback_reason.clone().or_else(|| {
+                document
+                    .warnings
+                    .iter()
+                    .find(|warning| warning.contains("AI Review Partner context unavailable"))
+                    .cloned()
+            })
+        });
         (
             guide_state.document.clone(),
             guide_state.loading,
             guide_state.generating,
             guide_state.progress_text,
             guide_state.error,
-            guide_state.message,
-            selected_layer,
+            fallback_reason,
+            focus_key,
+            focus_label,
+            focus_record,
+            focus_loading,
+            focus_error,
             app_state.selected_tour_provider(),
             crate::review_session::sanitize_guided_review_panel_width(panel_width),
         )
@@ -7699,9 +7768,12 @@ fn render_guided_review_panel(
     let resize_drag =
         GuidedReviewPanelResizeDrag::new(resize_drag_id.clone(), state.clone(), panel_width);
     let resize_drag_id_for_move = resize_drag_id.clone();
-    let selected_guide_layer = selected_layer
-        .as_ref()
-        .and_then(|layer| guide.as_ref().and_then(|guide| guide.layer(&layer.id)));
+    let activity_phase =
+        (loading || generating || focus_loading).then(review_partner_activity_phase);
+    if activity_phase.is_some() {
+        window.request_animation_frame();
+    }
+    let panel_subtitle = provider.label().to_string();
 
     div()
         .relative()
@@ -7770,22 +7842,22 @@ fn render_guided_review_panel(
                                 .text_size(px(10.0))
                                 .font_family(mono_font_family())
                                 .text_color(fg_muted())
-                                .child(format!(
-                                    "{}{}",
-                                    provider.label(),
-                                    if message.is_some() { " · ready" } else { "" }
-                                )),
+                                .child(panel_subtitle),
                         ),
                 )
-                .child(ghost_button("Retry", move |_, window, cx| {
-                    review_intelligence::trigger_review_intelligence(
-                        &state_for_retry,
-                        window,
-                        cx,
-                        review_intelligence::ReviewIntelligenceScope::StackOnly,
-                        true,
-                    );
-                })),
+                .child(review_partner_action_icon_button(
+                    LucideIcon::RefreshCw,
+                    "Regenerate Review Partner",
+                    move |_, window, cx| {
+                        review_intelligence::trigger_review_intelligence(
+                            &state_for_retry,
+                            window,
+                            cx,
+                            review_intelligence::ReviewIntelligenceScope::StackOnly,
+                            true,
+                        );
+                    },
+                )),
         )
         .child(
             div()
@@ -7800,41 +7872,83 @@ fn render_guided_review_panel(
                 .gap(px(12.0))
                 .when(loading || generating, |el| {
                     el.child(render_guided_review_partner_status(
-                        "Preparing guide",
-                        progress_text
-                            .as_deref()
-                            .unwrap_or("Generating layer guidance and structural evidence."),
+                        "Preparing context",
+                        progress_text.as_deref().unwrap_or(
+                            "Checking usages, removed symbols, similar code, and stack context.",
+                        ),
                         LucideIcon::Sparkles,
                         accent(),
+                        activity_phase,
                     ))
                 })
                 .when_some(error.clone(), |el, error| {
                     el.child(render_guided_review_partner_status(
-                        "Guidance unavailable",
+                        "Context unavailable",
                         &error,
                         LucideIcon::CircleHelp,
                         danger(),
+                        None,
                     ))
                 })
-                .when(guide.is_some(), |el| {
-                    el.when_some(selected_layer.as_ref(), |el, layer| {
-                        el.child(render_guided_review_partner_panel(
-                            state,
-                            guide.as_deref(),
-                            layer,
-                            selected_guide_layer,
-                            cx,
-                        ))
-                    })
+                .when_some(fallback_reason.clone(), |el, reason| {
+                    el.child(render_guided_review_partner_status(
+                        "Fallback context",
+                        &reason,
+                        LucideIcon::CircleHelp,
+                        warning(),
+                        None,
+                    ))
                 })
+                .when_some(focus_record.as_ref(), |el, record| {
+                    el.child(render_guided_review_focus_record(state, record, cx))
+                })
+                .when(
+                    guide.is_some()
+                        && focus_record.is_none()
+                        && focus_key.is_some()
+                        && (focus_loading || focus_error.is_none()),
+                    |el| {
+                        el.child(render_guided_review_partner_status(
+                            "Generating focus context",
+                            focus_label.as_deref().unwrap_or(
+                                "Review Partner is preparing context for this stack layer.",
+                            ),
+                            LucideIcon::Sparkles,
+                            accent(),
+                            activity_phase,
+                        ))
+                    },
+                )
+                .when_some(focus_error.clone(), |el, error| {
+                    el.child(render_guided_review_partner_status(
+                        "Focus context unavailable",
+                        &error,
+                        LucideIcon::CircleHelp,
+                        warning(),
+                        None,
+                    ))
+                })
+                .when(
+                    guide.is_some() && focus_record.is_none() && focus_key.is_none(),
+                    |el| {
+                        el.child(render_guided_review_partner_status(
+                            "No stack layer selected",
+                            "Select a stack layer to load its explanation context.",
+                            LucideIcon::Sparkles,
+                            fg_muted(),
+                            None,
+                        ))
+                    },
+                )
                 .when(
                     guide.is_none() && !loading && !generating && error.is_none(),
                     |el| {
                         el.child(render_guided_review_partner_status(
-                            "No guide yet",
-                            "Generate Guided Review to see stack-aware layer notes here.",
+                            "No context yet",
+                            "Review Partner context appears here after stack layers are prepared.",
                             LucideIcon::Sparkles,
                             fg_muted(),
+                            None,
                         ))
                     },
                 ),
@@ -7846,12 +7960,11 @@ fn render_guided_review_partner_status(
     message: &str,
     icon: LucideIcon,
     tone: Rgba,
+    activity_phase: Option<f32>,
 ) -> impl IntoElement {
     div()
         .rounded(px(6.0))
-        .border_1()
-        .border_color(border_muted())
-        .bg(bg_overlay())
+        .bg(with_alpha(bg_overlay(), 0.62))
         .p(px(12.0))
         .flex()
         .gap(px(10.0))
@@ -7876,449 +7989,725 @@ fn render_guided_review_partner_status(
                         .line_height(px(18.0))
                         .text_color(fg_muted())
                         .child(message.to_string()),
-                ),
+                )
+                .when_some(activity_phase, |el, phase| {
+                    el.child(render_review_partner_activity_indicator(tone, phase))
+                }),
         )
 }
 
-fn render_guided_review_partner_panel(
+fn review_partner_activity_phase() -> f32 {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    (elapsed % 1200) as f32 / 1200.0
+}
+
+fn render_review_partner_activity_indicator(tone: Rgba, phase: f32) -> impl IntoElement {
+    div()
+        .mt(px(2.0))
+        .h(px(10.0))
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .children((0..3).map(move |index| {
+            div().size(px(4.0)).rounded(px(999.0)).bg(with_alpha(
+                tone,
+                review_partner_activity_dot_alpha(phase, index),
+            ))
+        }))
+}
+
+fn review_partner_activity_dot_alpha(phase: f32, index: usize) -> f32 {
+    let dot_phase = (phase + 1.0 - (index as f32 * 0.18)).fract();
+    let pulse = 1.0 - ((dot_phase - 0.5).abs() * 2.0).clamp(0.0, 1.0);
+    0.24 + (pulse * 0.64)
+}
+
+fn render_guided_review_focus_record(
     state: &Entity<AppState>,
-    guide: Option<&crate::review_guide::GeneratedReviewGuide>,
-    layer: &ReviewStackLayer,
-    guide_layer: Option<&crate::review_guide::ReviewGuideLayer>,
+    record: &crate::review_partner::ReviewPartnerFocusRecord,
     cx: &App,
 ) -> impl IntoElement {
-    let what_changed = guide_layer
-        .map(|layer| layer.what_changed.as_str())
-        .unwrap_or(layer.summary.as_str());
-    let why_it_matters = guide_layer
-        .map(|layer| layer.why_it_matters.as_str())
-        .unwrap_or(layer.rationale.as_str());
-    let how_to_review = guide_layer
-        .map(|layer| layer.how_to_review.clone())
-        .filter(|items| !items.is_empty())
-        .unwrap_or_else(|| vec![format!("Review the diff for {}", layer.title)]);
-    let bug_risks = guide_layer
-        .map(|layer| layer.bug_risks.clone())
-        .unwrap_or_default();
-    let evidence_notes = guide_layer
-        .map(|layer| layer.evidence_notes.clone())
-        .unwrap_or_default();
-    let follow_ups = guide_layer
-        .map(|layer| layer.follow_ups.clone())
-        .unwrap_or_default();
-    let global_notes = guide
-        .map(|guide| {
-            guide
-                .warnings
-                .iter()
-                .chain(guide.open_questions.iter())
-                .cloned()
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let partner_overview = guide
-        .map(|guide| guide.partner_overview.as_str())
-        .unwrap_or_default();
-    let review_strategy = guide
-        .map(|guide| guide.review_strategy.as_str())
-        .unwrap_or_default();
-    let structural_status = guide_layer
-        .map(|layer| layer.structural_evidence_status.label())
-        .unwrap_or("Structural evidence pending");
-
     div()
         .flex()
         .flex_col()
-        .gap(px(10.0))
-        .child(render_review_partner_what_card(
-            layer,
-            what_changed,
-            partner_overview,
-        ))
-        .child(render_review_partner_guidance_card(
-            &layer.id,
-            why_it_matters,
-            &how_to_review,
-        ))
-        .when(!bug_risks.is_empty() || !follow_ups.is_empty(), |el| {
-            el.child(render_review_partner_risk_card(
-                &layer.id,
-                &bug_risks,
-                &follow_ups,
-            ))
-        })
-        .child(render_review_partner_detail_card(
-            state,
-            &format!("guided-review-evidence-open-{}", layer.id),
-            "Evidence",
-            structural_status,
-            LucideIcon::GitCompareArrows,
-            accent(),
-            &evidence_notes,
-            "evidence",
-            &layer.id,
-            cx,
-        ))
-        .when(
-            !review_strategy.trim().is_empty() || !global_notes.is_empty(),
-            |el| {
-                let mut notes = global_notes;
-                if !review_strategy.trim().is_empty() {
-                    notes.insert(0, review_strategy.to_string());
-                }
-                el.child(render_review_partner_detail_card(
-                    state,
-                    &format!("guided-review-strategy-open-{}", layer.id),
-                    "Strategy",
-                    "PR-level review context",
-                    LucideIcon::ListChecks,
-                    fg_muted(),
-                    &notes,
-                    "strategy",
-                    &layer.id,
-                    cx,
-                ))
-            },
-        )
-}
-
-fn render_review_partner_what_card(
-    layer: &ReviewStackLayer,
-    what_changed: &str,
-    partner_overview: &str,
-) -> impl IntoElement {
-    div()
-        .rounded(px(6.0))
-        .border_1()
-        .border_color(border_muted())
-        .bg(bg_overlay())
-        .p(px(12.0))
-        .flex()
-        .flex_col()
-        .gap(px(8.0))
+        .gap(px(12.0))
         .child(
             div()
                 .flex()
+                .flex_col()
+                .gap(px(5.0))
+                .pb(px(2.0))
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg_emphasis())
+                        .line_height(px(18.0))
+                        .whitespace_normal()
+                        .child(SelectableText::new(
+                            format!("review-partner-focus-{}-title", record.key),
+                            record.title.clone(),
+                        )),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .font_family(mono_font_family())
+                        .text_color(fg_muted())
+                        .whitespace_nowrap()
+                        .overflow_x_hidden()
+                        .text_ellipsis()
+                        .child(review_partner_display_subtitle(&record.subtitle)),
+                ),
+        )
+        .child(render_review_partner_summary(record))
+        .when(!record.usage_context.is_empty(), |el| {
+            el.child(render_review_partner_usage_section(state, record, cx))
+        })
+        .when(
+            !record.codebase_fit.follows && !record.codebase_fit.evidence.is_empty(),
+            |el| {
+                el.child(render_review_partner_codebase_fit_section(
+                    state, record, cx,
+                ))
+            },
+        )
+        .children(
+            record
+                .sections
+                .iter()
+                .enumerate()
+                .filter_map(|(index, section)| {
+                    if section.items.is_empty() {
+                        return None;
+                    }
+                    let (icon, tone) = review_partner_focus_section_style(&section.title);
+                    Some(
+                        render_review_partner_secondary_section(
+                            state, record, index, section, icon, tone, cx,
+                        )
+                        .into_any_element(),
+                    )
+                }),
+        )
+}
+
+fn review_partner_display_subtitle(subtitle: &str) -> String {
+    [
+        "Focused change · ",
+        "Focused hunk · ",
+        "Hunk context · ",
+        "File context · ",
+    ]
+    .iter()
+    .find_map(|prefix| subtitle.strip_prefix(prefix))
+    .unwrap_or(subtitle)
+    .to_string()
+}
+
+fn review_partner_focus_section_style(label: &str) -> (LucideIcon, Rgba) {
+    match label {
+        "Usage context" => (LucideIcon::GitCompareArrows, fg_muted()),
+        "Codebase fit" => (LucideIcon::ListChecks, fg_muted()),
+        "Similar code" => (LucideIcon::SearchCode, fg_muted()),
+        "Removed impact" => (LucideIcon::ArchiveX, warning()),
+        "Concerns" => (LucideIcon::ShieldAlert, danger()),
+        "Focused change" => (LucideIcon::FileCode2, fg_muted()),
+        _ => (LucideIcon::Sparkles, accent()),
+    }
+}
+
+fn render_review_partner_summary(
+    record: &crate::review_partner::ReviewPartnerFocusRecord,
+) -> impl IntoElement {
+    let summary = if record.summary.trim().is_empty() {
+        record.title.clone()
+    } else {
+        record.summary.clone()
+    };
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(7.0))
+        .child(render_review_partner_section_header(
+            "Summary".to_string(),
+            None,
+            LucideIcon::Sparkles,
+            accent(),
+        ))
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .text_size(px(13.0))
+                .line_height(px(20.0))
+                .text_color(fg_default())
+                .whitespace_normal()
+                .child(summary),
+        )
+}
+
+fn render_review_partner_usage_section(
+    state: &Entity<AppState>,
+    record: &crate::review_partner::ReviewPartnerFocusRecord,
+    cx: &App,
+) -> impl IntoElement {
+    let symbol_count = record.usage_context.len();
+    let usage_count = record
+        .usage_context
+        .iter()
+        .map(|group| group.usages.len())
+        .sum::<usize>();
+    let detail = format!(
+        "{} symbol{}, {} occurrence{}",
+        symbol_count,
+        if symbol_count == 1 { "" } else { "s" },
+        usage_count,
+        if usage_count == 1 { "" } else { "s" }
+    );
+    let body = record
+        .usage_context
+        .iter()
+        .enumerate()
+        .map(|(index, group)| render_review_partner_usage_group(state, record, index, group, cx))
+        .collect::<Vec<_>>();
+
+    render_review_partner_flat_section(
+        "Usages".to_string(),
+        Some(detail),
+        LucideIcon::GitCompareArrows,
+        fg_muted(),
+        body,
+    )
+}
+
+fn render_review_partner_usage_group(
+    state: &Entity<AppState>,
+    record: &crate::review_partner::ReviewPartnerFocusRecord,
+    index: usize,
+    group: &crate::review_partner::ReviewPartnerUsageGroup,
+    cx: &App,
+) -> AnyElement {
+    let key = review_partner_disclosure_key(record, &format!("usage-{index}"));
+    let body = group
+        .usages
+        .iter()
+        .enumerate()
+        .map(|(usage_index, item)| {
+            render_review_partner_usage_item_row(state, record, index, usage_index, item)
+                .into_any_element()
+        })
+        .collect::<Vec<_>>();
+
+    render_review_partner_disclosure(
+        state,
+        key,
+        false,
+        LucideIcon::FileCode2,
+        fg_muted(),
+        group.symbol.clone(),
+        Some(group.summary.clone()),
+        body,
+        cx,
+    )
+    .into_any_element()
+}
+
+fn render_review_partner_codebase_fit_section(
+    state: &Entity<AppState>,
+    record: &crate::review_partner::ReviewPartnerFocusRecord,
+    _cx: &App,
+) -> AnyElement {
+    let fit = &record.codebase_fit;
+    let body = fit
+        .evidence
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            render_review_partner_item_row(state, "Codebase fit", index, item, None, warning())
+                .into_any_element()
+        })
+        .collect::<Vec<_>>();
+
+    render_review_partner_flat_section(
+        "Codebase fit".to_string(),
+        Some(fit.summary.clone()),
+        LucideIcon::ListChecks,
+        warning(),
+        body,
+    )
+    .into_any_element()
+}
+
+fn render_review_partner_secondary_section(
+    state: &Entity<AppState>,
+    _record: &crate::review_partner::ReviewPartnerFocusRecord,
+    _section_index: usize,
+    section: &crate::review_partner::ReviewPartnerFocusSection,
+    icon: LucideIcon,
+    tone: Rgba,
+    _cx: &App,
+) -> impl IntoElement {
+    let detail = format!(
+        "{} item{}",
+        section.items.len(),
+        if section.items.len() == 1 { "" } else { "s" }
+    );
+    let body = section
+        .items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            render_review_partner_item_row(state, &section.title, index, item, None, tone)
+                .into_any_element()
+        })
+        .collect::<Vec<_>>();
+
+    render_review_partner_flat_section(section.title.clone(), Some(detail), icon, tone, body)
+}
+
+fn render_review_partner_flat_section(
+    title: String,
+    detail: Option<String>,
+    icon: LucideIcon,
+    tone: Rgba,
+    body: Vec<AnyElement>,
+) -> impl IntoElement {
+    div()
+        .pt(px(10.0))
+        .border_t(px(1.0))
+        .border_color(with_alpha(diff_annotation_border(), 0.72))
+        .flex()
+        .flex_col()
+        .gap(px(7.0))
+        .child(render_review_partner_section_header(
+            title, detail, icon, tone,
+        ))
+        .children(body)
+}
+
+fn render_review_partner_section_header(
+    title: String,
+    detail: Option<String>,
+    icon: LucideIcon,
+    tone: Rgba,
+) -> impl IntoElement {
+    div()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .child(lucide_icon(icon, 13.0, tone))
+        .child(
+            div()
+                .min_w_0()
+                .flex_grow()
+                .flex()
+                .items_baseline()
+                .gap(px(7.0))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg_emphasis())
+                        .whitespace_nowrap()
+                        .overflow_x_hidden()
+                        .text_ellipsis()
+                        .child(title),
+                )
+                .when_some(detail, |el, detail| {
+                    el.child(
+                        div()
+                            .min_w_0()
+                            .text_size(px(10.0))
+                            .font_family(mono_font_family())
+                            .text_color(fg_muted())
+                            .whitespace_nowrap()
+                            .overflow_x_hidden()
+                            .text_ellipsis()
+                            .child(detail),
+                    )
+                }),
+        )
+}
+
+fn render_review_partner_disclosure(
+    state: &Entity<AppState>,
+    key: String,
+    default_expanded: bool,
+    icon: LucideIcon,
+    tone: Rgba,
+    title: String,
+    detail: Option<String>,
+    body: Vec<AnyElement>,
+    cx: &App,
+) -> impl IntoElement {
+    let expanded = state
+        .read(cx)
+        .is_review_partner_disclosure_expanded(&key, default_expanded);
+    let state_for_toggle = state.clone();
+    let key_for_toggle = key.clone();
+    let header_key = format!("{key}:header");
+    let tooltip = if expanded {
+        "Collapse section"
+    } else {
+        "Expand section"
+    };
+
+    div()
+        .id(ElementId::Name(key.into()))
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .id(ElementId::Name(header_key.into()))
+                .rounded(px(4.0))
+                .px(px(2.0))
+                .py(px(5.0))
+                .flex()
                 .items_center()
-                .gap(px(8.0))
-                .child(review_partner_icon_chip(LucideIcon::Sparkles, accent()))
+                .gap(px(6.0))
+                .cursor_pointer()
+                .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
+                .hover(|style| style.bg(bg_selected()))
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    state_for_toggle.update(cx, |state, cx| {
+                        state.toggle_review_partner_disclosure(&key_for_toggle, default_expanded);
+                        state.persist_active_review_session();
+                        cx.notify();
+                    });
+                    cx.stop_propagation();
+                })
+                .child(
+                    div()
+                        .w(px(13.0))
+                        .h(px(18.0))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(lucide_icon(
+                            if expanded {
+                                LucideIcon::ChevronDown
+                            } else {
+                                LucideIcon::ChevronRight
+                            },
+                            13.0,
+                            fg_muted(),
+                        )),
+                )
+                .child(lucide_icon(icon, 12.0, tone))
                 .child(
                     div()
                         .min_w_0()
                         .flex()
                         .flex_col()
-                        .gap(px(2.0))
+                        .gap(px(3.0))
                         .child(
                             div()
-                                .text_size(px(10.0))
+                                .text_size(px(12.0))
                                 .font_family(mono_font_family())
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(fg_subtle())
-                                .child("WHAT CHANGED"),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(14.0))
-                                .font_weight(FontWeight::SEMIBOLD)
+                                .font_weight(FontWeight::MEDIUM)
                                 .text_color(fg_emphasis())
-                                .line_clamp(2)
-                                .child(layer.title.clone()),
-                        ),
+                                .whitespace_nowrap()
+                                .overflow_x_hidden()
+                                .text_ellipsis()
+                                .child(title),
+                        )
+                        .when_some(detail, |el, detail| {
+                            el.child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .line_height(px(16.0))
+                                    .text_color(fg_muted())
+                                    .whitespace_normal()
+                                    .child(detail),
+                            )
+                        }),
                 ),
         )
-        .child(
-            div()
-                .text_size(px(12.0))
-                .line_height(px(18.0))
-                .text_color(fg_default())
-                .child(SelectableText::new(
-                    format!("guided-review-what-{}", layer.id),
-                    what_changed.to_string(),
-                )),
-        )
-        .when(!partner_overview.trim().is_empty(), |el| {
+        .when(expanded && !body.is_empty(), |el| {
             el.child(
                 div()
-                    .pt(px(8.0))
-                    .border_t(px(1.0))
-                    .border_color(border_muted())
-                    .text_size(px(11.0))
-                    .line_height(px(16.0))
-                    .text_color(fg_muted())
-                    .line_clamp(2)
-                    .child(partner_overview.to_string()),
-            )
-        })
-}
-
-fn render_review_partner_guidance_card(
-    layer_id: &str,
-    why_it_matters: &str,
-    how_to_review: &[String],
-) -> impl IntoElement {
-    review_partner_card("Why it matters", LucideIcon::Zap, accent())
-        .child(
-            div()
-                .text_size(px(12.0))
-                .line_height(px(18.0))
-                .text_color(fg_default())
-                .child(SelectableText::new(
-                    format!("guided-review-why-{layer_id}"),
-                    why_it_matters.to_string(),
-                )),
-        )
-        .child(
-            div()
-                .mt(px(10.0))
-                .pt(px(10.0))
-                .border_t(px(1.0))
-                .border_color(border_muted())
-                .flex()
-                .flex_col()
-                .gap(px(7.0))
-                .child(review_partner_micro_label(
-                    LucideIcon::ListChecks,
-                    "How to review",
-                    fg_muted(),
-                ))
-                .children(how_to_review.iter().enumerate().map(|(ix, value)| {
-                    render_review_partner_check_row(
-                        format!("guided-review-how-{layer_id}-{ix}"),
-                        value,
-                    )
-                })),
-        )
-}
-
-fn render_review_partner_risk_card(
-    layer_id: &str,
-    bug_risks: &[String],
-    follow_ups: &[String],
-) -> impl IntoElement {
-    review_partner_card("Bugs & risks", LucideIcon::ShieldCheck, danger())
-        .when(!bug_risks.is_empty(), |el| {
-            el.child(render_review_partner_bullet_list(
-                bug_risks,
-                "risk",
-                layer_id,
-                danger(),
-            ))
-        })
-        .when(!follow_ups.is_empty(), |el| {
-            el.child(
-                div()
-                    .when(!bug_risks.is_empty(), |el| {
-                        el.mt(px(10.0))
-                            .pt(px(10.0))
-                            .border_t(px(1.0))
-                            .border_color(border_muted())
-                    })
+                    .pl(px(21.0))
+                    .pt(px(2.0))
+                    .pb(px(5.0))
                     .flex()
                     .flex_col()
-                    .gap(px(7.0))
-                    .child(review_partner_micro_label(
-                        LucideIcon::CircleHelp,
-                        "Follow-ups",
-                        warning(),
-                    ))
-                    .child(render_review_partner_bullet_list(
-                        follow_ups,
-                        "follow-up",
-                        layer_id,
-                        warning(),
-                    )),
+                    .gap(px(5.0))
+                    .children(body),
             )
         })
 }
 
-fn render_review_partner_detail_card(
+fn review_partner_disclosure_key(
+    record: &crate::review_partner::ReviewPartnerFocusRecord,
+    suffix: &str,
+) -> String {
+    format!("review-partner:{}:{suffix}", record.key)
+}
+
+fn render_review_partner_item_row(
     state: &Entity<AppState>,
-    section_id: &str,
-    label: &str,
-    summary: &str,
-    icon: LucideIcon,
-    tone: Rgba,
-    values: &[String],
-    id_prefix: &str,
-    layer_id: &str,
-    cx: &App,
+    section: &str,
+    index: usize,
+    item: &crate::review_partner::ReviewPartnerItem,
+    suppress_title_matching: Option<&str>,
+    _tone: Rgba,
 ) -> impl IntoElement {
-    let expanded = state.read(cx).is_review_section_collapsed(section_id);
-    let state_for_toggle = state.clone();
-    let section_id_for_toggle = section_id.to_string();
+    let location_side = if section == "Removed impact" {
+        TempSourceSide::Base
+    } else {
+        TempSourceSide::Head
+    };
+    let show_title = should_show_review_partner_item_title(
+        item.title.as_str(),
+        item.detail.as_str(),
+        suppress_title_matching,
+    );
 
     div()
-        .rounded(px(6.0))
-        .border_1()
-        .border_color(border_muted())
-        .bg(bg_overlay())
-        .p(px(10.0))
+        .w_full()
+        .min_w_0()
+        .rounded(px(4.0))
+        .px(px(6.0))
+        .py(px(5.0))
         .flex()
-        .flex_col()
-        .gap(px(8.0))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(10.0))
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(review_partner_icon_chip(icon, tone))
-                        .child(
-                            div()
-                                .min_w_0()
-                                .flex()
-                                .flex_col()
-                                .gap(px(2.0))
-                                .child(
-                                    div()
-                                        .text_size(px(11.0))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(fg_emphasis())
-                                        .child(label.to_string()),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(11.0))
-                                        .text_color(fg_muted())
-                                        .text_ellipsis()
-                                        .whitespace_nowrap()
-                                        .overflow_x_hidden()
-                                        .child(summary.to_string()),
-                                ),
-                        ),
-                )
-                .when(!values.is_empty(), |el| {
-                    el.child(review_partner_small_button(
-                        if expanded { "Hide" } else { "Show" },
-                        move |_, _, cx| {
-                            state_for_toggle.update(cx, |state, cx| {
-                                state.toggle_review_section_collapse(&section_id_for_toggle);
-                                state.persist_active_review_session();
-                                cx.notify();
-                            });
-                        },
-                    ))
-                }),
-        )
-        .when(expanded && !values.is_empty(), |el| {
-            el.child(render_review_partner_bullet_list(
-                values, id_prefix, layer_id, tone,
-            ))
-        })
-}
-
-fn render_review_partner_bullet_list(
-    values: &[String],
-    id_prefix: &str,
-    layer_id: &str,
-    tone: Rgba,
-) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(7.0))
-        .children(values.iter().enumerate().map(|(ix, value)| {
-            div()
-                .flex()
-                .items_start()
-                .gap(px(7.0))
-                .child(
-                    div()
-                        .mt(px(7.0))
-                        .w(px(5.0))
-                        .h(px(5.0))
-                        .flex_shrink_0()
-                        .rounded(px(2.5))
-                        .bg(tone),
-                )
-                .child(
-                    div()
-                        .flex_grow()
-                        .min_w_0()
-                        .text_size(px(12.0))
-                        .line_height(px(18.0))
-                        .text_color(fg_default())
-                        .child(SelectableText::new(
-                            format!("guided-review-{id_prefix}-{layer_id}-{ix}"),
-                            value.clone(),
-                        )),
-                )
-        }))
-}
-
-fn render_review_partner_check_row(id: impl Into<SharedString>, value: &str) -> impl IntoElement {
-    div()
-        .flex()
-        .items_start()
-        .gap(px(7.0))
-        .child(
-            div()
-                .mt(px(2.0))
-                .w(px(16.0))
-                .h(px(16.0))
-                .rounded(px(4.0))
-                .border_1()
-                .border_color(border_muted())
-                .bg(bg_selected())
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(lucide_icon(LucideIcon::Check, 10.0, success())),
-        )
+        .hover(|style| style.bg(bg_selected()))
         .child(
             div()
                 .flex_grow()
                 .min_w_0()
-                .text_size(px(12.0))
-                .line_height(px(18.0))
-                .text_color(fg_default())
-                .child(SelectableText::new(id, value.to_string())),
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .when(show_title, |el| {
+                    el.child(
+                        div()
+                            .text_size(px(12.0))
+                            .line_height(px(17.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(fg_emphasis())
+                            .whitespace_normal()
+                            .child(SelectableText::new(
+                                format!("review-partner-{section}-{index}-title"),
+                                item.title.clone(),
+                            )),
+                    )
+                })
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .line_height(px(17.0))
+                        .font_weight(if show_title {
+                            FontWeight::NORMAL
+                        } else {
+                            FontWeight::MEDIUM
+                        })
+                        .text_color(if show_title {
+                            fg_default()
+                        } else {
+                            fg_emphasis()
+                        })
+                        .whitespace_normal()
+                        .child(SelectableText::new(
+                            format!("review-partner-{section}-{index}-detail"),
+                            item.detail.clone(),
+                        )),
+                )
+                .when_some(item.path.as_ref(), |el, path| {
+                    el.child(render_review_partner_location_link(
+                        state,
+                        path.clone(),
+                        item.line,
+                        location_side,
+                    ))
+                }),
         )
 }
 
-fn review_partner_card(label: &str, icon: LucideIcon, tone: Rgba) -> gpui::Div {
-    div()
-        .rounded(px(6.0))
-        .border_1()
-        .border_color(border_muted())
-        .bg(bg_overlay())
-        .p(px(12.0))
-        .flex()
-        .flex_col()
-        .gap(px(8.0))
-        .child(review_partner_micro_label(icon, label, tone))
-}
+fn render_review_partner_usage_item_row(
+    state: &Entity<AppState>,
+    record: &crate::review_partner::ReviewPartnerFocusRecord,
+    group_index: usize,
+    usage_index: usize,
+    item: &crate::review_partner::ReviewPartnerItem,
+) -> impl IntoElement {
+    let source_hint = item.path.as_deref().unwrap_or("rust");
+    let snippet = item.detail.trim();
+    let snippet = if snippet.is_empty() { " " } else { snippet };
 
-fn review_partner_micro_label(icon: LucideIcon, label: &str, tone: Rgba) -> impl IntoElement {
     div()
+        .w_full()
+        .min_w_0()
+        .rounded(px(4.0))
+        .px(px(6.0))
+        .py(px(5.0))
         .flex()
-        .items_center()
-        .gap(px(6.0))
-        .child(lucide_icon(icon, 12.0, tone))
+        .hover(|style| style.bg(bg_selected()))
         .child(
             div()
-                .text_size(px(10.0))
-                .font_family(mono_font_family())
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(fg_subtle())
-                .child(label.to_ascii_uppercase()),
+                .flex_grow()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .text_size(px(11.5))
+                        .line_height(px(17.0))
+                        .font_family(mono_font_family())
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(fg_default())
+                        .whitespace_normal()
+                        .child(render_review_partner_code_snippet(
+                            format!(
+                                "review-partner-{}-usage-{group_index}-{usage_index}-snippet",
+                                record.key
+                            ),
+                            source_hint,
+                            snippet,
+                        )),
+                )
+                .when_some(item.path.as_ref(), |el, path| {
+                    el.child(render_review_partner_location_link(
+                        state,
+                        path.clone(),
+                        item.line,
+                        TempSourceSide::Head,
+                    ))
+                }),
         )
+}
+
+fn render_review_partner_code_snippet(
+    selection_id: String,
+    source_hint: &str,
+    snippet: &str,
+) -> SelectableText {
+    let text = snippet.to_string();
+    let spans = syntax::highlight_line(source_hint, &text);
+    if let Some(runs) = code_text_runs(text.as_str(), spans.as_slice(), fg_default()) {
+        SelectableText::new(selection_id, text).with_runs(runs)
+    } else {
+        SelectableText::new(selection_id, text)
+    }
+}
+
+fn should_show_review_partner_item_title(
+    title: &str,
+    detail: &str,
+    suppress_matching: Option<&str>,
+) -> bool {
+    let title = title.trim();
+    if title.is_empty() {
+        return false;
+    }
+    if !detail.trim().is_empty() && title.eq_ignore_ascii_case(detail.trim()) {
+        return false;
+    }
+    suppress_matching
+        .map(|matching| !title.eq_ignore_ascii_case(matching.trim()))
+        .unwrap_or(true)
+}
+
+fn render_review_partner_location_link(
+    state: &Entity<AppState>,
+    path: String,
+    line: Option<usize>,
+    side: TempSourceSide,
+) -> impl IntoElement {
+    let location_label = match line {
+        Some(line) => format!("{path}:{line}"),
+        None => path.clone(),
+    };
+    let state_for_open = state.clone();
+    let path_for_open = path.clone();
+
+    div()
+        .mt(px(2.0))
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .min_w_0()
+        .cursor_pointer()
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            open_review_partner_source_window(
+                &state_for_open,
+                path_for_open.clone(),
+                line,
+                side,
+                window,
+                cx,
+            );
+            cx.stop_propagation();
+        })
+        .child(lucide_icon(LucideIcon::ExternalLink, 10.0, info()))
+        .child(
+            div()
+                .min_w_0()
+                .overflow_x_hidden()
+                .text_size(px(10.0))
+                .line_height(px(15.0))
+                .font_family(mono_font_family())
+                .text_color(info())
+                .whitespace_nowrap()
+                .overflow_x_hidden()
+                .text_ellipsis()
+                .child(location_label),
+        )
+}
+
+fn open_review_partner_source_window(
+    state: &Entity<AppState>,
+    path: String,
+    line: Option<usize>,
+    side: TempSourceSide,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let target = {
+        let app_state = state.read(cx);
+        let Some(detail) = app_state.active_detail() else {
+            return;
+        };
+        let reference = match side {
+            TempSourceSide::Base => detail
+                .base_ref_oid
+                .clone()
+                .or_else(|| Some(detail.base_ref_name.clone())),
+            TempSourceSide::Head => detail
+                .head_ref_oid
+                .clone()
+                .or_else(|| Some(detail.head_ref_name.clone())),
+        }
+        .map(|reference| reference.trim().to_string())
+        .filter(|reference| !reference.is_empty());
+
+        reference.map(|reference| TempSourceTarget {
+            path,
+            side,
+            line: line.unwrap_or(1).max(1),
+            reference,
+        })
+    };
+
+    if let Some(target) = target {
+        open_temp_source_window_for_diff_target(state, target, window, cx);
+    }
 }
 
 fn review_partner_icon_chip(icon: LucideIcon, tone: Rgba) -> impl IntoElement {
     div()
-        .w(px(24.0))
-        .h(px(24.0))
+        .w(px(22.0))
+        .h(px(22.0))
         .flex_shrink_0()
-        .rounded(px(6.0))
-        .border_1()
-        .border_color(with_alpha(tone, 0.35))
+        .rounded(px(5.0))
         .bg(with_alpha(tone, 0.10))
         .flex()
         .items_center()
@@ -8326,29 +8715,28 @@ fn review_partner_icon_chip(icon: LucideIcon, tone: Rgba) -> impl IntoElement {
         .child(lucide_icon(icon, 13.0, tone))
 }
 
-fn review_partner_small_button(
-    label: &str,
+fn review_partner_action_icon_button(
+    icon: LucideIcon,
+    tooltip: &'static str,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     div()
-        .px(px(8.0))
-        .py(px(4.0))
+        .id("review-partner-regenerate")
+        .h(px(28.0))
+        .w(px(28.0))
+        .flex_shrink_0()
         .rounded(radius_sm())
         .border_1()
-        .border_color(border_muted())
-        .bg(control_button_bg())
-        .text_size(px(11.0))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(fg_muted())
+        .border_color(diff_annotation_border())
+        .bg(diff_annotation_bg())
+        .flex()
+        .items_center()
+        .justify_center()
         .cursor_pointer()
-        .hover(|style| {
-            style
-                .bg(control_button_hover_bg())
-                .border_color(border_default())
-                .text_color(fg_emphasis())
-        })
+        .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
+        .hover(|style| style.bg(bg_selected()).border_color(border_default()))
         .on_mouse_down(MouseButton::Left, on_click)
-        .child(label.to_string())
+        .child(lucide_icon(icon, 14.0, fg_muted()))
 }
 
 fn render_local_review_empty_state(
@@ -10606,67 +10994,88 @@ fn install_combined_diff_scroll_handler(
     let state_for_scroll = state.clone();
     let items = Arc::new(items);
     let contexts = Arc::new(contexts);
-    list_state.clone().set_scroll_handler(move |_, window, _| {
-        let state = state_for_scroll.clone();
-        let list_state = list_state.clone();
-        let last_focus_key = last_focus_key.clone();
-        let items = items.clone();
-        let contexts = contexts.clone();
-        let active_pr_key = active_pr_key.clone();
-        window.on_next_frame(move |window, cx| {
-            let scroll_top = list_state.logical_scroll_top();
-            let focus = combined_diff_scroll_focus_for_item_index(
-                items.as_ref(),
-                contexts.as_ref(),
-                scroll_top.item_ix,
-            );
-            let compact = scroll_top.item_ix > 0 || scroll_top.offset_in_item > px(0.0);
-            let mut should_load_content = false;
-            let mut should_load_structural = false;
-            state.update(cx, |state, cx| {
-                if state.active_surface != PullRequestSurface::Files
-                    || state.active_pr_key.as_deref() != Some(active_pr_key.as_str())
-                    || state
+    list_state
+        .clone()
+        .set_scroll_handler(move |event, window, _| {
+            let state = state_for_scroll.clone();
+            let list_state = list_state.clone();
+            let last_focus_key = last_focus_key.clone();
+            let items = items.clone();
+            let contexts = contexts.clone();
+            let active_pr_key = active_pr_key.clone();
+            let visible_range = event.visible_range.clone();
+            window.on_next_frame(move |window, cx| {
+                let scroll_top = list_state.logical_scroll_top();
+                let focus = combined_diff_reading_focus(
+                    items.as_ref(),
+                    contexts.as_ref(),
+                    &list_state,
+                    visible_range,
+                );
+                let compact = scroll_top.item_ix > 0 || scroll_top.offset_in_item > px(0.0);
+                let mut should_load_content = false;
+                let mut should_load_structural = false;
+                state.update(cx, |state, cx| {
+                    if state.active_surface != PullRequestSurface::Files
+                        || state.active_pr_key.as_deref() != Some(active_pr_key.as_str())
+                    {
+                        return;
+                    }
+                    let Some(session_mode) = state
                         .active_review_session()
-                        .map(|session| session.center_mode != center_mode)
-                        .unwrap_or(true)
-                {
-                    return;
-                }
+                        .map(|session| session.center_mode)
+                    else {
+                        return;
+                    };
+                    let session_matches = session_mode == center_mode
+                        || (session_mode == ReviewCenterMode::GuidedReview
+                            && matches!(
+                                center_mode,
+                                ReviewCenterMode::Stack | ReviewCenterMode::StructuralDiff
+                            ));
+                    if !session_matches {
+                        return;
+                    }
 
-                if let Some(focus) = focus.as_ref() {
-                    if state.selected_file_path.as_deref() != Some(focus.file_path.as_str()) {
-                        state.selected_file_path = Some(focus.file_path.clone());
-                        state.selected_diff_anchor = None;
-                        *last_focus_key.borrow_mut() =
-                            Some(combined_file_focus_key(&focus.file_path));
-                        should_load_content = true;
-                        should_load_structural = center_mode == ReviewCenterMode::StructuralDiff;
+                    if let Some(focus) = focus.as_ref() {
+                        if state.selected_file_path.as_deref() != Some(focus.file_path.as_str()) {
+                            state.selected_file_path = Some(focus.file_path.clone());
+                            state.selected_diff_anchor = None;
+                            *last_focus_key.borrow_mut() =
+                                Some(combined_file_focus_key(&focus.file_path));
+                            should_load_content = true;
+                            should_load_structural =
+                                center_mode == ReviewCenterMode::StructuralDiff;
+                            cx.notify();
+                        }
+                        let review_focus_mode = if session_mode == ReviewCenterMode::GuidedReview {
+                            ReviewCenterMode::GuidedReview
+                        } else {
+                            center_mode
+                        };
+                        state.set_review_scroll_focus(
+                            review_focus_mode,
+                            focus.file_path.clone(),
+                            focus.line,
+                            focus.side.clone(),
+                            focus.anchor.clone(),
+                        );
+                    }
+
+                    if state.pr_header_compact != compact {
+                        state.pr_header_compact = compact;
                         cx.notify();
                     }
-                    state.set_review_scroll_focus(
-                        center_mode,
-                        focus.file_path.clone(),
-                        focus.line,
-                        focus.side.clone(),
-                        focus.anchor.clone(),
-                    );
-                }
+                });
 
-                if state.pr_header_compact != compact {
-                    state.pr_header_compact = compact;
-                    cx.notify();
+                if should_load_structural {
+                    ensure_selected_structural_diff_loaded(&state, window, cx);
+                }
+                if should_load_content {
+                    ensure_selected_file_content_loaded(&state, window, cx);
                 }
             });
-
-            if should_load_structural {
-                ensure_selected_structural_diff_loaded(&state, window, cx);
-            }
-            if should_load_content {
-                ensure_selected_file_content_loaded(&state, window, cx);
-            }
         });
-    });
 }
 
 fn render_combined_diff_view_item(
@@ -10817,20 +11226,97 @@ fn combined_diff_scroll_focus_for_item_index(
     contexts: &[CombinedDiffFileContext],
     item_ix: usize,
 ) -> Option<DiffScrollFocus> {
-    if items.is_empty() {
+    let item_ix = focus_item_index_around(items.len(), item_ix, |ix| {
+        combined_diff_scroll_focus_for_item(&items[ix], contexts).is_some()
+    })?;
+    combined_diff_scroll_focus_for_item(&items[item_ix], contexts)
+}
+
+fn combined_diff_reading_focus(
+    items: &[CombinedDiffViewItem],
+    contexts: &[CombinedDiffFileContext],
+    list_state: &ListState,
+    visible_range: std::ops::Range<usize>,
+) -> Option<DiffScrollFocus> {
+    if let Some(item_ix) = reading_focus_item_index(
+        items.len(),
+        visible_range,
+        list_state.viewport_bounds(),
+        |ix| list_state.bounds_for_item(ix),
+        |ix| combined_diff_changed_scroll_focus_for_item(&items[ix], contexts).is_some(),
+    ) {
+        return combined_diff_changed_scroll_focus_for_item(&items[item_ix], contexts);
+    }
+
+    let scroll_top = list_state.logical_scroll_top();
+    combined_diff_scroll_focus_for_item_index(items, contexts, scroll_top.item_ix)
+}
+
+fn reading_focus_item_index(
+    item_count: usize,
+    visible_range: std::ops::Range<usize>,
+    viewport: Bounds<Pixels>,
+    mut bounds_for_item: impl FnMut(usize) -> Option<Bounds<Pixels>>,
+    mut is_changed_focus_item: impl FnMut(usize) -> bool,
+) -> Option<usize> {
+    let viewport_height = f32::from(viewport.size.height);
+    if viewport_height <= 0.0 {
         return None;
     }
 
-    let item_ix = item_ix.min(items.len().saturating_sub(1));
-    for ix in item_ix..items.len() {
-        if let Some(focus) = combined_diff_scroll_focus_for_item(&items[ix], contexts) {
-            return Some(focus);
+    let reading_y = viewport.top() + px(viewport_height * 0.33);
+    for ix in visible_range {
+        if ix >= item_count {
+            continue;
+        }
+        let Some(bounds) = bounds_for_item(ix) else {
+            continue;
+        };
+        if bounds.bottom() < reading_y {
+            continue;
+        }
+        if is_changed_focus_item(ix) {
+            return Some(ix);
+        }
+    }
+    None
+}
+
+fn focus_item_index_around(
+    item_count: usize,
+    item_ix: usize,
+    mut is_focus_item: impl FnMut(usize) -> bool,
+) -> Option<usize> {
+    if item_count == 0 {
+        return None;
+    }
+
+    let item_ix = item_ix.min(item_count.saturating_sub(1));
+    for ix in item_ix..item_count {
+        if is_focus_item(ix) {
+            return Some(ix);
         }
     }
 
-    (0..item_ix)
-        .rev()
-        .find_map(|ix| combined_diff_scroll_focus_for_item(&items[ix], contexts))
+    (0..item_ix).rev().find(|ix| is_focus_item(*ix))
+}
+
+fn combined_diff_changed_scroll_focus_for_item(
+    item: &CombinedDiffViewItem,
+    contexts: &[CombinedDiffFileContext],
+) -> Option<DiffScrollFocus> {
+    let CombinedDiffViewItem::Row { file_index, item } = item else {
+        return None;
+    };
+    let context = contexts.get(*file_index)?;
+    context.parsed.as_deref().and_then(|parsed| {
+        diff_scroll_focus_for_item(
+            *item,
+            context.rows.as_ref(),
+            parsed,
+            context.file.path.as_str(),
+        )
+    })
 }
 
 fn combined_diff_scroll_focus_for_item(
@@ -10867,6 +11353,7 @@ fn combined_file_scroll_focus(file_path: &str) -> DiffScrollFocus {
         file_path: file_path.to_string(),
         line: None,
         side: None,
+        hunk_header: None,
         anchor: None,
     }
 }
@@ -11585,6 +12072,7 @@ struct DiffScrollFocus {
     file_path: String,
     line: Option<usize>,
     side: Option<String>,
+    hunk_header: Option<String>,
     anchor: Option<DiffAnchor>,
 }
 
@@ -11677,21 +12165,10 @@ fn diff_scroll_focus_for_item_index(
     item_ix: usize,
     fallback_file_path: &str,
 ) -> Option<DiffScrollFocus> {
-    if items.is_empty() {
-        return None;
-    }
-
-    let item_ix = item_ix.min(items.len().saturating_sub(1));
-    for ix in item_ix..items.len() {
-        if let Some(focus) = diff_scroll_focus_for_item(items[ix], rows, parsed, fallback_file_path)
-        {
-            return Some(focus);
-        }
-    }
-
-    (0..item_ix)
-        .rev()
-        .find_map(|ix| diff_scroll_focus_for_item(items[ix], rows, parsed, fallback_file_path))
+    let item_ix = focus_item_index_around(items.len(), item_ix, |ix| {
+        diff_scroll_focus_for_item(items[ix], rows, parsed, fallback_file_path).is_some()
+    })?;
+    diff_scroll_focus_for_item(items[item_ix], rows, parsed, fallback_file_path)
 }
 
 fn diff_scroll_focus_for_item(
@@ -11728,6 +12205,7 @@ fn diff_scroll_focus_for_item(
         file_path: target.anchor.file_path.clone(),
         line,
         side: target.anchor.side.clone(),
+        hunk_header: Some(hunk.header.clone()),
         anchor: Some(target.anchor),
     })
 }
@@ -17284,14 +17762,15 @@ fn label_for_change_type(change_type: &str) -> &str {
 mod tests {
     use crate::diff::parse_unified_diff;
     use crate::state::{DiffInlineRange, ReviewFileTreeRow, StructuralDiffFileState};
-    use gpui::{px, ListAlignment, ListOffset, ListState};
+    use gpui::{point, px, size, Bounds, ListAlignment, ListOffset, ListState, Pixels};
 
     use super::{
         build_file_tree_rows, build_normal_side_by_side_diff_file, compute_inline_emphasis,
-        max_side_by_side_column_widths, should_apply_structural_diff_update,
-        should_reuse_structural_diff_state, structural_diff_state_terminal_status,
-        sync_stack_timeline_item_count, DiffFileCollapseScrollAdjustment, ReviewFileTreeEntry,
-        SideBySideColumnWidths, StructuralDiffTerminalStatus,
+        focus_item_index_around, max_side_by_side_column_widths, reading_focus_item_index,
+        should_apply_structural_diff_update, should_reuse_structural_diff_state,
+        structural_diff_state_terminal_status, sync_stack_timeline_item_count,
+        DiffFileCollapseScrollAdjustment, ReviewFileTreeEntry, SideBySideColumnWidths,
+        StructuralDiffTerminalStatus,
     };
 
     fn inline_range(column_start: usize, column_end: usize) -> DiffInlineRange {
@@ -17299,6 +17778,13 @@ mod tests {
             column_start,
             column_end,
         }
+    }
+
+    fn test_bounds(top: f32, bottom: f32) -> Bounds<Pixels> {
+        Bounds::new(
+            point(px(0.0), px(top)),
+            size(px(100.0), px((bottom - top).max(0.0))),
+        )
     }
 
     #[test]
@@ -17490,6 +17976,56 @@ mod tests {
         let scroll_top = list_state.logical_scroll_top();
         assert_eq!(scroll_top.item_ix, 2);
         assert_eq!(scroll_top.offset_in_item, px(7.0));
+    }
+
+    #[test]
+    fn reading_focus_uses_upper_third_changed_row() {
+        let item_bounds = [
+            test_bounds(0.0, 32.0),
+            test_bounds(32.0, 60.0),
+            test_bounds(60.0, 112.0),
+            test_bounds(112.0, 140.0),
+            test_bounds(140.0, 168.0),
+        ];
+
+        let selected = reading_focus_item_index(
+            item_bounds.len(),
+            0..item_bounds.len(),
+            test_bounds(0.0, 300.0),
+            |ix| item_bounds.get(ix).cloned(),
+            |ix| matches!(ix, 1 | 3 | 4),
+        );
+
+        assert_eq!(selected, Some(3));
+    }
+
+    #[test]
+    fn reading_focus_skips_headers_and_gaps() {
+        let item_bounds = [
+            test_bounds(0.0, 120.0),
+            test_bounds(120.0, 148.0),
+            test_bounds(148.0, 176.0),
+        ];
+
+        let selected = reading_focus_item_index(
+            item_bounds.len(),
+            0..item_bounds.len(),
+            test_bounds(0.0, 300.0),
+            |ix| item_bounds.get(ix).cloned(),
+            |ix| ix == 1,
+        );
+
+        assert_eq!(selected, Some(1));
+    }
+
+    #[test]
+    fn reading_focus_falls_back_when_bounds_are_unavailable() {
+        let selected =
+            reading_focus_item_index(4, 0..4, test_bounds(0.0, 300.0), |_| None, |_| true);
+
+        assert_eq!(selected, None);
+        assert_eq!(focus_item_index_around(4, 2, |ix| ix == 3), Some(3));
+        assert_eq!(focus_item_index_around(4, 2, |ix| ix == 1), Some(1));
     }
 
     #[test]

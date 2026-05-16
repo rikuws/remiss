@@ -24,7 +24,7 @@ use crate::onboarding::{
     self, GhSetupStatus, OnboardingProgress, StartupWizardOptions, WizardSession, WizardStepTarget,
 };
 use crate::review_brief::ReviewBrief;
-use crate::review_guide::GeneratedReviewGuide;
+use crate::review_partner::{GeneratedReviewPartnerContext, ReviewPartnerFocusTarget};
 use crate::review_queue::{default_review_file, ReviewQueue};
 use crate::review_session::{
     add_waymark, load_review_session, location_label, push_history_location, push_route_location,
@@ -119,7 +119,7 @@ pub struct DetailState {
     pub review_intelligence_request_key: Option<String>,
     pub review_intelligence_loading: bool,
     pub review_brief_state: ReviewBriefState,
-    pub review_guide_state: ReviewGuideState,
+    pub review_partner_state: ReviewPartnerState,
     pub ai_stack_state: AiStackState,
     pub tour_states: std::collections::HashMap<CodeTourProvider, CodeTourState>,
     pub file_content_states: std::collections::HashMap<String, FileContentState>,
@@ -151,7 +151,7 @@ impl Default for DetailState {
             review_intelligence_request_key: None,
             review_intelligence_loading: false,
             review_brief_state: ReviewBriefState::default(),
-            review_guide_state: ReviewGuideState::default(),
+            review_partner_state: ReviewPartnerState::default(),
             ai_stack_state: AiStackState::default(),
             tour_states: std::collections::HashMap::new(),
             file_content_states: std::collections::HashMap::new(),
@@ -208,9 +208,16 @@ impl Default for ReviewBriefState {
 }
 
 #[derive(Clone, Debug)]
-pub struct ReviewGuideState {
+pub struct ReviewPartnerState {
     pub request_key: Option<String>,
-    pub document: Option<Arc<GeneratedReviewGuide>>,
+    pub document: Option<Arc<GeneratedReviewPartnerContext>>,
+    pub active_focus_key: Option<String>,
+    pub active_focus_label: Option<String>,
+    pub active_focus_path: Option<String>,
+    pub active_focus_line: Option<usize>,
+    pub focus_update_generation: u64,
+    pub loading_focus_keys: std::collections::BTreeSet<String>,
+    pub focus_errors: std::collections::BTreeMap<String, String>,
     pub loading: bool,
     pub generating: bool,
     pub progress_text: Option<String>,
@@ -219,11 +226,18 @@ pub struct ReviewGuideState {
     pub success: bool,
 }
 
-impl Default for ReviewGuideState {
+impl Default for ReviewPartnerState {
     fn default() -> Self {
         Self {
             request_key: None,
             document: None,
+            active_focus_key: None,
+            active_focus_label: None,
+            active_focus_path: None,
+            active_focus_line: None,
+            focus_update_generation: 0,
+            loading_focus_keys: std::collections::BTreeSet::new(),
+            focus_errors: std::collections::BTreeMap::new(),
             loading: false,
             generating: false,
             progress_text: None,
@@ -1075,6 +1089,7 @@ pub struct AppState {
     pub code_tour_provider_error: Option<String>,
     pub automatic_tour_request_keys: std::collections::HashSet<String>,
     pub automatic_brief_request_keys: std::collections::HashSet<String>,
+    pub automatic_partner_request_keys: std::collections::HashSet<String>,
     pub settings_scroll_handle: ScrollHandle,
     pub ai_tour_section_list_state: ListState,
     pub code_tour_settings: CodeTourSettingsState,
@@ -1220,6 +1235,7 @@ impl AppState {
             code_tour_provider_error: None,
             automatic_tour_request_keys: std::collections::HashSet::new(),
             automatic_brief_request_keys: std::collections::HashSet::new(),
+            automatic_partner_request_keys: std::collections::HashSet::new(),
             settings_scroll_handle: ScrollHandle::new(),
             ai_tour_section_list_state: ListState::new(0, ListAlignment::Top, px(720.0)),
             code_tour_settings: initial_code_tour_settings,
@@ -1995,6 +2011,41 @@ impl AppState {
             .unwrap_or(false)
     }
 
+    pub fn toggle_review_partner_disclosure(&mut self, section_id: &str, default_expanded: bool) {
+        let Some(session) = self.active_review_session_mut() else {
+            return;
+        };
+
+        if default_expanded {
+            if !session.collapsed_sections.insert(section_id.to_string()) {
+                session.collapsed_sections.remove(section_id);
+            }
+        } else if !session
+            .expanded_review_partner_sections
+            .insert(section_id.to_string())
+        {
+            session.expanded_review_partner_sections.remove(section_id);
+        }
+    }
+
+    pub fn is_review_partner_disclosure_expanded(
+        &self,
+        section_id: &str,
+        default_expanded: bool,
+    ) -> bool {
+        self.active_review_session()
+            .map(|session| {
+                if default_expanded {
+                    !session.collapsed_sections.contains(section_id)
+                } else {
+                    session
+                        .expanded_review_partner_sections
+                        .contains(section_id)
+                }
+            })
+            .unwrap_or(default_expanded)
+    }
+
     pub fn set_review_file_collapsed(&mut self, file_path: &str, collapsed: bool) {
         let Some(session) = self.active_review_session_mut() else {
             return;
@@ -2315,6 +2366,55 @@ impl AppState {
         if let Some(session) = self.active_review_session_mut() {
             session.guided_review_lens = lens;
         }
+    }
+
+    pub fn bump_guided_review_focus_update_generation(&mut self) -> Option<u64> {
+        let detail_key = self.active_pr_key.as_deref()?;
+        let detail_state = self.detail_states.get_mut(detail_key)?;
+        detail_state.review_partner_state.focus_update_generation = detail_state
+            .review_partner_state
+            .focus_update_generation
+            .wrapping_add(1);
+        Some(detail_state.review_partner_state.focus_update_generation)
+    }
+
+    pub fn guided_review_focus_update_generation_matches(&self, generation: u64) -> bool {
+        self.active_pr_key
+            .as_deref()
+            .and_then(|detail_key| self.detail_states.get(detail_key))
+            .map(|detail_state| detail_state.review_partner_state.focus_update_generation)
+            == Some(generation)
+    }
+
+    pub fn set_active_guided_review_focus(&mut self, target: &ReviewPartnerFocusTarget) -> bool {
+        let Some(detail_key) = self.active_pr_key.clone() else {
+            return false;
+        };
+        let Some(detail_state) = self.detail_states.get_mut(&detail_key) else {
+            return false;
+        };
+        let label = target.subtitle.clone();
+        let changed = detail_state
+            .review_partner_state
+            .active_focus_key
+            .as_deref()
+            != Some(target.key.as_str())
+            || detail_state
+                .review_partner_state
+                .active_focus_label
+                .as_deref()
+                != Some(label.as_str());
+
+        detail_state.review_partner_state.active_focus_key = Some(target.key.clone());
+        detail_state.review_partner_state.active_focus_label = Some(label);
+        detail_state.review_partner_state.active_focus_path = Some(target.file_path.clone());
+        detail_state.review_partner_state.active_focus_line = target.line;
+
+        if let Some(session) = self.active_review_session_mut() {
+            session.guided_review_focus_key = Some(target.key.clone());
+        }
+
+        changed
     }
 
     pub fn set_guided_review_panel_width(&mut self, width: f32) {

@@ -287,7 +287,11 @@ fn viewer_login(state: &AppState) -> Option<String> {
         })
 }
 
-pub fn render_pr_workspace(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
+pub fn render_pr_workspace(
+    state: &Entity<AppState>,
+    window: &mut Window,
+    cx: &App,
+) -> impl IntoElement {
     let s = state.read(cx);
     let pr = s.active_pr();
     let detail = s.active_detail();
@@ -351,7 +355,7 @@ pub fn render_pr_workspace(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
         )
         .when(
             detail.is_some() && surface == PullRequestSurface::Files,
-            |el| el.child(render_files_view(state, cx)),
+            |el| el.child(render_files_view(state, window, cx)),
         )
         .into_any_element()
 }
@@ -1187,6 +1191,12 @@ fn render_review_brief_setup_needed(
                 .flex_wrap()
                 .child(ghost_button("Retry", move |_, window, cx| {
                     review_intelligence::refresh_active_review_brief(
+                        &state_for_retry,
+                        window,
+                        cx,
+                        true,
+                    );
+                    review_intelligence::refresh_active_review_partner(
                         &state_for_retry,
                         window,
                         cx,
@@ -3825,7 +3835,9 @@ fn trigger_sync_pr(
                     .await;
             }
 
-            let should_refresh_guide = model
+            review_intelligence::refresh_active_review_partner_flow(model.clone(), true, cx).await;
+
+            let should_refresh_partner = model
                 .read_with(cx, |s, _| {
                     s.active_surface == PullRequestSurface::Files
                         && s.active_pr_key.as_deref() == Some(&detail_key)
@@ -3836,7 +3848,7 @@ fn trigger_sync_pr(
                 .ok()
                 .unwrap_or(false);
 
-            if should_refresh_guide {
+            if should_refresh_partner {
                 review_intelligence::run_review_intelligence_flow(
                     model.clone(),
                     ReviewIntelligenceScope::StackOnly,

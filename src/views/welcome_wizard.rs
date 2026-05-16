@@ -302,6 +302,7 @@ fn render_step_content(
 fn render_github_setup_content(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let status = state.read(cx).onboarding_gh_status.clone();
     let state_for_retry = state.clone();
+    let show_setup_commands = !status.is_ready();
     let status_color = match status.state {
         GhSetupState::Checking => fg_subtle(),
         GhSetupState::Ready => success(),
@@ -315,11 +316,15 @@ fn render_github_setup_content(state: &Entity<AppState>, cx: &App) -> impl IntoE
     };
 
     div()
+        .w_full()
+        .min_w_0()
         .flex()
         .flex_col()
         .gap(px(10.0))
         .child(
             div()
+                .w_full()
+                .min_w_0()
                 .rounded(radius_sm())
                 .border_1()
                 .border_color(with_alpha(status_color, 0.34))
@@ -347,34 +352,46 @@ fn render_github_setup_content(state: &Entity<AppState>, cx: &App) -> impl IntoE
                                 .text_size(px(12.0))
                                 .line_height(px(17.0))
                                 .text_color(fg_default())
+                                .whitespace_normal()
                                 .child(status_summary(&status)),
                         ),
                 ),
         )
-        .child(render_command_copy_row("Install", "brew install gh"))
-        .child(render_command_copy_row("Authenticate", "gh auth login"))
-        .child(render_command_copy_row("Setup git", "gh auth setup-git"))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(10.0))
+        .when(show_setup_commands, |el| {
+            el.child(render_command_copy_row("Install", "brew install gh"))
+                .child(render_command_copy_row("Authenticate", "gh auth login"))
+                .child(render_command_copy_row("Setup git", "gh auth setup-git"))
                 .child(
                     div()
-                        .text_size(px(11.0))
-                        .line_height(px(16.0))
-                        .text_color(fg_subtle())
-                        .child("Setup can be completed later; the tutorial still works offline."),
+                        .w_full()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(10.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(11.0))
+                                .line_height(px(16.0))
+                                .text_color(fg_subtle())
+                                .whitespace_normal()
+                                .child(
+                                    "Setup can be completed later; the tutorial still works offline.",
+                                ),
+                        )
+                        .child(
+                            div().flex_shrink_0().child(wizard_secondary_button(
+                                "Retry".to_string(),
+                                status.state == GhSetupState::Checking,
+                                move |_, window, cx| {
+                                    refresh_onboarding_gh_status(&state_for_retry, window, cx);
+                                },
+                            )),
+                        ),
                 )
-                .child(wizard_secondary_button(
-                    "Retry".to_string(),
-                    status.state == GhSetupState::Checking,
-                    move |_, window, cx| {
-                        refresh_onboarding_gh_status(&state_for_retry, window, cx);
-                    },
-                )),
-        )
+        })
 }
 
 fn status_summary(status: &crate::onboarding::GhSetupStatus) -> String {

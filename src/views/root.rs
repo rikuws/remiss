@@ -678,6 +678,7 @@ impl Render for RootView {
             .child(render_main_column(
                 &self.state,
                 workspace_route_transition,
+                window,
                 cx,
             ))
             .child(render_titlebar_sidebar_toggle(&self.state, cx))
@@ -1365,6 +1366,7 @@ fn local_review_status_color(status: LocalReviewStatusKind) -> Rgba {
 fn render_main_column(
     state: &Entity<AppState>,
     workspace_route_transition: WorkspaceRouteTransition,
+    window: &mut Window,
     cx: &App,
 ) -> impl IntoElement {
     div()
@@ -1374,7 +1376,12 @@ fn render_main_column(
         .flex()
         .flex_col()
         .child(render_workspace_chrome(state, cx))
-        .child(render_workspace_body(state, workspace_route_transition, cx))
+        .child(render_workspace_body(
+            state,
+            workspace_route_transition,
+            window,
+            cx,
+        ))
 }
 
 fn render_titlebar_sidebar_toggle(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
@@ -1489,6 +1496,12 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                                 cx.notify();
                             });
                             crate::review_intelligence::refresh_active_review_brief(
+                                &state_for_briefing,
+                                window,
+                                cx,
+                                true,
+                            );
+                            crate::review_intelligence::refresh_active_review_partner(
                                 &state_for_briefing,
                                 window,
                                 cx,
@@ -1854,6 +1867,7 @@ fn workspace_route_key(state: &AppState) -> WorkspaceRouteKey {
 fn render_workspace_body(
     state: &Entity<AppState>,
     workspace_route_transition: WorkspaceRouteTransition,
+    window: &mut Window,
     cx: &App,
 ) -> impl IntoElement {
     let s = state.read(cx);
@@ -1876,7 +1890,7 @@ fn render_workspace_body(
                 .flex_col()
                 .opacity(content_opacity)
                 .child(if has_active_pr {
-                    render_pr_workspace(state, cx).into_any_element()
+                    render_pr_workspace(state, window, cx).into_any_element()
                 } else {
                     render_section_workspace(state, cx).into_any_element()
                 }),

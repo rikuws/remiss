@@ -2422,6 +2422,7 @@ pub fn open_pull_request(
     ensure_structural_diff_warmup_started(state, window, cx);
     if initial_surface == PullRequestSurface::Overview {
         crate::review_intelligence::refresh_active_review_brief(state, window, cx, true);
+        crate::review_intelligence::refresh_active_review_partner(state, window, cx, true);
     }
 
     if !load_plan.load_cached_snapshot && !load_plan.sync_live {
@@ -2552,7 +2553,8 @@ async fn refresh_brief_if_active_overview(
         .unwrap_or(false);
 
     if should_refresh_brief {
-        crate::review_intelligence::refresh_active_review_brief_flow(model, true, cx).await;
+        crate::review_intelligence::refresh_active_review_brief_flow(model.clone(), true, cx).await;
+        crate::review_intelligence::refresh_active_review_partner_flow(model, true, cx).await;
     }
 }
 
