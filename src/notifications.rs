@@ -430,13 +430,19 @@ fn notification_timestamp_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::*;
 
+    static TEMP_CACHE_ID: AtomicU64 = AtomicU64::new(1);
+
     fn temp_cache() -> CacheStore {
+        let cache_id = TEMP_CACHE_ID.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "remiss-notification-test-{}-{}.sqlite3",
+            "remiss-notification-test-{}-{}-{}.sqlite3",
             std::process::id(),
-            notification_timestamp_ms()
+            notification_timestamp_ms(),
+            cache_id
         ));
         CacheStore::new(path).expect("failed to create temp cache")
     }

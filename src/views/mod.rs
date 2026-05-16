@@ -1,10 +1,12 @@
 pub(crate) mod ai_tour;
 pub(crate) mod diff_view;
+mod file_tree;
 mod palette;
 mod pr_detail;
 mod root;
 mod sections;
 mod settings;
+mod tooltips;
 mod welcome_wizard;
 mod workspace_sync;
 

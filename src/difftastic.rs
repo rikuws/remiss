@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk, ParsedDiffLine},
-    inline_diff::normalize_inline_emphasis_ranges,
+    inline_diff::{merge_inline_ranges, normalize_inline_emphasis_ranges},
     state::{DiffInlineRange, DiffLineHighlight, DIFF_INLINE_EMPHASIS_ENABLED},
     syntax,
 };
@@ -546,12 +546,11 @@ fn adapted_line(
 }
 
 fn changes_to_ranges(line: &str, changes: &[DifftasticChange]) -> Vec<DiffInlineRange> {
-    let mut ranges = changes
+    let ranges = changes
         .iter()
         .filter_map(|change| byte_offsets_to_range(line, change.start, change.end))
         .collect::<Vec<_>>();
-    ranges.sort_by_key(|range| (range.column_start, range.column_end));
-    merge_ranges(ranges)
+    merge_inline_ranges(ranges)
 }
 
 fn byte_offsets_to_range(line: &str, start: u32, end: u32) -> Option<DiffInlineRange> {
@@ -580,27 +579,6 @@ fn nearest_char_boundary(line: &str, byte_ix: usize) -> usize {
         .rev()
         .find(|ix| line.is_char_boundary(*ix))
         .unwrap_or(0)
-}
-
-fn merge_ranges(ranges: Vec<DiffInlineRange>) -> Vec<DiffInlineRange> {
-    let mut merged: Vec<DiffInlineRange> = Vec::new();
-
-    for range in ranges {
-        if range.column_start >= range.column_end {
-            continue;
-        }
-
-        if let Some(last) = merged.last_mut() {
-            if range.column_start <= last.column_end {
-                last.column_end = last.column_end.max(range.column_end);
-                continue;
-            }
-        }
-
-        merged.push(range);
-    }
-
-    merged
 }
 
 fn hunk_header(lines: &[ParsedDiffLine]) -> String {
