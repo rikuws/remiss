@@ -189,7 +189,90 @@ jobs:
             gh release create "$RELEASE_TAG" \
               --title "Remiss ${RELEASE_TAG#v}" \
               --notes "Automated macOS build for ${RELEASE_TAG}." \
-              --verify-tag
+              --verify-tag \
+              || gh release view "$RELEASE_TAG" >/dev/null
           fi
 
           gh release upload "$RELEASE_TAG" release-assets/* --clobber
+
+  windows:
+    name: Windows portable package
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.92.0
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          prefix-key: v1-rust-windows
+
+      - name: Set version from release tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          "REMISS_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Build portable package
+        shell: pwsh
+        run: ./scripts/build-windows.ps1
+
+      - name: Prepare release assets
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force release-assets -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+
+          $artifacts = Get-ChildItem -Path dist -Filter 'remiss-*-windows-*.zip'
+          if (-not $artifacts) {
+            throw "No Windows zip artifacts found in dist"
+          }
+
+          foreach ($artifact in $artifacts) {
+            Copy-Item $artifact.FullName (Join-Path release-assets $artifact.Name)
+          }
+
+          $latest = $artifacts | Sort-Object Name | Select-Object -Last 1
+          Copy-Item $latest.FullName (Join-Path release-assets 'remiss-latest-windows.zip')
+
+          $sumLines = Get-ChildItem -Path release-assets -File | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          }
+          $sumLines | Set-Content -Path (Join-Path release-assets 'SHA256SUMS-windows.txt')
+
+      - name: Upload CI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: remiss-windows
+          path: release-assets/*
+          if-no-files-found: error
+
+      - name: Upload release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release view $env:RELEASE_TAG *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:RELEASE_TAG --title "Remiss $($env:RELEASE_TAG -replace '^v', '')" --notes "Automated Remiss build for $env:RELEASE_TAG." --verify-tag
+            if ($LASTEXITCODE -ne 0) {
+              gh release view $env:RELEASE_TAG *> $null
+              if ($LASTEXITCODE -ne 0) {
+                exit 1
+              }
+            }
+          }
+
+          $files = Get-ChildItem -Path release-assets -File | ForEach-Object { $_.FullName }
+          gh release upload $env:RELEASE_TAG @files --clobber

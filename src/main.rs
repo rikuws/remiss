@@ -69,6 +69,7 @@ mod review_session;
 mod selectable_text;
 mod semantic_diff;
 mod shader_surface;
+mod shortcuts;
 mod source_browser;
 mod stacks;
 mod state;
@@ -104,8 +105,7 @@ use views::{
     move_palette_selection, move_waypoint_spotlight_selection, reset_code_font_size_preference,
     toggle_palette, toggle_waypoint_spotlight, trigger_add_waypoint_shortcut,
     trigger_software_update_check, trigger_submit_inline_comment, trigger_submit_review,
-    trigger_submit_review_from_review_mode, RootView, APP_TRAFFIC_LIGHT_LEFT,
-    APP_TRAFFIC_LIGHT_TOP,
+    trigger_submit_review_from_review_mode, RootView,
 };
 
 fn main() {
@@ -148,14 +148,7 @@ fn start_app(cx: &mut App) -> Result<(), String> {
     cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(TitlebarOptions {
-                title: Some(APP_NAME.into()),
-                appears_transparent: true,
-                traffic_light_position: Some(point(
-                    px(APP_TRAFFIC_LIGHT_LEFT),
-                    px(APP_TRAFFIC_LIGHT_TOP),
-                )),
-            }),
+            titlebar: Some(main_window_titlebar_options()),
             ..Default::default()
         },
         |window, cx| cx.new(|cx| RootView::new(app_state.clone(), window, cx)),
@@ -172,12 +165,8 @@ fn start_app(cx: &mut App) -> Result<(), String> {
     let app_state_for_keys = app_state.clone();
     cx.observe_keystrokes(move |event, window, cx| {
         let keystroke = &event.keystroke;
-        let is_platform_only = keystroke.modifiers.platform
-            && !keystroke.modifiers.control
-            && !keystroke.modifiers.alt
-            && !keystroke.modifiers.function;
-        let is_platform_plain = is_platform_only && !keystroke.modifiers.shift;
-        let is_platform_shift = is_platform_only && keystroke.modifiers.shift;
+        let is_secondary_plain = shortcuts::secondary_plain_modifier(keystroke.modifiers);
+        let is_secondary_shift = shortcuts::secondary_shift_modifier(keystroke.modifiers);
 
         let onboarding_wizard_open = app_state_for_keys
             .read(cx)
@@ -208,7 +197,7 @@ fn start_app(cx: &mut App) -> Result<(), String> {
             return;
         }
 
-        if is_platform_plain && keystroke.key == "k" {
+        if is_secondary_plain && keystroke.key == "k" {
             toggle_palette(&app_state_for_keys, cx);
             return;
         }
@@ -225,37 +214,39 @@ fn start_app(cx: &mut App) -> Result<(), String> {
             return;
         }
 
-        if (is_platform_plain || is_platform_shift) && matches!(keystroke.key.as_str(), "=" | "+") {
+        if (is_secondary_plain || is_secondary_shift) && matches!(keystroke.key.as_str(), "=" | "+")
+        {
             increase_code_font_size_preference(&app_state_for_keys, window, cx);
             return;
         }
 
-        if (is_platform_plain || is_platform_shift) && matches!(keystroke.key.as_str(), "-" | "_") {
+        if (is_secondary_plain || is_secondary_shift) && matches!(keystroke.key.as_str(), "-" | "_")
+        {
             decrease_code_font_size_preference(&app_state_for_keys, window, cx);
             return;
         }
 
-        if is_platform_plain && keystroke.key == "0" {
+        if is_secondary_plain && keystroke.key == "0" {
             reset_code_font_size_preference(&app_state_for_keys, window, cx);
             return;
         }
 
-        if is_platform_shift && keystroke.key == "t" {
+        if is_secondary_shift && keystroke.key == "t" {
             cycle_diff_color_theme_preference(&app_state_for_keys, window, cx);
             return;
         }
 
-        if is_platform_shift && keystroke.key == "j" {
+        if is_secondary_shift && keystroke.key == "j" {
             trigger_add_waypoint_shortcut(&app_state_for_keys, cx);
             return;
         }
 
-        if is_platform_plain && keystroke.key == "j" {
+        if is_secondary_plain && keystroke.key == "j" {
             toggle_waypoint_spotlight(&app_state_for_keys, cx);
             return;
         }
 
-        if is_platform_plain
+        if is_secondary_plain
             && keystroke.key == "o"
             && open_temp_source_window_for_selected_diff_line(&app_state_for_keys, window, cx)
         {
@@ -281,7 +272,7 @@ fn start_app(cx: &mut App) -> Result<(), String> {
 
         let finish_review_open = app_state_for_keys.read(cx).review_finish_modal_open;
         if finish_review_open {
-            if is_platform_plain && keystroke.key == "enter" {
+            if is_secondary_plain && keystroke.key == "enter" {
                 trigger_submit_review_from_review_mode(&app_state_for_keys, window, cx);
                 return;
             }
@@ -301,7 +292,7 @@ fn start_app(cx: &mut App) -> Result<(), String> {
             == state::ReviewLineActionMode::Comment;
 
         if line_action_active {
-            if is_platform_plain && keystroke.key == "enter" && line_comment_mode {
+            if is_secondary_plain && keystroke.key == "enter" && line_comment_mode {
                 trigger_submit_inline_comment(&app_state_for_keys, window, cx);
                 return;
             }
@@ -317,7 +308,7 @@ fn start_app(cx: &mut App) -> Result<(), String> {
             return;
         }
 
-        if is_platform_plain && keystroke.key == "enter" {
+        if is_secondary_plain && keystroke.key == "enter" {
             trigger_submit_review(&app_state_for_keys, window, cx);
             return;
         }
@@ -329,4 +320,25 @@ fn start_app(cx: &mut App) -> Result<(), String> {
     })
     .detach();
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn main_window_titlebar_options() -> TitlebarOptions {
+    TitlebarOptions {
+        title: Some(APP_NAME.into()),
+        appears_transparent: true,
+        traffic_light_position: Some(point(
+            px(views::APP_TRAFFIC_LIGHT_LEFT),
+            px(views::APP_TRAFFIC_LIGHT_TOP),
+        )),
+        ..Default::default()
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn main_window_titlebar_options() -> TitlebarOptions {
+    TitlebarOptions {
+        title: Some(APP_NAME.into()),
+        ..Default::default()
+    }
 }

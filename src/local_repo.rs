@@ -1537,6 +1537,17 @@ mod tests {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
+    fn assert_path_string_eq(result: Option<&str>, expected: &Path) {
+        assert_eq!(
+            result.map(normalized_path_text),
+            Some(normalized_path_text(expected.to_string_lossy().as_ref()))
+        );
+    }
+
+    fn normalized_path_text(path: &str) -> String {
+        path.replace('\\', "/")
+    }
+
     fn create_managed_clone(repository: &str, source: &Path) -> PathBuf {
         let managed_path = managed_repository_path(repository).expect("failed to resolve path");
         if managed_path.exists() {
@@ -1807,10 +1818,7 @@ mod tests {
             status.current_head_oid.as_deref(),
             Some(second_head.as_str())
         );
-        assert_eq!(
-            status.path.as_deref(),
-            Some(expected_path.to_string_lossy().as_ref())
-        );
+        assert_path_string_eq(status.path.as_deref(), &expected_path);
         assert!(!stale_path.exists());
         assert!(expected_path.exists());
 
@@ -1853,14 +1861,10 @@ mod tests {
         assert!(status.ready_for_local_features);
         assert!(status.is_worktree_clean);
         assert_eq!(status.current_head_oid.as_deref(), Some(head.as_str()));
-        assert_eq!(
+        assert_path_string_eq(
             status.path.as_deref(),
-            Some(
-                managed_repository_worktree_path(&repository_name, 42, Some(&head))
-                    .expect("worktree path")
-                    .to_string_lossy()
-                    .as_ref()
-            )
+            &managed_repository_worktree_path(&repository_name, 42, Some(&head))
+                .expect("worktree path"),
         );
 
         let _ = fs::remove_dir_all(

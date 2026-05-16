@@ -9,6 +9,7 @@ use gpui::{
 };
 
 use crate::{
+    shortcuts,
     state::AppState,
     theme::{accent, accent_muted},
 };
@@ -614,7 +615,7 @@ impl Element for SelectableText {
                         }
 
                         let modifiers = event.keystroke.modifiers;
-                        let platform_only = platform_primary_modifier(modifiers) && !modifiers.alt;
+                        let platform_only = platform_primary_modifier(modifiers);
                         match event.keystroke.key.as_str() {
                             "a" if platform_only && !key_text.is_empty() => {
                                 key_selection.borrow_mut().select_all(key_text.len());
@@ -961,7 +962,7 @@ impl Element for AppTextInput {
                         }
 
                         let modifiers = event.keystroke.modifiers;
-                        let platform_only = platform_primary_modifier(modifiers) && !modifiers.alt;
+                        let platform_only = platform_primary_modifier(modifiers);
                         let key = event.keystroke.key.as_str();
 
                         let mut handled = true;
@@ -1441,15 +1442,11 @@ fn next_boundary(text: &str, offset: usize) -> usize {
 }
 
 fn platform_primary_modifier(modifiers: gpui::Modifiers) -> bool {
-    modifiers.platform
+    shortcuts::secondary_text_modifier(modifiers)
 }
 
 fn platform_click_modifier(modifiers: gpui::Modifiers) -> bool {
-    modifiers.platform
-        && !modifiers.control
-        && !modifiers.alt
-        && !modifiers.shift
-        && !modifiers.function
+    shortcuts::secondary_plain_modifier(modifiers)
 }
 
 fn set_active_text_target(id: String) {

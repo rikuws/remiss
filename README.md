@@ -11,21 +11,25 @@ Remiss uses a small fork of difftastic for embedded structural diffs. See
 
 ## Requirements
 
-- macOS is the primary development target today.
+- macOS is the primary development target. Windows has a first alpha build path.
 - Rust toolchain from `rust-toolchain.toml`.
 - Git.
 - GitHub CLI (`gh`) authenticated with `gh auth login`.
+- Optional: Codex and Copilot CLIs for AI-generated review tours.
 
 ## Development
 
 ```sh
 cargo fmt --check
+cargo check --all-targets --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 cargo run
 ```
 
 ## Packaging
+
+### macOS
 
 ```sh
 ./scripts/build-app.sh
@@ -35,6 +39,14 @@ REMISS_ALLOW_DEVELOPMENT_PACKAGE=1 REMISS_SIGNING_MODE=adhoc ./scripts/package-a
 `./scripts/package-app.sh` creates `dist/remiss-<version>-macos-<arch>.dmg` and `.zip`. Downloadable release packages require a `Developer ID Application` certificate unless `REMISS_ALLOW_DEVELOPMENT_PACKAGE=1` is set for local-only testing. Tagged GitHub releases (`v*`) use the `REMISS_*` signing and notarization secrets from `.github/workflows/release.yml`.
 
 Release builds also bundle Sparkle for in-app updates. Set `REMISS_SPARKLE_PUBLIC_ED_KEY` when building a distributable package, and set both `REMISS_SPARKLE_PUBLIC_ED_KEY` and `REMISS_SPARKLE_PRIVATE_KEY` as GitHub secrets for tagged releases. Generate/export those keys with Sparkle's `generate_keys` tool from `./scripts/ensure-sparkle.sh`.
+
+### Windows
+
+```powershell
+pwsh ./scripts/build-windows.ps1
+```
+
+`./scripts/build-windows.ps1` creates `dist/remiss-<version>-windows-<arch>.zip`. This first Windows package is an unsigned portable build containing `Remiss.exe` and the bundled `assets` directory. Installers, signing, and auto-update support are intentionally not part of the first Windows path.
 
 ## Data Model
 

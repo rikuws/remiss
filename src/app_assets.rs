@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gpui::{AssetSource, Result, SharedString};
 use lucide_icons::LUCIDE_FONT_BYTES;
@@ -15,14 +15,34 @@ pub struct AppAssets {
 impl AppAssets {
     pub fn new() -> Self {
         Self {
-            base: bundled_assets_dir()
-                .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets")),
+            base: bundled_assets_dir().unwrap_or_else(source_assets_dir),
         }
     }
 }
 
+fn source_assets_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets")
+}
+
 fn bundled_assets_dir() -> Option<PathBuf> {
     let executable = std::env::current_exe().ok()?;
+    bundled_assets_dir_for_executable(&executable, |path| path.is_dir())
+}
+
+fn bundled_assets_dir_for_executable(
+    executable: &Path,
+    is_dir: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    if let Some(assets_dir) = macos_bundled_assets_dir(executable, &is_dir) {
+        return Some(assets_dir);
+    }
+
+    let executable_dir = executable.parent()?;
+    let assets_dir = executable_dir.join("assets");
+    is_dir(&assets_dir).then_some(assets_dir)
+}
+
+fn macos_bundled_assets_dir(executable: &Path, is_dir: &impl Fn(&Path) -> bool) -> Option<PathBuf> {
     let macos_dir = executable.parent()?;
     let contents_dir = macos_dir.parent()?;
 
@@ -33,7 +53,7 @@ fn bundled_assets_dir() -> Option<PathBuf> {
     }
 
     let assets_dir = contents_dir.join("Resources").join("assets");
-    assets_dir.is_dir().then_some(assets_dir)
+    is_dir(&assets_dir).then_some(assets_dir)
 }
 
 pub fn load_bundled_fonts() -> Result<Vec<Cow<'static, [u8]>>> {
@@ -78,5 +98,28 @@ impl AssetSource for AppAssets {
                     .collect()
             })
             .map_err(Into::into)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_assets_inside_macos_bundle() {
+        let executable = Path::new("/Applications/Remiss.app/Contents/MacOS/remiss");
+        let expected = Path::new("/Applications/Remiss.app/Contents/Resources/assets");
+        let result = bundled_assets_dir_for_executable(executable, |path| path == expected);
+
+        assert_eq!(result.as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn resolves_assets_next_to_packaged_executable() {
+        let executable = Path::new("/tmp/Remiss/Remiss.exe");
+        let expected = Path::new("/tmp/Remiss/assets");
+        let result = bundled_assets_dir_for_executable(executable, |path| path == expected);
+
+        assert_eq!(result.as_deref(), Some(expected));
     }
 }

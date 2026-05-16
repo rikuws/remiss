@@ -51,6 +51,7 @@ use crate::review_session::{
 };
 use crate::selectable_text::{AppTextFieldKind, AppTextInput, SelectableText};
 use crate::semantic_diff::{build_semantic_diff_file, SemanticDiffFile, SemanticDiffSection};
+use crate::shortcuts;
 use crate::source_browser::render_source_browser;
 use crate::stacks::{
     discover_review_stack,
@@ -1499,8 +1500,8 @@ fn render_waypoint_spotlight(state: &Entity<AppState>, cx: &App) -> impl IntoEle
                                         .flex()
                                         .gap(px(6.0))
                                         .items_center()
-                                        .child(badge("cmd-j"))
-                                        .child(badge("cmd-shift-j")),
+                                        .child(badge(&shortcuts::secondary_key_label("j")))
+                                        .child(badge(&shortcuts::secondary_shift_key_label("j"))),
                                 ),
                         )
                         .child(
@@ -1566,9 +1567,10 @@ fn render_waypoint_spotlight(state: &Entity<AppState>, cx: &App) -> impl IntoEle
                                 div()
                                     .px(px(20.0))
                                     .pb(px(18.0))
-                                    .child(panel_state_text(
-                                        "No waypoints yet. Click a diff line, choose Add waypoint, or press cmd-shift-j on a selected line.",
-                                    )),
+                                    .child(panel_state_text(&format!(
+                                        "No waypoints yet. Click a diff line, choose Add waypoint, or press {} on a selected line.",
+                                        shortcuts::secondary_shift_key_label("j")
+                                    ))),
                             )
                         })
                         .children(filtered.into_iter().enumerate().map(|(ix, waymark)| {
@@ -14585,7 +14587,10 @@ fn render_review_line_action_popup(
                                 .text_size(px(11.0))
                                 .font_family(mono_font_family())
                                 .text_color(fg_subtle())
-                                .child("cmd-enter submit"),
+                                .child(format!(
+                                    "{} submit",
+                                    shortcuts::secondary_key_label("enter")
+                                )),
                         )
                         .child(
                             div()
