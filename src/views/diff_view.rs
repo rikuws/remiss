@@ -631,7 +631,7 @@ fn render_waypoint_spotlight(state: &Entity<AppState>, cx: &App) -> impl IntoEle
                 .border_1()
                 .border_color(transparent())
                 .bg(bg_overlay())
-                .shadow_sm()
+                .shadow(dialog_shadow())
                 .occlude()
                 .overflow_hidden()
                 .child(

@@ -1148,7 +1148,7 @@ impl Render for SharedLspHoverTooltipView {
             .border_1()
             .border_color(transparent())
             .bg(bg_overlay())
-            .shadow_sm()
+            .shadow(popover_shadow())
             .child(
                 div()
                     .px(px(12.0))

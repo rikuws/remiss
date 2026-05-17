@@ -15,6 +15,7 @@ use crate::app_menu::{
     SwitchToStructuralDiff, SyncWorkspace, ToggleCommandPalette, ToggleWaypointSpotlight,
 };
 use crate::branding::APP_NAME;
+use crate::deep_link::{self, DeepLinkRequest};
 use crate::github;
 use crate::icons::{lucide_icon, LucideIcon};
 use crate::local_review::{self, LocalReviewStatusKind, RememberedLocalRepository};
@@ -262,7 +263,7 @@ impl RootView {
 
 async fn maybe_bootstrap_debug_pull_request(
     model: &Entity<AppState>,
-    cache: &crate::cache::CacheStore,
+    _cache: &crate::cache::CacheStore,
     cx: &mut AsyncWindowContext,
 ) {
     let Some(debug_target) = std::env::var("REMISS_DEBUG_OPEN_PR")
@@ -277,27 +278,185 @@ async fn maybe_bootstrap_debug_pull_request(
         return;
     };
 
+    open_remote_pull_request_flow(
+        model.clone(),
+        repository,
+        number,
+        PullRequestSurface::Overview,
+        cx,
+    )
+    .await;
+}
+
+pub(crate) fn open_deep_link_request(
+    state: &Entity<AppState>,
+    request: DeepLinkRequest,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    match request {
+        DeepLinkRequest::GitHubPullRequest { repository, number } => {
+            let model = state.clone();
+            window
+                .spawn(cx, async move |cx: &mut AsyncWindowContext| {
+                    open_remote_pull_request_flow(
+                        model,
+                        repository,
+                        number,
+                        PullRequestSurface::Files,
+                        cx,
+                    )
+                    .await;
+                })
+                .detach();
+        }
+    }
+}
+
+async fn open_remote_pull_request_flow(
+    model: Entity<AppState>,
+    repository: String,
+    number: i64,
+    initial_surface: PullRequestSurface,
+    cx: &mut AsyncWindowContext,
+) {
+    let detail_key = pr_key(&repository, number);
+    let cached_review_session = model
+        .read_with(cx, |state, _| {
+            load_review_session(state.cache.as_ref(), &detail_key)
+                .ok()
+                .flatten()
+        })
+        .ok()
+        .flatten();
+    let cache = model.read_with(cx, |state, _| state.cache.clone()).ok();
+    let Some(cache) = cache else {
+        return;
+    };
+
+    model
+        .update(cx, |state, cx| {
+            if !state
+                .open_tabs
+                .iter()
+                .any(|tab| pr_key(&tab.repository, tab.number) == detail_key)
+            {
+                state
+                    .open_tabs
+                    .insert(0, placeholder_pull_request_summary(&repository, number));
+            }
+            state.set_active_section(SectionId::Pulls);
+            state.active_surface = initial_surface;
+            state.active_pr_key = Some(detail_key.clone());
+            state.pr_header_compact = false;
+            state.review_body.clear();
+            state.review_editor_active = false;
+            state.review_message = None;
+            state.review_success = false;
+
+            let detail_state = state.detail_states.entry(detail_key.clone()).or_default();
+            detail_state.loading = detail_state
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.detail.as_ref())
+                .is_none();
+            detail_state.syncing = true;
+            detail_state.error = None;
+            state.apply_review_session_document(&detail_key, cached_review_session.clone());
+            cx.notify();
+        })
+        .ok();
+
     let snapshot = match cx
         .background_executor()
         .spawn({
             let cache = cache.clone();
             let repository = repository.clone();
-            async move { github::load_pull_request_detail(&cache, &repository, number) }
+            async move { github::sync_pull_request_detail(&cache, &repository, number) }
         })
         .await
     {
         Ok(snapshot) => snapshot,
-        Err(_) => return,
+        Err(error) => {
+            model
+                .update(cx, |state, cx| {
+                    let detail_state = state.detail_states.entry(detail_key.clone()).or_default();
+                    detail_state.loading = false;
+                    detail_state.syncing = false;
+                    detail_state.error = Some(error);
+                    cx.notify();
+                })
+                .ok();
+            return;
+        }
     };
 
     let Some(detail) = snapshot.detail.clone() else {
+        let error = if !snapshot.auth.is_authenticated {
+            snapshot.auth.message.clone()
+        } else {
+            format!("Pull request {repository}#{number} was not found.")
+        };
+        model
+            .update(cx, |state, cx| {
+                let detail_state = state.detail_states.entry(detail_key.clone()).or_default();
+                detail_state.loading = false;
+                detail_state.syncing = false;
+                detail_state.error = Some(error);
+                cx.notify();
+            })
+            .ok();
         return;
     };
 
-    let review_session = load_review_session(cache, &pr_key(&repository, number))
-        .ok()
-        .flatten();
-    let summary = github::PullRequestSummary {
+    let summary = summary_from_detail(&detail);
+
+    model
+        .update(cx, |state, cx| {
+            if let Some(tab) = state
+                .open_tabs
+                .iter()
+                .position(|tab| pr_key(&tab.repository, tab.number) == detail_key)
+                .and_then(|index| state.open_tabs.get_mut(index))
+            {
+                *tab = summary.clone();
+            } else {
+                state.open_tabs.insert(0, summary);
+            }
+
+            state.set_active_section(SectionId::Pulls);
+            state.active_surface = initial_surface;
+            state.active_pr_key = Some(detail_key.clone());
+            state.pr_header_compact = false;
+            state.review_body.clear();
+            state.review_editor_active = false;
+            state.review_message = None;
+            state.review_success = false;
+
+            let detail_state = state.detail_states.entry(detail_key.clone()).or_default();
+            detail_state.snapshot = Some(snapshot.clone());
+            detail_state.loading = false;
+            detail_state.syncing = false;
+            detail_state.error = None;
+
+            state.apply_review_session_document(&detail_key, cached_review_session.clone());
+            state.ensure_active_selected_file_is_valid();
+            cx.notify();
+        })
+        .ok();
+
+    super::diff_view::load_pull_request_file_content_flow(model.clone(), None, cx).await;
+    warm_structural_diffs_flow(model.clone(), cx).await;
+}
+
+fn parse_debug_pull_request_target(target: &str) -> Option<(String, i64)> {
+    let (repository, number) = target.trim().rsplit_once('#')?;
+    let number = number.parse::<i64>().ok()?;
+    Some((repository.to_string(), number))
+}
+
+fn summary_from_detail(detail: &github::PullRequestDetail) -> github::PullRequestSummary {
+    github::PullRequestSummary {
         local_key: None,
         repository: detail.repository.clone(),
         number: detail.number,
@@ -313,50 +472,27 @@ async fn maybe_bootstrap_debug_pull_request(
         review_decision: detail.review_decision.clone(),
         updated_at: detail.updated_at.clone(),
         url: detail.url.clone(),
-    };
-    let detail_key = pr_key(&repository, number);
-
-    model
-        .update(cx, |state, cx| {
-            let opens_new_tab = !state
-                .open_tabs
-                .iter()
-                .any(|tab| pr_key(&tab.repository, tab.number) == detail_key);
-            if opens_new_tab {
-                state.open_tabs.insert(0, summary);
-            }
-
-            state.set_active_section(SectionId::Pulls);
-            state.active_surface = if opens_new_tab {
-                PullRequestSurface::Overview
-            } else {
-                PullRequestSurface::Files
-            };
-            state.active_pr_key = Some(detail_key.clone());
-            state.pr_header_compact = false;
-            state.review_body.clear();
-            state.review_editor_active = false;
-            state.review_message = None;
-            state.review_success = false;
-
-            let detail_state = state.detail_states.entry(detail_key.clone()).or_default();
-            detail_state.snapshot = Some(snapshot.clone());
-            detail_state.loading = false;
-            detail_state.syncing = false;
-            detail_state.error = None;
-
-            state.apply_review_session_document(&detail_key, review_session.clone());
-            cx.notify();
-        })
-        .ok();
-
-    warm_structural_diffs_flow(model.clone(), cx).await;
+    }
 }
 
-fn parse_debug_pull_request_target(target: &str) -> Option<(String, i64)> {
-    let (repository, number) = target.trim().rsplit_once('#')?;
-    let number = number.parse::<i64>().ok()?;
-    Some((repository.to_string(), number))
+fn placeholder_pull_request_summary(repository: &str, number: i64) -> github::PullRequestSummary {
+    github::PullRequestSummary {
+        local_key: None,
+        repository: repository.to_string(),
+        number,
+        title: format!("Pull request #{number}"),
+        author_login: "unknown".to_string(),
+        author_avatar_url: None,
+        is_draft: false,
+        comments_count: 0,
+        additions: 0,
+        deletions: 0,
+        changed_files: 0,
+        state: "LOADING".to_string(),
+        review_decision: None,
+        updated_at: String::new(),
+        url: deep_link::github_pull_request_web_url(repository, number),
+    }
 }
 
 pub(crate) fn refresh_active_local_review(
@@ -2064,7 +2200,7 @@ fn render_notification_drawer(state: &Entity<AppState>, cx: &App) -> impl IntoEl
         .border_1()
         .border_color(transparent())
         .bg(bg_overlay())
-        .shadow_md()
+        .shadow(popover_shadow())
         .flex()
         .flex_col()
         .overflow_hidden()
@@ -2274,6 +2410,7 @@ impl Render for ChromeTooltipView {
             .border_1()
             .border_color(transparent())
             .bg(bg_overlay())
+            .shadow(tooltip_shadow())
             .text_size(px(11.0))
             .text_color(fg_default())
             .child(self.text.clone())

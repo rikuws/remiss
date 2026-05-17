@@ -1155,7 +1155,7 @@ pub(super) fn render_finish_review_modal(
                 .border_1()
                 .border_color(transparent())
                 .bg(bg_overlay())
-                .shadow_sm()
+                .shadow(dialog_shadow())
                 .occlude()
                 .overflow_hidden()
                 .flex()
@@ -1522,7 +1522,7 @@ fn render_review_line_action_popup(
         .bg(bg_overlay())
         // Prevent diff rows behind the popup from receiving mouse interactions.
         .occlude()
-        .shadow_sm()
+        .shadow(popover_shadow())
         .on_any_mouse_down(|_, _, cx| {
             cx.stop_propagation();
         })

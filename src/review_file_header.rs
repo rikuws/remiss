@@ -220,6 +220,7 @@ impl Render for ReviewFileHeaderTooltip {
             .border_1()
             .border_color(transparent())
             .bg(bg_overlay())
+            .shadow(tooltip_shadow())
             .text_size(px(11.0))
             .font_weight(FontWeight::MEDIUM)
             .text_color(fg_emphasis())

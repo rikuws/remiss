@@ -300,10 +300,10 @@ fn render_guided_review_panel(
                 .id("guided-review-scroll")
                 .overflow_y_scroll()
                 .px(px(14.0))
-                .py(px(12.0))
+                .py(px(14.0))
                 .flex()
                 .flex_col()
-                .gap(px(12.0))
+                .gap(px(14.0))
                 .when(loading || generating, |el| {
                     el.child(render_guided_review_partner_status(
                         "Preparing context",
@@ -467,19 +467,19 @@ fn render_guided_review_focus_record(
     div()
         .flex()
         .flex_col()
-        .gap(px(12.0))
+        .gap(px(14.0))
         .child(
             div()
                 .flex()
                 .flex_col()
-                .gap(px(5.0))
-                .pb(px(2.0))
+                .gap(px(6.0))
+                .pb(px(3.0))
                 .child(
                     div()
                         .text_size(px(13.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(fg_emphasis())
-                        .line_height(px(18.0))
+                        .line_height(px(19.0))
                         .whitespace_normal()
                         .child(SelectableText::new(
                             format!("review-partner-focus-{}-title", record.key),
@@ -566,7 +566,7 @@ fn render_review_partner_summary(
     div()
         .flex()
         .flex_col()
-        .gap(px(7.0))
+        .gap(px(9.0))
         .child(render_review_partner_section_header(
             "Summary".to_string(),
             None,
@@ -578,7 +578,7 @@ fn render_review_partner_summary(
                 .w_full()
                 .min_w_0()
                 .text_size(px(13.0))
-                .line_height(px(20.0))
+                .line_height(px(21.0))
                 .text_color(fg_default())
                 .whitespace_normal()
                 .child(summary),
@@ -712,12 +712,12 @@ fn render_review_partner_flat_section(
     body: Vec<AnyElement>,
 ) -> impl IntoElement {
     div()
-        .pt(px(10.0))
+        .pt(px(12.0))
         .border_t(px(1.0))
-        .border_color(with_alpha(diff_annotation_border(), 0.72))
+        .border_color(with_alpha(diff_annotation_border(), 0.8))
         .flex()
         .flex_col()
-        .gap(px(7.0))
+        .gap(px(9.0))
         .child(render_review_partner_section_header(
             title, detail, icon, tone,
         ))
@@ -801,8 +801,8 @@ fn render_review_partner_disclosure(
             div()
                 .id(ElementId::Name(header_key.into()))
                 .rounded(px(4.0))
-                .px(px(2.0))
-                .py(px(5.0))
+                .px(px(3.0))
+                .py(px(6.0))
                 .flex()
                 .items_center()
                 .gap(px(6.0))
@@ -857,7 +857,7 @@ fn render_review_partner_disclosure(
                             el.child(
                                 div()
                                     .text_size(px(11.0))
-                                    .line_height(px(16.0))
+                                    .line_height(px(17.0))
                                     .text_color(fg_muted())
                                     .whitespace_normal()
                                     .child(detail),
@@ -868,12 +868,12 @@ fn render_review_partner_disclosure(
         .when(expanded && !body.is_empty(), |el| {
             el.child(
                 div()
-                    .pl(px(21.0))
-                    .pt(px(2.0))
-                    .pb(px(5.0))
+                    .pl(px(22.0))
+                    .pt(px(4.0))
+                    .pb(px(7.0))
                     .flex()
                     .flex_col()
-                    .gap(px(5.0))
+                    .gap(px(6.0))
                     .children(body),
             )
         })
@@ -909,8 +909,8 @@ fn render_review_partner_item_row(
         .w_full()
         .min_w_0()
         .rounded(px(4.0))
-        .px(px(6.0))
-        .py(px(5.0))
+        .px(px(7.0))
+        .py(px(6.0))
         .flex()
         .hover(|style| style.bg(bg_selected()))
         .child(
@@ -924,7 +924,7 @@ fn render_review_partner_item_row(
                     el.child(
                         div()
                             .text_size(px(12.0))
-                            .line_height(px(17.0))
+                            .line_height(px(18.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(fg_emphasis())
                             .whitespace_normal()
@@ -936,8 +936,8 @@ fn render_review_partner_item_row(
                 })
                 .child(
                     div()
-                        .text_size(px(12.0))
-                        .line_height(px(17.0))
+                        .text_size(px(12.5))
+                        .line_height(px(19.0))
                         .font_weight(if show_title {
                             FontWeight::NORMAL
                         } else {
@@ -980,8 +980,8 @@ fn render_review_partner_usage_item_row(
         .w_full()
         .min_w_0()
         .rounded(px(4.0))
-        .px(px(6.0))
-        .py(px(5.0))
+        .px(px(7.0))
+        .py(px(6.0))
         .flex()
         .hover(|style| style.bg(bg_selected()))
         .child(
@@ -994,7 +994,7 @@ fn render_review_partner_usage_item_row(
                 .child(
                     div()
                         .text_size(px(11.5))
-                        .line_height(px(17.0))
+                        .line_height(px(18.0))
                         .font_family(mono_font_family())
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(fg_default())

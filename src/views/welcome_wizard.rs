@@ -94,7 +94,7 @@ pub(super) fn render_onboarding_wizard(state: &Entity<AppState>, cx: &App) -> im
                 .border_1()
                 .border_color(transparent())
                 .bg(bg_overlay())
-                .shadow_sm()
+                .shadow(popover_shadow())
                 .occlude()
                 .overflow_hidden()
                 .child(render_coachmark_header(

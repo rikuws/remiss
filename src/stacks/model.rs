@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{semantic_review::RemissSemanticReview, structural_evidence::StructuralEvidencePack};
 
-pub const STACK_GENERATOR_VERSION: &str = "virtual-stacks-v3";
+pub const STACK_GENERATOR_VERSION: &str = "virtual-stacks-v4";
 
 pub type ReviewStackId = String;
 pub type ReviewStackLayerId = String;

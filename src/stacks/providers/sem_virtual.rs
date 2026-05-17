@@ -216,7 +216,7 @@ fn build_stack_from_semantic_review(
             ReviewStackLayer {
                 id: layer_id,
                 index,
-                title: clean_layer_text(&group.title, "Sem review layer", 90),
+                title: polished_layer_title(&group, &layer_atoms, role),
                 summary: clean_layer_text(&group.summary, "Sem grouped these changes.", 260),
                 rationale: clean_layer_text(
                     &group.rationale,
@@ -340,6 +340,8 @@ struct SemLayerGroup {
     summary: String,
     rationale: String,
     atom_ids: Vec<ChangeAtomId>,
+    file_paths: Vec<String>,
+    entity_names: Vec<String>,
     source_label: String,
     confidence: Confidence,
 }
@@ -354,6 +356,8 @@ impl SemLayerGroup {
             summary: layer.summary.clone(),
             rationale: layer.rationale.clone(),
             atom_ids,
+            file_paths: layer.file_paths.clone(),
+            entity_names: layer.entity_names.clone(),
             source_label: "sem-layer".to_string(),
             confidence: Confidence::High,
         }
@@ -410,6 +414,8 @@ fn assign_unmapped_substantive_atoms(
                 "This repair group preserves exact atom coverage without asking the LLM to invent stack structure."
                     .to_string(),
             atom_ids,
+            file_paths: Vec::new(),
+            entity_names: Vec::new(),
             source_label: "sem-coverage-repair".to_string(),
             confidence: Confidence::Medium,
         });
@@ -661,8 +667,12 @@ fn merge_excess_groups(
             previous.rationale =
                 "Merged Sem groups to stay within the configured Guided Review layer budget."
                     .to_string();
+            previous.file_paths.extend(last.file_paths);
+            previous.entity_names.extend(last.entity_names);
             previous.confidence = previous.confidence.min(last.confidence);
             dedup_atom_ids(&mut previous.atom_ids);
+            dedup_strings(&mut previous.file_paths);
+            dedup_strings(&mut previous.entity_names);
         } else {
             groups.push(last);
             break;
@@ -860,6 +870,341 @@ fn hunk_indices_overlap(left: &ChangeAtom, right: &ChangeAtom) -> bool {
 fn dedup_atom_ids(atom_ids: &mut Vec<ChangeAtomId>) {
     let mut seen = BTreeSet::<ChangeAtomId>::new();
     atom_ids.retain(|atom_id| seen.insert(atom_id.clone()));
+}
+
+fn dedup_strings(values: &mut Vec<String>) {
+    let mut seen = BTreeSet::<String>::new();
+    values.retain(|value| seen.insert(value.clone()));
+}
+
+fn polished_layer_title(group: &SemLayerGroup, atoms: &[&ChangeAtom], role: ChangeRole) -> String {
+    let original = clean_layer_text(&group.title, "Sem review layer", 90);
+    if !sem_title_needs_polish(&original) {
+        return original;
+    }
+
+    let file_paths = title_file_paths(group, atoms);
+    let terms = title_terms(group, atoms);
+    domain_layer_title(&terms, &file_paths)
+        .or_else(|| file_based_layer_title(&file_paths, role))
+        .map(|title| clean_layer_text(&title, &original, 90))
+        .unwrap_or(original)
+}
+
+fn sem_title_needs_polish(title: &str) -> bool {
+    let lower = title.trim().to_ascii_lowercase();
+    lower == "update related code"
+        || lower.contains("+ update related code")
+        || lower == "update configuration"
+        || lower == "sem review layer"
+        || lower.starts_with("update readme")
+        || lower.starts_with("update .github/")
+        || lower.starts_with("update scripts/")
+        || lower.starts_with("update src/")
+}
+
+fn title_file_paths(group: &SemLayerGroup, atoms: &[&ChangeAtom]) -> Vec<String> {
+    let mut paths = group.file_paths.clone();
+    paths.extend(atoms.iter().map(|atom| atom.path.clone()));
+    dedup_strings(&mut paths);
+    paths
+}
+
+fn title_terms(group: &SemLayerGroup, atoms: &[&ChangeAtom]) -> BTreeSet<String> {
+    let mut terms = BTreeSet::new();
+    for value in group
+        .entity_names
+        .iter()
+        .chain(group.file_paths.iter())
+        .chain(std::iter::once(&group.title))
+    {
+        add_title_terms(value, &mut terms);
+    }
+    for atom in atoms {
+        add_title_terms(&atom.path, &mut terms);
+        if let Some(symbol) = atom.symbol_name.as_ref() {
+            add_title_terms(symbol, &mut terms);
+        }
+        for symbol in atom
+            .defined_symbols
+            .iter()
+            .chain(atom.referenced_symbols.iter())
+        {
+            add_title_terms(symbol, &mut terms);
+        }
+        for header in &atom.hunk_headers {
+            add_title_terms(header, &mut terms);
+        }
+    }
+    terms
+}
+
+fn add_title_terms(value: &str, terms: &mut BTreeSet<String>) {
+    let mut expanded = String::with_capacity(value.len());
+    let mut previous_lowercase = false;
+    for ch in value.chars() {
+        if ch.is_ascii_uppercase() {
+            if previous_lowercase {
+                expanded.push(' ');
+            }
+            expanded.push(ch.to_ascii_lowercase());
+            previous_lowercase = false;
+        } else {
+            expanded.push(ch.to_ascii_lowercase());
+            previous_lowercase = ch.is_ascii_lowercase();
+        }
+    }
+
+    for token in expanded.split(|ch: char| !ch.is_ascii_alphanumeric()) {
+        let token = token.trim();
+        if title_token_is_useful(token) {
+            terms.insert(token.to_string());
+        }
+    }
+}
+
+fn title_token_is_useful(token: &str) -> bool {
+    if token.len() < 2 || token.chars().all(|ch| ch.is_ascii_digit()) {
+        return false;
+    }
+    !matches!(
+        token,
+        "rs" | "md"
+            | "ps1"
+            | "toml"
+            | "yaml"
+            | "yml"
+            | "json"
+            | "lock"
+            | "src"
+            | "line"
+            | "lines"
+            | "new"
+            | "old"
+            | "update"
+            | "updated"
+            | "related"
+            | "code"
+            | "render"
+            | "renders"
+            | "assert"
+            | "test"
+            | "tests"
+            | "default"
+            | "from"
+            | "into"
+            | "with"
+            | "for"
+    )
+}
+
+fn domain_layer_title(terms: &BTreeSet<String>, file_paths: &[String]) -> Option<String> {
+    if file_paths
+        .iter()
+        .any(|path| path.starts_with(".github/workflows/"))
+    {
+        return Some("CI and release workflows".to_string());
+    }
+    if file_paths
+        .iter()
+        .all(|path| path.eq_ignore_ascii_case("README.md"))
+    {
+        return Some(
+            if has_any(terms, &["windows", "macos", "packaging", "requirements"]) {
+                "Platform setup docs".to_string()
+            } else {
+                "Project documentation".to_string()
+            },
+        );
+    }
+    if file_paths
+        .iter()
+        .any(|path| path.ends_with("build-windows.ps1"))
+    {
+        return Some("Windows build script".to_string());
+    }
+    if has_any(
+        terms,
+        &["secondary", "shortcut", "shortcuts", "modifier", "key"],
+    ) && has_any(
+        terms,
+        &["label", "labels", "shortcut", "shortcuts", "modifier"],
+    ) {
+        return Some(if terms.contains("secondary") {
+            "Secondary shortcut labels".to_string()
+        } else {
+            "Shortcut labels".to_string()
+        });
+    }
+    if has_any(terms, &["tool", "binary", "candidate", "candidates"])
+        && has_any(
+            terms,
+            &["asset", "assets", "bundle", "bundled", "nvm", "copilot"],
+        )
+    {
+        return Some("Tool discovery and bundled assets".to_string());
+    }
+    if has_any(terms, &["asset", "assets", "bundle", "bundled"]) {
+        return Some("Bundle asset paths".to_string());
+    }
+    if terms.contains("menu") && has_any(terms, &["key", "keys", "equivalent", "equivalents"]) {
+        return Some("Menu shortcuts".to_string());
+    }
+    if terms.contains("review")
+        && has_any(
+            terms,
+            &[
+                "waypoint",
+                "spotlight",
+                "popup",
+                "palette",
+                "submit",
+                "panel",
+                "action",
+            ],
+        )
+    {
+        return Some("Review action UI".to_string());
+    }
+    if terms.contains("palette") {
+        return Some("Command palette".to_string());
+    }
+    if has_any(terms, &["checkout", "worktree", "repository", "repo"]) {
+        return Some("Checkout recovery".to_string());
+    }
+    if has_any(terms, &["lsp", "definition", "location", "locations"]) {
+        return Some("LSP navigation".to_string());
+    }
+    if has_any(terms, &["window", "titlebar", "chrome"]) {
+        return Some("Window chrome".to_string());
+    }
+    if has_any(terms, &["notification", "notifications"]) {
+        return Some("Notifications".to_string());
+    }
+    None
+}
+
+fn has_any(terms: &BTreeSet<String>, candidates: &[&str]) -> bool {
+    candidates
+        .iter()
+        .any(|candidate| terms.contains(*candidate))
+}
+
+fn file_based_layer_title(file_paths: &[String], role: ChangeRole) -> Option<String> {
+    match file_paths {
+        [] => None,
+        [path] => Some(single_file_layer_title(path, role)),
+        paths => {
+            let common = common_directory(paths)?;
+            Some(match (role, common.as_str()) {
+                (ChangeRole::Presentation, "src/views") => "Review view surfaces".to_string(),
+                (ChangeRole::Config, ".github/workflows") => "Workflow configuration".to_string(),
+                (ChangeRole::CoreLogic, "src") => "Core source behavior".to_string(),
+                (_, directory) => {
+                    let topic = human_title_from_identifier(
+                        directory.rsplit('/').next().unwrap_or(directory),
+                    );
+                    match role {
+                        ChangeRole::Presentation => format!("{topic} UI"),
+                        ChangeRole::Tests => format!("{topic} validation"),
+                        ChangeRole::Docs => format!("{topic} docs"),
+                        ChangeRole::Config | ChangeRole::Foundation => {
+                            format!("{topic} foundation")
+                        }
+                        ChangeRole::CoreLogic | ChangeRole::Integration => {
+                            format!("{topic} behavior")
+                        }
+                        ChangeRole::Generated | ChangeRole::Unknown => format!("{topic} review"),
+                    }
+                }
+            })
+        }
+    }
+}
+
+fn single_file_layer_title(path: &str, role: ChangeRole) -> String {
+    let lower = path.to_ascii_lowercase();
+    if lower == "readme.md" {
+        return "Project documentation".to_string();
+    }
+    if lower.ends_with("build-windows.ps1") {
+        return "Windows build script".to_string();
+    }
+    if lower.ends_with("/ci.yml") || lower.ends_with("/ci.yaml") {
+        return "CI workflow".to_string();
+    }
+    if lower.ends_with("/release.yml") || lower.ends_with("/release.yaml") {
+        return "Release workflow".to_string();
+    }
+
+    let topic = path
+        .rsplit('/')
+        .next()
+        .map(file_stem)
+        .map(human_title_from_identifier)
+        .unwrap_or_else(|| "Review".to_string());
+    match role {
+        ChangeRole::Presentation => format!("{topic} UI"),
+        ChangeRole::Tests => format!("{topic} validation"),
+        ChangeRole::Docs => format!("{topic} docs"),
+        ChangeRole::Config => format!("{topic} configuration"),
+        ChangeRole::Foundation => format!("{topic} foundation"),
+        ChangeRole::CoreLogic | ChangeRole::Integration => format!("{topic} behavior"),
+        ChangeRole::Generated | ChangeRole::Unknown => format!("{topic} review"),
+    }
+}
+
+fn common_directory(paths: &[String]) -> Option<String> {
+    let mut dirs = paths
+        .iter()
+        .filter_map(|path| path.rsplit_once('/').map(|(dir, _)| dir));
+    let first = dirs.next()?.to_string();
+    if dirs.all(|dir| dir == first) {
+        Some(first)
+    } else {
+        None
+    }
+}
+
+fn file_stem(file_name: &str) -> &str {
+    file_name
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(file_name)
+}
+
+fn human_title_from_identifier(value: &str) -> String {
+    let mut terms = BTreeSet::new();
+    add_title_terms(value, &mut terms);
+    if terms.is_empty() {
+        return value.to_string();
+    }
+    terms
+        .into_iter()
+        .map(|word| title_word(&word))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn title_word(word: &str) -> String {
+    match word {
+        "api" => "API".to_string(),
+        "ci" => "CI".to_string(),
+        "cli" => "CLI".to_string(),
+        "lsp" => "LSP".to_string(),
+        "macos" => "macOS".to_string(),
+        "nvm" => "nvm".to_string(),
+        "pr" => "PR".to_string(),
+        "readme" => "README".to_string(),
+        "ui" => "UI".to_string(),
+        _ => {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        }
+    }
 }
 
 fn clean_layer_text(value: &str, fallback: &str, limit: usize) -> String {
@@ -1072,6 +1417,116 @@ mod tests {
         assert_exact_stack_coverage(&stack);
     }
 
+    #[test]
+    fn sem_stack_polishes_generic_update_titles_from_layer_context() {
+        let mut tools = atom(
+            "tools",
+            "src/app_assets.rs",
+            ChangeRole::CoreLogic,
+            Some("function"),
+            24,
+        );
+        tools.symbol_name = Some("tool_binary_candidates".to_string());
+        tools.defined_symbols = vec![
+            "tool_binary_candidates".to_string(),
+            "bundled_assets_dir".to_string(),
+        ];
+        let mut shortcuts = atom(
+            "shortcuts",
+            "src/shortcuts.rs",
+            ChangeRole::CoreLogic,
+            Some("function"),
+            12,
+        );
+        shortcuts.symbol_name = Some("secondary_key_label".to_string());
+        shortcuts.defined_symbols = vec![
+            "secondary_key_label".to_string(),
+            "secondary_modifier_label".to_string(),
+        ];
+        let mut review_ui = atom(
+            "review-ui",
+            "src/views/diff_view.rs",
+            ChangeRole::Presentation,
+            Some("function"),
+            12,
+        );
+        review_ui.symbol_name = Some("render_review_line_action_popup".to_string());
+        review_ui.defined_symbols = vec![
+            "render_review_line_action_popup".to_string(),
+            "render_submit_review_panel".to_string(),
+        ];
+
+        let review = semantic_review(
+            vec![
+                sem_layer_with_entities(
+                    "sem-tools",
+                    0,
+                    "Update related code",
+                    vec!["src/app_assets.rs", "src/cli_binary.rs"],
+                    vec!["tool_binary_candidates", "bundled_assets_dir"],
+                    vec![0],
+                ),
+                sem_layer_with_entities(
+                    "sem-shortcuts",
+                    1,
+                    "Update related code",
+                    vec!["src/main.rs", "src/shortcuts.rs"],
+                    vec!["secondary_key_label", "secondary_modifier_label"],
+                    vec![0],
+                ),
+                sem_layer_with_entities(
+                    "sem-review-ui",
+                    2,
+                    "Update related code",
+                    vec![
+                        "src/views/diff_view.rs",
+                        "src/views/palette.rs",
+                        "src/views/pr_detail.rs",
+                    ],
+                    vec![
+                        "render_review_line_action_popup",
+                        "render_palette",
+                        "render_submit_review_panel",
+                    ],
+                    vec![0],
+                ),
+            ],
+            vec![
+                mapping("sem-tools", vec!["tools"], vec!["src/app_assets.rs"]),
+                mapping("sem-shortcuts", vec!["shortcuts"], vec!["src/shortcuts.rs"]),
+                mapping(
+                    "sem-review-ui",
+                    vec!["review-ui"],
+                    vec!["src/views/diff_view.rs"],
+                ),
+            ],
+        );
+
+        let stack = build_stack_from_semantic_review(
+            &detail(),
+            vec![tools, shortcuts, review_ui],
+            &review,
+            &VirtualStackSizing::default(),
+        )
+        .expect("sem stack");
+        let titles = stack
+            .layers
+            .iter()
+            .map(|layer| layer.title.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            titles,
+            vec![
+                "Tool discovery and bundled assets",
+                "Secondary shortcut labels",
+                "Review action UI"
+            ]
+        );
+        assert!(!titles.contains(&"Update related code"));
+        assert_exact_stack_coverage(&stack);
+    }
+
     fn assert_exact_stack_coverage(stack: &ReviewStack) {
         let known = stack
             .atoms
@@ -1118,6 +1573,17 @@ mod tests {
         file_paths: Vec<&str>,
         hunk_indices: Vec<usize>,
     ) -> SemReviewLayer {
+        sem_layer_with_entities(id, index, title, file_paths, vec![title], hunk_indices)
+    }
+
+    fn sem_layer_with_entities(
+        id: &str,
+        index: usize,
+        title: &str,
+        file_paths: Vec<&str>,
+        entity_names: Vec<&str>,
+        hunk_indices: Vec<usize>,
+    ) -> SemReviewLayer {
         SemReviewLayer {
             id: id.to_string(),
             index,
@@ -1128,7 +1594,7 @@ mod tests {
             change_indices: vec![index],
             file_paths: file_paths.into_iter().map(str::to_string).collect(),
             hunk_indices,
-            entity_names: vec![title.to_string()],
+            entity_names: entity_names.into_iter().map(str::to_string).collect(),
         }
     }
 

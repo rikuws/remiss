@@ -83,7 +83,7 @@ pub fn render_palette(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                 .border_1()
                 .border_color(transparent())
                 .occlude()
-                .shadow_sm()
+                .shadow(dialog_shadow())
                 .overflow_hidden()
                 .flex()
                 .flex_col()

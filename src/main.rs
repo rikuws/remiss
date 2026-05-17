@@ -43,6 +43,7 @@ mod code_display;
 mod code_tour;
 mod code_tour_background;
 mod command_runner;
+mod deep_link;
 mod diff;
 mod difftastic;
 mod emoji;
@@ -113,17 +114,25 @@ use views::{
 fn main() {
     cli_binary::repair_process_path_for_cli_tools();
 
-    Application::new()
+    let deep_link_dispatcher = deep_link::DeepLinkDispatcher::new();
+    let deep_link_dispatcher_for_urls = deep_link_dispatcher.clone();
+    let application = Application::new()
         .with_assets(AppAssets::new())
-        .with_http_client(Arc::new(UreqHttpClient::new()))
-        .run(|cx: &mut App| {
-            if let Err(error) = start_app(cx) {
-                eprintln!("{APP_NAME} failed to start: {error}");
-            }
-        });
+        .with_http_client(Arc::new(UreqHttpClient::new()));
+    application.on_open_urls(move |urls| {
+        deep_link_dispatcher_for_urls.receive_urls(urls);
+    });
+    application.run(move |cx: &mut App| {
+        if let Err(error) = start_app(cx, deep_link_dispatcher.clone()) {
+            eprintln!("{APP_NAME} failed to start: {error}");
+        }
+    });
 }
 
-fn start_app(cx: &mut App) -> Result<(), String> {
+fn start_app(
+    cx: &mut App,
+    deep_link_dispatcher: deep_link::DeepLinkDispatcher,
+) -> Result<(), String> {
     let startup_wizard_options = onboarding::StartupWizardOptions::from_env_and_args();
     let bundled_fonts =
         load_bundled_fonts().map_err(|error| format!("Failed to load bundled fonts: {error}"))?;
@@ -147,22 +156,40 @@ fn start_app(cx: &mut App) -> Result<(), String> {
     });
 
     let bounds = Bounds::centered(None, initial_window_size, cx);
-    cx.open_window(
-        WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(TitlebarOptions {
-                title: Some(APP_NAME.into()),
-                appears_transparent: true,
-                traffic_light_position: Some(point(
-                    px(APP_TRAFFIC_LIGHT_LEFT),
-                    px(APP_TRAFFIC_LIGHT_TOP),
-                )),
-            }),
-            ..Default::default()
-        },
-        |window, cx| cx.new(|cx| RootView::new(app_state.clone(), window, cx)),
-    )
-    .map_err(|error| format!("Failed to open app window: {error:?}"))?;
+    let root_window = cx
+        .open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(TitlebarOptions {
+                    title: Some(APP_NAME.into()),
+                    appears_transparent: true,
+                    traffic_light_position: Some(point(
+                        px(APP_TRAFFIC_LIGHT_LEFT),
+                        px(APP_TRAFFIC_LIGHT_TOP),
+                    )),
+                }),
+                ..Default::default()
+            },
+            |window, cx| cx.new(|cx| RootView::new(app_state.clone(), window, cx)),
+        )
+        .map_err(|error| format!("Failed to open app window: {error:?}"))?;
+    let async_app = cx.to_async();
+    deep_link_dispatcher.install_handler({
+        let app_state = app_state.clone();
+        move |request| {
+            let app_state = app_state.clone();
+            let root_window = root_window.clone();
+            let mut async_app = async_app.clone();
+            let result = root_window.update(&mut async_app, move |_, window, cx| {
+                cx.activate(true);
+                window.activate_window();
+                views::open_deep_link_request(&app_state, request, window, cx);
+            });
+            if let Err(error) = result {
+                eprintln!("Failed to route Remiss URL: {error}");
+            }
+        }
+    });
 
     if let Err(error) = platform_macos::updates::start_updater() {
         eprintln!("{APP_NAME} updater disabled: {error}");

@@ -196,6 +196,7 @@ pub(super) fn render_combined_diff_files(
     let list_state = view_state.list_state.clone();
     let render_collapse_list_state = view_state.list_state.clone();
     let scrollbar_list_state = view_state.list_state.clone();
+    let scrollbar_activity = view_state.scrollbar_activity.clone();
     let side_by_side_scroll_handles = SideBySideScrollHandles {
         left: view_state.side_by_side_left_scroll.clone(),
         right: view_state.side_by_side_right_scroll.clone(),
@@ -238,6 +239,7 @@ pub(super) fn render_combined_diff_files(
         body,
         &scrollbar_list_state,
         item_count,
+        &scrollbar_activity,
         (!wrap_diff_lines && has_side_by_side_rows).then_some(&side_by_side_scroll_handles),
         DiffScrollbarInsets::combined_body(),
         show_top_fade,
@@ -278,14 +280,29 @@ pub(super) fn render_diff_scroll_body(
     body: AnyElement,
     list_state: &ListState,
     item_count: usize,
+    scrollbar_activity: &DiffScrollbarActivity,
     side_by_side_scroll_handles: Option<&SideBySideScrollHandles>,
     side_by_side_scrollbar_insets: DiffScrollbarInsets,
     show_top_fade: bool,
 ) -> AnyElement {
-    let side_by_side_scrollbars = side_by_side_scroll_handles.and_then(|handles| {
-        render_side_by_side_horizontal_scrollbars(handles, side_by_side_scrollbar_insets)
-    });
-    let has_side_by_side_scrollbars = side_by_side_scrollbars.is_some();
+    let scrollbars_visible = scrollbar_activity.is_visible();
+    let has_side_by_side_scrollbars = side_by_side_scroll_handles
+        .map(|handles| {
+            handles.left_has_horizontal_scroll() || handles.right_has_horizontal_scroll()
+        })
+        .unwrap_or(false);
+    let side_by_side_scrollbars = scrollbars_visible
+        .then(|| {
+            side_by_side_scroll_handles.and_then(|handles| {
+                render_side_by_side_horizontal_scrollbars(
+                    handles,
+                    side_by_side_scrollbar_insets,
+                    scrollbar_activity,
+                )
+            })
+        })
+        .flatten();
+    let scroll_activity = scrollbar_activity.clone();
 
     div()
         .relative()
@@ -297,10 +314,15 @@ pub(super) fn render_diff_scroll_body(
         .when(has_side_by_side_scrollbars, |el| {
             el.pb(px(DIFF_SCROLLBAR_WIDTH + 4.0))
         })
+        .on_scroll_wheel(move |_, window, cx| {
+            mark_diff_scrollbars_active(&scroll_activity, window, cx);
+        })
         .child(body)
         .when(show_top_fade, |el| el.child(render_diff_scroll_top_fade()))
         .when_some(
-            render_diff_vertical_scrollbar(list_state, item_count),
+            scrollbars_visible
+                .then(|| render_diff_vertical_scrollbar(list_state, item_count, scrollbar_activity))
+                .flatten(),
             |el, scrollbar| el.child(scrollbar),
         )
         .when_some(side_by_side_scrollbars, |el, scrollbar| el.child(scrollbar))
@@ -430,7 +452,39 @@ impl Render for DiffScrollbarDragPreview {
     }
 }
 
-fn render_diff_vertical_scrollbar(list_state: &ListState, item_count: usize) -> Option<AnyElement> {
+const DIFF_SCROLLBAR_IDLE_HIDE_DELAY: Duration = Duration::from_millis(650);
+
+fn mark_diff_scrollbars_active(
+    scrollbar_activity: &DiffScrollbarActivity,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let (generation, was_hidden) = scrollbar_activity.show();
+    if was_hidden {
+        window.refresh();
+    }
+
+    let scrollbar_activity = scrollbar_activity.clone();
+    window
+        .spawn(cx, async move |cx| {
+            cx.background_executor()
+                .timer(DIFF_SCROLLBAR_IDLE_HIDE_DELAY)
+                .await;
+            cx.update(|window, _cx| {
+                if scrollbar_activity.hide_if_current(generation) {
+                    window.refresh();
+                }
+            })
+            .ok();
+        })
+        .detach();
+}
+
+fn render_diff_vertical_scrollbar(
+    list_state: &ListState,
+    item_count: usize,
+    scrollbar_activity: &DiffScrollbarActivity,
+) -> Option<AnyElement> {
     if item_count <= 1 {
         return None;
     }
@@ -461,6 +515,8 @@ fn render_diff_vertical_scrollbar(list_state: &ListState, item_count: usize) -> 
         viewport_height - thumb_height,
     );
     let drag_id_for_move = drag_id.clone();
+    let drag_start_activity = scrollbar_activity.clone();
+    let drag_move_activity = scrollbar_activity.clone();
 
     Some(
         div()
@@ -478,13 +534,17 @@ fn render_diff_vertical_scrollbar(list_state: &ListState, item_count: usize) -> 
                     .h(px(thumb_height))
                     .id(ElementId::Name(drag_id.into()))
                     .cursor(CursorStyle::ResizeUpDown)
-                    .on_drag(drag, |_, _, _, cx| cx.new(|_| DiffScrollbarDragPreview))
+                    .on_drag(drag, move |_, _, window, cx| {
+                        mark_diff_scrollbars_active(&drag_start_activity, window, cx);
+                        cx.new(|_| DiffScrollbarDragPreview)
+                    })
                     .on_drag_move(
                         move |event: &DragMoveEvent<DiffVerticalScrollbarDrag>, window, cx| {
-                            let drag = event.drag(cx);
+                            let drag = event.drag(cx).clone();
                             if drag.id != drag_id_for_move {
                                 return;
                             }
+                            mark_diff_scrollbars_active(&drag_move_activity, window, cx);
                             drag.drag_to(event.event.position.y, window);
                         },
                     )
@@ -527,6 +587,7 @@ impl DiffScrollbarInsets {
 fn render_side_by_side_horizontal_scrollbars(
     handles: &SideBySideScrollHandles,
     insets: DiffScrollbarInsets,
+    scrollbar_activity: &DiffScrollbarActivity,
 ) -> Option<AnyElement> {
     let left_has_scroll = handles.left_has_horizontal_scroll();
     let right_has_scroll = handles.right_has_horizontal_scroll();
@@ -546,11 +607,13 @@ fn render_side_by_side_horizontal_scrollbars(
                 SideBySideDiffSide::Left,
                 handles.handle_for(SideBySideDiffSide::Left),
                 left_has_scroll,
+                scrollbar_activity,
             ))
             .child(render_side_by_side_horizontal_scrollbar_lane(
                 SideBySideDiffSide::Right,
                 handles.handle_for(SideBySideDiffSide::Right),
                 right_has_scroll,
+                scrollbar_activity,
             ))
             .into_any_element(),
     )
@@ -560,6 +623,7 @@ fn render_side_by_side_horizontal_scrollbar_lane(
     side: SideBySideDiffSide,
     handle: &ScrollHandle,
     visible: bool,
+    scrollbar_activity: &DiffScrollbarActivity,
 ) -> AnyElement {
     if !visible {
         return div().flex_1().min_w_0().into_any_element();
@@ -586,6 +650,8 @@ fn render_side_by_side_horizontal_scrollbar_lane(
         viewport_width - thumb_width,
     );
     let drag_id_for_move = drag_id.clone();
+    let drag_start_activity = scrollbar_activity.clone();
+    let drag_move_activity = scrollbar_activity.clone();
 
     div()
         .relative()
@@ -601,13 +667,17 @@ fn render_side_by_side_horizontal_scrollbar_lane(
                 .h(px(DIFF_SCROLLBAR_WIDTH))
                 .id(ElementId::Name(drag_id.into()))
                 .cursor(CursorStyle::ResizeLeftRight)
-                .on_drag(drag, |_, _, _, cx| cx.new(|_| DiffScrollbarDragPreview))
+                .on_drag(drag, move |_, _, window, cx| {
+                    mark_diff_scrollbars_active(&drag_start_activity, window, cx);
+                    cx.new(|_| DiffScrollbarDragPreview)
+                })
                 .on_drag_move(
                     move |event: &DragMoveEvent<DiffHorizontalScrollbarDrag>, window, cx| {
-                        let drag = event.drag(cx);
+                        let drag = event.drag(cx).clone();
                         if drag.id != drag_id_for_move {
                             return;
                         }
+                        mark_diff_scrollbars_active(&drag_move_activity, window, cx);
                         drag.drag_to(event.event.position.x, window);
                     },
                 )

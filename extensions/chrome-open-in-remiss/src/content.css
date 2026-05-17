@@ -1,0 +1,8 @@
+.remiss-open-in-remiss {
+  margin-left: 8px;
+  white-space: nowrap;
+}
+
+.gh-header-actions .remiss-open-in-remiss:first-child {
+  margin-left: 0;
+}

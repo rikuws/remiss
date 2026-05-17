@@ -106,6 +106,7 @@ pub(super) fn render_file_diff(
     let gutter_layout = diff_gutter_layout(file, parsed, reserve_waypoint_slot);
     let selected_anchor = selected_anchor.cloned();
     let list_state = diff_view_state.list_state.clone();
+    let scrollbar_activity = diff_view_state.scrollbar_activity.clone();
     let side_by_side_scroll_handles = SideBySideScrollHandles {
         left: diff_view_state.side_by_side_left_scroll.clone(),
         right: diff_view_state.side_by_side_right_scroll.clone(),
@@ -255,6 +256,7 @@ pub(super) fn render_file_diff(
                         wrap_diff_lines,
                         side_by_side_scroll_handles,
                         side_by_side_column_widths,
+                        scrollbar_activity,
                     )
                     .into_any_element(),
                 ),
@@ -277,6 +279,7 @@ pub(super) fn render_virtualized_diff_rows(
     wrap_diff_lines: bool,
     side_by_side_scroll_handles: SideBySideScrollHandles,
     side_by_side_column_widths: Option<SideBySideColumnWidths>,
+    scrollbar_activity: DiffScrollbarActivity,
 ) -> AnyElement {
     let state = state.clone();
     let has_side_by_side_rows = structural_side_by_side.is_some() || normal_side_by_side.is_some();
@@ -327,6 +330,7 @@ pub(super) fn render_virtualized_diff_rows(
         body,
         &scrollbar_list_state,
         item_count,
+        &scrollbar_activity,
         (!wrap_diff_lines && has_side_by_side_rows).then_some(&side_by_side_scroll_handles),
         DiffScrollbarInsets::none(),
         false,

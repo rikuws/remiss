@@ -1276,7 +1276,7 @@ fn render_project_shader_picker(
                 .border_1()
                 .border_color(transparent())
                 .bg(bg_overlay())
-                .shadow_sm()
+                .shadow(dialog_shadow())
                 .occlude()
                 .overflow_hidden()
                 .flex()
@@ -2022,7 +2022,7 @@ fn kanban_lane(
                 .flex_grow()
                 .rounded(lane_radius)
                 .bg(transparent())
-                .shadow_md()
+                .shadow(surface_shadow())
                 .child(
                     shader_material_surface_variant(
                         lane_id,

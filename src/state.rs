@@ -599,6 +599,39 @@ impl ReviewLineActionTarget {
     }
 }
 
+#[derive(Clone, Default)]
+pub struct DiffScrollbarActivity(Rc<RefCell<DiffScrollbarActivityState>>);
+
+#[derive(Debug, Default)]
+struct DiffScrollbarActivityState {
+    visible: bool,
+    generation: u64,
+}
+
+impl DiffScrollbarActivity {
+    pub fn is_visible(&self) -> bool {
+        self.0.borrow().visible
+    }
+
+    pub fn show(&self) -> (u64, bool) {
+        let mut state = self.0.borrow_mut();
+        let was_hidden = !state.visible;
+        state.visible = true;
+        state.generation = state.generation.wrapping_add(1);
+        (state.generation, was_hidden)
+    }
+
+    pub fn hide_if_current(&self, generation: u64) -> bool {
+        let mut state = self.0.borrow_mut();
+        if state.generation != generation || !state.visible {
+            return false;
+        }
+
+        state.visible = false;
+        true
+    }
+}
+
 #[derive(Clone)]
 pub struct DiffFileViewState {
     pub rows: Arc<Vec<DiffRenderRow>>,
@@ -608,6 +641,7 @@ pub struct DiffFileViewState {
     pub list_state: ListState,
     pub side_by_side_left_scroll: ScrollHandle,
     pub side_by_side_right_scroll: ScrollHandle,
+    pub scrollbar_activity: DiffScrollbarActivity,
     pub last_focus_key: Rc<RefCell<Option<String>>>,
 }
 
@@ -626,6 +660,7 @@ impl DiffFileViewState {
             list_state: ListState::new(0, ListAlignment::Top, px(400.0)).measure_all(),
             side_by_side_left_scroll: ScrollHandle::new(),
             side_by_side_right_scroll: ScrollHandle::new(),
+            scrollbar_activity: DiffScrollbarActivity::default(),
             last_focus_key: Rc::new(RefCell::new(None)),
         }
     }
@@ -651,6 +686,7 @@ pub struct CombinedDiffViewState {
     pub list_state: ListState,
     pub side_by_side_left_scroll: ScrollHandle,
     pub side_by_side_right_scroll: ScrollHandle,
+    pub scrollbar_activity: DiffScrollbarActivity,
     pub last_focus_key: Rc<RefCell<Option<String>>>,
 }
 
@@ -660,6 +696,7 @@ impl CombinedDiffViewState {
             list_state: ListState::new(0, ListAlignment::Top, px(400.0)).measure_all(),
             side_by_side_left_scroll: ScrollHandle::new(),
             side_by_side_right_scroll: ScrollHandle::new(),
+            scrollbar_activity: DiffScrollbarActivity::default(),
             last_focus_key: Rc::new(RefCell::new(None)),
         }
     }
@@ -2553,8 +2590,8 @@ mod tests {
 
     use super::{
         diff_anchor_for_line, first_review_comment_after_focus_index,
-        review_comment_navigation_items, summary_key, AppState, PullRequestSurface,
-        ReviewModeFocus, SectionId, StructuralDiffWarmupState,
+        review_comment_navigation_items, summary_key, AppState, DiffScrollbarActivity,
+        PullRequestSurface, ReviewModeFocus, SectionId, StructuralDiffWarmupState,
     };
 
     fn temp_cache_store(name: &str) -> CacheStore {
@@ -2566,6 +2603,25 @@ mod tests {
             "/tmp/remiss-state-test-{name}-{suffix}/cache.sqlite"
         ));
         CacheStore::new(path).expect("cache")
+    }
+
+    #[test]
+    fn diff_scrollbar_activity_hides_only_current_generation() {
+        let activity = DiffScrollbarActivity::default();
+        assert!(!activity.is_visible());
+
+        let (first_generation, was_hidden) = activity.show();
+        assert!(was_hidden);
+        assert!(activity.is_visible());
+
+        let (second_generation, was_hidden) = activity.show();
+        assert!(!was_hidden);
+        assert!(activity.is_visible());
+
+        assert!(!activity.hide_if_current(first_generation));
+        assert!(activity.is_visible());
+        assert!(activity.hide_if_current(second_generation));
+        assert!(!activity.is_visible());
     }
 
     #[test]
