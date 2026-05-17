@@ -2,9 +2,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::structural_evidence::StructuralEvidencePack;
+use crate::{semantic_review::RemissSemanticReview, structural_evidence::StructuralEvidencePack};
 
-pub const STACK_GENERATOR_VERSION: &str = "virtual-stacks-v1";
+pub const STACK_GENERATOR_VERSION: &str = "virtual-stacks-v4";
 
 pub type ReviewStackId = String;
 pub type ReviewStackLayerId = String;
@@ -99,7 +99,7 @@ impl StackSource {
             Self::BranchTopology => "Branch topology",
             Self::LocalStackMetadata => "Local metadata",
             Self::VirtualCommits => "Virtual commits",
-            Self::VirtualSemantic => "Virtual semantic",
+            Self::VirtualSemantic => "Sem",
             Self::VirtualAi => "Virtual AI",
         }
     }
@@ -414,6 +414,7 @@ pub struct RepoContext {
     pub local_repo_path: Option<PathBuf>,
     pub trunk_branch: Option<String>,
     pub structural_evidence: Option<StructuralEvidencePack>,
+    pub semantic_review: Option<RemissSemanticReview>,
 }
 
 impl RepoContext {
@@ -423,6 +424,7 @@ impl RepoContext {
             local_repo_path: None,
             trunk_branch: None,
             structural_evidence: None,
+            semantic_review: None,
         }
     }
 }
@@ -433,6 +435,7 @@ pub struct StackDiscoveryOptions {
     pub enable_branch_topology: bool,
     pub enable_local_metadata: bool,
     pub enable_ai_virtual: bool,
+    pub enable_sem_virtual: bool,
     pub enable_virtual_commits: bool,
     pub enable_virtual_semantic: bool,
     pub ai_provider: Option<crate::code_tour::CodeTourProvider>,
@@ -446,6 +449,7 @@ impl Default for StackDiscoveryOptions {
             enable_branch_topology: true,
             enable_local_metadata: true,
             enable_ai_virtual: true,
+            enable_sem_virtual: true,
             enable_virtual_commits: true,
             enable_virtual_semantic: true,
             ai_provider: None,

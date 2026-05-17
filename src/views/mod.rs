@@ -1,10 +1,12 @@
 pub(crate) mod ai_tour;
 pub(crate) mod diff_view;
+mod file_tree;
 mod palette;
 mod pr_detail;
 mod root;
 mod sections;
 mod settings;
+mod tooltips;
 mod welcome_wizard;
 mod workspace_sync;
 
@@ -18,7 +20,9 @@ pub use palette::{
     close_palette, execute_palette_selection, move_palette_selection, toggle_palette,
 };
 pub use pr_detail::{blur_review_editor, trigger_submit_review};
-pub(crate) use root::{RootView, APP_TRAFFIC_LIGHT_LEFT, APP_TRAFFIC_LIGHT_TOP};
+pub(crate) use root::{
+    open_deep_link_request, RootView, APP_TRAFFIC_LIGHT_LEFT, APP_TRAFFIC_LIGHT_TOP,
+};
 pub use settings::{
     cycle_diff_color_theme_preference, decrease_code_font_size_preference,
     increase_code_font_size_preference, reset_code_font_size_preference,

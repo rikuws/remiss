@@ -9,6 +9,7 @@ edition = "2021"
 codex-codes = { version = "0.101", default-features = false, features = ["async-client"] }
 dirs = "6"
 difftastic = { git = "https://github.com/rikuws/difftastic", rev = "007b1a2dbc8a997d1a9b4b9a773aafb3f032cdc0" }
+sem-core = { git = "https://github.com/rikuws/sem", rev = "bbfba575f772dcda82f91fdc9a3865f1e511de9e" }
 flate2 = "1"
 gpui = "0.2"
 emojis = "0.8.2"
@@ -23,6 +24,8 @@ sha1 = "0.10"
 pulldown-cmark = "0.13"
 giallo = { version = "0.3.1", features = ["dump"] }
 tar = "0.4"
+tree-sitter = "0.26.8"
+tree-sitter-rust-orchard = "0.16.6"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "sync", "time"] }
 ureq = { version = "2.12", features = ["json"] }
 zip = { version = "2.4", default-features = false, features = ["deflate"] }

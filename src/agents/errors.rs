@@ -11,7 +11,11 @@ pub enum AbortKind {
     Inactivity,
 }
 
-pub fn generation_abort_message(provider_label: &str, reason: &AbortReason) -> String {
+pub fn generation_abort_message(
+    provider_label: &str,
+    task_label: &str,
+    reason: &AbortReason,
+) -> String {
     let suffix = reason
         .last_visible_activity
         .as_deref()
@@ -21,11 +25,11 @@ pub fn generation_abort_message(provider_label: &str, reason: &AbortReason) -> S
 
     match reason.kind {
         AbortKind::Inactivity => format!(
-            "{provider_label} stopped reporting progress for {} while generating the code tour.{suffix}",
+            "{provider_label} stopped reporting progress for {} while generating {task_label}.{suffix}",
             format_duration(reason.timeout_ms)
         ),
         AbortKind::Overall => format!(
-            "{provider_label} timed out while generating the code tour after {}.{suffix}",
+            "{provider_label} timed out while generating {task_label} after {}.{suffix}",
             format_duration(reason.timeout_ms)
         ),
     }
@@ -55,7 +59,7 @@ mod tests {
             timeout_ms: 240_000,
             last_visible_activity: Some("Reading foo.rs".to_string()),
         };
-        let msg = generation_abort_message("Codex", &reason);
+        let msg = generation_abort_message("Codex", "the code tour", &reason);
         assert!(msg.contains("4 minutes"));
         assert!(msg.contains("Last visible activity: Reading foo.rs."));
     }
@@ -67,7 +71,7 @@ mod tests {
             timeout_ms: 60_000,
             last_visible_activity: None,
         };
-        let msg = generation_abort_message("GitHub Copilot", &reason);
+        let msg = generation_abort_message("GitHub Copilot", "the code tour", &reason);
         assert!(msg.contains("stopped reporting progress"));
         assert!(msg.contains("1 minute"));
     }

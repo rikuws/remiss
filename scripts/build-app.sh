@@ -56,6 +56,17 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <string>Remiss</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key>
+      <string>dev.rikuwikman.remiss</string>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>remiss</string>
+      </array>
+    </dict>
+  </array>
   <key>CFBundleShortVersionString</key>
   <string>0.1.0</string>
   <key>CFBundleVersion</key>

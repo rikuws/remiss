@@ -1,7 +1,10 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gpui::{linear_color_stop, linear_gradient, px, Background, Pixels, Rgba, WindowAppearance};
+use gpui::{
+    hsla, linear_color_stop, linear_gradient, point, px, Background, BoxShadow, Hsla, Pixels, Rgba,
+    WindowAppearance,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::cache::CacheStore;
@@ -995,6 +998,74 @@ fn material_index(seed: &str) -> usize {
 
 pub fn palette_backdrop() -> Rgba {
     theme_rgba((0.05, 0.09, 0.16, 0.18), (0.0, 0.0, 0.0, 0.72))
+}
+
+pub fn surface_shadow() -> Vec<BoxShadow> {
+    match active_theme() {
+        ActiveTheme::Light => vec![
+            shadow_layer(hsla(0.61, 0.22, 0.18, 0.09), 0.0, 14.0, 36.0, -20.0),
+            shadow_layer(hsla(0.61, 0.18, 0.16, 0.08), 0.0, 5.0, 14.0, -10.0),
+        ],
+        ActiveTheme::Dark => vec![
+            shadow_layer(hsla(0.0, 0.0, 0.0, 0.46), 0.0, 18.0, 42.0, -22.0),
+            shadow_layer(hsla(0.0, 0.0, 0.0, 0.36), 0.0, 6.0, 16.0, -10.0),
+            shadow_layer(hsla(0.60, 0.18, 0.82, 0.05), 0.0, 0.0, 0.0, 1.0),
+        ],
+    }
+}
+
+pub fn dialog_shadow() -> Vec<BoxShadow> {
+    match active_theme() {
+        ActiveTheme::Light => vec![
+            shadow_layer(hsla(0.61, 0.24, 0.18, 0.12), 0.0, 28.0, 68.0, -30.0),
+            shadow_layer(hsla(0.61, 0.20, 0.14, 0.12), 0.0, 12.0, 30.0, -16.0),
+            shadow_layer(hsla(0.61, 0.18, 0.22, 0.08), 0.0, 0.0, 0.0, 1.0),
+        ],
+        ActiveTheme::Dark => vec![
+            shadow_layer(hsla(0.0, 0.0, 0.0, 0.74), 0.0, 34.0, 78.0, -34.0),
+            shadow_layer(hsla(0.0, 0.0, 0.0, 0.54), 0.0, 13.0, 32.0, -17.0),
+            shadow_layer(hsla(0.60, 0.18, 0.82, 0.07), 0.0, 0.0, 0.0, 1.0),
+        ],
+    }
+}
+
+pub fn popover_shadow() -> Vec<BoxShadow> {
+    match active_theme() {
+        ActiveTheme::Light => vec![
+            shadow_layer(hsla(0.61, 0.24, 0.18, 0.11), 0.0, 20.0, 46.0, -24.0),
+            shadow_layer(hsla(0.61, 0.18, 0.14, 0.11), 0.0, 8.0, 22.0, -14.0),
+            shadow_layer(hsla(0.61, 0.18, 0.22, 0.08), 0.0, 0.0, 0.0, 1.0),
+        ],
+        ActiveTheme::Dark => vec![
+            shadow_layer(hsla(0.0, 0.0, 0.0, 0.66), 0.0, 24.0, 56.0, -28.0),
+            shadow_layer(hsla(0.0, 0.0, 0.0, 0.48), 0.0, 9.0, 24.0, -14.0),
+            shadow_layer(hsla(0.60, 0.18, 0.82, 0.06), 0.0, 0.0, 0.0, 1.0),
+        ],
+    }
+}
+
+pub fn tooltip_shadow() -> Vec<BoxShadow> {
+    match active_theme() {
+        ActiveTheme::Light => vec![
+            shadow_layer(hsla(0.61, 0.24, 0.18, 0.10), 0.0, 12.0, 28.0, -16.0),
+            shadow_layer(hsla(0.61, 0.18, 0.14, 0.10), 0.0, 4.0, 12.0, -8.0),
+            shadow_layer(hsla(0.61, 0.18, 0.22, 0.07), 0.0, 0.0, 0.0, 1.0),
+        ],
+        ActiveTheme::Dark => vec![
+            shadow_layer(hsla(0.0, 0.0, 0.0, 0.58), 0.0, 14.0, 34.0, -18.0),
+            shadow_layer(hsla(0.0, 0.0, 0.0, 0.42), 0.0, 5.0, 14.0, -9.0),
+            shadow_layer(hsla(0.60, 0.18, 0.82, 0.06), 0.0, 0.0, 0.0, 1.0),
+        ],
+    }
+}
+
+fn shadow_layer(color: Hsla, x: f32, y: f32, blur: f32, spread: f32) -> BoxShadow {
+    BoxShadow {
+        color,
+        offset: point(px(x), px(y)),
+        blur_radius: px(blur),
+        spread_radius: px(spread),
+    }
 }
 
 pub fn topbar_height() -> Pixels {

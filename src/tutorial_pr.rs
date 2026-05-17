@@ -12,7 +12,12 @@ use crate::github::{
     PullRequestSummary,
 };
 use crate::review_brief::{ReviewBrief, ReviewBriefConfidence};
-use crate::review_guide::{GeneratedReviewGuide, ReviewGuideLayer, REVIEW_GUIDE_GENERATOR_VERSION};
+use crate::review_partner::{
+    GeneratedReviewPartnerContext, ReviewPartnerCodebaseFit, ReviewPartnerContextPack,
+    ReviewPartnerFocusMatchKind, ReviewPartnerFocusRecord, ReviewPartnerFocusSection,
+    ReviewPartnerFocusTarget, ReviewPartnerItem, ReviewPartnerLayer, ReviewPartnerUsageGroup,
+    REVIEW_PARTNER_CONTEXT_VERSION, REVIEW_PARTNER_GENERATOR_VERSION,
+};
 use crate::review_session::{
     DiffLayout, ReviewCenterMode, ReviewGuideLens, ReviewLocation, ReviewSessionDocument,
     ReviewTaskRoute, ReviewWaymark,
@@ -357,55 +362,137 @@ pub fn review_stack() -> ReviewStack {
     }
 }
 
-pub fn review_guide(detail: &PullRequestDetail, stack: ReviewStack) -> GeneratedReviewGuide {
+pub fn review_partner(
+    detail: &PullRequestDetail,
+    stack: ReviewStack,
+) -> GeneratedReviewPartnerContext {
     let structural_evidence = StructuralEvidencePack::empty();
-    GeneratedReviewGuide {
+    let focus_target = ReviewPartnerFocusTarget {
+        key: "atom:tutorial-atom-toolbar".to_string(),
+        file_path: "src/views/diff_view.rs".to_string(),
+        hunk_header: None,
+        hunk_index: None,
+        line: Some(1),
+        side: Some("RIGHT".to_string()),
+        atom_ids: vec!["tutorial-atom-toolbar".to_string()],
+        layer_id: Some("tutorial-layer-feedback-ui".to_string()),
+        title: "Feedback toolbar state".to_string(),
+        subtitle: "src/views/diff_view.rs:1".to_string(),
+        match_kind: ReviewPartnerFocusMatchKind::AtomRange,
+    };
+    let focus_record = ReviewPartnerFocusRecord {
+        key: focus_target.key.clone(),
+        title: "Feedback toolbar state".to_string(),
+        subtitle: focus_target.subtitle.clone(),
+        target: focus_target.clone(),
+        summary: "The toolbar state change threads waypoint count and pending-review submit copy through the focused review controls.".to_string(),
+        usage_context: vec![ReviewPartnerUsageGroup {
+            symbol: "ReviewToolbarState".to_string(),
+            summary: "One focused consumer keeps the pending review controls visible.".to_string(),
+            usages: vec![ReviewPartnerItem {
+                title: "Pending review surface".to_string(),
+                detail: "Use the toolbar consumer to confirm the finish action remains visible without crowding the row.".to_string(),
+                path: Some("src/views/diff_view.rs".to_string()),
+                line: Some(1),
+            }],
+        }],
+        codebase_fit: ReviewPartnerCodebaseFit::default(),
+        sections: vec![
+            ReviewPartnerFocusSection {
+                title: "Concerns".to_string(),
+                items: vec![ReviewPartnerItem {
+                    title: "Stale pending count".to_string(),
+                    detail: "A stale pending count would encourage submitting incomplete feedback.".to_string(),
+                    path: Some("src/views/diff_view.rs".to_string()),
+                    line: Some(1),
+                }],
+            },
+        ],
+        limitations: Vec::new(),
+        generated_at_ms: GENERATED_AT,
+    };
+    GeneratedReviewPartnerContext {
         provider: CodeTourProvider::Codex,
         model: Some("tutorial-fixture".to_string()),
         generated_at_ms: GENERATED_AT,
         code_version_key: tour_code_version_key(detail),
-        generator_version: REVIEW_GUIDE_GENERATOR_VERSION.to_string(),
+        generator_version: REVIEW_PARTNER_GENERATOR_VERSION.to_string(),
+        context_version: REVIEW_PARTNER_CONTEXT_VERSION.to_string(),
         structural_evidence_version: STRUCTURAL_EVIDENCE_VERSION.to_string(),
-        partner_overview: "Guided Review groups the tutorial into the feedback UI change and the test that protects it.".to_string(),
-        review_strategy: "Read the toolbar state first, then use the test layer to confirm the expected finish-review behavior.".to_string(),
-        open_questions: vec![
-            "Should waypoints be shown even when there are no pending line comments?".to_string(),
+        stack_brief: "Guided Review groups the tutorial into the feedback UI change and the test that protects it.".to_string(),
+        stack_concerns: vec![
+            ReviewPartnerItem {
+                title: "Waypoint visibility".to_string(),
+                detail: "Check whether waypoints should be shown even when there are no pending line comments.".to_string(),
+                path: Some("src/views/diff_view.rs".to_string()),
+                line: Some(1),
+            },
         ],
+        limitations: Vec::new(),
         warnings: Vec::new(),
+        fallback_reason: None,
+        stack,
         structural_evidence,
+        semantic_review: None,
+        context: ReviewPartnerContextPack::empty(),
         layers: vec![
-            ReviewGuideLayer {
+            ReviewPartnerLayer {
                 layer_id: "tutorial-layer-feedback-ui".to_string(),
                 title: "Feedback toolbar state".to_string(),
-                what_changed: "The toolbar state now includes waypoint counts and a pending-review submit label.".to_string(),
-                why_it_matters: "Reviewers can keep orientation while drafting feedback and finishing the pass.".to_string(),
-                how_to_review: vec![
-                    "Check the state inputs for pending comments and waypoints.".to_string(),
-                    "Confirm the finish action remains visible without crowding the toolbar.".to_string(),
+                brief: "The toolbar state now includes waypoint counts and a pending-review submit label.".to_string(),
+                changed_items: vec![
+                    ReviewPartnerItem {
+                        title: "Toolbar state".to_string(),
+                        detail: "State inputs now combine pending comments, waypoints, and finish-review labeling.".to_string(),
+                        path: Some("src/views/diff_view.rs".to_string()),
+                        line: Some(1),
+                    },
                 ],
-                bug_risks: vec![
-                    "A stale pending count would encourage submitting incomplete feedback.".to_string(),
+                removed_items: Vec::new(),
+                usage_context: vec![
+                    ReviewPartnerItem {
+                        title: "Pending review surface".to_string(),
+                        detail: "Use the toolbar consumer to confirm the finish action remains visible without crowding the row.".to_string(),
+                        path: Some("src/views/diff_view.rs".to_string()),
+                        line: Some(1),
+                    },
                 ],
-                evidence_notes: vec!["One unresolved tutorial comment is attached to this layer.".to_string()],
-                follow_ups: Vec::new(),
+                similar_code: Vec::new(),
+                codebase_fit: Vec::new(),
+                concerns: vec![
+                    ReviewPartnerItem {
+                        title: "Stale pending count".to_string(),
+                        detail: "A stale pending count would encourage submitting incomplete feedback.".to_string(),
+                        path: Some("src/views/diff_view.rs".to_string()),
+                        line: Some(1),
+                    },
+                ],
+                limitations: Vec::new(),
                 structural_evidence_status: StructuralEvidenceStatus::Unavailable,
             },
-            ReviewGuideLayer {
+            ReviewPartnerLayer {
                 layer_id: "tutorial-layer-test-coverage".to_string(),
                 title: "Feedback regression coverage".to_string(),
-                what_changed: "A focused test covers the toolbar label and waypoint count.".to_string(),
-                why_it_matters: "The feedback flow is easy to regress during review UI polish.".to_string(),
-                how_to_review: vec![
-                    "Confirm the test names the user-visible behavior.".to_string(),
-                    "Check whether another test should cover the zero-pending state.".to_string(),
+                brief: "A focused test covers the toolbar label and waypoint count.".to_string(),
+                changed_items: vec![
+                    ReviewPartnerItem {
+                        title: "Toolbar regression test".to_string(),
+                        detail: "Confirm the test names the user-visible behavior rather than internal state plumbing.".to_string(),
+                        path: Some("src/views/diff_view.rs".to_string()),
+                        line: Some(1),
+                    },
                 ],
-                bug_risks: Vec::new(),
-                evidence_notes: Vec::new(),
-                follow_ups: Vec::new(),
+                removed_items: Vec::new(),
+                usage_context: Vec::new(),
+                similar_code: Vec::new(),
+                codebase_fit: Vec::new(),
+                concerns: Vec::new(),
+                limitations: vec!["Tutorial fixture does not run the local context collector.".to_string()],
                 structural_evidence_status: StructuralEvidenceStatus::Unavailable,
             },
         ],
-        stack,
+        focus_targets: vec![focus_target],
+        focus_records: vec![focus_record],
     }
 }
 
@@ -424,6 +511,7 @@ pub fn review_session() -> ReviewSessionDocument {
         normal_diff_layout: DiffLayout::Unified,
         structural_diff_layout: DiffLayout::SideBySide,
         guided_review_lens: ReviewGuideLens::Diff,
+        guided_review_focus_key: Some("atom:tutorial-atom-toolbar".to_string()),
         guided_review_panel_width: crate::review_session::GUIDED_REVIEW_PANEL_DEFAULT_WIDTH,
         wrap_diff_lines: false,
         show_file_tree: true,
@@ -475,6 +563,7 @@ pub fn review_session() -> ReviewSessionDocument {
         history_forward: Vec::new(),
         last_read: None,
         collapsed_sections: Vec::new(),
+        expanded_review_partner_sections: Vec::new(),
         collapsed_file_paths: Vec::new(),
         reviewed_file_paths: Vec::new(),
         stack_rail_expanded: true,
@@ -656,7 +745,7 @@ pub fn apply_fixture_to_detail_state(detail_state: &mut crate::state::DetailStat
         .expect("tutorial snapshot includes detail")
         .clone();
     let stack = review_stack();
-    let guide = review_guide(&detail, stack.clone());
+    let partner = review_partner(&detail, stack.clone());
     let request_key = request_key(&detail);
 
     detail_state.snapshot = Some(snapshot);
@@ -675,14 +764,21 @@ pub fn apply_fixture_to_detail_state(detail_state: &mut crate::state::DetailStat
         message: Some("Tutorial briefing loaded locally.".to_string()),
         success: true,
     };
-    detail_state.review_guide_state = crate::state::ReviewGuideState {
+    detail_state.review_partner_state = crate::state::ReviewPartnerState {
         request_key: Some(request_key.clone()),
-        document: Some(Arc::new(guide)),
+        document: Some(Arc::new(partner)),
+        active_focus_key: Some("atom:tutorial-atom-toolbar".to_string()),
+        active_focus_label: Some("src/views/diff_view.rs:1".to_string()),
+        active_focus_path: Some("src/views/diff_view.rs".to_string()),
+        active_focus_line: Some(1),
+        focus_update_generation: 0,
+        loading_focus_keys: std::collections::BTreeSet::new(),
+        focus_errors: std::collections::BTreeMap::new(),
         loading: false,
         generating: false,
         progress_text: None,
         error: None,
-        message: Some("Tutorial Guided Review loaded locally.".to_string()),
+        message: Some("Tutorial Review Partner loaded locally.".to_string()),
         success: true,
     };
     detail_state.ai_stack_state = crate::state::AiStackState {

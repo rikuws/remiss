@@ -212,6 +212,8 @@ pub struct ReviewSessionDocument {
     pub structural_diff_layout: DiffLayout,
     #[serde(default)]
     pub guided_review_lens: ReviewGuideLens,
+    #[serde(default)]
+    pub guided_review_focus_key: Option<String>,
     #[serde(default = "default_guided_review_panel_width")]
     pub guided_review_panel_width: f32,
     #[serde(default = "default_false")]
@@ -234,6 +236,8 @@ pub struct ReviewSessionDocument {
     pub last_read: Option<ReviewLocation>,
     #[serde(default)]
     pub collapsed_sections: Vec<String>,
+    #[serde(default)]
+    pub expanded_review_partner_sections: Vec<String>,
     #[serde(default)]
     pub collapsed_file_paths: Vec<String>,
     #[serde(default)]
@@ -259,6 +263,7 @@ pub struct ReviewSessionState {
     pub normal_diff_layout: DiffLayout,
     pub structural_diff_layout: DiffLayout,
     pub guided_review_lens: ReviewGuideLens,
+    pub guided_review_focus_key: Option<String>,
     pub guided_review_panel_width: f32,
     pub wrap_diff_lines: bool,
     pub show_file_tree: bool,
@@ -270,6 +275,7 @@ pub struct ReviewSessionState {
     pub history_forward: Vec<ReviewLocation>,
     pub last_read: Option<ReviewLocation>,
     pub collapsed_sections: HashSet<String>,
+    pub expanded_review_partner_sections: HashSet<String>,
     pub collapsed_file_paths: HashSet<String>,
     pub reviewed_file_paths: HashSet<String>,
     pub stack_rail_expanded: bool,
@@ -289,6 +295,7 @@ impl Default for ReviewSessionState {
             normal_diff_layout: DiffLayout::Unified,
             structural_diff_layout: DiffLayout::SideBySide,
             guided_review_lens: ReviewGuideLens::Diff,
+            guided_review_focus_key: None,
             guided_review_panel_width: GUIDED_REVIEW_PANEL_DEFAULT_WIDTH,
             wrap_diff_lines: false,
             show_file_tree: true,
@@ -300,6 +307,7 @@ impl Default for ReviewSessionState {
             history_forward: Vec::new(),
             last_read: None,
             collapsed_sections: HashSet::new(),
+            expanded_review_partner_sections: HashSet::new(),
             collapsed_file_paths: HashSet::new(),
             reviewed_file_paths: HashSet::new(),
             stack_rail_expanded: false,
@@ -337,6 +345,7 @@ impl ReviewSessionState {
             normal_diff_layout: document.normal_diff_layout,
             structural_diff_layout: document.structural_diff_layout,
             guided_review_lens: document.guided_review_lens,
+            guided_review_focus_key: document.guided_review_focus_key,
             guided_review_panel_width: sanitize_guided_review_panel_width(
                 document.guided_review_panel_width,
             ),
@@ -366,6 +375,10 @@ impl ReviewSessionState {
                 .collect(),
             last_read: document.last_read.map(normalize_review_location),
             collapsed_sections: document.collapsed_sections.into_iter().collect(),
+            expanded_review_partner_sections: document
+                .expanded_review_partner_sections
+                .into_iter()
+                .collect(),
             collapsed_file_paths: document.collapsed_file_paths.into_iter().collect(),
             reviewed_file_paths: document.reviewed_file_paths.into_iter().collect(),
             stack_rail_expanded: document.stack_rail_expanded,
@@ -389,6 +402,7 @@ impl ReviewSessionState {
             normal_diff_layout: self.normal_diff_layout,
             structural_diff_layout: self.structural_diff_layout,
             guided_review_lens: self.guided_review_lens,
+            guided_review_focus_key: self.guided_review_focus_key.clone(),
             guided_review_panel_width: sanitize_guided_review_panel_width(
                 self.guided_review_panel_width,
             ),
@@ -402,6 +416,11 @@ impl ReviewSessionState {
             history_forward: self.history_forward.clone(),
             last_read: self.last_read.clone(),
             collapsed_sections: self.collapsed_sections.iter().cloned().collect(),
+            expanded_review_partner_sections: self
+                .expanded_review_partner_sections
+                .iter()
+                .cloned()
+                .collect(),
             collapsed_file_paths: self.collapsed_file_paths.iter().cloned().collect(),
             reviewed_file_paths: self.reviewed_file_paths.iter().cloned().collect(),
             stack_rail_expanded: self.stack_rail_expanded,
@@ -730,6 +749,31 @@ mod tests {
         assert_eq!(
             restored.to_document(None, None).guided_review_lens,
             super::ReviewGuideLens::Structural
+        );
+    }
+
+    #[test]
+    fn review_session_persists_guided_review_focus_key() {
+        let document: super::ReviewSessionDocument = serde_json::from_str(
+            r#"{
+                "centerMode": "guidedReview",
+                "guidedReviewFocusKey": "atom:focus-1"
+            }"#,
+        )
+        .expect("guided review session should deserialize");
+
+        let restored = ReviewSessionState::from_document(document);
+
+        assert_eq!(
+            restored.guided_review_focus_key.as_deref(),
+            Some("atom:focus-1")
+        );
+        assert_eq!(
+            restored
+                .to_document(None, None)
+                .guided_review_focus_key
+                .as_deref(),
+            Some("atom:focus-1")
         );
     }
 

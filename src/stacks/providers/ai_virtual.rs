@@ -12,6 +12,7 @@ use crate::{
     app_storage,
     code_tour::CodeTourProvider,
     github::PullRequestDetail,
+    semantic_review::{summarize_semantic_review, RemissSemanticReview},
     structural_evidence::{StructuralEvidencePack, STRUCTURAL_EVIDENCE_VERSION},
 };
 
@@ -116,6 +117,7 @@ pub fn discover(
         &atoms,
         &commit_context,
         repo_context.structural_evidence.as_ref(),
+        repo_context.semantic_review.as_ref(),
     );
     let initial_prompt = build_stack_planning_prompt(&input_json);
 
@@ -930,6 +932,7 @@ fn build_stack_planning_input(
     atoms: &[ChangeAtom],
     commit_context: &CommitContext,
     structural_evidence: Option<&StructuralEvidencePack>,
+    semantic_review: Option<&RemissSemanticReview>,
 ) -> Value {
     let commits_by_path = commits_by_path(&commit_context.commits);
     let dependencies = build_atom_dependencies(atoms);
@@ -965,6 +968,7 @@ fn build_stack_planning_input(
         "hard_validation_rules": [
             "Every layer needs at least one substantive atom unless it is a coherent mechanical formatting/comment layer.",
             "Structural evidence is advisory and may be partial; atom coverage is still authoritative.",
+            "Semantic evidence is advisory and may be partial; Sem layer atom mappings are preferred over directory buckets only when they preserve exact atom coverage.",
             "Import-only and mostly import layers are invalid; attach import atoms to the substantive atom that requires them.",
             "The final layer must not contain more than 40% of substantive atoms or more than two concerns.",
             "Tests usually travel with the behavior they validate; generic tests-only layers are invalid.",
@@ -977,6 +981,63 @@ fn build_stack_planning_input(
             .map(|atom| atom_summary_json(atom, &commits_by_path, &depths))
             .collect::<Vec<_>>(),
         "structural_evidence": structural_evidence_json(structural_evidence),
+        "semantic_evidence": semantic_evidence_json(semantic_review),
+    })
+}
+
+fn semantic_evidence_json(review: Option<&RemissSemanticReview>) -> Value {
+    const MAX_LAYERS: usize = 24;
+    const MAX_ATOMS_PER_LAYER: usize = 32;
+    const MAX_FILES_PER_LAYER: usize = 12;
+    const MAX_ENTITIES_PER_LAYER: usize = 16;
+    const MAX_WARNINGS: usize = 12;
+    const MAX_FOCUS: usize = 24;
+
+    let Some(review) = review else {
+        return json!({
+            "status": "unavailable",
+            "warnings": ["Semantic evidence was not available for this stack planning run."],
+            "layers": [],
+        });
+    };
+
+    let summary = summarize_semantic_review(review);
+    json!({
+        "status": if summary.layer_count > 0 { "ready" } else { "empty" },
+        "version": summary.version,
+        "sem_api_version": summary.sem_api_version,
+        "code_version_key": summary.code_version_key,
+        "analysis_cache_key": summary.analysis_cache_key,
+        "layer_cache_key": summary.layer_cache_key,
+        "summary": {
+            "file_count": summary.file_count,
+            "change_count": summary.change_count,
+            "layer_count": summary.layer_count,
+            "added_count": summary.added_count,
+            "modified_count": summary.modified_count,
+            "deleted_count": summary.deleted_count,
+            "moved_count": summary.moved_count,
+            "renamed_count": summary.renamed_count,
+            "reordered_count": summary.reordered_count,
+            "orphan_count": summary.orphan_count,
+        },
+        "warnings": summary.warnings.into_iter().take(MAX_WARNINGS).collect::<Vec<_>>(),
+        "focus": summary.focus_summaries.into_iter().take(MAX_FOCUS).collect::<Vec<_>>(),
+        "layers": summary.layers.into_iter().take(MAX_LAYERS).map(|layer| {
+            json!({
+                "id": layer.id,
+                "index": layer.index,
+                "title": layer.title,
+                "summary": crate::agents::prompt::trim_text(&layer.summary, 220),
+                "rationale": crate::agents::prompt::trim_text(&layer.rationale, 260),
+                "depends_on_layer_ids": layer.depends_on_layer_ids,
+                "atom_ids": layer.atom_ids.into_iter().take(MAX_ATOMS_PER_LAYER).collect::<Vec<_>>(),
+                "file_paths": layer.file_paths.into_iter().take(MAX_FILES_PER_LAYER).collect::<Vec<_>>(),
+                "hunk_indices": layer.hunk_indices,
+                "entity_names": layer.entity_names.into_iter().take(MAX_ENTITIES_PER_LAYER).collect::<Vec<_>>(),
+                "change_count": layer.change_count,
+            })
+        }).collect::<Vec<_>>(),
     })
 }
 
@@ -1446,6 +1507,7 @@ mod tests {
     use super::*;
     use crate::{
         github::{PullRequestDataCompleteness, PullRequestFile},
+        semantic_review::{build_semantic_review_from_contents, RemissSemFileContents},
         stacks::{
             model::{LineRange, StackWarning},
             validation::{AiStackPlan, AiStackPlanStrategy},
@@ -1651,15 +1713,61 @@ mod tests {
             },
         };
 
-        let input = build_stack_planning_input(&detail(), &atoms, &commit_context, Some(&evidence));
+        let input =
+            build_stack_planning_input(&detail(), &atoms, &commit_context, Some(&evidence), None);
         let prompt = build_stack_planning_prompt(&input);
 
         assert_eq!(
             input["structural_evidence"]["files"][0]["path"],
             "src/atom_1.rs"
         );
+        assert_eq!(input["semantic_evidence"]["status"], "unavailable");
         assert!(prompt.contains("input.structural_evidence"));
+        assert!(prompt.contains("input.semantic_evidence"));
         assert!(prompt.contains("Assign every atom exactly once"));
+    }
+
+    #[test]
+    fn stack_planning_input_includes_semantic_evidence_without_relaxing_atom_coverage() {
+        let atoms = vec![atom("atom_1", ChangeRole::CoreLogic, 12)];
+        let detail = detail();
+        let semantic_review = build_semantic_review_from_contents(
+            &detail,
+            &atoms,
+            &[RemissSemFileContents {
+                path: "src/atom_1.rs".to_string(),
+                previous_path: None,
+                before_content: Some("fn atom_1() -> i32 { 1 }\n".to_string()),
+                after_content: Some("fn atom_1() -> i32 { 2 }\n".to_string()),
+            }],
+            &sem_core::embedded::SemEmbeddedOptions::default(),
+        );
+        let commit_context = CommitContext {
+            commits: Vec::new(),
+            suitability: CommitSuitability {
+                score: 0.0,
+                suitable_for_layers: false,
+                reasons: vec!["No commits.".to_string()],
+            },
+        };
+
+        let input = build_stack_planning_input(
+            &detail,
+            &atoms,
+            &commit_context,
+            None,
+            Some(&semantic_review),
+        );
+        let prompt = build_stack_planning_prompt(&input);
+
+        assert_eq!(input["semantic_evidence"]["status"], "ready");
+        assert_eq!(
+            input["semantic_evidence"]["layers"][0]["atom_ids"][0],
+            "atom_1"
+        );
+        assert!(prompt.contains("input.semantic_evidence"));
+        assert!(prompt.contains("Assign every atom exactly once"));
+        assert!(prompt.contains("Do not invent atom IDs"));
     }
 
     fn plan_layer(title: &str, atom_ids: Vec<&str>, deps: Vec<usize>) -> AiStackPlanLayer {

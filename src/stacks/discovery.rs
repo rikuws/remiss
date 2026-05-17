@@ -49,6 +49,14 @@ pub fn discover_review_stack(
         }
     }
 
+    if options.enable_sem_virtual {
+        match providers::sem_virtual::discover(selected_pr, repo_context, &options.sizing) {
+            Ok(Some(stack)) => return Ok(stack),
+            Ok(None) => {}
+            Err(error) => provider_errors.push(format!("Sem virtual: {}", error.message)),
+        }
+    }
+
     if options.enable_ai_virtual {
         if let Some(provider) = options.ai_provider {
             match providers::ai_virtual::discover(

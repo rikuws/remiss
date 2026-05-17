@@ -16,7 +16,8 @@ use crate::{
     github::PullRequestDetail,
     local_repo, local_review,
     review_brief::{self, build_review_brief_request_key},
-    review_guide::{self, build_review_guide_request_key},
+    review_partner::{self, build_review_partner_request_key},
+    semantic_review,
     stacks::{
         atoms::extract_change_atoms,
         cache::{load_ai_review_stack, save_ai_review_stack},
@@ -30,6 +31,11 @@ use crate::{
 
 static REVIEW_INTELLIGENCE_JOB_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static FOREGROUND_REVIEW_INTELLIGENCE_JOBS: AtomicUsize = AtomicUsize::new(0);
+
+struct GeneratedReviewStack {
+    stack: ReviewStack,
+    semantic_review: Option<semantic_review::RemissSemanticReview>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReviewIntelligenceScope {
@@ -48,7 +54,7 @@ impl ReviewIntelligenceScope {
         matches!(self, Self::All | Self::StackOnly)
     }
 
-    fn includes_guide(self) -> bool {
+    fn includes_partner(self) -> bool {
         self.includes_stack()
     }
 
@@ -121,6 +127,188 @@ pub fn refresh_active_review_brief(
             refresh_active_review_brief_flow(model, allow_automatic_generation, cx).await;
         })
         .detach();
+}
+
+pub fn refresh_active_review_partner(
+    state: &Entity<AppState>,
+    window: &mut Window,
+    cx: &mut App,
+    allow_automatic_generation: bool,
+) {
+    let model = state.clone();
+    window
+        .spawn(cx, async move |cx: &mut AsyncWindowContext| {
+            refresh_active_review_partner_flow(model, allow_automatic_generation, cx).await;
+        })
+        .detach();
+}
+
+pub fn request_active_review_partner_focus(
+    model: &Entity<AppState>,
+    target: review_partner::ReviewPartnerFocusTarget,
+    cx: &mut App,
+) {
+    let request = {
+        let state = model.read(cx);
+        let Some(detail_key) = state.active_pr_key.clone() else {
+            return;
+        };
+        let Some(detail_state) = state.detail_states.get(&detail_key) else {
+            return;
+        };
+        let Some(document) = detail_state.review_partner_state.document.clone() else {
+            return;
+        };
+        if document.focus_record(&target.key).is_some()
+            || detail_state
+                .review_partner_state
+                .loading_focus_keys
+                .contains(&target.key)
+        {
+            return;
+        }
+        let Some(local_repo_status) = detail_state.local_repository_status.clone() else {
+            return;
+        };
+        let Some(working_directory) = local_repo_status.path.clone() else {
+            return;
+        };
+        let Some(request_key) = detail_state.review_partner_state.request_key.clone() else {
+            return;
+        };
+        (
+            detail_key,
+            request_key,
+            document,
+            working_directory,
+            CacheStore::clone(state.cache.as_ref()),
+        )
+    };
+
+    let (detail_key, request_key, document, working_directory, cache) = request;
+    let focus_key = target.key.clone();
+    model.update(cx, |state, cx| {
+        if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
+            if detail_state.review_partner_state.request_key.as_deref() == Some(&request_key) {
+                detail_state
+                    .review_partner_state
+                    .loading_focus_keys
+                    .insert(focus_key.clone());
+                detail_state
+                    .review_partner_state
+                    .focus_errors
+                    .remove(&focus_key);
+                cx.notify();
+            }
+        }
+    });
+
+    let model = model.clone();
+    cx.spawn(async move |cx| {
+        let result = cx
+            .background_executor()
+            .spawn({
+                let document = document.clone();
+                let target = target.clone();
+                let working_directory = working_directory.clone();
+                async move {
+                    run_foreground_blocking(|| {
+                        review_partner::generate_review_partner_focus_record(
+                            document.as_ref(),
+                            target,
+                            &working_directory,
+                        )
+                    })
+                }
+            })
+            .await;
+
+        let mut document_to_save = None;
+        model
+            .update(cx, |state, cx| {
+                if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
+                    if detail_state.review_partner_state.request_key.as_deref()
+                        != Some(&request_key)
+                    {
+                        return;
+                    }
+
+                    detail_state
+                        .review_partner_state
+                        .loading_focus_keys
+                        .remove(&focus_key);
+                    match result {
+                        Ok(record) => {
+                            if let Some(current) =
+                                detail_state.review_partner_state.document.as_ref()
+                            {
+                                let mut next = current.as_ref().clone();
+                                review_partner::upsert_focus_record(
+                                    &mut next,
+                                    target.clone(),
+                                    record,
+                                );
+                                document_to_save = Some(next.clone());
+                                detail_state.review_partner_state.document =
+                                    Some(std::sync::Arc::new(next));
+                            }
+                            detail_state
+                                .review_partner_state
+                                .focus_errors
+                                .remove(&focus_key);
+                        }
+                        Err(error) => {
+                            if let Some(current) =
+                                detail_state.review_partner_state.document.as_ref()
+                            {
+                                let input = review_partner::GenerateReviewPartnerInput {
+                                    provider: current.provider,
+                                    working_directory: working_directory.clone(),
+                                    repository: current.stack.repository.clone(),
+                                    number: current.stack.selected_pr_number,
+                                    code_version_key: current.code_version_key.clone(),
+                                    title: String::new(),
+                                    body: String::new(),
+                                    url: String::new(),
+                                    base_ref_name: String::new(),
+                                    head_ref_name: String::new(),
+                                    stack: current.stack.clone(),
+                                    structural_evidence: current.structural_evidence.clone(),
+                                    semantic_review: current.semantic_review.clone(),
+                                    context: current.context.clone(),
+                                    focus_targets: vec![target.clone()],
+                                };
+                                let record = review_partner::fallback_focus_record(
+                                    &input,
+                                    &target,
+                                    Some(format!("AI focus context unavailable: {error}")),
+                                );
+                                let mut next = current.as_ref().clone();
+                                review_partner::upsert_focus_record(
+                                    &mut next,
+                                    target.clone(),
+                                    record,
+                                );
+                                document_to_save = Some(next.clone());
+                                detail_state.review_partner_state.document =
+                                    Some(std::sync::Arc::new(next));
+                            }
+                            detail_state
+                                .review_partner_state
+                                .focus_errors
+                                .insert(focus_key.clone(), error);
+                        }
+                    }
+                    cx.notify();
+                }
+            })
+            .ok();
+
+        if let Some(document) = document_to_save {
+            let _ = review_partner::save_review_partner_context(&cache, &document);
+        }
+    })
+    .detach();
 }
 
 pub(crate) async fn refresh_active_review_brief_flow(
@@ -325,6 +513,137 @@ pub(crate) async fn refresh_active_review_brief_flow(
     }
 }
 
+pub(crate) async fn refresh_active_review_partner_flow(
+    model: Entity<AppState>,
+    allow_automatic_generation: bool,
+    cx: &mut AsyncWindowContext,
+) {
+    let initial = model
+        .read_with(cx, |state, _| {
+            let detail = state.active_detail()?.clone();
+            let detail_key = state.active_pr_key.clone()?;
+            Some((
+                detail_key,
+                detail,
+                state.cache.clone(),
+                state.code_tour_settings.loaded,
+                state.code_tour_settings.settings.clone(),
+                state.code_tour_provider_statuses_loaded,
+                state.code_tour_provider_statuses.clone(),
+            ))
+        })
+        .ok()
+        .flatten();
+
+    let Some((
+        detail_key,
+        detail,
+        cache,
+        settings_loaded,
+        existing_settings,
+        statuses_loaded,
+        existing_statuses,
+    )) = initial
+    else {
+        return;
+    };
+
+    if !settings_loaded {
+        model
+            .update(cx, |state, cx| {
+                state.code_tour_settings.loading = true;
+                state.code_tour_settings.error = None;
+                cx.notify();
+            })
+            .ok();
+    }
+
+    if !statuses_loaded {
+        model
+            .update(cx, |state, cx| {
+                state.code_tour_provider_loading = true;
+                state.code_tour_provider_error = None;
+                cx.notify();
+            })
+            .ok();
+    }
+
+    let settings_result = if settings_loaded {
+        Ok(existing_settings.clone())
+    } else {
+        cx.background_executor()
+            .spawn({
+                let cache = cache.clone();
+                async move { code_tour::load_code_tour_settings(&cache) }
+            })
+            .await
+    };
+
+    let provider_statuses_result = if statuses_loaded {
+        Ok(existing_statuses)
+    } else {
+        cx.background_executor()
+            .spawn(async { code_tour::load_code_tour_provider_statuses() })
+            .await
+    };
+
+    let settings = settings_result
+        .clone()
+        .unwrap_or_else(|_| existing_settings.clone());
+    let provider = settings.provider;
+    let request_key = build_review_partner_request_key(&detail, provider);
+    let provider_statuses = provider_statuses_result.clone().unwrap_or_default();
+    let provider_ready = provider_statuses
+        .iter()
+        .find(|status| status.provider == provider)
+        .map(|status| status.available && status.authenticated)
+        .unwrap_or(false);
+    let should_auto_generate = allow_automatic_generation
+        && settings.automatically_generates_for(&detail.repository)
+        && provider_ready
+        && model
+            .read_with(cx, |state, _| {
+                !state.automatic_partner_request_keys.contains(&request_key)
+                    && detail_partner_request_matches(state, &detail_key, provider, &request_key)
+            })
+            .ok()
+            .unwrap_or(false);
+
+    model
+        .update(cx, |state, cx| {
+            state.code_tour_settings.loading = false;
+            if let Ok(settings) = &settings_result {
+                state.code_tour_settings.settings = settings.clone();
+                state.code_tour_settings.loaded = true;
+                state.code_tour_settings.error = None;
+            } else if let Err(error) = &settings_result {
+                state.code_tour_settings.error = Some(error.clone());
+            }
+
+            state.code_tour_provider_loading = false;
+            state.code_tour_provider_statuses_loaded = true;
+            if let Ok(statuses) = &provider_statuses_result {
+                state.code_tour_provider_statuses = statuses.clone();
+                state.code_tour_provider_error = None;
+            } else if let Err(error) = &provider_statuses_result {
+                state.code_tour_provider_error = Some(error.clone());
+            }
+
+            cx.notify();
+        })
+        .ok();
+
+    if should_auto_generate {
+        model
+            .update(cx, |state, _| {
+                state.automatic_partner_request_keys.insert(request_key);
+            })
+            .ok();
+        run_review_intelligence_flow(model, ReviewIntelligenceScope::StackOnly, false, true, cx)
+            .await;
+    }
+}
+
 pub(crate) async fn run_review_intelligence_flow(
     model: Entity<AppState>,
     scope: ReviewIntelligenceScope,
@@ -349,6 +668,7 @@ pub(crate) async fn run_review_intelligence_flow(
                 detail_key,
                 detail,
                 provider,
+                state.lsp_session_manager.clone(),
                 state.code_tour_provider_statuses_loaded,
                 open_pull_requests,
                 existing_local_repository_status,
@@ -365,6 +685,7 @@ pub(crate) async fn run_review_intelligence_flow(
         detail_key,
         detail,
         provider,
+        lsp_session_manager,
         statuses_loaded,
         open_pull_requests,
         existing_local_repository_status,
@@ -372,12 +693,14 @@ pub(crate) async fn run_review_intelligence_flow(
     let request_key = review_intelligence_request_key(&detail, provider);
     let code_version_key = tour_code_version_key(&detail);
     let stack_code_version_key = format!(
-        "{}:{}",
+        "{}:{}:{}:{}",
         code_version_key,
-        structural_evidence::STRUCTURAL_EVIDENCE_VERSION
+        crate::stacks::model::STACK_GENERATOR_VERSION,
+        structural_evidence::STRUCTURAL_EVIDENCE_VERSION,
+        semantic_review::semantic_review_version_key()
     );
     let brief_request_key = build_review_brief_request_key(&detail, provider);
-    let guide_request_key = build_review_guide_request_key(&detail, provider);
+    let partner_request_key = build_review_partner_request_key(&detail, provider);
     let tour_request_key = build_tour_request_key(&detail, provider);
     let local_review_repository_status =
         local_review::reusable_local_repository_status(&detail, existing_local_repository_status);
@@ -413,17 +736,17 @@ pub(crate) async fn run_review_intelligence_flow(
                         detail_state.ai_stack_state.success = false;
                     }
 
-                    if scope.includes_guide() {
-                        detail_state.review_guide_state.request_key =
-                            Some(guide_request_key.clone());
-                        detail_state.review_guide_state.loading = false;
-                        detail_state.review_guide_state.generating = true;
-                        detail_state.review_guide_state.error = None;
-                        detail_state.review_guide_state.message =
+                    if scope.includes_partner() {
+                        detail_state.review_partner_state.request_key =
+                            Some(partner_request_key.clone());
+                        detail_state.review_partner_state.loading = false;
+                        detail_state.review_partner_state.generating = true;
+                        detail_state.review_partner_state.error = None;
+                        detail_state.review_partner_state.message =
                             Some("Generation is already in progress.".to_string());
-                        detail_state.review_guide_state.progress_text =
+                        detail_state.review_partner_state.progress_text =
                             Some("Generation is already in progress.".to_string());
-                        detail_state.review_guide_state.success = false;
+                        detail_state.review_partner_state.success = false;
                     }
 
                     if scope.includes_tour() {
@@ -473,22 +796,22 @@ pub(crate) async fn run_review_intelligence_flow(
                     Some("Preparing local checkout for Guided Review.".to_string());
                 detail_state.ai_stack_state.success = false;
 
-                let guide_request_changed = detail_state
-                    .review_guide_state
+                let partner_request_changed = detail_state
+                    .review_partner_state
                     .request_key
                     .as_deref()
-                    != Some(&guide_request_key);
-                detail_state.review_guide_state.request_key = Some(guide_request_key.clone());
-                detail_state.review_guide_state.loading = true;
-                detail_state.review_guide_state.generating = false;
-                if force || guide_request_changed {
-                    detail_state.review_guide_state.document = None;
+                    != Some(&partner_request_key);
+                detail_state.review_partner_state.request_key = Some(partner_request_key.clone());
+                detail_state.review_partner_state.loading = true;
+                detail_state.review_partner_state.generating = false;
+                if force || partner_request_changed {
+                    detail_state.review_partner_state.document = None;
                 }
-                detail_state.review_guide_state.error = None;
-                detail_state.review_guide_state.message = None;
-                detail_state.review_guide_state.progress_text =
-                    Some("Preparing local checkout for Guided Review.".to_string());
-                detail_state.review_guide_state.success = false;
+                detail_state.review_partner_state.error = None;
+                detail_state.review_partner_state.message = None;
+                detail_state.review_partner_state.progress_text =
+                    Some("Preparing local checkout for Review Partner.".to_string());
+                detail_state.review_partner_state.success = false;
             }
 
             if scope.includes_brief() {
@@ -658,27 +981,29 @@ pub(crate) async fn run_review_intelligence_flow(
         None
     };
 
-    if scope.includes_guide() {
-        if let Some(stack) = generated_stack {
-            generate_or_load_guide(
+    if scope.includes_partner() {
+        if let Some(generated_stack) = generated_stack {
+            generate_or_load_partner(
                 &model,
                 cache.as_ref(),
                 &detail_key,
                 &detail,
                 provider,
-                &guide_request_key,
+                &partner_request_key,
                 &local_repo_status,
-                stack,
+                generated_stack.stack,
+                generated_stack.semantic_review,
                 force,
+                lsp_session_manager.clone(),
                 cx,
             )
             .await;
         } else {
-            set_guide_error(
+            set_partner_error(
                 &model,
                 &detail_key,
-                &guide_request_key,
-                "Guided Review needs a generated stack before it can build layer guidance."
+                &partner_request_key,
+                "Guided Review needs generated stack layers before Review Partner context can be built."
                     .to_string(),
                 cx,
             )
@@ -735,7 +1060,7 @@ async fn generate_or_load_stack(
     reflect_tour_progress: bool,
     tour_request_key: &str,
     cx: &mut AsyncWindowContext,
-) -> Option<ReviewStack> {
+) -> Option<GeneratedReviewStack> {
     if !force {
         let cached = cx
             .background_executor()
@@ -758,6 +1083,32 @@ async fn generate_or_load_stack(
 
         if let Ok(Some(stack)) = cached {
             let loaded_stack = stack.clone();
+            let semantic_review = if let Some(working_directory) = local_repo_status.path.as_ref() {
+                cx.background_executor()
+                    .spawn({
+                        let cache = CacheStore::clone(cache);
+                        let detail = detail.clone();
+                        let semantic_stack = loaded_stack.clone();
+                        let working_directory = PathBuf::from(working_directory);
+                        let head_oid = checkout_head_oid(local_repo_status);
+                        async move {
+                            run_foreground_blocking(|| {
+                                semantic_review::build_and_cache_semantic_review(
+                                    &cache,
+                                    &detail,
+                                    &semantic_stack.atoms,
+                                    &detail.repository,
+                                    working_directory.as_path(),
+                                    head_oid.as_deref(),
+                                    false,
+                                )
+                            })
+                        }
+                    })
+                    .await
+            } else {
+                None
+            };
             set_stack_success(
                 model,
                 detail_key,
@@ -785,7 +1136,10 @@ async fn generate_or_load_stack(
                     })
                     .ok();
             }
-            return Some(loaded_stack);
+            return Some(GeneratedReviewStack {
+                stack: loaded_stack,
+                semantic_review,
+            });
         }
     }
 
@@ -809,7 +1163,7 @@ async fn generate_or_load_stack(
                     detail_state.ai_stack_state.loading = false;
                     detail_state.ai_stack_state.generating = true;
                     detail_state.ai_stack_state.message =
-                        Some("Building structural evidence for Guided Review.".to_string());
+                        Some("Building Sem evidence for Guided Review.".to_string());
                 }
 
                 if reflect_tour_progress {
@@ -820,10 +1174,7 @@ async fn generate_or_load_stack(
                         false,
                         true,
                         "Generating Guided Review layers",
-                        &format!(
-                            "{} is planning review layers first. The walkthrough starts after that phase finishes.",
-                            provider.label()
-                        ),
+                        "Sem is building deterministic review layers before the walkthrough starts.",
                     );
                 }
             }
@@ -841,6 +1192,15 @@ async fn generate_or_load_stack(
             async move {
                 run_foreground_blocking(|| {
                     let atoms = extract_change_atoms(&detail);
+                    let semantic_review = semantic_review::build_and_cache_semantic_review(
+                        &cache,
+                        &detail,
+                        &atoms,
+                        &detail.repository,
+                        working_directory.as_path(),
+                        head_oid.as_deref(),
+                        force,
+                    );
                     let structural_evidence = head_oid
                         .as_deref()
                         .map(|head_oid| {
@@ -865,9 +1225,10 @@ async fn generate_or_load_stack(
                         enable_github_native: false,
                         enable_branch_topology: false,
                         enable_local_metadata: false,
-                        enable_ai_virtual: true,
+                        enable_ai_virtual: false,
+                        enable_sem_virtual: true,
                         enable_virtual_commits: false,
-                        enable_virtual_semantic: false,
+                        enable_virtual_semantic: true,
                         ai_provider: Some(provider),
                         ..StackDiscoveryOptions::default()
                     };
@@ -877,9 +1238,11 @@ async fn generate_or_load_stack(
                         local_repo_path: Some(working_directory),
                         trunk_branch: None,
                         structural_evidence: Some(structural_evidence),
+                        semantic_review: semantic_review.clone(),
                     };
 
                     discover_review_stack(&detail, &repo_context, options)
+                        .map(|stack| (stack, semantic_review))
                         .map_err(|error| error.message)
                 })
             }
@@ -887,7 +1250,7 @@ async fn generate_or_load_stack(
         .await;
 
     match stack_result {
-        Ok(stack) if !stack_is_ai_unavailable(&stack) => {
+        Ok((stack, semantic_review)) if !stack_is_ai_unavailable(&stack) => {
             let _ = save_ai_review_stack(cache, &stack, provider, code_version_key);
             let generated_stack = stack.clone();
             set_stack_success(
@@ -899,9 +1262,12 @@ async fn generate_or_load_stack(
                 cx,
             )
             .await;
-            Some(generated_stack)
+            Some(GeneratedReviewStack {
+                stack: generated_stack,
+                semantic_review,
+            })
         }
-        Ok(stack) => {
+        Ok((stack, semantic_review)) => {
             let message = stack
                 .warnings
                 .first()
@@ -912,7 +1278,10 @@ async fn generate_or_load_stack(
                 });
             let unavailable_stack = stack.clone();
             set_stack_transient_failure(model, detail_key, request_key, stack, message, cx).await;
-            Some(unavailable_stack)
+            Some(GeneratedReviewStack {
+                stack: unavailable_stack,
+                semantic_review,
+            })
         }
         Err(error) => {
             set_stack_error(model, detail_key, request_key, detail, error, cx).await;
@@ -921,16 +1290,18 @@ async fn generate_or_load_stack(
     }
 }
 
-async fn generate_or_load_guide(
+async fn generate_or_load_partner(
     model: &Entity<AppState>,
     cache: &CacheStore,
     detail_key: &str,
     detail: &PullRequestDetail,
     provider: CodeTourProvider,
-    guide_request_key: &str,
+    partner_request_key: &str,
     local_repo_status: &local_repo::LocalRepositoryStatus,
     stack: ReviewStack,
+    semantic_review: Option<semantic_review::RemissSemanticReview>,
     force: bool,
+    lsp_session_manager: std::sync::Arc<crate::lsp::LspSessionManager>,
     cx: &mut AsyncWindowContext,
 ) {
     if !force {
@@ -939,17 +1310,17 @@ async fn generate_or_load_guide(
             .spawn({
                 let cache = CacheStore::clone(cache);
                 let detail = detail.clone();
-                async move { review_guide::load_review_guide(&cache, &detail, provider) }
+                async move { review_partner::load_review_partner_context(&cache, &detail, provider) }
             })
             .await;
 
-        if let Ok(Some(guide)) = cached {
-            set_guide_success(
+        if let Ok(Some(partner)) = cached {
+            set_partner_success(
                 model,
                 detail_key,
-                guide_request_key,
-                guide,
-                Some("Loaded cached Guided Review.".to_string()),
+                partner_request_key,
+                partner,
+                Some("Loaded cached Review Partner context.".to_string()),
                 cx,
             )
             .await;
@@ -958,10 +1329,10 @@ async fn generate_or_load_guide(
     }
 
     let Some(working_directory) = local_repo_status.path.as_ref() else {
-        set_guide_error(
+        set_partner_error(
             model,
             detail_key,
-            guide_request_key,
+            partner_request_key,
             local_repo_status.message.clone(),
             cx,
         )
@@ -972,31 +1343,45 @@ async fn generate_or_load_guide(
     model
         .update(cx, |state, cx| {
             if let Some(detail_state) = state.detail_states.get_mut(detail_key) {
-                if detail_state.review_guide_state.request_key.as_deref() == Some(guide_request_key)
+                if detail_state.review_partner_state.request_key.as_deref()
+                    == Some(partner_request_key)
                 {
-                    detail_state.review_guide_state.loading = false;
-                    detail_state.review_guide_state.generating = true;
-                    detail_state.review_guide_state.progress_text =
-                        Some("Building structural evidence for Guided Review.".to_string());
-                    detail_state.review_guide_state.error = None;
-                    detail_state.review_guide_state.message = None;
-                    detail_state.review_guide_state.success = false;
+                    detail_state.review_partner_state.loading = false;
+                    detail_state.review_partner_state.generating = true;
+                    detail_state.review_partner_state.progress_text =
+                        Some("Checking usages and codebase context.".to_string());
+                    detail_state.review_partner_state.error = None;
+                    detail_state.review_partner_state.message = None;
+                    detail_state.review_partner_state.success = false;
                 }
             }
             cx.notify();
         })
         .ok();
 
-    let guide_result = cx
+    let partner_result = cx
         .background_executor()
         .spawn({
             let cache = CacheStore::clone(cache);
             let detail = detail.clone();
             let stack = stack.clone();
+            let semantic_review = semantic_review.clone();
             let working_directory = PathBuf::from(working_directory);
             let head_oid = checkout_head_oid(local_repo_status);
+            let lsp_session_manager = lsp_session_manager.clone();
             async move {
                 run_foreground_blocking(|| {
+                    let semantic_review = semantic_review.or_else(|| {
+                        semantic_review::build_and_cache_semantic_review(
+                            &cache,
+                            &detail,
+                            &stack.atoms,
+                            &detail.repository,
+                            working_directory.as_path(),
+                            head_oid.as_deref(),
+                            force,
+                        )
+                    });
                     let structural_evidence = head_oid
                         .as_deref()
                         .map(|head_oid| {
@@ -1017,23 +1402,23 @@ async fn generate_or_load_guide(
                             );
                             pack
                         });
-                    let input = review_guide::build_review_guide_generation_input(
+                    let input = review_partner::build_review_partner_generation_input(
                         &detail,
                         provider,
                         working_directory.to_string_lossy().as_ref(),
                         stack,
                         structural_evidence,
+                        semantic_review,
+                        Some(lsp_session_manager),
                     );
 
-                    match review_guide::generate_review_guide(&cache, input.clone()) {
-                        Ok(guide) => guide,
+                    match review_partner::generate_review_partner_context(&cache, input.clone()) {
+                        Ok(partner) => partner,
                         Err(error) => {
-                            let guide = review_guide::fallback_review_guide(
+                            review_partner::fallback_review_partner_context(
                                 &input,
-                                Some(format!("AI layer guidance unavailable: {error}")),
-                            );
-                            let _ = review_guide::save_review_guide(&cache, &guide);
-                            guide
+                                Some(format!("AI Review Partner context unavailable: {error}")),
+                            )
                         }
                     }
                 })
@@ -1041,12 +1426,18 @@ async fn generate_or_load_guide(
         })
         .await;
 
-    set_guide_success(
+    let partner_message = if partner_result.fallback_reason.is_some() {
+        Some("Using deterministic Review Partner fallback.".to_string())
+    } else {
+        Some("Generated Review Partner context.".to_string())
+    };
+
+    set_partner_success(
         model,
         detail_key,
-        guide_request_key,
-        guide_result,
-        Some("Generated Guided Review.".to_string()),
+        partner_request_key,
+        partner_result,
+        partner_message,
         cx,
     )
     .await;
@@ -1278,13 +1669,13 @@ async fn fail_checkout(
                     detail_state.ai_stack_state.success = false;
                 }
 
-                if scope.includes_guide() {
-                    detail_state.review_guide_state.loading = false;
-                    detail_state.review_guide_state.generating = false;
-                    detail_state.review_guide_state.error = Some(error.to_string());
-                    detail_state.review_guide_state.progress_text = None;
-                    detail_state.review_guide_state.message = None;
-                    detail_state.review_guide_state.success = false;
+                if scope.includes_partner() {
+                    detail_state.review_partner_state.loading = false;
+                    detail_state.review_partner_state.generating = false;
+                    detail_state.review_partner_state.error = Some(error.to_string());
+                    detail_state.review_partner_state.progress_text = None;
+                    detail_state.review_partner_state.message = None;
+                    detail_state.review_partner_state.success = false;
                 }
 
                 if scope.includes_tour() {
@@ -1368,27 +1759,29 @@ async fn set_brief_message(
         .ok();
 }
 
-async fn set_guide_success(
+async fn set_partner_success(
     model: &Entity<AppState>,
     detail_key: &str,
     request_key: &str,
-    guide: review_guide::GeneratedReviewGuide,
+    partner: review_partner::GeneratedReviewPartnerContext,
     message: Option<String>,
     cx: &mut AsyncWindowContext,
 ) {
     model
         .update(cx, |state, cx| {
             if let Some(detail_state) = state.detail_states.get_mut(detail_key) {
-                if detail_state.review_guide_state.request_key.as_deref() == Some(request_key) {
+                if detail_state.review_partner_state.request_key.as_deref() == Some(request_key) {
                     detail_state.ai_stack_state.stack =
-                        Some(std::sync::Arc::new(guide.stack.clone()));
-                    detail_state.review_guide_state.document = Some(std::sync::Arc::new(guide));
-                    detail_state.review_guide_state.loading = false;
-                    detail_state.review_guide_state.generating = false;
-                    detail_state.review_guide_state.progress_text = None;
-                    detail_state.review_guide_state.error = None;
-                    detail_state.review_guide_state.message = message;
-                    detail_state.review_guide_state.success = true;
+                        Some(std::sync::Arc::new(partner.stack.clone()));
+                    detail_state.review_partner_state.document = Some(std::sync::Arc::new(partner));
+                    detail_state.review_partner_state.loading = false;
+                    detail_state.review_partner_state.generating = false;
+                    detail_state.review_partner_state.progress_text = None;
+                    detail_state.review_partner_state.error = None;
+                    detail_state.review_partner_state.message = message;
+                    detail_state.review_partner_state.success = true;
+                    detail_state.review_partner_state.loading_focus_keys.clear();
+                    detail_state.review_partner_state.focus_errors.clear();
                     state.review_stack_cache.borrow_mut().clear();
                 }
             }
@@ -1397,7 +1790,7 @@ async fn set_guide_success(
         .ok();
 }
 
-async fn set_guide_error(
+async fn set_partner_error(
     model: &Entity<AppState>,
     detail_key: &str,
     request_key: &str,
@@ -1407,13 +1800,13 @@ async fn set_guide_error(
     model
         .update(cx, |state, cx| {
             if let Some(detail_state) = state.detail_states.get_mut(detail_key) {
-                if detail_state.review_guide_state.request_key.as_deref() == Some(request_key) {
-                    detail_state.review_guide_state.loading = false;
-                    detail_state.review_guide_state.generating = false;
-                    detail_state.review_guide_state.progress_text = None;
-                    detail_state.review_guide_state.error = Some(error.clone());
-                    detail_state.review_guide_state.message = None;
-                    detail_state.review_guide_state.success = false;
+                if detail_state.review_partner_state.request_key.as_deref() == Some(request_key) {
+                    detail_state.review_partner_state.loading = false;
+                    detail_state.review_partner_state.generating = false;
+                    detail_state.review_partner_state.progress_text = None;
+                    detail_state.review_partner_state.error = Some(error.clone());
+                    detail_state.review_partner_state.message = None;
+                    detail_state.review_partner_state.success = false;
                 }
             }
             cx.notify();
@@ -1595,6 +1988,21 @@ fn detail_brief_request_matches(
         .and_then(|detail_state| detail_state.snapshot.as_ref())
         .and_then(|snapshot| snapshot.detail.as_ref())
         .map(|detail| build_review_brief_request_key(detail, provider) == request_key)
+        .unwrap_or(false)
+}
+
+fn detail_partner_request_matches(
+    state: &AppState,
+    detail_key: &str,
+    provider: CodeTourProvider,
+    request_key: &str,
+) -> bool {
+    state
+        .detail_states
+        .get(detail_key)
+        .and_then(|detail_state| detail_state.snapshot.as_ref())
+        .and_then(|snapshot| snapshot.detail.as_ref())
+        .map(|detail| build_review_partner_request_key(detail, provider) == request_key)
         .unwrap_or(false)
 }
 

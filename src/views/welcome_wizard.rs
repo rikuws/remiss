@@ -92,9 +92,9 @@ pub(super) fn render_onboarding_wizard(state: &Entity<AppState>, cx: &App) -> im
                 .w(px(COACHMARK_WIDTH))
                 .rounded(radius_lg())
                 .border_1()
-                .border_color(focus_border())
+                .border_color(transparent())
                 .bg(bg_overlay())
-                .shadow_sm()
+                .shadow(popover_shadow())
                 .occlude()
                 .overflow_hidden()
                 .child(render_coachmark_header(
@@ -302,6 +302,7 @@ fn render_step_content(
 fn render_github_setup_content(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let status = state.read(cx).onboarding_gh_status.clone();
     let state_for_retry = state.clone();
+    let show_setup_commands = !status.is_ready();
     let status_color = match status.state {
         GhSetupState::Checking => fg_subtle(),
         GhSetupState::Ready => success(),
@@ -315,14 +316,18 @@ fn render_github_setup_content(state: &Entity<AppState>, cx: &App) -> impl IntoE
     };
 
     div()
+        .w_full()
+        .min_w_0()
         .flex()
         .flex_col()
         .gap(px(10.0))
         .child(
             div()
+                .w_full()
+                .min_w_0()
                 .rounded(radius_sm())
                 .border_1()
-                .border_color(with_alpha(status_color, 0.34))
+                .border_color(transparent())
                 .bg(with_alpha(status_color, 0.1))
                 .p(px(10.0))
                 .flex()
@@ -347,34 +352,46 @@ fn render_github_setup_content(state: &Entity<AppState>, cx: &App) -> impl IntoE
                                 .text_size(px(12.0))
                                 .line_height(px(17.0))
                                 .text_color(fg_default())
+                                .whitespace_normal()
                                 .child(status_summary(&status)),
                         ),
                 ),
         )
-        .child(render_command_copy_row("Install", "brew install gh"))
-        .child(render_command_copy_row("Authenticate", "gh auth login"))
-        .child(render_command_copy_row("Setup git", "gh auth setup-git"))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(10.0))
+        .when(show_setup_commands, |el| {
+            el.child(render_command_copy_row("Install", "brew install gh"))
+                .child(render_command_copy_row("Authenticate", "gh auth login"))
+                .child(render_command_copy_row("Setup git", "gh auth setup-git"))
                 .child(
                     div()
-                        .text_size(px(11.0))
-                        .line_height(px(16.0))
-                        .text_color(fg_subtle())
-                        .child("Setup can be completed later; the tutorial still works offline."),
+                        .w_full()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(10.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(11.0))
+                                .line_height(px(16.0))
+                                .text_color(fg_subtle())
+                                .whitespace_normal()
+                                .child(
+                                    "Setup can be completed later; the tutorial still works offline.",
+                                ),
+                        )
+                        .child(
+                            div().flex_shrink_0().child(wizard_secondary_button(
+                                "Retry".to_string(),
+                                status.state == GhSetupState::Checking,
+                                move |_, window, cx| {
+                                    refresh_onboarding_gh_status(&state_for_retry, window, cx);
+                                },
+                            )),
+                        ),
                 )
-                .child(wizard_secondary_button(
-                    "Retry".to_string(),
-                    status.state == GhSetupState::Checking,
-                    move |_, window, cx| {
-                        refresh_onboarding_gh_status(&state_for_retry, window, cx);
-                    },
-                )),
-        )
+        })
 }
 
 fn status_summary(status: &crate::onboarding::GhSetupStatus) -> String {
@@ -393,7 +410,7 @@ fn render_command_copy_row(label: &'static str, command: &'static str) -> impl I
     div()
         .rounded(radius_sm())
         .border_1()
-        .border_color(border_muted())
+        .border_color(transparent())
         .bg(bg_surface())
         .px(px(10.0))
         .py(px(9.0))
@@ -429,7 +446,7 @@ fn render_command_copy_row(label: &'static str, command: &'static str) -> impl I
                 .h(px(28.0))
                 .rounded(radius_sm())
                 .border_1()
-                .border_color(border_muted())
+                .border_color(transparent())
                 .bg(control_button_bg())
                 .flex()
                 .items_center()
@@ -447,7 +464,7 @@ fn render_bullets(step: WizardStepDefinition, tone: Rgba) -> impl IntoElement {
     div()
         .rounded(radius_sm())
         .border_1()
-        .border_color(border_muted())
+        .border_color(transparent())
         .bg(bg_surface())
         .overflow_hidden()
         .children(step.bullets.iter().enumerate().map(|(index, bullet)| {
@@ -469,7 +486,7 @@ fn render_bullets(step: WizardStepDefinition, tone: Rgba) -> impl IntoElement {
                         .rounded(px(5.0))
                         .bg(with_alpha(tone, 0.12))
                         .border_1()
-                        .border_color(with_alpha(tone, 0.28))
+                        .border_color(transparent())
                         .flex()
                         .items_center()
                         .justify_center()
@@ -514,7 +531,7 @@ fn wizard_icon_chip(icon: LucideIcon, tone: Rgba) -> impl IntoElement {
         .h(px(34.0))
         .rounded(px(8.0))
         .border_1()
-        .border_color(with_alpha(tone, 0.34))
+        .border_color(transparent())
         .bg(with_alpha(tone, 0.12))
         .flex_shrink_0()
         .flex()
@@ -533,7 +550,7 @@ fn wizard_secondary_button(
         .py(px(7.0))
         .rounded(radius_sm())
         .border_1()
-        .border_color(border_muted())
+        .border_color(transparent())
         .bg(control_button_bg())
         .text_size(px(12.0))
         .font_weight(FontWeight::MEDIUM)
@@ -545,7 +562,6 @@ fn wizard_secondary_button(
                     style
                         .bg(control_button_hover_bg())
                         .text_color(fg_emphasis())
-                        .border_color(border_default())
                 })
                 .on_mouse_down(MouseButton::Left, on_click)
         })

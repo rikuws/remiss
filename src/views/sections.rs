@@ -548,12 +548,7 @@ fn overview_review_request_row(
         .items_center()
         .gap(px(14.0))
         .cursor_pointer()
-        .hover(|style| {
-            style
-                .bg(bg_surface())
-                .border_color(border_muted())
-                .text_color(fg_emphasis())
-        })
+        .hover(|style| style.bg(bg_surface()).text_color(fg_emphasis()))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             on_click(summary.clone(), window, cx)
         })
@@ -1279,9 +1274,9 @@ fn render_project_shader_picker(
                 .w(px(460.0))
                 .rounded(radius_lg())
                 .border_1()
-                .border_color(border_default())
+                .border_color(transparent())
                 .bg(bg_overlay())
-                .shadow_sm()
+                .shadow(dialog_shadow())
                 .occlude()
                 .overflow_hidden()
                 .flex()
@@ -1370,18 +1365,14 @@ fn project_shader_choice_row(
         .w_full()
         .rounded(radius())
         .border_1()
-        .border_color(if is_selected {
-            focus_border()
-        } else {
-            border_muted()
-        })
+        .border_color(transparent())
         .bg(if is_selected {
             control_selected_bg()
         } else {
             bg_surface()
         })
         .cursor_pointer()
-        .hover(|style| style.bg(hover_bg()).border_color(border_default()))
+        .hover(|style| style.bg(hover_bg()))
         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
             state.update(cx, |s, cx| {
                 s.set_project_shader(&project, variant);
@@ -1570,7 +1561,7 @@ pub fn ghost_button(
         .rounded(radius_sm())
         .bg(control_button_bg())
         .border_1()
-        .border_color(border_muted())
+        .border_color(transparent())
         .text_color(fg_default())
         .text_size(px(13.0))
         .font_weight(FontWeight::MEDIUM)
@@ -1578,7 +1569,6 @@ pub fn ghost_button(
         .hover(|style| {
             style
                 .bg(control_button_hover_bg())
-                .border_color(border_default())
                 .text_color(fg_emphasis())
         })
         .on_mouse_down(MouseButton::Left, on_click)
@@ -1610,7 +1600,7 @@ pub fn badge(text: &str) -> impl IntoElement {
         .rounded(px(999.0))
         .bg(bg_subtle())
         .border_1()
-        .border_color(border_muted())
+        .border_color(transparent())
         .text_size(px(12.0))
         .font_weight(FontWeight::MEDIUM)
         .text_color(fg_muted())
@@ -1641,7 +1631,7 @@ pub fn user_avatar(
                 .rounded(px(size / 2.0))
                 .overflow_hidden()
                 .border_1()
-                .border_color(if emphasized { accent() } else { border_muted() })
+                .border_color(transparent())
                 .bg(if emphasized {
                     accent_muted()
                 } else {
@@ -1714,7 +1704,7 @@ fn avatar_placeholder(login: &str, size: f32, emphasized: bool) -> Div {
         .h(px(size))
         .rounded(px(size / 2.0))
         .border_1()
-        .border_color(if emphasized { accent() } else { border_muted() })
+        .border_color(transparent())
         .bg(if emphasized {
             accent_muted()
         } else {
@@ -1751,7 +1741,7 @@ pub fn badge_success(text: &str) -> impl IntoElement {
         .rounded(px(999.0))
         .bg(success_muted())
         .border_1()
-        .border_color(diff_add_border())
+        .border_color(transparent())
         .text_size(px(12.0))
         .font_weight(FontWeight::MEDIUM)
         .text_color(success())
@@ -1802,7 +1792,7 @@ pub fn meta_row(label: &str, value: &str) -> impl IntoElement {
                 .rounded(radius_sm())
                 .bg(bg_inset())
                 .border_1()
-                .border_color(border_muted())
+                .border_color(transparent())
                 .text_color(fg_emphasis())
                 .font_weight(FontWeight::MEDIUM)
                 .font_family(mono_font_family())
@@ -1874,14 +1864,14 @@ fn filter_pill(
         )
 }
 
-fn pill_badge(label: &str, fg: Rgba, bg: Rgba, border: Rgba) -> impl IntoElement {
+fn pill_badge(label: &str, fg: Rgba, bg: Rgba, _border: Rgba) -> impl IntoElement {
     div()
         .px(px(8.0))
         .py(px(2.0))
         .rounded(px(999.0))
         .bg(bg)
         .border_1()
-        .border_color(border)
+        .border_color(transparent())
         .text_size(px(10.0))
         .font_weight(FontWeight::MEDIUM)
         .text_color(fg)
@@ -1995,13 +1985,6 @@ fn lane_header_control_hover_bg() -> Rgba {
     }
 }
 
-fn lane_header_control_border() -> Rgba {
-    match active_theme() {
-        ActiveTheme::Light => with_alpha(white().into(), 0.42),
-        ActiveTheme::Dark => with_alpha(white().into(), 0.18),
-    }
-}
-
 fn kanban_lane(
     lane_id: &str,
     label: &str,
@@ -2039,7 +2022,7 @@ fn kanban_lane(
                 .flex_grow()
                 .rounded(lane_radius)
                 .bg(transparent())
-                .shadow_md()
+                .shadow(surface_shadow())
                 .child(
                     shader_material_surface_variant(
                         lane_id,
@@ -2082,7 +2065,7 @@ fn kanban_lane(
                                     .rounded(radius_sm())
                                     .bg(lane_header_control_bg())
                                     .border_1()
-                                    .border_color(lane_header_control_border())
+                                    .border_color(transparent())
                                     .text_size(px(14.0))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(fg_emphasis())
@@ -2095,7 +2078,7 @@ fn kanban_lane(
                                     .rounded(px(999.0))
                                     .bg(lane_header_control_bg())
                                     .border_1()
-                                    .border_color(lane_header_control_border())
+                                    .border_color(transparent())
                                     .text_size(px(11.0))
                                     .font_family(mono_font_family())
                                     .text_color(fg_emphasis())
@@ -2113,7 +2096,7 @@ fn kanban_lane(
                                 .cursor_pointer()
                                 .bg(lane_header_control_bg())
                                 .border_1()
-                                .border_color(lane_header_control_border())
+                                .border_color(transparent())
                                 .hover(|s| {
                                     s.bg(lane_header_control_hover_bg()).text_color(danger())
                                 })
@@ -2422,6 +2405,7 @@ pub fn open_pull_request(
     ensure_structural_diff_warmup_started(state, window, cx);
     if initial_surface == PullRequestSurface::Overview {
         crate::review_intelligence::refresh_active_review_brief(state, window, cx, true);
+        crate::review_intelligence::refresh_active_review_partner(state, window, cx, true);
     }
 
     if !load_plan.load_cached_snapshot && !load_plan.sync_live {
@@ -2552,7 +2536,8 @@ async fn refresh_brief_if_active_overview(
         .unwrap_or(false);
 
     if should_refresh_brief {
-        crate::review_intelligence::refresh_active_review_brief_flow(model, true, cx).await;
+        crate::review_intelligence::refresh_active_review_brief_flow(model.clone(), true, cx).await;
+        crate::review_intelligence::refresh_active_review_partner_flow(model, true, cx).await;
     }
 }
 

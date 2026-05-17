@@ -72,7 +72,7 @@ pub fn render_review_file_header_with_controls(
         .pr(px(16.0))
         .bg(diff_annotation_bg())
         .border_1()
-        .border_color(diff_annotation_border())
+        .border_color(transparent())
         .rounded(radius_sm())
         .flex()
         .items_center()
@@ -193,7 +193,7 @@ fn render_file_header_copy_button(path: String) -> impl IntoElement {
         .justify_center()
         .cursor_pointer()
         .tooltip(|_, cx| build_file_header_static_tooltip("Copy file path", cx))
-        .hover(|style| style.bg(bg_selected()).border_color(border_muted()))
+        .hover(|style| style.bg(bg_selected()))
         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(path.clone()));
             cx.stop_propagation();
@@ -218,8 +218,9 @@ impl Render for ReviewFileHeaderTooltip {
             .py(px(4.0))
             .rounded(radius_sm())
             .border_1()
-            .border_color(border_muted())
+            .border_color(transparent())
             .bg(bg_overlay())
+            .shadow(tooltip_shadow())
             .text_size(px(11.0))
             .font_weight(FontWeight::MEDIUM)
             .text_color(fg_emphasis())

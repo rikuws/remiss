@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Open in Remiss",
+  "version": "0.1.0",
+  "description": "Adds an Open in Remiss button to GitHub pull request pages.",
+  "content_scripts": [
+    {
+      "matches": ["https://github.com/*/*/pull/*"],
+      "js": ["src/content.js"],
+      "css": ["src/content.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}

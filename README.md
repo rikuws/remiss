@@ -21,11 +21,16 @@ Remiss uses a small fork of difftastic for embedded structural diffs. See
 
 ```sh
 cargo fmt --check
+./scripts/check-line-budget.sh
 cargo check --all-targets --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 cargo run
 ```
+
+Rust source files have a 3000-line budget. The checker keeps the current
+oversized baseline in `scripts/line-budget-allowlist.txt` so new oversized files
+fail CI while the existing large files are split.
 
 ## Packaging
 

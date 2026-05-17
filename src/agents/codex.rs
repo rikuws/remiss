@@ -29,12 +29,10 @@ use super::merge::{merge_tour, TourResponse};
 use super::progress::make_progress;
 use super::prompt::build_tour_prompt;
 use super::runtime;
-use super::{AgentTextResponse, CodingAgentBackend};
+use super::{AgentJsonPromptOptions, AgentTextResponse, CodingAgentBackend};
 
 const OVERALL_TIMEOUT_MS: u64 = 240_000;
 const INACTIVITY_TIMEOUT_MS: u64 = 60_000;
-const STACK_PLAN_OVERALL_TIMEOUT_MS: u64 = 90_000;
-const STACK_PLAN_INACTIVITY_TIMEOUT_MS: u64 = 35_000;
 const RUNNING_TICKER_MS: u64 = 10_000;
 const NEXT_MESSAGE_POLL: Duration = Duration::from_millis(250);
 
@@ -151,6 +149,7 @@ impl CodingAgentBackend for CodexBackend {
 pub fn run_json_prompt(
     working_directory: &str,
     prompt: String,
+    options: AgentJsonPromptOptions,
 ) -> Result<AgentTextResponse, String> {
     let Some(binary) = find_codex_binary() else {
         return Err("Codex CLI is not installed on PATH.".to_string());
@@ -172,8 +171,8 @@ pub fn run_json_prompt(
             working_directory,
             prompt,
             progress_tx,
-            STACK_PLAN_OVERALL_TIMEOUT_MS,
-            STACK_PLAN_INACTIVITY_TIMEOUT_MS,
+            options.codex_overall_timeout_ms,
+            options.codex_inactivity_timeout_ms,
         ));
         let _ = result_tx.send(outcome);
     });
@@ -185,7 +184,7 @@ pub fn run_json_prompt(
             Ok(outcome) => {
                 while progress_rx.try_recv().is_ok() {}
                 let _ = worker.join();
-                return finalize_text_turn(outcome);
+                return finalize_text_turn(outcome, options.task_label);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -206,11 +205,12 @@ struct CodexTurnOutcome {
 
 fn finalize_text_turn(
     outcome: Result<CodexTurnOutcome, String>,
+    task_label: &str,
 ) -> Result<AgentTextResponse, String> {
     let outcome = outcome?;
 
     if let Some(abort) = &outcome.abort {
-        return Err(generation_abort_message("Codex", abort));
+        return Err(generation_abort_message("Codex", task_label, abort));
     }
 
     if let Some(error) = &outcome.error {
@@ -243,7 +243,7 @@ fn finalize_turn(
     let outcome = outcome?;
 
     if let Some(abort) = &outcome.abort {
-        let summary = generation_abort_message("Codex", abort);
+        let summary = generation_abort_message("Codex", "the code tour", abort);
         on_progress(make_progress(
             "timeout",
             summary.clone(),

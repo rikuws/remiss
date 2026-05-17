@@ -144,6 +144,9 @@ impl CommandRunner {
 
 #[cfg(unix)]
 fn configure_child_process(command: &mut Command) {
+    // SAFETY: `pre_exec` runs after fork and before exec. The closure only calls
+    // the async-signal-safe libc `setpgid` and constructs an OS error from errno
+    // when that call fails.
     unsafe {
         command.pre_exec(|| {
             if libc::setpgid(0, 0) == 0 {
@@ -160,21 +163,32 @@ fn configure_child_process(_command: &mut Command) {}
 
 #[cfg(unix)]
 fn terminate_child_tree(child: &mut Child) {
-    let process_group_id = child.id() as libc::pid_t;
-    unsafe {
-        let _ = libc::kill(-process_group_id, libc::SIGTERM);
-    }
+    signal_child_process_group(child, libc::SIGTERM);
     for _ in 0..10 {
         if child.try_wait().ok().flatten().is_some() {
             return;
         }
         thread::sleep(Duration::from_millis(20));
     }
-    unsafe {
-        let _ = libc::kill(-process_group_id, libc::SIGKILL);
-    }
+    signal_child_process_group(child, libc::SIGKILL);
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[cfg(unix)]
+fn signal_child_process_group(child: &Child, signal: libc::c_int) {
+    let process_group_id = child.id() as libc::pid_t;
+    if process_group_id <= 0 {
+        return;
+    }
+
+    // SAFETY: `configure_child_process` places launched commands in a process
+    // group with the child's pid as the pgid. Passing a negative pid asks POSIX
+    // `kill` to signal that process group. The signal value is one of libc's
+    // known constants supplied by this module.
+    unsafe {
+        let _ = libc::kill(-process_group_id, signal);
+    }
 }
 
 #[cfg(not(unix))]

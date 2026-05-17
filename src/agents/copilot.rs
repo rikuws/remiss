@@ -18,12 +18,10 @@ use super::jsonrepair::parse_tolerant;
 use super::merge::{build_copilot_fallback_tour, merge_tour, TourResponse};
 use super::progress::{limit_text, make_progress};
 use super::prompt::build_tour_prompt;
-use super::{AgentTextResponse, CodingAgentBackend};
+use super::{AgentJsonPromptOptions, AgentTextResponse, CodingAgentBackend};
 
 const OVERALL_TIMEOUT_MS: u64 = 480_000;
 const INACTIVITY_TIMEOUT_MS: u64 = 120_000;
-const STACK_PLAN_OVERALL_TIMEOUT_MS: u64 = 120_000;
-const STACK_PLAN_INACTIVITY_TIMEOUT_MS: u64 = 45_000;
 const RUNNING_TICKER_MS: u64 = 10_000;
 const POLL_INTERVAL: Duration = Duration::from_millis(120);
 const MAX_PROMPT_BYTES: usize = 120_000;
@@ -155,7 +153,7 @@ impl CodingAgentBackend for CopilotBackend {
 
         if let Some(abort) = &outcome.abort {
             if !has_usable_final_text(&outcome) {
-                let summary = generation_abort_message("GitHub Copilot", &abort);
+                let summary = generation_abort_message("GitHub Copilot", "the code tour", &abort);
                 on_progress(make_progress(
                     "timeout",
                     summary.clone(),
@@ -217,6 +215,7 @@ impl CodingAgentBackend for CopilotBackend {
 pub fn run_json_prompt(
     working_directory: &str,
     mut prompt: String,
+    options: AgentJsonPromptOptions,
 ) -> Result<AgentTextResponse, String> {
     let Some(binary) = find_copilot_binary() else {
         return Err(
@@ -244,15 +243,19 @@ pub fn run_json_prompt(
         &binary,
         working_directory,
         &prompt,
-        STACK_PLAN_OVERALL_TIMEOUT_MS,
-        STACK_PLAN_INACTIVITY_TIMEOUT_MS,
+        options.copilot_overall_timeout_ms,
+        options.copilot_inactivity_timeout_ms,
         false,
         &mut ignore_progress,
     )?;
 
     if let Some(abort) = &outcome.abort {
         if !has_usable_final_text(&outcome) {
-            return Err(generation_abort_message("GitHub Copilot", &abort));
+            return Err(generation_abort_message(
+                "GitHub Copilot",
+                options.task_label,
+                abort,
+            ));
         }
     }
 
