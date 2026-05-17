@@ -72,8 +72,13 @@ pub(super) fn collect_layer_context(
     lsp_session_manager: Option<&LspSessionManager>,
     warnings: &mut Vec<String>,
 ) -> ReviewPartnerCollectedLayer {
-    let semantic_layers = semantic_layers_for_layer(layer, atoms, semantic_review);
     let semantic_focus = semantic_focus_for_layer(layer, semantic_review);
+    let mut semantic_layers = semantic_layers_for_layer(layer, atoms, semantic_review);
+    if semantic_layers.is_empty() {
+        if let Some(fallback) = semantic_layer_from_focus(layer, atoms, &semantic_focus) {
+            semantic_layers.push(fallback);
+        }
+    }
     let changed_symbols =
         collect_changed_symbols(layer, atoms, checkout_root, lsp_session_manager, warnings);
     let removed_symbols = collect_removed_symbols(detail, atoms, checkout_root, warnings);
@@ -172,6 +177,74 @@ fn semantic_layer_matches_atoms(
                 .iter()
                 .any(|index| layer_hunks.contains(index));
         path_matches && hunk_matches
+    })
+}
+
+fn semantic_layer_from_focus(
+    layer: &ReviewStackLayer,
+    atoms: &[&ChangeAtom],
+    semantic_focus: &[RemissSemanticFocusSummary],
+) -> Option<ReviewPartnerSemanticLayer> {
+    if semantic_focus.is_empty() {
+        return None;
+    }
+
+    let mut atom_ids = BTreeSet::new();
+    let mut file_paths = BTreeSet::new();
+    let mut hunk_indices = BTreeSet::new();
+    let mut entity_names = BTreeSet::new();
+    let mut change_count = 0usize;
+
+    for atom in atoms {
+        atom_ids.insert(atom.id.clone());
+        file_paths.insert(normalize_repo_path(&atom.path));
+        if let Some(path) = atom.previous_path.as_deref() {
+            file_paths.insert(normalize_repo_path(path));
+        }
+        hunk_indices.extend(atom.hunk_indices.iter().copied());
+    }
+
+    for focus in semantic_focus {
+        atom_ids.insert(focus.atom_id.clone());
+        if let Some(entity) = focus.target_entity.as_ref() {
+            entity_names.insert(entity.name.clone());
+            file_paths.insert(normalize_repo_path(&entity.file_path));
+        }
+        for entity in &focus.overlapping_entities {
+            entity_names.insert(entity.name.clone());
+            file_paths.insert(normalize_repo_path(&entity.file_path));
+        }
+        for change in &focus.matching_changes {
+            entity_names.insert(change.entity_name.clone());
+            file_paths.insert(normalize_repo_path(&change.file_path));
+            hunk_indices.extend(change.hunk_indices.iter().copied());
+        }
+        change_count += focus.matching_changes.len().max(1);
+    }
+
+    Some(ReviewPartnerSemanticLayer {
+        id: format!("{}-semantic-focus", layer.id),
+        title: limit_text(
+            format!("Sem focus for {}", layer.title),
+            MAX_ITEM_TEXT_CHARS,
+        ),
+        summary: limit_text(
+            format!(
+                "Sem resolved {} focus target{} for this stack layer.",
+                semantic_focus.len(),
+                if semantic_focus.len() == 1 { "" } else { "s" }
+            ),
+            MAX_ITEM_TEXT_CHARS,
+        ),
+        rationale: limit_text(
+            "Derived from Sem focus because Sem layer mapping was unavailable for these atoms.",
+            MAX_ITEM_TEXT_CHARS,
+        ),
+        atom_ids: atom_ids.into_iter().take(MAX_LAYER_ATOMS).collect(),
+        file_paths: file_paths.into_iter().take(MAX_SECTION_ITEMS).collect(),
+        hunk_indices: hunk_indices.into_iter().collect(),
+        entity_names: entity_names.into_iter().take(MAX_SECTION_ITEMS).collect(),
+        change_count,
     })
 }
 

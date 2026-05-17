@@ -71,6 +71,26 @@ fn semantic_layer_context_falls_back_to_path_and_hunk_overlap() {
 }
 
 #[test]
+fn semantic_layer_context_falls_back_to_semantic_focus() {
+    let stack = stack();
+    let mut summary = summarize_semantic_review(&semantic_review_for_stack(&stack));
+    summary.layers.clear();
+
+    let semantic_layers = collect_layer_context(
+        &detail_with_deleted_symbol(),
+        &stack.layers[0],
+        &[&stack.atoms[0]],
+        Path::new("/tmp"),
+        Some(&summary),
+        None,
+        &mut Vec::new(),
+    )
+    .semantic_layers;
+
+    assert_eq!(semantic_layers[0].atom_ids, vec!["atom-1".to_string()]);
+}
+
+#[test]
 fn review_partner_prompt_and_focus_records_include_semantic_context() {
     let stack = stack();
     let semantic_review = semantic_review_for_stack(&stack);
