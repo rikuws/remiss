@@ -72,7 +72,7 @@ pub(super) fn collect_layer_context(
     lsp_session_manager: Option<&LspSessionManager>,
     warnings: &mut Vec<String>,
 ) -> ReviewPartnerCollectedLayer {
-    let semantic_layers = semantic_layers_for_layer(layer, semantic_review);
+    let semantic_layers = semantic_layers_for_layer(layer, atoms, semantic_review);
     let semantic_focus = semantic_focus_for_layer(layer, semantic_review);
     let changed_symbols =
         collect_changed_symbols(layer, atoms, checkout_root, lsp_session_manager, warnings);
@@ -122,6 +122,7 @@ pub(super) fn collect_layer_context(
 
 fn semantic_layers_for_layer(
     layer: &ReviewStackLayer,
+    atoms: &[&ChangeAtom],
     semantic_review: Option<&RemissSemanticReviewSummary>,
 ) -> Vec<ReviewPartnerSemanticLayer> {
     let Some(semantic_review) = semantic_review else {
@@ -136,10 +137,42 @@ fn semantic_layers_for_layer(
                 .atom_ids
                 .iter()
                 .any(|atom_id| layer_atom_ids.contains(atom_id))
+                || (semantic_layer.atom_ids.is_empty()
+                    && semantic_layer_matches_atoms(semantic_layer, atoms))
         })
         .take(MAX_SECTION_ITEMS)
         .map(review_partner_semantic_layer)
         .collect()
+}
+
+fn semantic_layer_matches_atoms(
+    semantic_layer: &RemissSemanticLayerSummary,
+    atoms: &[&ChangeAtom],
+) -> bool {
+    let layer_paths = semantic_layer
+        .file_paths
+        .iter()
+        .map(|path| normalize_repo_path(path))
+        .collect::<BTreeSet<_>>();
+    let layer_hunks = semantic_layer
+        .hunk_indices
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+
+    atoms.iter().any(|atom| {
+        let path_matches = layer_paths.contains(&normalize_repo_path(&atom.path))
+            || atom
+                .previous_path
+                .as_deref()
+                .is_some_and(|path| layer_paths.contains(&normalize_repo_path(path)));
+        let hunk_matches = layer_hunks.is_empty()
+            || atom
+                .hunk_indices
+                .iter()
+                .any(|index| layer_hunks.contains(index));
+        path_matches && hunk_matches
+    })
 }
 
 fn semantic_focus_for_layer(

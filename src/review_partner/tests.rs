@@ -1,5 +1,8 @@
 use super::*;
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use crate::diff::{ParsedDiffHunk, ParsedDiffLine};
 use crate::semantic_review::{build_semantic_review_from_contents, RemissSemFileContents};
@@ -41,6 +44,30 @@ fn review_partner_prompt_requires_concrete_summary_copy() {
 #[test]
 fn repo_path_normalization_uses_git_style_separators() {
     assert_eq!(normalize_repo_path(r".\src\lib.rs"), "src/lib.rs");
+}
+
+#[test]
+fn semantic_layer_context_falls_back_to_path_and_hunk_overlap() {
+    let stack = stack();
+    let mut summary = summarize_semantic_review(&semantic_review_for_stack(&stack));
+    for layer in &mut summary.layers {
+        layer.atom_ids.clear();
+        layer.file_paths = vec![r"src\lib.rs".to_string()];
+        layer.hunk_indices = vec![0];
+    }
+
+    let semantic_layers = collect_layer_context(
+        &detail_with_deleted_symbol(),
+        &stack.layers[0],
+        &[&stack.atoms[0]],
+        Path::new("/tmp"),
+        Some(&summary),
+        None,
+        &mut Vec::new(),
+    )
+    .semantic_layers;
+
+    assert!(!semantic_layers.is_empty());
 }
 
 #[test]
