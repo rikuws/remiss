@@ -47,6 +47,138 @@ pub fn deliver_system_notification(_title: &str, _body: &str) -> Result<(), Stri
 }
 
 #[cfg(target_os = "macos")]
+pub fn install_deep_link_url_event_handler(
+    dispatcher: crate::deep_link::DeepLinkDispatcher,
+) -> Result<(), String> {
+    deep_link_url_events::install(dispatcher)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn install_deep_link_url_event_handler(
+    _dispatcher: crate::deep_link::DeepLinkDispatcher,
+) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+mod deep_link_url_events {
+    use std::{cell::RefCell, ffi::CString};
+
+    use objc2::{
+        define_class, msg_send,
+        rc::Retained,
+        runtime::{AnyClass, AnyObject},
+        sel, ClassType,
+    };
+    use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
+
+    use crate::deep_link::DeepLinkDispatcher;
+
+    const KEY_DIRECT_OBJECT: u32 = four_char_code(*b"----");
+    const K_AE_GET_URL: u32 = four_char_code(*b"GURL");
+    const K_INTERNET_EVENT_CLASS: u32 = four_char_code(*b"GURL");
+
+    thread_local! {
+        static DISPATCHER: RefCell<Option<DeepLinkDispatcher>> = const { RefCell::new(None) };
+        static HANDLER: RefCell<Option<Retained<RemissUrlEventHandler>>> = const { RefCell::new(None) };
+    }
+
+    define_class!(
+        // SAFETY:
+        // - The superclass NSObject has no subclassing requirements.
+        // - The handler stores no Rust ivars and is retained for the full
+        //   process lifetime after registration.
+        #[unsafe(super(NSObject))]
+        struct RemissUrlEventHandler;
+
+        // SAFETY: NSObjectProtocol has no additional safety requirements.
+        unsafe impl NSObjectProtocol for RemissUrlEventHandler {}
+
+        impl RemissUrlEventHandler {
+            #[unsafe(method(handleGetURLEvent:withReplyEvent:))]
+            fn handle_get_url_event(
+                &self,
+                event: &AnyObject,
+                _reply_event: &AnyObject,
+            ) {
+                let direct_object: *mut AnyObject =
+                    unsafe { msg_send![event, paramDescriptorForKeyword: KEY_DIRECT_OBJECT] };
+                if direct_object.is_null() {
+                    eprintln!("Ignoring Remiss URL event without a direct URL object.");
+                    return;
+                }
+                let url: *mut NSString = unsafe { msg_send![direct_object, stringValue] };
+                if url.is_null() {
+                    eprintln!("Ignoring Remiss URL event with a non-string direct object.");
+                    return;
+                }
+                let url = unsafe { &*url }.to_string();
+
+                DISPATCHER.with(|dispatcher| {
+                    if let Some(dispatcher) = dispatcher.borrow().as_ref() {
+                        dispatcher.receive_urls(vec![url]);
+                    } else {
+                        eprintln!("Ignoring Remiss URL event before dispatcher installation.");
+                    }
+                });
+            }
+        }
+    );
+
+    impl RemissUrlEventHandler {
+        fn new() -> Retained<Self> {
+            unsafe { msg_send![Self::class(), new] }
+        }
+    }
+
+    pub fn install(dispatcher: DeepLinkDispatcher) -> Result<(), String> {
+        DISPATCHER.with(|slot| {
+            *slot.borrow_mut() = Some(dispatcher);
+        });
+
+        HANDLER.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(RemissUrlEventHandler::new());
+            }
+
+            let handler = slot
+                .as_ref()
+                .expect("Remiss URL event handler should be initialized");
+            let class_name = CString::new("NSAppleEventManager").unwrap();
+            let Some(manager_class) = AnyClass::get(&class_name) else {
+                return Err("NSAppleEventManager is unavailable on this process.".to_string());
+            };
+            let manager: *mut AnyObject =
+                unsafe { msg_send![manager_class, sharedAppleEventManager] };
+            if manager.is_null() {
+                return Err(
+                    "NSAppleEventManager.sharedAppleEventManager returned null.".to_string()
+                );
+            }
+
+            unsafe {
+                let _: () = msg_send![
+                    manager,
+                    setEventHandler: handler.as_super().as_super(),
+                    andSelector: sel!(handleGetURLEvent:withReplyEvent:),
+                    forEventClass: K_INTERNET_EVENT_CLASS,
+                    andEventID: K_AE_GET_URL
+                ];
+            }
+            Ok(())
+        })
+    }
+
+    const fn four_char_code(bytes: [u8; 4]) -> u32 {
+        ((bytes[0] as u32) << 24)
+            | ((bytes[1] as u32) << 16)
+            | ((bytes[2] as u32) << 8)
+            | bytes[3] as u32
+    }
+}
+
+#[cfg(target_os = "macos")]
 mod system_notifications {
     use std::{
         ffi::{c_void, CString},

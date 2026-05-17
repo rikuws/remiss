@@ -1,4 +1,10 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    time::{Duration, Instant},
+};
+
+const DUPLICATE_URL_WINDOW: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DeepLinkRequest {
@@ -14,6 +20,7 @@ pub struct DeepLinkDispatcher {
 struct DeepLinkDispatcherState {
     handler: Option<Box<dyn FnMut(DeepLinkRequest)>>,
     pending_urls: Vec<String>,
+    recently_received_urls: Vec<(String, Instant)>,
 }
 
 impl DeepLinkDispatcher {
@@ -23,6 +30,14 @@ impl DeepLinkDispatcher {
 
     pub fn receive_urls(&self, urls: Vec<String>) {
         let mut state = self.state.borrow_mut();
+        let urls = urls
+            .into_iter()
+            .filter(|url| state.remember_url(url))
+            .collect::<Vec<_>>();
+        if urls.is_empty() {
+            return;
+        }
+
         if state.handler.is_none() {
             state.pending_urls.extend(urls);
             return;
@@ -39,8 +54,27 @@ impl DeepLinkDispatcher {
         };
 
         if !pending_urls.is_empty() {
-            self.receive_urls(pending_urls);
+            deliver_urls(&mut self.state.borrow_mut(), pending_urls);
         }
+    }
+}
+
+impl DeepLinkDispatcherState {
+    fn remember_url(&mut self, url: &str) -> bool {
+        let normalized = url.trim().to_string();
+        let now = Instant::now();
+        self.recently_received_urls
+            .retain(|(_, received_at)| now.duration_since(*received_at) <= DUPLICATE_URL_WINDOW);
+        if self
+            .recently_received_urls
+            .iter()
+            .any(|(recent_url, _)| *recent_url == normalized)
+        {
+            return false;
+        }
+
+        self.recently_received_urls.push((normalized, now));
+        true
     }
 }
 
@@ -81,6 +115,12 @@ pub fn github_pull_request_web_url(repository: &str, number: i64) -> String {
     format!("https://github.com/{repository}/pull/{number}")
 }
 
+pub fn remiss_urls_from_args(args: impl IntoIterator<Item = String>) -> Vec<String> {
+    args.into_iter()
+        .filter(|arg| arg.trim().starts_with("remiss://"))
+        .collect()
+}
+
 fn deliver_urls(state: &mut DeepLinkDispatcherState, urls: Vec<String>) {
     let Some(handler) = state.handler.as_mut() else {
         state.pending_urls.extend(urls);
@@ -97,7 +137,9 @@ fn deliver_urls(state: &mut DeepLinkDispatcherState, urls: Vec<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_url, DeepLinkRequest};
+    use std::{cell::RefCell, rc::Rc};
+
+    use super::{parse_url, remiss_urls_from_args, DeepLinkDispatcher, DeepLinkRequest};
 
     #[test]
     fn parses_github_pull_request_links() {
@@ -125,5 +167,54 @@ mod tests {
     fn rejects_unsupported_routes() {
         assert!(parse_url("remiss://github/rikuws/remiss/issues/17").is_err());
         assert!(parse_url("https://github.com/rikuws/remiss/pull/17").is_err());
+    }
+
+    #[test]
+    fn dispatches_urls_received_before_handler_installation() {
+        let dispatcher = DeepLinkDispatcher::new();
+        dispatcher.receive_urls(vec!["remiss://github/rikuws/remiss/pull/17".to_string()]);
+
+        let delivered = Rc::new(RefCell::new(Vec::new()));
+        let delivered_for_handler = delivered.clone();
+        dispatcher.install_handler(move |request| {
+            delivered_for_handler.borrow_mut().push(request);
+        });
+
+        assert_eq!(
+            delivered.borrow().as_slice(),
+            &[DeepLinkRequest::GitHubPullRequest {
+                repository: "rikuws/remiss".to_string(),
+                number: 17,
+            }]
+        );
+    }
+
+    #[test]
+    fn ignores_immediate_duplicate_urls_from_multiple_macos_delivery_paths() {
+        let dispatcher = DeepLinkDispatcher::new();
+        let delivered = Rc::new(RefCell::new(Vec::new()));
+        let delivered_for_handler = delivered.clone();
+        dispatcher.install_handler(move |request| {
+            delivered_for_handler.borrow_mut().push(request);
+        });
+
+        dispatcher.receive_urls(vec![
+            "remiss://github/rikuws/remiss/pull/17".to_string(),
+            "remiss://github/rikuws/remiss/pull/17".to_string(),
+        ]);
+
+        assert_eq!(delivered.borrow().len(), 1);
+    }
+
+    #[test]
+    fn extracts_remiss_urls_from_launch_args() {
+        assert_eq!(
+            remiss_urls_from_args([
+                "-psn_0_12345".to_string(),
+                "remiss://github/rikuws/remiss/pull/17".to_string(),
+                "https://github.com/rikuws/remiss/pull/17".to_string(),
+            ]),
+            vec!["remiss://github/rikuws/remiss/pull/17".to_string()]
+        );
     }
 }

@@ -115,6 +115,13 @@ fn main() {
     cli_binary::repair_process_path_for_cli_tools();
 
     let deep_link_dispatcher = deep_link::DeepLinkDispatcher::new();
+    if let Err(error) =
+        platform_macos::install_deep_link_url_event_handler(deep_link_dispatcher.clone())
+    {
+        eprintln!("{APP_NAME} URL event handler disabled: {error}");
+    }
+    deep_link_dispatcher.receive_urls(deep_link::remiss_urls_from_args(std::env::args().skip(1)));
+
     let deep_link_dispatcher_for_urls = deep_link_dispatcher.clone();
     let application = Application::new()
         .with_assets(AppAssets::new())
