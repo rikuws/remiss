@@ -39,6 +39,11 @@ fn review_partner_prompt_requires_concrete_summary_copy() {
 }
 
 #[test]
+fn repo_path_normalization_uses_git_style_separators() {
+    assert_eq!(normalize_repo_path(r".\src\lib.rs"), "src/lib.rs");
+}
+
+#[test]
 fn review_partner_prompt_and_focus_records_include_semantic_context() {
     let stack = stack();
     let semantic_review = semantic_review_for_stack(&stack);

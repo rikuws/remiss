@@ -858,7 +858,7 @@ fn sem_change_hunks_match_atom(change: &SemEmbeddedChange, atom: &ChangeAtom) ->
 
 fn sem_change_ranges_match_atom(change: &SemEmbeddedChange, atom: &ChangeAtom) -> bool {
     change.after_range.as_ref().is_some_and(|range| {
-        atom.path == range.file_path
+        repo_paths_equal(&atom.path, &range.file_path)
             && atom
                 .new_range
                 .is_some_and(|atom_range| sem_ranges_overlap(atom_range, range))
@@ -890,7 +890,19 @@ fn atom_matches_file_paths(atom: &ChangeAtom, file_paths: &BTreeSet<String>) -> 
 }
 
 fn atom_matches_file_path(atom: &ChangeAtom, file_path: &str) -> bool {
-    atom.path == file_path || atom.previous_path.as_deref() == Some(file_path)
+    repo_paths_equal(&atom.path, file_path)
+        || atom
+            .previous_path
+            .as_deref()
+            .is_some_and(|path| repo_paths_equal(path, file_path))
+}
+
+fn repo_paths_equal(left: &str, right: &str) -> bool {
+    normalize_repo_path(left) == normalize_repo_path(right)
+}
+
+fn normalize_repo_path(path: &str) -> String {
+    path.replace('\\', "/")
 }
 
 fn sem_ranges_overlap(
@@ -1129,6 +1141,33 @@ mod tests {
         assert_eq!(change.file_path, "src/lib.rs");
         assert_eq!(change.hunks.len(), 1);
         assert_eq!(change.hunks[0].new_range.unwrap().start_line, 1);
+    }
+
+    #[test]
+    fn sem_path_matching_accepts_windows_separators() {
+        let atom = ChangeAtom {
+            id: "atom-path".to_string(),
+            source: ChangeAtomSource::Hunk { hunk_index: 0 },
+            path: "src/lib.rs".to_string(),
+            previous_path: None,
+            role: ChangeRole::CoreLogic,
+            semantic_kind: None,
+            symbol_name: None,
+            defined_symbols: Vec::new(),
+            referenced_symbols: Vec::new(),
+            old_range: Some(LineRange { start: 1, end: 1 }),
+            new_range: Some(LineRange { start: 1, end: 1 }),
+            hunk_headers: Vec::new(),
+            hunk_indices: vec![0],
+            additions: 1,
+            deletions: 1,
+            patch_hash: "hash".to_string(),
+            risk_score: 1,
+            review_thread_ids: Vec::new(),
+            warnings: Vec::<StackWarning>::new(),
+        };
+
+        assert!(atom_matches_file_path(&atom, r"src\lib.rs"));
     }
 
     #[test]

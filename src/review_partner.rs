@@ -2503,10 +2503,16 @@ fn is_text_search_candidate(path: &Path) -> bool {
 }
 
 fn relative_path(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .to_string()
+    normalize_repo_path(
+        path.strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .as_ref(),
+    )
+}
+
+fn normalize_repo_path(path: &str) -> String {
+    path.replace('\\', "/").trim_start_matches("./").to_string()
 }
 
 fn trim_text(value: &str, max_length: usize) -> String {
