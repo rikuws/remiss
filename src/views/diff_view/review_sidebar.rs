@@ -971,12 +971,8 @@ fn render_stack_view_layer_card(
 ) -> impl IntoElement {
     let state_for_open = state.clone();
     let layer_id = layer.id.clone();
-    let first_file = stack.first_file_for_layer(layer);
-    let is_current_pr_layer = layer
-        .pr
-        .as_ref()
-        .map(|pr| pr.number == detail.number)
-        .unwrap_or(true);
+    let first_file = first_changed_file_for_stack_layer(stack, layer, detail);
+    let route_summary = stack_layer_pull_request_summary(&detail.repository, detail.number, layer);
     let (number_label, title_label) = stack_view_layer_title_parts(layer);
     let row_bg = if is_active {
         bg_emphasis()
@@ -1003,22 +999,14 @@ fn render_stack_view_layer_card(
                 .cursor_pointer()
                 .hover(move |style| style.bg(hover_bg))
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                    state_for_open.update(cx, |state, cx| {
-                        state.set_selected_stack_layer(Some(layer_id.clone()));
-                        state.set_stack_diff_mode(StackDiffMode::CurrentLayerOnly);
-                        state.set_review_center_mode(ReviewCenterMode::GuidedReview);
-                        if is_current_pr_layer {
-                            if let Some(path) = first_file.clone() {
-                                state.selected_file_path = Some(path);
-                                state.selected_diff_anchor = None;
-                            }
-                        }
-                        state.persist_active_review_session();
-                        cx.notify();
-                    });
-                    if is_current_pr_layer {
-                        ensure_selected_file_content_loaded(&state_for_open, window, cx);
-                    }
+                    open_stack_layer(
+                        &state_for_open,
+                        route_summary.clone(),
+                        layer_id.clone(),
+                        first_file.clone(),
+                        window,
+                        cx,
+                    );
                 })
                 .child(
                     div()
@@ -2424,15 +2412,11 @@ fn render_stack_layer_row(
 ) -> impl IntoElement {
     let state_for_open = state.clone();
     let layer_id = layer.id.clone();
-    let first_file = stack.first_file_for_layer(layer);
+    let first_file = first_changed_file_for_stack_layer(stack, layer, detail);
+    let route_summary = stack_layer_pull_request_summary(&detail.repository, detail.number, layer);
     let line_count = layer.metrics.changed_lines;
     let thread_count = layer.metrics.unresolved_thread_count;
     let confidence = layer.confidence;
-    let is_current_pr_layer = layer
-        .pr
-        .as_ref()
-        .map(|pr| pr.number == detail.number)
-        .unwrap_or(true);
 
     div()
         .px(px(8.0))
@@ -2454,22 +2438,14 @@ fn render_stack_layer_row(
             })
         })
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            state_for_open.update(cx, |state, cx| {
-                state.set_selected_stack_layer(Some(layer_id.clone()));
-                state.set_stack_diff_mode(StackDiffMode::CurrentLayerOnly);
-                state.set_review_center_mode(ReviewCenterMode::GuidedReview);
-                if is_current_pr_layer {
-                    if let Some(path) = first_file.clone() {
-                        state.selected_file_path = Some(path);
-                        state.selected_diff_anchor = None;
-                    }
-                }
-                state.persist_active_review_session();
-                cx.notify();
-            });
-            if is_current_pr_layer {
-                ensure_selected_file_content_loaded(&state_for_open, window, cx);
-            }
+            open_stack_layer(
+                &state_for_open,
+                route_summary.clone(),
+                layer_id.clone(),
+                first_file.clone(),
+                window,
+                cx,
+            );
         })
         .child(
             div()
@@ -2578,6 +2554,114 @@ fn subtle_stack_chip(label: &str) -> impl IntoElement {
         .font_family(mono_font_family())
         .text_color(fg_muted())
         .child(label.to_string())
+}
+
+fn open_stack_layer(
+    state: &Entity<AppState>,
+    route_summary: Option<github::PullRequestSummary>,
+    layer_id: String,
+    first_file: Option<String>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if let Some(summary) = route_summary {
+        let summary_repository = summary.repository.clone();
+        let open_pull_requests = {
+            let state = state.read(cx);
+            state
+                .active_detail()
+                .filter(|detail| detail.repository == summary_repository)
+                .and_then(|_| state.active_detail_state())
+                .and_then(|detail_state| detail_state.stack_open_pull_requests.clone())
+        };
+
+        super::super::sections::open_pull_request(state, summary, window, cx);
+
+        state.update(cx, |state, cx| {
+            state.active_surface = PullRequestSurface::Files;
+            state.pr_header_compact = false;
+            state.set_review_file_tree_visible(true);
+            state.set_review_center_mode(ReviewCenterMode::GuidedReview);
+            state.set_selected_stack_layer(Some(layer_id));
+            state.set_stack_diff_mode(StackDiffMode::CurrentLayerOnly);
+            state.selected_file_path = None;
+            state.selected_diff_anchor = None;
+            if let (Some(detail_key), Some(open_pull_requests)) =
+                (state.active_pr_key.clone(), open_pull_requests)
+            {
+                if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
+                    detail_state.stack_open_pull_requests = Some(open_pull_requests);
+                    detail_state.stack_open_pull_requests_loading = false;
+                    detail_state.stack_open_pull_requests_error = None;
+                }
+                state.review_stack_cache.borrow_mut().clear();
+            }
+            state.ensure_active_selected_file_is_valid();
+            state.persist_active_review_session();
+            cx.notify();
+        });
+
+        ensure_active_stack_refs_loaded(state, window, cx);
+        ensure_active_review_focus_loaded(state, window, cx);
+        ensure_selected_file_content_loaded(state, window, cx);
+        return;
+    }
+
+    state.update(cx, |state, cx| {
+        state.set_selected_stack_layer(Some(layer_id));
+        state.set_stack_diff_mode(StackDiffMode::CurrentLayerOnly);
+        state.set_review_center_mode(ReviewCenterMode::GuidedReview);
+        if let Some(path) = first_file {
+            state.selected_file_path = Some(path);
+            state.selected_diff_anchor = None;
+        }
+        state.ensure_active_selected_file_is_valid();
+        state.persist_active_review_session();
+        cx.notify();
+    });
+    ensure_active_review_focus_loaded(state, window, cx);
+    ensure_selected_file_content_loaded(state, window, cx);
+}
+
+fn stack_layer_pull_request_summary(
+    current_repository: &str,
+    current_number: i64,
+    layer: &ReviewStackLayer,
+) -> Option<github::PullRequestSummary> {
+    let pr = layer.pr.as_ref()?;
+    if pr.repository == current_repository && pr.number == current_number {
+        return None;
+    }
+
+    Some(github::PullRequestSummary {
+        local_key: None,
+        repository: pr.repository.clone(),
+        number: pr.number,
+        title: pr.title.clone(),
+        author_login: "unknown".to_string(),
+        author_avatar_url: None,
+        is_draft: pr.is_draft,
+        comments_count: 0,
+        additions: layer.metrics.additions as i64,
+        deletions: layer.metrics.deletions as i64,
+        changed_files: layer.metrics.file_count as i64,
+        state: pr.state.clone(),
+        review_decision: pr.review_decision.clone(),
+        updated_at: String::new(),
+        url: pr.url.clone(),
+    })
+}
+
+fn first_changed_file_for_stack_layer(
+    stack: &ReviewStack,
+    layer: &ReviewStackLayer,
+    detail: &PullRequestDetail,
+) -> Option<String> {
+    stack
+        .atoms_for_layer(layer)
+        .into_iter()
+        .find(|atom| detail.files.iter().any(|file| file.path == atom.path))
+        .map(|atom| atom.path.clone())
 }
 
 fn render_source_file_tree(
