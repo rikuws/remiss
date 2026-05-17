@@ -10,11 +10,15 @@ pub fn show_about_panel() -> Result<(), String> {
     let class_name = CString::new("NSApplication").unwrap();
     let app_class = AnyClass::get(&class_name)
         .ok_or_else(|| "NSApplication is unavailable on this process.".to_string())?;
+    // SAFETY: `sharedApplication` is NSApplication's singleton accessor and
+    // returns the live process application object without transferring ownership.
     let app: *mut AnyObject = unsafe { msg_send![app_class, sharedApplication] };
     if app.is_null() {
         return Err("NSApplication.sharedApplication returned null.".to_string());
     }
 
+    // SAFETY: `app` is the non-null NSApplication singleton and
+    // `orderFrontStandardAboutPanel:` is the documented way to show the About UI.
     unsafe {
         let _: () = msg_send![app, orderFrontStandardAboutPanel: Option::<&AnyObject>::None];
     }
@@ -24,6 +28,32 @@ pub fn show_about_panel() -> Result<(), String> {
 #[cfg(not(target_os = "macos"))]
 pub fn show_about_panel() -> Result<(), String> {
     Err("The native About panel is only available on macOS.".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn app_contents_dir_for_executable(executable: &std::path::Path) -> Option<std::path::PathBuf> {
+    let macos_dir = executable.parent()?;
+    if macos_dir.file_name().and_then(|name| name.to_str()) != Some("MacOS") {
+        return None;
+    }
+
+    let contents_dir = macos_dir.parent()?;
+    if contents_dir.file_name().and_then(|name| name.to_str()) != Some("Contents") {
+        return None;
+    }
+
+    let app_dir = contents_dir.parent()?;
+    if app_dir.extension().and_then(|extension| extension.to_str()) != Some("app") {
+        return None;
+    }
+
+    Some(contents_dir.to_path_buf())
+}
+
+#[cfg(target_os = "macos")]
+fn current_app_contents_dir() -> Option<std::path::PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    app_contents_dir_for_executable(&executable)
 }
 
 #[cfg(target_os = "macos")]
@@ -182,7 +212,6 @@ mod deep_link_url_events {
 mod system_notifications {
     use std::{
         ffi::{c_void, CString},
-        path::PathBuf,
         ptr,
         sync::atomic::{AtomicBool, AtomicU64, Ordering},
     };
@@ -245,12 +274,14 @@ mod system_notifications {
 
     impl RemissNotificationDelegate {
         fn new() -> Retained<Self> {
+            // SAFETY: `new` is the standard NSObject constructor for this class
+            // and returns an owned delegate instance or aborts if allocation fails.
             unsafe { msg_send![Self::class(), new] }
         }
     }
 
     pub fn prepare() -> Result<(), String> {
-        if app_contents_dir().is_none() {
+        if super::current_app_contents_dir().is_none() {
             return Ok(());
         }
 
@@ -259,7 +290,7 @@ mod system_notifications {
     }
 
     pub fn deliver(title: &str, body: &str) -> Result<(), String> {
-        if app_contents_dir().is_none() {
+        if super::current_app_contents_dir().is_none() {
             return Err("Native Remiss notifications require running from Remiss.app.".to_string());
         }
 
@@ -324,35 +355,19 @@ mod system_notifications {
         );
     }
 
-    fn app_contents_dir() -> Option<PathBuf> {
-        let executable = std::env::current_exe().ok()?;
-        let macos_dir = executable.parent()?;
-        if macos_dir.file_name().and_then(|name| name.to_str()) != Some("MacOS") {
-            return None;
-        }
-
-        let contents_dir = macos_dir.parent()?;
-        if contents_dir.file_name().and_then(|name| name.to_str()) != Some("Contents") {
-            return None;
-        }
-
-        let app_dir = contents_dir.parent()?;
-        if app_dir.extension().and_then(|extension| extension.to_str()) != Some("app") {
-            return None;
-        }
-
-        Some(contents_dir.to_path_buf())
-    }
-
     fn ns_error_message(error: *mut NSError) -> Option<String> {
         if error.is_null() {
             return None;
         }
 
+        // SAFETY: `error` is non-null above and `localizedDescription` returns
+        // an autoreleased NSString for a live NSError instance.
         let description: *mut NSString = unsafe { msg_send![error, localizedDescription] };
         if description.is_null() {
             None
         } else {
+            // SAFETY: `description` is non-null above and remains valid for the
+            // duration of this autorelease pool turn while we copy it into Rust.
             Some(unsafe { &*description }.to_string())
         }
     }
@@ -372,6 +387,8 @@ mod system_notifications {
     }
 
     fn activate_remiss_application() {
+        // SAFETY: `_dispatch_main_q` is the process-wide main queue and
+        // `activate_remiss_application_now` matches `dispatch_async_f`'s C ABI.
         unsafe {
             dispatch_async_f(
                 ptr::addr_of!(_dispatch_main_q),
@@ -386,11 +403,15 @@ mod system_notifications {
         let Some(app_class) = AnyClass::get(&class_name) else {
             return;
         };
+        // SAFETY: `sharedApplication` is a class method on NSApplication that
+        // returns the process singleton without transferring ownership.
         let app: *mut AnyObject = unsafe { msg_send![app_class, sharedApplication] };
         if app.is_null() {
             return;
         }
 
+        // SAFETY: `app` is the non-null NSApplication singleton and both
+        // messages are ordinary activation calls that do not outlive this object.
         unsafe {
             let _: () = msg_send![app, unhide: Option::<&AnyObject>::None];
             let _: () = msg_send![app, activateIgnoringOtherApps: Bool::YES];
@@ -425,7 +446,7 @@ pub mod updates {
     }
 
     pub fn updater_status() -> UpdaterStatus {
-        let Some(contents_dir) = app_contents_dir() else {
+        let Some(contents_dir) = super::current_app_contents_dir() else {
             return UpdaterStatus {
                 available: false,
                 detail: "Available in packaged app builds.".to_string(),
@@ -452,7 +473,7 @@ pub mod updates {
     }
 
     pub fn start_updater() -> Result<(), String> {
-        if app_contents_dir().is_none() {
+        if super::current_app_contents_dir().is_none() {
             return Ok(());
         }
 
@@ -461,6 +482,8 @@ pub mod updates {
 
     pub fn check_for_updates() -> Result<(), String> {
         let controller = ensure_update_controller()?;
+        // SAFETY: `controller` is a live SPUStandardUpdaterController retained by
+        // this module and accepts `checkForUpdates:` on the main app object.
         unsafe {
             let _: () = msg_send![&*controller, checkForUpdates: Option::<&AnyObject>::None];
         }
@@ -487,6 +510,9 @@ pub mod updates {
             "Sparkle loaded, but SPUStandardUpdaterController is unavailable.".to_string()
         })?;
 
+        // SAFETY: `SPUStandardUpdaterController` follows the Objective-C alloc/init
+        // convention. We immediately convert the returned pointer into `Retained`
+        // and reject a null initializer result.
         unsafe {
             let allocated: *mut AnyObject = msg_send![controller_class, alloc];
             let controller: *mut AnyObject = msg_send![
@@ -501,7 +527,7 @@ pub mod updates {
     }
 
     fn load_sparkle_framework() -> Result<(), String> {
-        let contents_dir = app_contents_dir().ok_or_else(|| {
+        let contents_dir = super::current_app_contents_dir().ok_or_else(|| {
             "Sparkle updates are only available when Remiss is running from Remiss.app.".to_string()
         })?;
         let framework = sparkle_framework_binary_path(&contents_dir);
@@ -523,6 +549,8 @@ pub mod updates {
                 framework.display()
             )
         })?;
+        // SAFETY: `path` is a NUL-terminated framework path we just built, and
+        // `dlopen` copies that path during the call before returning a handle.
         let handle = unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
         if handle.is_null() {
             return Err(format!(
@@ -532,26 +560,6 @@ pub mod updates {
         }
 
         Ok(())
-    }
-
-    fn app_contents_dir() -> Option<PathBuf> {
-        let executable = std::env::current_exe().ok()?;
-        let macos_dir = executable.parent()?;
-        if macos_dir.file_name().and_then(|name| name.to_str()) != Some("MacOS") {
-            return None;
-        }
-
-        let contents_dir = macos_dir.parent()?;
-        if contents_dir.file_name().and_then(|name| name.to_str()) != Some("Contents") {
-            return None;
-        }
-
-        let app_dir = contents_dir.parent()?;
-        if app_dir.extension().and_then(|extension| extension.to_str()) != Some("app") {
-            return None;
-        }
-
-        Some(contents_dir.to_path_buf())
     }
 
     fn sparkle_framework_binary_path(contents_dir: &Path) -> PathBuf {
@@ -568,12 +576,47 @@ pub mod updates {
     }
 
     fn dlerror_string() -> String {
+        // SAFETY: `dlerror` returns either null or a pointer to a thread-local
+        // error string owned by the dynamic loader.
         let error = unsafe { libc::dlerror() };
         if error.is_null() {
             return "unknown dynamic loader error".to_string();
         }
 
+        // SAFETY: `error` is the non-null C string returned by `dlerror`, and
+        // we immediately copy it into an owned Rust String.
         unsafe { CStr::from_ptr(error).to_string_lossy().into_owned() }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::app_contents_dir_for_executable;
+
+    #[test]
+    fn resolves_bundle_contents_dir_from_executable_path() {
+        assert_eq!(
+            app_contents_dir_for_executable(Path::new(
+                "/Applications/Remiss.app/Contents/MacOS/Remiss"
+            )),
+            Some(PathBuf::from("/Applications/Remiss.app/Contents"))
+        );
+    }
+
+    #[test]
+    fn rejects_non_bundle_executable_paths() {
+        assert_eq!(
+            app_contents_dir_for_executable(Path::new(
+                "/Applications/Remiss/Contents/MacOS/Remiss"
+            )),
+            None
+        );
+        assert_eq!(
+            app_contents_dir_for_executable(Path::new("/tmp/Remiss")),
+            None
+        );
     }
 }
 
