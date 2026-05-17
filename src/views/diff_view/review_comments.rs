@@ -1573,7 +1573,10 @@ fn render_review_line_action_popup(
                                 .text_size(px(11.0))
                                 .font_family(mono_font_family())
                                 .text_color(fg_subtle())
-                                .child("cmd-enter submit"),
+                                .child(format!(
+                                    "{} submit",
+                                    crate::shortcuts::secondary_key_label("enter")
+                                )),
                         )
                         .child(
                             div()
