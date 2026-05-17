@@ -108,7 +108,7 @@ fn find_tool_binary_from_env(
         let Some(candidate) = env_path_value(&env_value, env_var) else {
             continue;
         };
-        if is_file(&candidate) {
+        if let Some(candidate) = first_existing_tool_candidate(&candidate, &is_file) {
             return Some(candidate.to_string_lossy().into_owned());
         }
     }
@@ -116,7 +116,7 @@ fn find_tool_binary_from_env(
     if let Some(path_value) = env_value("PATH") {
         for directory in env::split_paths(&path_value) {
             let candidate = directory.join(spec.name);
-            if is_file(&candidate) {
+            if let Some(candidate) = first_existing_tool_candidate(&candidate, &is_file) {
                 return Some(candidate.to_string_lossy().into_owned());
             }
         }
@@ -124,7 +124,7 @@ fn find_tool_binary_from_env(
 
     for candidate in spec.well_known_paths {
         let candidate = Path::new(candidate);
-        if is_file(candidate) {
+        if let Some(candidate) = first_existing_tool_candidate(candidate, &is_file) {
             return Some(candidate.to_string_lossy().into_owned());
         }
     }
@@ -134,7 +134,7 @@ fn find_tool_binary_from_env(
     };
     for relative_path in spec.home_relative_paths {
         let candidate = home_dir.join(relative_path);
-        if is_file(&candidate) {
+        if let Some(candidate) = first_existing_tool_candidate(&candidate, &is_file) {
             return Some(candidate.to_string_lossy().into_owned());
         }
     }
@@ -149,6 +149,28 @@ fn find_tool_binary_from_env(
     }
 
     None
+}
+
+fn first_existing_tool_candidate(
+    candidate: &Path,
+    is_file: &impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    tool_binary_candidates(candidate)
+        .into_iter()
+        .find(|candidate| is_file(candidate))
+}
+
+fn tool_binary_candidates(candidate: &Path) -> Vec<PathBuf> {
+    tool_binary_candidates_for_platform(candidate, cfg!(windows))
+}
+
+fn tool_binary_candidates_for_platform(candidate: &Path, windows: bool) -> Vec<PathBuf> {
+    let mut candidates = vec![candidate.to_path_buf()];
+    if windows && candidate.extension().is_none() {
+        candidates
+            .extend(["exe", "cmd", "bat"].map(|extension| candidate.with_extension(extension)));
+    }
+    candidates
 }
 
 fn env_path_value(env_value: &impl Fn(&str) -> Option<OsString>, key: &str) -> Option<PathBuf> {
@@ -354,27 +376,46 @@ mod tests {
             |path| path == Path::new("/Users/example/.codex/bin/codex"),
         );
 
-        assert_eq!(result.as_deref(), Some("/Users/example/.codex/bin/codex"));
+        assert_path_result_eq(
+            result.as_deref(),
+            &Path::new("/Users/example").join(".codex/bin/codex"),
+        );
+    }
+
+    #[test]
+    fn windows_tool_candidates_include_common_executable_extensions() {
+        let candidates = tool_binary_candidates_for_platform(Path::new("C:/tools/gh"), true);
+
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from("C:/tools/gh"),
+                PathBuf::from("C:/tools/gh.exe"),
+                PathBuf::from("C:/tools/gh.cmd"),
+                PathBuf::from("C:/tools/gh.bat"),
+            ]
+        );
     }
 
     #[test]
     fn augmented_path_adds_common_and_home_tool_directories_once() {
+        let opt_homebrew_bin = PathBuf::from("/opt/homebrew/bin");
+        let home_codex_bin = Path::new("/Users/example").join(".codex/bin");
         let result = augmented_path(
             Some(OsString::from("/usr/bin:/bin")),
             Some(Path::new("/Users/example")),
             |path| {
-                matches!(
-                    path.to_string_lossy().as_ref(),
-                    "/opt/homebrew/bin" | "/Users/example/.codex/bin" | "/usr/bin" | "/bin"
-                )
+                path == opt_homebrew_bin
+                    || path == home_codex_bin
+                    || path == Path::new("/usr/bin")
+                    || path == Path::new("/bin")
             },
         )
         .expect("path should join");
 
         let segments = env::split_paths(&result).collect::<Vec<_>>();
-        let result_text = result.to_string_lossy();
-        assert!(result_text.contains("/opt/homebrew/bin"));
-        assert!(result_text.contains("/Users/example/.codex/bin"));
+        assert!(segments.iter().any(|segment| segment == &opt_homebrew_bin));
+        assert!(segments.iter().any(|segment| segment == &home_codex_bin));
         assert_eq!(
             segments
                 .iter()
@@ -414,7 +455,7 @@ mod tests {
             |path| path.is_file(),
         );
 
-        assert_eq!(result.as_deref(), Some(copilot.to_string_lossy().as_ref()));
+        assert_path_result_eq(result.as_deref(), &copilot);
         let _ = fs::remove_dir_all(home_dir);
     }
 
@@ -438,7 +479,7 @@ mod tests {
         let result =
             find_tool_binary_from_env(spec, |_| None, Some(&home_dir), |path| path.is_file());
 
-        assert_eq!(result.as_deref(), Some(newer.to_string_lossy().as_ref()));
+        assert_path_result_eq(result.as_deref(), &newer);
         let _ = fs::remove_dir_all(home_dir);
     }
 
@@ -485,6 +526,17 @@ mod tests {
             env::temp_dir().join(format!("gh-ui-cli-binary-{label}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&home_dir);
         home_dir
+    }
+
+    fn assert_path_result_eq(result: Option<&str>, expected: &Path) {
+        assert_eq!(
+            result.map(normalized_path_text),
+            Some(normalized_path_text(expected.to_string_lossy().as_ref()))
+        );
+    }
+
+    fn normalized_path_text(path: &str) -> String {
+        path.replace('\\', "/")
     }
 
     fn write_test_file(path: &Path) {

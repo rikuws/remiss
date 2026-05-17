@@ -574,6 +574,8 @@ kernel vec4 overviewShader(float iTime, vec2 iResolution) {
         GPU.get_or_init(|| {
             let software_renderer: Retained<AnyObject> = NSNumber::new_bool(false).into();
             let options: Retained<NSDictionary<CIContextOption, AnyObject>> =
+                // SAFETY: `kCIContextUseSoftwareRenderer` is Core Image's
+                // documented context option key for a boolean NSNumber value.
                 NSDictionary::from_slices(
                     &[unsafe { kCIContextUseSoftwareRenderer }],
                     &[&*software_renderer],
@@ -582,6 +584,8 @@ kernel vec4 overviewShader(float iTime, vec2 iResolution) {
             let ember_source = NSString::from_str(EMBER_CORE_IMAGE_SHADER);
             let ribbon_source = NSString::from_str(RIBBON_CORE_IMAGE_SHADER);
             let interference_source = NSString::from_str(INTERFERENCE_CORE_IMAGE_SHADER);
+            // SAFETY: These static shader sources are compiled once during
+            // startup, and Core Image reports invalid kernels via `None`.
             #[allow(deprecated)]
             let bands_kernel = unsafe { CIColorKernel::kernelWithString(&bands_source) }
                 .expect("overview bands shader must compile as a Core Image GPU kernel");
@@ -595,6 +599,8 @@ kernel vec4 overviewShader(float iTime, vec2 iResolution) {
             let interference_kernel =
                 unsafe { CIColorKernel::kernelWithString(&interference_source) }
                     .expect("overview interference shader must compile as a Core Image GPU kernel");
+            // SAFETY: `options` only contains the documented boolean renderer
+            // preference and stays alive for the duration of this call.
             let context = unsafe { CIContext::contextWithOptions(Some(&options)) };
 
             ShaderGpu {
@@ -618,16 +624,22 @@ kernel vec4 overviewShader(float iTime, vec2 iResolution) {
         ) -> Option<Retained<CIImage>> {
             let time: Retained<AnyObject> = NSNumber::new_f32(time).into();
             let resolution: Retained<AnyObject> =
+                // SAFETY: CIVector copies these scalar coordinates into a new
+                // Objective-C value object; the Rust inputs remain valid.
                 unsafe { CIVector::vectorWithX_Y(width as CGFloat, height as CGFloat).into() };
             let args = NSArray::from_retained_slice(&[time, resolution]);
             let extent = CGRect::new(
                 CGPoint::new(0.0, 0.0),
                 CGSize::new(width as CGFloat, height as CGFloat),
             );
+            // SAFETY: `args` matches the kernel signatures compiled above and
+            // `extent` bounds the render area for the returned CIImage.
             let image = unsafe {
                 self.kernel(variant)
                     .applyWithExtent_arguments(extent, &args)?
             };
+            // SAFETY: `target` is a live CVPixelBuffer allocated by this module,
+            // and `image` stays retained for the duration of the render call.
             unsafe {
                 self.context
                     .render_toCVPixelBuffer(&image, objc_cv_pixel_buffer(target));
@@ -662,6 +674,8 @@ kernel vec4 overviewShader(float iTime, vec2 iResolution) {
 
             for (name, source) in shaders {
                 let source = NSString::from_str(source);
+                // SAFETY: The test uses the same static shader source strings
+                // that production initializes, and only checks compilation.
                 #[allow(deprecated)]
                 let kernel = unsafe { CIColorKernel::kernelWithString(&source) };
                 assert!(kernel.is_some(), "{name} shader should compile");
@@ -674,6 +688,9 @@ kernel vec4 overviewShader(float iTime, vec2 iResolution) {
         pixels + pixels % 2
     }
 
+    // SAFETY: `CVPixelBuffer` and `ObjcCVPixelBuffer` are two typed views over
+    // the same CoreVideo object. The returned reference borrows `buffer`'s
+    // lifetime and is only used for the immediate Core Image render call.
     unsafe fn objc_cv_pixel_buffer(buffer: &CVPixelBuffer) -> &ObjcCVPixelBuffer {
         &*(buffer.as_concrete_TypeRef() as *const ObjcCVPixelBuffer)
     }

@@ -1806,12 +1806,14 @@ mod tests {
 
     #[test]
     fn parses_definition_targets_from_location_links() {
-        let repo_root = PathBuf::from("/tmp/remiss");
+        let repo_root = std::env::temp_dir().join("remiss-lsp-test");
+        let target_path = repo_root.join("src").join("lsp.rs");
+        let target_uri = file_uri(&target_path).expect("expected target URI");
         let targets = parse_definition_targets(
             &repo_root,
             &json!([
                 {
-                    "targetUri": "file:///tmp/remiss/src/lsp.rs",
+                    "targetUri": target_uri.clone(),
                     "targetSelectionRange": {
                         "start": {
                             "line": 9,
@@ -1825,7 +1827,7 @@ mod tests {
         assert_eq!(
             targets,
             vec![LspDefinitionTarget {
-                uri: "file:///tmp/remiss/src/lsp.rs".to_string(),
+                uri: target_uri,
                 path: "src/lsp.rs".to_string(),
                 line: 10,
                 column: 5,

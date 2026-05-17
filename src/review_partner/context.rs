@@ -731,7 +731,7 @@ fn scan_symbol_locations_from(
 
 fn parse_rg_line(line: &str) -> Option<ReviewPartnerLocation> {
     let mut parts = line.splitn(3, ':');
-    let path = parts.next()?.trim_start_matches("./").to_string();
+    let path = normalize_repo_path(parts.next()?);
     let line_number = parts.next()?.parse::<usize>().ok()?;
     let snippet = parts
         .next()

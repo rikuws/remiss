@@ -48,20 +48,20 @@ pub fn install(cx: &mut App) {
 
 fn bind_menu_key_equivalents(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("cmd-k", ToggleCommandPalette, None),
-        KeyBinding::new("cmd-,", ShowSettings, None),
-        KeyBinding::new("cmd-shift-u", CheckForUpdates, None),
-        KeyBinding::new("cmd-r", SyncWorkspace, None),
-        KeyBinding::new("cmd-shift-o", AddLocalRepository, None),
-        KeyBinding::new("cmd-enter", SubmitReview, None),
-        KeyBinding::new("cmd-o", OpenSelectedLineInSource, None),
-        KeyBinding::new("cmd-j", ToggleWaypointSpotlight, None),
-        KeyBinding::new("cmd-shift-j", AddWaypoint, None),
-        KeyBinding::new("cmd-=", IncreaseCodeFontSize, None),
-        KeyBinding::new("cmd--", DecreaseCodeFontSize, None),
-        KeyBinding::new("cmd-0", ResetCodeFontSize, None),
-        KeyBinding::new("cmd-shift-t", CycleCodeTheme, None),
-        KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("secondary-k", ToggleCommandPalette, None),
+        KeyBinding::new("secondary-,", ShowSettings, None),
+        KeyBinding::new("secondary-shift-u", CheckForUpdates, None),
+        KeyBinding::new("secondary-r", SyncWorkspace, None),
+        KeyBinding::new("secondary-shift-o", AddLocalRepository, None),
+        KeyBinding::new("secondary-enter", SubmitReview, None),
+        KeyBinding::new("secondary-o", OpenSelectedLineInSource, None),
+        KeyBinding::new("secondary-j", ToggleWaypointSpotlight, None),
+        KeyBinding::new("secondary-shift-j", AddWaypoint, None),
+        KeyBinding::new("secondary-=", IncreaseCodeFontSize, None),
+        KeyBinding::new("secondary--", DecreaseCodeFontSize, None),
+        KeyBinding::new("secondary-0", ResetCodeFontSize, None),
+        KeyBinding::new("secondary-shift-t", CycleCodeTheme, None),
+        KeyBinding::new("secondary-q", Quit, None),
     ]);
 }
 

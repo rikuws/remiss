@@ -16,6 +16,7 @@ use crate::review_brief::ReviewBrief;
 use crate::review_intelligence::{self, ReviewIntelligenceScope};
 use crate::review_session::ReviewCenterMode;
 use crate::selectable_text::{AppTextFieldKind, AppTextInput};
+use crate::shortcuts;
 use crate::state::*;
 use crate::theme::*;
 
@@ -1004,7 +1005,10 @@ fn render_submit_review_panel(
                             div()
                                 .text_size(px(12.0))
                                 .text_color(fg_subtle())
-                                .child("cmd-enter submit"),
+                                .child(format!(
+                                    "{} submit",
+                                    shortcuts::secondary_key_label("enter")
+                                )),
                         ),
                 )
                 .child(
