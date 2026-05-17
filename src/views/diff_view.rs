@@ -777,7 +777,6 @@ fn render_waypoint_spotlight_row(
         } else {
             bg_overlay()
         })
-        .cursor_pointer()
         .hover(move |style| {
             style.bg(if selected {
                 bg_emphasis()
@@ -1173,6 +1172,56 @@ fn render_diff_panel(
         )
 }
 
+fn render_review_header_change_summary(
+    total_additions: i64,
+    total_deletions: i64,
+    focus_summary: String,
+) -> impl IntoElement {
+    let has_focus_summary = !focus_summary.is_empty();
+
+    div()
+        .text_size(px(11.0))
+        .font_family(mono_font_family())
+        .min_w_0()
+        .whitespace_nowrap()
+        .overflow_x_hidden()
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_color(if total_additions > 0 {
+                    success()
+                } else {
+                    fg_subtle()
+                })
+                .child(format!("+{total_additions}")),
+        )
+        .child(div().flex_shrink_0().text_color(fg_subtle()).child("/"))
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_color(if total_deletions > 0 {
+                    danger()
+                } else {
+                    fg_subtle()
+                })
+                .child(format!("-{total_deletions}")),
+        )
+        .when(has_focus_summary, |el| {
+            el.child(div().flex_shrink_0().text_color(fg_subtle()).child("/"))
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_x_hidden()
+                        .text_ellipsis()
+                        .text_color(fg_muted())
+                        .child(focus_summary),
+                )
+        })
+}
+
 fn render_diff_toolbar(
     state: &Entity<AppState>,
     detail: &PullRequestDetail,
@@ -1190,7 +1239,6 @@ fn render_diff_toolbar(
     highlight_review_feedback: bool,
 ) -> impl IntoElement {
     let mut focus_meta = Vec::new();
-    focus_meta.push(format!("+{total_additions} / -{total_deletions}"));
     if local_repo_loading {
         focus_meta.push("preparing checkout".to_string());
     } else if let Some(status) = local_repo_status.filter(|status| !status.ready_for_local_features)
@@ -1253,17 +1301,11 @@ fn render_diff_toolbar(
                         .text_ellipsis()
                         .child(format!("{total_files} files changed")),
                 )
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .font_family(mono_font_family())
-                        .text_color(fg_muted())
-                        .min_w_0()
-                        .whitespace_nowrap()
-                        .overflow_x_hidden()
-                        .text_ellipsis()
-                        .child(focus_summary),
-                ),
+                .child(render_review_header_change_summary(
+                    total_additions,
+                    total_deletions,
+                    focus_summary,
+                )),
         )
         .when_some(guided_review_lens, |el, lens| {
             el.child(render_guided_review_lens_toggle(state, lens))
@@ -1327,7 +1369,6 @@ fn diff_toolbar_primary_button(
                 .text_color(fg_on_primary_action())
                 .text_size(px(12.0))
                 .font_weight(FontWeight::SEMIBOLD)
-                .cursor_pointer()
                 .hover(|style| style.bg(primary_action_hover()))
                 .on_mouse_down(MouseButton::Left, on_click)
                 .child(label.to_string()),
@@ -1359,8 +1400,7 @@ fn toolbar_icon_button(
         .justify_center()
         .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
         .when(!disabled, move |el| {
-            el.cursor_pointer()
-                .hover(move |style| style.bg(if active { bg_emphasis() } else { bg_selected() }))
+            el.hover(move |style| style.bg(if active { bg_emphasis() } else { bg_selected() }))
                 .on_mouse_down(MouseButton::Left, on_click)
         })
         .child(icon)
@@ -1400,7 +1440,6 @@ fn workspace_mode_button(
         .text_size(px(11.0))
         .font_weight(FontWeight::MEDIUM)
         .text_color(if active { fg_emphasis() } else { fg_muted() })
-        .cursor_pointer()
         .hover(move |style| {
             style
                 .bg(if active { bg_emphasis() } else { bg_selected() })

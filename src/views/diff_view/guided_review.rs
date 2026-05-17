@@ -490,11 +490,10 @@ fn render_guided_review_focus_record(
                     div()
                         .text_size(px(10.0))
                         .font_family(mono_font_family())
-                        .text_color(fg_muted())
                         .whitespace_nowrap()
                         .overflow_x_hidden()
                         .text_ellipsis()
-                        .child(review_partner_display_subtitle(&record.subtitle)),
+                        .child(render_review_partner_display_subtitle(&record.subtitle)),
                 ),
         )
         .child(render_review_partner_summary(record))
@@ -540,6 +539,50 @@ fn review_partner_display_subtitle(subtitle: &str) -> String {
     .find_map(|prefix| subtitle.strip_prefix(prefix))
     .unwrap_or(subtitle)
     .to_string()
+}
+
+fn render_review_partner_display_subtitle(subtitle: &str) -> AnyElement {
+    let display = review_partner_display_subtitle(subtitle);
+
+    if let Some((prefix, file_label, additions, deletions)) = parse_stack_layer_subtitle(&display) {
+        return div()
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .min_w_0()
+            .child(div().text_color(fg_muted()).child(prefix))
+            .child(div().text_color(fg_muted()).child(file_label))
+            .child(div().text_color(success()).child(additions))
+            .child(div().text_color(danger()).child(deletions))
+            .into_any_element();
+    }
+
+    div()
+        .text_color(fg_muted())
+        .overflow_x_hidden()
+        .text_ellipsis()
+        .child(display)
+        .into_any_element()
+}
+
+fn parse_stack_layer_subtitle(subtitle: &str) -> Option<(String, String, String, String)> {
+    let rest = subtitle.strip_prefix("Stack layer · ")?;
+    let mut parts = rest.split_whitespace();
+    let file_count = parts.next()?;
+    let file_word = parts.next()?.trim_end_matches(',');
+    let additions = parts.next()?.to_string();
+    let deletions = parts.next()?.to_string();
+
+    if !additions.starts_with('+') || !deletions.starts_with('-') {
+        return None;
+    }
+
+    Some((
+        "Stack layer ·".to_string(),
+        format!("{file_count} {file_word}"),
+        additions,
+        deletions,
+    ))
 }
 
 fn review_partner_focus_section_style(label: &str) -> (LucideIcon, Rgba) {
@@ -806,7 +849,6 @@ fn render_review_partner_disclosure(
                 .flex()
                 .items_center()
                 .gap(px(6.0))
-                .cursor_pointer()
                 .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
                 .hover(|style| style.bg(bg_selected()))
                 .on_mouse_down(MouseButton::Left, move |_, _, cx| {
@@ -1166,7 +1208,6 @@ fn review_partner_action_icon_button(
         .flex()
         .items_center()
         .justify_center()
-        .cursor_pointer()
         .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
         .hover(|style| style.bg(bg_selected()))
         .on_mouse_down(MouseButton::Left, on_click)
@@ -1377,13 +1418,12 @@ fn diff_layout_segment(
         .items_center()
         .justify_center()
         .when(!disabled, move |el| {
-            el.cursor_pointer()
-                .hover(move |style| {
-                    style
-                        .bg(if active { bg_emphasis() } else { bg_selected() })
-                        .text_color(fg_emphasis())
-                })
-                .on_mouse_down(MouseButton::Left, on_click)
+            el.hover(move |style| {
+                style
+                    .bg(if active { bg_emphasis() } else { bg_selected() })
+                    .text_color(fg_emphasis())
+            })
+            .on_mouse_down(MouseButton::Left, on_click)
         })
         .child(label)
         .with_animation(

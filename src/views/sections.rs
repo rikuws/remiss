@@ -251,8 +251,7 @@ fn overview_metric_card(
         .px(px(18.0))
         .py(px(14.0))
         .when(interactive, |el| {
-            el.cursor_pointer()
-                .hover(|style| style.bg(bg_emphasis()).text_color(fg_emphasis()))
+            el.hover(|style| style.bg(bg_emphasis()).text_color(fg_emphasis()))
                 .on_mouse_down(MouseButton::Left, on_click)
         })
         .child(
@@ -547,7 +546,6 @@ fn overview_review_request_row(
         .flex()
         .items_center()
         .gap(px(14.0))
-        .cursor_pointer()
         .hover(|style| style.bg(bg_surface()).text_color(fg_emphasis()))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             on_click(summary.clone(), window, cx)
@@ -637,7 +635,6 @@ fn overview_review_comment_row(
         .py(px(12.0))
         .border_t(px(1.0))
         .border_color(border_muted())
-        .cursor_pointer()
         .hover(|style| style.bg(hover_bg()).text_color(fg_emphasis()))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             open_pull_request(&state, summary.clone(), window, cx);
@@ -1318,7 +1315,6 @@ fn render_project_shader_picker(
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .cursor_pointer()
                                 .hover(|style| style.bg(hover_bg()))
                                 .on_mouse_down(MouseButton::Left, {
                                     let state = state.clone();
@@ -1371,7 +1367,6 @@ fn project_shader_choice_row(
         } else {
             bg_surface()
         })
-        .cursor_pointer()
         .hover(|style| style.bg(hover_bg()))
         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
             state.update(cx, |s, cx| {
@@ -1565,7 +1560,6 @@ pub fn ghost_button(
         .text_color(fg_default())
         .text_size(px(13.0))
         .font_weight(FontWeight::MEDIUM)
-        .cursor_pointer()
         .hover(|style| {
             style
                 .bg(control_button_hover_bg())
@@ -1587,7 +1581,6 @@ pub fn review_button(
         .text_color(fg_on_primary_action())
         .text_size(px(13.0))
         .font_weight(FontWeight::SEMIBOLD)
-        .cursor_pointer()
         .hover(|style| style.bg(primary_action_hover()))
         .on_mouse_down(MouseButton::Left, on_click)
         .child(label.to_string())
@@ -1836,7 +1829,6 @@ fn filter_pill(
         .border_color(transparent())
         .text_size(px(13.0))
         .font_weight(FontWeight::MEDIUM)
-        .cursor_pointer()
         .when(active, |el| el.bg(bg_emphasis()).text_color(fg_emphasis()))
         .when(!active, |el| el.text_color(fg_muted()))
         .hover(move |style| {
@@ -2039,7 +2031,6 @@ fn kanban_lane(
                     .pt(px(16.0))
                     .pb(px(16.0) + lane_radius)
                     .text_color(fg_emphasis())
-                    .cursor_pointer()
                     .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                         picker_state.update(cx, |s, cx| {
                             s.open_project_shader_picker(&picker_project, &picker_label);
@@ -2093,7 +2084,6 @@ fn kanban_lane(
                                 .rounded(radius_sm())
                                 .text_size(px(11.0))
                                 .text_color(fg_emphasis())
-                                .cursor_pointer()
                                 .bg(lane_header_control_bg())
                                 .border_1()
                                 .border_color(transparent())
@@ -2203,7 +2193,6 @@ fn kanban_card(
         .rounded(radius())
         .bg(bg_overlay())
         .p(px(14.0))
-        .cursor_pointer()
         .hover(|s| s.bg(bg_emphasis()))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             on_click(summary.clone(), window, cx)
@@ -2323,7 +2312,6 @@ fn muted_repo_pill(
                 .rounded(radius_sm())
                 .text_size(px(11.0))
                 .text_color(fg_subtle())
-                .cursor_pointer()
                 .hover(|s| s.bg(hover_bg()).text_color(success()))
                 .on_mouse_down(MouseButton::Left, on_unmute)
                 .child("Unmute"),

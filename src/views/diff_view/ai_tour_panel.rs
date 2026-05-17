@@ -573,7 +573,6 @@ fn render_ai_tour_semantic_overview_row(
         .rounded(radius_sm())
         .bg(bg_overlay())
         .flex()
-        .cursor_pointer()
         .hover(|style| style.bg(bg_subtle()))
         .on_mouse_down(MouseButton::Left, move |_, _, _| {
             list_state.scroll_to(ListOffset {

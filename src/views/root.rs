@@ -55,10 +55,10 @@ const APP_SIDEBAR_TRAFFIC_LIGHT_CLEARANCE: f32 = 58.0;
 pub(crate) const APP_CHROME_HEIGHT: f32 = 64.0;
 pub(crate) const APP_TRAFFIC_LIGHT_LEFT: f32 = 12.0;
 pub(crate) const APP_TRAFFIC_LIGHT_TOP: f32 = 11.0;
-const APP_TITLEBAR_SIDEBAR_TOGGLE_LEFT: f32 = 76.0;
-const APP_TITLEBAR_CONTROL_SIZE: f32 = 24.0;
-const APP_TITLEBAR_CONTROL_TOP: f32 = 8.0;
-const APP_TITLEBAR_CONTROL_ICON_SIZE: f32 = 13.0;
+const APP_TITLEBAR_SIDEBAR_TOGGLE_LEFT: f32 = 80.0;
+const APP_TITLEBAR_CONTROL_SIZE: f32 = 30.0;
+const APP_TITLEBAR_CONTROL_TOP: f32 = 2.0;
+const APP_TITLEBAR_CONTROL_ICON_SIZE: f32 = 15.0;
 const APP_CHROME_HIDDEN_LEFT_INSET: f32 = 206.0;
 const APP_SIDEBAR_ANIMATION_MS: u64 = 220;
 const NOTIFICATION_DRAWER_ANIMATION_MS: u64 = 160;
@@ -1414,7 +1414,6 @@ fn local_review_sidebar_row(
         .flex()
         .items_center()
         .gap(px(8.0))
-        .cursor_pointer()
         .hover(move |style| {
             style
                 .bg(if active { bg_emphasis() } else { bg_selected() })
@@ -1539,6 +1538,7 @@ fn render_titlebar_sidebar_toggle(state: &Entity<AppState>, cx: &App) -> impl In
             "titlebar-sidebar-toggle",
             sidebar_icon,
             sidebar_tooltip,
+            false,
             false,
             move |_, _, cx| {
                 state_for_sidebar.update(cx, |state, cx| {
@@ -1750,6 +1750,7 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                     LucideIcon::Bell,
                     "Notifications",
                     drawer_open,
+                    true,
                     move |_, _, cx| {
                         state_for_notifications.update(cx, |state, cx| {
                             state.notification_drawer_open = !drawer_open;
@@ -1786,25 +1787,31 @@ fn titlebar_icon_button(
     icon: LucideIcon,
     tooltip: &'static str,
     active: bool,
+    show_highlight: bool,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
+) -> AnyElement {
     let animation_id =
         SharedString::from(format!("titlebar-icon-button-{id}-{}", usize::from(active)));
 
-    div()
+    let button = div()
         .id(id)
         .w(px(APP_TITLEBAR_CONTROL_SIZE))
         .h(px(APP_TITLEBAR_CONTROL_SIZE))
         .rounded(px(6.0))
-        .bg(if active { bg_emphasis() } else { transparent() })
+        .bg(if active && show_highlight {
+            bg_emphasis()
+        } else {
+            transparent()
+        })
         .flex()
         .items_center()
         .justify_center()
-        .cursor_pointer()
-        .hover(move |style| {
-            style
-                .bg(if active { bg_emphasis() } else { bg_selected() })
-                .text_color(fg_emphasis())
+        .when(show_highlight, |el| {
+            el.hover(move |style| {
+                style
+                    .bg(if active { bg_emphasis() } else { bg_selected() })
+                    .text_color(fg_emphasis())
+            })
         })
         .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
         .on_mouse_down(MouseButton::Left, on_click)
@@ -1812,15 +1819,22 @@ fn titlebar_icon_button(
             icon,
             APP_TITLEBAR_CONTROL_ICON_SIZE,
             if active { fg_emphasis() } else { fg_subtle() },
-        ))
-        .with_animation(
-            animation_id,
-            Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
-            move |el, delta| {
-                let progress = selected_reveal_progress(active, delta);
-                el.bg(mix_rgba(transparent(), bg_emphasis(), progress))
-            },
-        )
+        ));
+
+    if show_highlight {
+        button
+            .with_animation(
+                animation_id,
+                Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
+                move |el, delta| {
+                    let progress = selected_reveal_progress(active, delta);
+                    el.bg(mix_rgba(transparent(), bg_emphasis(), progress))
+                },
+            )
+            .into_any_element()
+    } else {
+        button.into_any_element()
+    }
 }
 
 fn render_workspace_tabs(
@@ -2060,7 +2074,6 @@ fn chrome_icon_button(
         .flex()
         .items_center()
         .justify_center()
-        .cursor_pointer()
         .hover(move |style| {
             style
                 .bg(if active { bg_emphasis() } else { bg_selected() })
@@ -2127,7 +2140,6 @@ fn chrome_segment(
         .items_center()
         .justify_center()
         .opacity(if disabled { 0.5 } else { 1.0 })
-        .cursor_pointer()
         .hover(move |style| {
             style
                 .bg(if active { bg_emphasis() } else { bg_selected() })
@@ -2247,7 +2259,6 @@ fn render_notification_drawer(state: &Entity<AppState>, cx: &App) -> impl IntoEl
                                     .rounded(radius_sm())
                                     .text_size(px(11.0))
                                     .text_color(fg_muted())
-                                    .cursor_pointer()
                                     .hover(|style| style.bg(hover_bg()).text_color(fg_emphasis()))
                                     .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                                         state_for_mark_read.update(cx, |state, cx| {
@@ -2460,7 +2471,6 @@ fn sidebar_nav_button(
         .items_center()
         .justify_between()
         .gap(px(10.0))
-        .cursor_pointer()
         .hover(move |style| {
             style
                 .bg(if active { bg_emphasis() } else { bg_selected() })
@@ -2539,7 +2549,6 @@ fn sidebar_theme_button(
         .flex()
         .items_center()
         .justify_center()
-        .cursor_pointer()
         .hover(move |style| style.bg(if active { bg_emphasis() } else { bg_selected() }))
         .on_mouse_down(MouseButton::Left, on_click)
         .child(lucide_icon(
@@ -2577,7 +2586,6 @@ fn sidebar_utility_button(
         .flex()
         .items_center()
         .justify_center()
-        .cursor_pointer()
         .hover(move |style| style.bg(if active { bg_emphasis() } else { bg_selected() }))
         .on_mouse_down(MouseButton::Left, on_click)
         .child(lucide_icon(
@@ -2606,7 +2614,6 @@ fn sidebar_action_button(
         .gap(px(8.0))
         .when(!collapsed, |el| el.px(px(10.0)).justify_start())
         .when(collapsed, |el| el.w_full())
-        .cursor_pointer()
         .hover(|style| style.bg(control_button_hover_bg()))
         .on_mouse_down(MouseButton::Left, on_click)
         .child(lucide_icon(icon, 16.0, icon_color))
@@ -2671,7 +2678,6 @@ fn pr_tab(
         .text_size(px(12.0))
         .max_w(px(320.0))
         .min_w_0()
-        .cursor_pointer()
         .hover(move |style| style.bg(tab_hover_bg).text_color(fg_emphasis()))
         .on_mouse_down(MouseButton::Left, on_click)
         .child(lucide_icon(
@@ -2770,7 +2776,6 @@ fn compact_close_button(
         .flex()
         .items_center()
         .justify_center()
-        .cursor_pointer()
         .text_color(fg_subtle())
         .hover(|style| style.bg(bg_selected()).text_color(fg_emphasis()))
         .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))

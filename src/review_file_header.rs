@@ -191,7 +191,6 @@ fn render_file_header_copy_button(path: String) -> impl IntoElement {
         .flex()
         .items_center()
         .justify_center()
-        .cursor_pointer()
         .tooltip(|_, cx| build_file_header_static_tooltip("Copy file path", cx))
         .hover(|style| style.bg(bg_selected()))
         .on_mouse_down(MouseButton::Left, move |_, _, cx| {

@@ -1,3 +1,4 @@
+use std::fmt;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -5,7 +6,8 @@ use gpui::{
     hsla, linear_color_stop, linear_gradient, point, px, Background, BoxShadow, Hsla, Pixels, Rgba,
     WindowAppearance,
 };
-use serde::{Deserialize, Serialize};
+use serde::de::{self, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::cache::CacheStore;
 
@@ -83,60 +85,137 @@ impl ThemePreference {
     }
 }
 
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum CodeFontSizePreference {
-    Compact = 0,
-    #[default]
-    Default = 1,
-    Large = 2,
-    ExtraLarge = 3,
+pub const CODE_FONT_SIZE_MIN: u8 = 11;
+pub const CODE_FONT_SIZE_DEFAULT: u8 = 14;
+pub const CODE_FONT_SIZE_MAX: u8 = 20;
+
+const CODE_FONT_SIZE_PRESETS: [CodeFontSizePreference; 10] = [
+    CodeFontSizePreference(11),
+    CodeFontSizePreference(12),
+    CodeFontSizePreference(13),
+    CodeFontSizePreference(14),
+    CodeFontSizePreference(15),
+    CodeFontSizePreference(16),
+    CodeFontSizePreference(17),
+    CodeFontSizePreference(18),
+    CodeFontSizePreference(19),
+    CodeFontSizePreference(20),
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CodeFontSizePreference(u8);
+
+impl Default for CodeFontSizePreference {
+    fn default() -> Self {
+        Self::default_size()
+    }
 }
 
 impl CodeFontSizePreference {
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Compact => "Compact",
-            Self::Default => "Default",
-            Self::Large => "Large",
-            Self::ExtraLarge => "Extra large",
+    pub const fn new(size_px: u8) -> Self {
+        if size_px < CODE_FONT_SIZE_MIN {
+            Self(CODE_FONT_SIZE_MIN)
+        } else if size_px > CODE_FONT_SIZE_MAX {
+            Self(CODE_FONT_SIZE_MAX)
+        } else {
+            Self(size_px)
         }
+    }
+
+    pub const fn default_size() -> Self {
+        Self(CODE_FONT_SIZE_DEFAULT)
+    }
+
+    pub fn label(self) -> String {
+        format!("{} px", self.size_px())
     }
 
     pub fn all() -> &'static [CodeFontSizePreference] {
-        &[
-            CodeFontSizePreference::Compact,
-            CodeFontSizePreference::Default,
-            CodeFontSizePreference::Large,
-            CodeFontSizePreference::ExtraLarge,
-        ]
+        &CODE_FONT_SIZE_PRESETS
     }
 
     pub fn smaller(self) -> Self {
-        match self {
-            Self::Compact => Self::Compact,
-            Self::Default => Self::Compact,
-            Self::Large => Self::Default,
-            Self::ExtraLarge => Self::Large,
-        }
+        Self::new(self.0.saturating_sub(1))
     }
 
     pub fn larger(self) -> Self {
-        match self {
-            Self::Compact => Self::Default,
-            Self::Default => Self::Large,
-            Self::Large => Self::ExtraLarge,
-            Self::ExtraLarge => Self::ExtraLarge,
-        }
+        Self::new(self.0.saturating_add(1))
     }
 
-    pub fn scale(&self) -> f32 {
-        match self {
-            Self::Compact => 0.93,
-            Self::Default => 1.0,
-            Self::Large => 1.12,
-            Self::ExtraLarge => 1.24,
+    pub fn size_px(self) -> u8 {
+        self.0
+    }
+
+    pub fn scale(self) -> f32 {
+        f32::from(self.0) / f32::from(CODE_FONT_SIZE_DEFAULT)
+    }
+}
+
+impl Serialize for CodeFontSizePreference {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u8(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for CodeFontSizePreference {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(CodeFontSizePreferenceVisitor)
+    }
+}
+
+struct CodeFontSizePreferenceVisitor;
+
+impl<'de> Visitor<'de> for CodeFontSizePreferenceVisitor {
+    type Value = CodeFontSizePreference;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a code font size in px or a legacy named font size")
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(CodeFontSizePreference::new(
+            value.min(u64::from(u8::MAX)) as u8
+        ))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(CodeFontSizePreference::new(
+            value.max(0).min(i64::from(u8::MAX)) as u8,
+        ))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        let normalized = value
+            .trim()
+            .to_ascii_lowercase()
+            .chars()
+            .filter(|ch| !matches!(ch, '_' | '-' | ' '))
+            .collect::<String>();
+        match normalized.as_str() {
+            "compact" | "small" => Ok(CodeFontSizePreference::new(13)),
+            "default" | "medium" => Ok(CodeFontSizePreference::default_size()),
+            "large" => Ok(CodeFontSizePreference::new(16)),
+            "extralarge" => Ok(CodeFontSizePreference::new(17)),
+            _ => value
+                .trim()
+                .parse::<u8>()
+                .map(CodeFontSizePreference::new)
+                .map_err(E::custom),
         }
     }
 }
@@ -222,7 +301,7 @@ pub struct ThemeSettings {
 }
 
 static ACTIVE_THEME: AtomicU8 = AtomicU8::new(ActiveTheme::Light as u8);
-static ACTIVE_CODE_FONT_SIZE: AtomicU8 = AtomicU8::new(CodeFontSizePreference::Default as u8);
+static ACTIVE_CODE_FONT_SIZE: AtomicU8 = AtomicU8::new(CODE_FONT_SIZE_DEFAULT);
 static ACTIVE_DIFF_COLOR_THEME: AtomicU8 = AtomicU8::new(DiffColorThemePreference::Graphite as u8);
 
 fn color(r: f32, g: f32, b: f32, a: f32) -> Rgba {
@@ -575,7 +654,7 @@ pub fn set_active_theme(theme: ActiveTheme) {
 }
 
 pub fn set_active_code_font_size(preference: CodeFontSizePreference) {
-    ACTIVE_CODE_FONT_SIZE.store(preference as u8, Ordering::Relaxed);
+    ACTIVE_CODE_FONT_SIZE.store(preference.size_px(), Ordering::Relaxed);
 }
 
 pub fn set_active_diff_color_theme(preference: DiffColorThemePreference) {
@@ -590,14 +669,7 @@ pub fn active_theme() -> ActiveTheme {
 }
 
 pub fn active_code_font_size() -> CodeFontSizePreference {
-    match ACTIVE_CODE_FONT_SIZE.load(Ordering::Relaxed) {
-        value if value == CodeFontSizePreference::Compact as u8 => CodeFontSizePreference::Compact,
-        value if value == CodeFontSizePreference::Large as u8 => CodeFontSizePreference::Large,
-        value if value == CodeFontSizePreference::ExtraLarge as u8 => {
-            CodeFontSizePreference::ExtraLarge
-        }
-        _ => CodeFontSizePreference::Default,
-    }
+    CodeFontSizePreference::new(ACTIVE_CODE_FONT_SIZE.load(Ordering::Relaxed))
 }
 
 pub fn active_diff_color_theme() -> DiffColorThemePreference {
@@ -1172,7 +1244,7 @@ mod tests {
         let cache = temp_cache();
         let settings = ThemeSettings {
             preference: ThemePreference::Dark,
-            code_font_size: CodeFontSizePreference::Large,
+            code_font_size: CodeFontSizePreference::new(16),
             diff_color_theme: DiffColorThemePreference::Monokai,
         };
 
@@ -1209,7 +1281,7 @@ mod tests {
             load_theme_settings(&cache).unwrap(),
             ThemeSettings {
                 preference: ThemePreference::Light,
-                code_font_size: CodeFontSizePreference::Default,
+                code_font_size: CodeFontSizePreference::default_size(),
                 diff_color_theme: DiffColorThemePreference::Graphite,
             }
         );
@@ -1230,9 +1302,26 @@ mod tests {
             load_theme_settings(&cache).unwrap(),
             ThemeSettings {
                 preference: ThemePreference::Dark,
-                code_font_size: CodeFontSizePreference::ExtraLarge,
+                code_font_size: CodeFontSizePreference::new(17),
                 diff_color_theme: DiffColorThemePreference::Graphite,
             }
+        );
+    }
+
+    #[test]
+    fn numeric_code_font_size_is_clamped_when_loaded() {
+        let cache = temp_cache();
+        cache
+            .put(
+                THEME_SETTINGS_CACHE_KEY,
+                &serde_json::json!({ "preference": "dark", "codeFontSize": 24 }),
+                1,
+            )
+            .expect("failed to save numeric theme settings");
+
+        assert_eq!(
+            load_theme_settings(&cache).unwrap().code_font_size,
+            CodeFontSizePreference::new(CODE_FONT_SIZE_MAX)
         );
     }
 }

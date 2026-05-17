@@ -244,7 +244,6 @@ fn render_coachmark_header(
                 .flex()
                 .items_center()
                 .justify_center()
-                .cursor_pointer()
                 .hover(|style| style.bg(hover_bg()))
                 .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                     state_for_close.update(cx, |state, cx| {
@@ -451,7 +450,6 @@ fn render_command_copy_row(label: &'static str, command: &'static str) -> impl I
                 .flex()
                 .items_center()
                 .justify_center()
-                .cursor_pointer()
                 .hover(|style| style.bg(control_button_hover_bg()))
                 .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(command.to_string()));
@@ -557,13 +555,12 @@ fn wizard_secondary_button(
         .text_color(if disabled { fg_subtle() } else { fg_muted() })
         .opacity(if disabled { 0.62 } else { 1.0 })
         .when(!disabled, |el| {
-            el.cursor_pointer()
-                .hover(|style| {
-                    style
-                        .bg(control_button_hover_bg())
-                        .text_color(fg_emphasis())
-                })
-                .on_mouse_down(MouseButton::Left, on_click)
+            el.hover(|style| {
+                style
+                    .bg(control_button_hover_bg())
+                    .text_color(fg_emphasis())
+            })
+            .on_mouse_down(MouseButton::Left, on_click)
         })
         .child(label)
 }
@@ -591,8 +588,7 @@ fn wizard_primary_button(
         .font_weight(FontWeight::SEMIBOLD)
         .opacity(if disabled { 0.72 } else { 1.0 })
         .when(!disabled, |el| {
-            el.cursor_pointer()
-                .hover(|style| style.bg(primary_action_hover()))
+            el.hover(|style| style.bg(primary_action_hover()))
                 .on_mouse_down(MouseButton::Left, on_click)
         })
         .child(label)

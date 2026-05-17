@@ -347,8 +347,9 @@ pub fn render_pr_workspace(
                         .items_center()
                         .id("pr-overview-scroll")
                         .overflow_y_scroll()
+                        .scrollbar_width(px(8.0))
                         .pt(px(16.0))
-                        .pb(px(24.0))
+                        .pb(px(12.0))
                         .child(
                             div()
                                 .w_full()
@@ -1888,7 +1889,6 @@ pub fn surface_tab(
         .text_size(px(12.0))
         .border_1()
         .border_color(transparent())
-        .cursor_pointer()
         .when(active, |el| el.bg(bg_emphasis()).text_color(fg_emphasis()))
         .when(!active, |el| el.text_color(fg_muted()))
         .hover(move |style| {

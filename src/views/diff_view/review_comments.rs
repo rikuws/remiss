@@ -1184,7 +1184,6 @@ pub(super) fn render_finish_review_modal(
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .cursor_pointer()
                                 .hover(|style| style.bg(hover_bg()))
                                 .on_mouse_down(MouseButton::Left, {
                                     let state = state.clone();
@@ -1409,9 +1408,9 @@ fn render_review_action_choice(
         .bg(if active { bg_selected() } else { bg_surface() })
         .opacity(if disabled { 0.48 } else { 1.0 })
         .when(!disabled, |el| {
-            el.cursor_pointer()
-                .hover(|style| style.bg(hover_bg()))
-                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            el.hover(|style| style.bg(hover_bg())).on_mouse_down(
+                MouseButton::Left,
+                move |_, _, cx| {
                     cx.stop_propagation();
                     state_for_click.update(cx, |state, cx| {
                         state.review_action = action;
@@ -1419,7 +1418,8 @@ fn render_review_action_choice(
                         state.review_success = false;
                         cx.notify();
                     });
-                })
+                },
+            )
         })
         .child(
             div()
@@ -1488,8 +1488,7 @@ fn review_submit_button(
         .font_weight(FontWeight::SEMIBOLD)
         .opacity(if disabled { 0.72 } else { 1.0 })
         .when(!disabled, |el| {
-            el.cursor_pointer()
-                .hover(|style| style.bg(primary_action_hover()))
+            el.hover(|style| style.bg(primary_action_hover()))
                 .on_mouse_down(MouseButton::Left, on_click)
         })
         .child(label)
@@ -1761,7 +1760,6 @@ fn markdown_editor_tab(
             FontWeight::MEDIUM
         })
         .text_color(if active { fg_emphasis() } else { fg_muted() })
-        .cursor_pointer()
         .hover(|style| style.bg(hover_bg()))
         .on_mouse_down(MouseButton::Left, move |event, window, cx| {
             cx.stop_propagation();
@@ -1822,7 +1820,6 @@ fn markdown_toolbar_button(
         .flex()
         .items_center()
         .justify_center()
-        .cursor_pointer()
         .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
         .hover(|style| style.bg(hover_bg()))
         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
@@ -1862,7 +1859,6 @@ fn render_emoji_suggestions(
                 .border_color(transparent())
                 .text_size(px(12.0))
                 .text_color(fg_default())
-                .cursor_pointer()
                 .hover(|style| style.bg(hover_bg()))
                 .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                     cx.stop_propagation();
@@ -1978,7 +1974,6 @@ fn line_action_button(
         .text_size(px(12.0))
         .font_weight(FontWeight::MEDIUM)
         .text_color(if active { waypoint_fg() } else { fg_emphasis() })
-        .cursor_pointer()
         .hover(|style| style.bg(hover_bg()))
         .on_mouse_down(MouseButton::Left, move |event, window, cx| {
             cx.stop_propagation();
@@ -2212,7 +2207,9 @@ fn render_thread_comment(
     let comment_id = comment.id.clone();
 
     div()
+        .px(px(10.0))
         .py(px(10.0))
+        .rounded(radius_sm())
         .bg(if is_unread {
             diff_line_hover_bg()
         } else {
@@ -2415,6 +2412,27 @@ fn render_thread_timeline_avatar(
         })
 }
 
+fn render_thread_reply_avatar(login: &str) -> impl IntoElement {
+    div()
+        .relative()
+        .w(px(36.0))
+        .h(px(36.0))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(user_avatar(login, None, 24.0, false))
+        .child(
+            div()
+                .absolute()
+                .top(px(-8.0))
+                .left(px(17.5))
+                .w(px(1.0))
+                .h(px(9.0))
+                .bg(border_muted()),
+        )
+}
+
 fn render_thread_reply_prompt(
     viewer_login: &str,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
@@ -2423,14 +2441,9 @@ fn render_thread_reply_prompt(
         .pt(px(8.0))
         .pb(px(10.0))
         .flex()
-        .items_start()
+        .items_center()
         .gap(px(12.0))
-        .child(render_thread_timeline_avatar(
-            viewer_login,
-            None,
-            true,
-            false,
-        ))
+        .child(render_thread_reply_avatar(viewer_login))
         .child(
             div()
                 .h(px(36.0))
@@ -2446,7 +2459,6 @@ fn render_thread_reply_prompt(
                 .text_size(px(14.0))
                 .line_height(px(20.0))
                 .text_color(fg_subtle())
-                .cursor_pointer()
                 .hover(|style| style.bg(control_button_hover_bg()).text_color(fg_muted()))
                 .on_mouse_down(MouseButton::Left, on_click)
                 .child("Reply..."),
@@ -2471,12 +2483,7 @@ fn render_thread_reply_editor(
         .flex()
         .items_start()
         .gap(px(12.0))
-        .child(render_thread_timeline_avatar(
-            viewer_login,
-            None,
-            true,
-            false,
-        ))
+        .child(render_thread_reply_avatar(viewer_login))
         .child(
             div()
                 .flex()
@@ -2573,7 +2580,6 @@ fn inline_comment_text_action(
         .line_height(px(16.0))
         .font_weight(FontWeight::MEDIUM)
         .text_color(fg_subtle())
-        .cursor_pointer()
         .hover(move |style| {
             style
                 .bg(hover_bg())

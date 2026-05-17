@@ -367,7 +367,6 @@ fn palette_item(
         } else {
             fg_default()
         })
-        .cursor_pointer()
         .hover(move |style| {
             style
                 .bg(if selected {

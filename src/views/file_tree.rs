@@ -100,7 +100,6 @@ pub(crate) fn render_file_tree_header(
                         .flex()
                         .items_center()
                         .justify_center()
-                        .cursor_pointer()
                         .tooltip(|_, cx| build_static_tooltip("Hide file tree", cx))
                         .hover(|style| style.bg(bg_selected()))
                         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
@@ -234,7 +233,6 @@ pub(crate) fn render_file_tree_file_row(
         } else {
             transparent()
         })
-        .cursor_pointer()
         .hover(move |style| {
             style.bg(if is_active {
                 bg_emphasis()

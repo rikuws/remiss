@@ -5,6 +5,7 @@ use gpui::*;
 
 use crate::branding::{APP_NAME, APP_VERSION};
 use crate::code_tour::{self, CodeTourProvider, CodeTourProviderStatus};
+use crate::icons::{lucide_icon, LucideIcon};
 use crate::managed_lsp::{
     self, ManagedServerInstallState, ManagedServerInstallStatus, ManagedServerKind,
 };
@@ -325,7 +326,7 @@ pub fn reset_code_font_size_preference(
     window: &mut Window,
     cx: &mut App,
 ) {
-    update_code_font_size_preference(state, CodeFontSizePreference::Default, window, cx);
+    update_code_font_size_preference(state, CodeFontSizePreference::default_size(), window, cx);
 }
 
 pub fn update_diff_color_theme_preference(
@@ -769,8 +770,105 @@ fn render_theme_settings_panel(state: &Entity<AppState>, s: &AppState) -> impl I
                         "system {}",
                         system_appearance.to_lowercase()
                     ))),
-            ),
+            )
+            .child(render_code_font_size_control(
+                state,
+                s.code_font_size_preference,
+            )),
     )
+}
+
+fn render_code_font_size_control(
+    state: &Entity<AppState>,
+    code_font_size: CodeFontSizePreference,
+) -> impl IntoElement {
+    let can_decrease = code_font_size.size_px() > CODE_FONT_SIZE_MIN;
+    let can_increase = code_font_size.size_px() < CODE_FONT_SIZE_MAX;
+    let can_reset = code_font_size != CodeFontSizePreference::default_size();
+
+    div()
+        .pt(px(6.0))
+        .flex()
+        .flex_col()
+        .gap(px(10.0))
+        .child(
+            div()
+                .text_size(px(13.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_emphasis())
+                .child("Code font size"),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(font_size_icon_button(LucideIcon::Minus, can_decrease, {
+                    let state = state.clone();
+                    move |_, window, cx| {
+                        decrease_code_font_size_preference(&state, window, cx);
+                    }
+                }))
+                .child(
+                    div()
+                        .min_w(px(68.0))
+                        .h(px(30.0))
+                        .px(px(12.0))
+                        .rounded(radius_sm())
+                        .bg(bg_inset())
+                        .border_1()
+                        .border_color(border_muted())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg_emphasis())
+                        .child(code_font_size.label()),
+                )
+                .child(font_size_icon_button(LucideIcon::Plus, can_increase, {
+                    let state = state.clone();
+                    move |_, window, cx| {
+                        increase_code_font_size_preference(&state, window, cx);
+                    }
+                }))
+                .child(font_size_icon_button(LucideIcon::RotateCcw, can_reset, {
+                    let state = state.clone();
+                    move |_, window, cx| {
+                        reset_code_font_size_preference(&state, window, cx);
+                    }
+                })),
+        )
+}
+
+fn font_size_icon_button(
+    icon: LucideIcon,
+    enabled: bool,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> Div {
+    let button = div()
+        .w(px(30.0))
+        .h(px(30.0))
+        .rounded(radius_sm())
+        .bg(control_button_bg())
+        .border_1()
+        .border_color(transparent())
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(lucide_icon(icon, 14.0, fg_muted()));
+
+    if enabled {
+        button
+            .hover(|style| {
+                style
+                    .bg(control_button_hover_bg())
+                    .text_color(fg_emphasis())
+            })
+            .on_mouse_down(MouseButton::Left, on_click)
+    } else {
+        button.opacity(0.42)
+    }
 }
 
 fn render_code_tour_settings_panel(state: &Entity<AppState>, s: &AppState) -> impl IntoElement {

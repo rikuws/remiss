@@ -326,7 +326,6 @@ fn review_brief_icon_button(
         .flex()
         .items_center()
         .justify_center()
-        .cursor_pointer()
         .tooltip(|_, cx| build_review_brief_tooltip("Regenerate pre-diff briefing", cx))
         .hover(|style| style.bg(bg_selected()))
         .on_mouse_down(MouseButton::Left, on_click)
@@ -960,11 +959,12 @@ fn render_own_feedback_card(
     div()
         .relative()
         .min_w_0()
-        .pl(px(32.0))
+        .pl(px(48.0))
+        .pr(px(12.0))
         .py(px(12.0))
+        .rounded(radius_sm())
         .border_t(px(1.0))
         .border_color(border_muted())
-        .cursor_pointer()
         .hover(|style| style.bg(hover_bg()))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             state.update(cx, |state, cx| {
@@ -978,7 +978,7 @@ fn render_own_feedback_card(
         .child(
             div()
                 .absolute()
-                .left(px(0.0))
+                .left(px(12.0))
                 .top(px(13.0))
                 .child(user_avatar(
                     &item.author_login,
@@ -1070,11 +1070,12 @@ fn render_thread_digest_card(
     div()
         .relative()
         .min_w_0()
-        .pl(px(32.0))
+        .pl(px(48.0))
+        .pr(px(12.0))
         .py(px(12.0))
+        .rounded(radius_sm())
         .border_t(px(1.0))
         .border_color(border_muted())
-        .cursor_pointer()
         .hover(|style| style.bg(hover_bg()))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             state.update(cx, |state, cx| {
@@ -1088,7 +1089,7 @@ fn render_thread_digest_card(
         .child(
             div()
                 .absolute()
-                .left(px(0.0))
+                .left(px(12.0))
                 .top(px(13.0))
                 .child(user_avatar(
                     &item.latest_author,
@@ -1322,16 +1323,17 @@ fn render_activity_card(
                 .flex()
                 .flex_col()
                 .when(clickable, |el| {
-                    el.cursor_pointer()
-                        .hover(|style| style.bg(hover_bg()))
-                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    el.hover(|style| style.bg(hover_bg())).on_mouse_down(
+                        MouseButton::Left,
+                        move |_, window, cx| {
                             state.update(cx, |state, cx| {
                                 state.selected_file_path = file_path.clone();
                                 state.selected_diff_anchor = anchor.clone();
                                 cx.notify();
                             });
                             enter_files_surface(&state, window, cx);
-                        })
+                        },
+                    )
                 })
                 .child(
                     div()
@@ -1444,16 +1446,17 @@ fn render_activity_thread_card(
                         .flex()
                         .flex_col()
                         .when(clickable, |el| {
-                            el.cursor_pointer()
-                                .hover(|style| style.bg(hover_bg()))
-                                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                            el.hover(|style| style.bg(hover_bg())).on_mouse_down(
+                                MouseButton::Left,
+                                move |_, window, cx| {
                                     state.update(cx, |state, cx| {
                                         state.selected_file_path = file_path.clone();
                                         state.selected_diff_anchor = anchor.clone();
                                         cx.notify();
                                     });
                                     enter_files_surface(&state, window, cx);
-                                })
+                                },
+                            )
                         })
                         .child(
                             div()
@@ -1787,7 +1790,6 @@ fn render_automation_activity_group(
                         .items_center()
                         .justify_between()
                         .gap(px(12.0))
-                        .cursor_pointer()
                         .hover(|style| style.bg(hover_bg()))
                         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                             toggle_state.update(cx, |state, cx| {

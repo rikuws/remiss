@@ -1547,7 +1547,6 @@ fn render_diff_file_collapse_toggle(
         .flex()
         .items_center()
         .justify_center()
-        .cursor_pointer()
         .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
         .hover(|style| style.bg(bg_selected()))
         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
@@ -1596,7 +1595,6 @@ fn render_diff_file_review_toggle(
         .flex()
         .items_center()
         .justify_center()
-        .cursor_pointer()
         .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
         .hover(|style| style.bg(bg_selected()))
         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
@@ -1650,7 +1648,6 @@ fn render_diff_line_wrap_toggle(
         .flex()
         .items_center()
         .justify_center()
-        .cursor_pointer()
         .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
         .hover(|style| style.bg(bg_selected()).text_color(fg_emphasis()))
         .on_mouse_down(MouseButton::Left, move |_, _, cx| {

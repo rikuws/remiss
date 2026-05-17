@@ -1422,7 +1422,6 @@ pub(super) fn render_semantic_section_header(
                         .items_center()
                         .gap(px(8.0))
                         .min_w_0()
-                        .cursor_pointer()
                         .hover(|style| style.text_color(fg_emphasis()))
                         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                             open_review_diff_location(

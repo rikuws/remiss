@@ -719,7 +719,6 @@ fn render_temp_source_error(
                         .bg(bg_surface())
                         .text_size(px(12.0))
                         .text_color(fg_emphasis())
-                        .cursor_pointer()
                         .hover(|style| style.bg(hover_bg()))
                         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                             retry_temp_source_window_target(&state, target.clone(), window, cx);

@@ -627,7 +627,6 @@ fn render_ai_tour_nav_row(
             .border_1()
             .border_color(transparent())
             .bg(bg_surface())
-            .cursor_pointer()
             .hover(|style| style.bg(hover_bg()))
             .on_mouse_down(MouseButton::Left, move |_, _, _| {
                 list_state.scroll_to(ListOffset {
@@ -1017,7 +1016,6 @@ fn render_stack_view_layer_card(
                 .px(px(8.0))
                 .rounded(px(4.0))
                 .bg(row_bg)
-                .cursor_pointer()
                 .hover(move |style| style.bg(hover_bg))
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                     open_stack_layer(
@@ -1691,7 +1689,6 @@ fn render_review_queue_row(
         } else {
             bg_overlay()
         })
-        .cursor_pointer()
         .hover(move |style| {
             style.bg(if is_selected {
                 bg_emphasis()
@@ -1800,7 +1797,6 @@ fn render_semantic_outline_row(
                         .flex_col()
                         .gap(px(4.0))
                         .min_w_0()
-                        .cursor_pointer()
                         .hover(|style| style.text_color(fg_emphasis()))
                         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                             open_review_diff_location(
@@ -1855,7 +1851,6 @@ fn render_task_route_stop_row(
         .py(px(8.0))
         .rounded(radius_sm())
         .bg(bg_overlay())
-        .cursor_pointer()
         .hover(|style| style.bg(hover_bg()))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             open_review_location_card(&state, &location_for_open, window, cx);
@@ -1909,7 +1904,6 @@ fn render_recent_location_row(
         .py(px(8.0))
         .rounded(radius_sm())
         .bg(bg_overlay())
-        .cursor_pointer()
         .hover(|style| style.bg(hover_bg()))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             open_review_location_card(&state, &location_for_open, window, cx);
@@ -1944,7 +1938,6 @@ fn render_waymark_row(
         .py(px(8.0))
         .rounded(radius_sm())
         .bg(bg_overlay())
-        .cursor_pointer()
         .hover(|style| style.bg(hover_bg()))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             open_review_location_card(&state, &location_for_open, window, cx);
@@ -2336,15 +2329,16 @@ fn render_stack_layer_summary_row(
         .border_color(transparent())
         .bg(bg_emphasis())
         .when(can_expand, |el| {
-            el.cursor_pointer()
-                .hover(|style| style.bg(bg_emphasis()))
-                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            el.hover(|style| style.bg(bg_emphasis())).on_mouse_down(
+                MouseButton::Left,
+                move |_, _, cx| {
                     state_for_open.update(cx, |state, cx| {
                         state.set_stack_rail_expanded(true);
                         state.persist_active_review_session();
                         cx.notify();
                     });
-                })
+                },
+            )
         })
         .child(
             div()
@@ -2461,7 +2455,6 @@ fn render_stack_layer_row(
         } else {
             bg_surface()
         })
-        .cursor_pointer()
         .hover(move |style| {
             style.bg(if is_active {
                 bg_emphasis()

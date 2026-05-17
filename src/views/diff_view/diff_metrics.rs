@@ -350,7 +350,6 @@ pub(super) fn render_diff_line(
                                         .flex()
                                         .items_center()
                                         .justify_center()
-                                        .cursor_pointer()
                                         .hover(|style| style.bg(diff_editor_surface()))
                                         .tooltip(move |_, cx| {
                                             build_text_tooltip(
@@ -402,7 +401,6 @@ pub(super) fn render_diff_line(
                                         .flex()
                                         .items_center()
                                         .justify_center()
-                                        .cursor_pointer()
                                         .hover(|style| style.bg(diff_editor_surface()))
                                         .tooltip(|_, cx| {
                                             build_static_tooltip("click or drag to comment", cx)
