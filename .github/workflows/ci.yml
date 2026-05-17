@@ -8,7 +8,7 @@ on:
 
 jobs:
   rust:
-    name: Rust
+    name: Rust (macOS)
     runs-on: macos-latest
     steps:
       - name: Checkout
@@ -39,6 +39,34 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --all-features
+
+  windows-rust:
+    name: Rust (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.92.0
+          components: rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          prefix-key: v1-rust-windows
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Check
+        run: cargo check --all-targets --all-features
 
       - name: Test
         run: cargo test --all-features

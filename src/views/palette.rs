@@ -12,6 +12,7 @@ use crate::branding::APP_NAME;
 use crate::icons::{lucide_icon, LucideIcon};
 use crate::review_session::ReviewCenterMode;
 use crate::selectable_text::{AppTextFieldKind, AppTextInput};
+use crate::shortcuts;
 use crate::state::*;
 use crate::theme::*;
 
@@ -129,7 +130,7 @@ pub fn render_palette(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                         .flex()
                                         .gap(px(6.0))
                                         .items_center()
-                                        .child(badge("cmd-k"))
+                                        .child(badge(&shortcuts::secondary_key_label("k")))
                                         .child(badge("esc")),
                                 ),
                         )
