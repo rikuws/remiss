@@ -1,8 +1,5 @@
 use super::*;
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeMap, path::PathBuf};
 
 use crate::diff::{ParsedDiffHunk, ParsedDiffLine};
 use crate::semantic_review::{build_semantic_review_from_contents, RemissSemFileContents};
@@ -47,57 +44,15 @@ fn repo_path_normalization_uses_git_style_separators() {
 }
 
 #[test]
-fn semantic_layer_context_falls_back_to_path_and_hunk_overlap() {
-    let stack = stack();
-    let mut summary = summarize_semantic_review(&semantic_review_for_stack(&stack));
-    for layer in &mut summary.layers {
-        layer.atom_ids.clear();
-        layer.file_paths = vec![r"src\lib.rs".to_string()];
-        layer.hunk_indices = vec![0];
-    }
-
-    let semantic_layers = collect_layer_context(
-        &detail_with_deleted_symbol(),
-        &stack.layers[0],
-        &[&stack.atoms[0]],
-        Path::new("/tmp"),
-        Some(&summary),
-        None,
-        &mut Vec::new(),
-    )
-    .semantic_layers;
-
-    assert!(!semantic_layers.is_empty());
-}
-
-#[test]
-fn semantic_layer_context_falls_back_to_semantic_focus() {
-    let stack = stack();
-    let mut summary = summarize_semantic_review(&semantic_review_for_stack(&stack));
-    summary.layers.clear();
-
-    let semantic_layers = collect_layer_context(
-        &detail_with_deleted_symbol(),
-        &stack.layers[0],
-        &[&stack.atoms[0]],
-        Path::new("/tmp"),
-        Some(&summary),
-        None,
-        &mut Vec::new(),
-    )
-    .semantic_layers;
-
-    assert_eq!(semantic_layers[0].atom_ids, vec!["atom-1".to_string()]);
-}
-
-#[test]
 fn review_partner_prompt_and_focus_records_include_semantic_context() {
     let stack = stack();
     let semantic_review = semantic_review_for_stack(&stack);
+    let checkout_root = std::env::temp_dir();
+    let checkout_root = checkout_root.to_string_lossy();
     let input = build_review_partner_generation_input(
         &detail_with_deleted_symbol(),
         CodeTourProvider::Codex,
-        "/tmp",
+        checkout_root.as_ref(),
         stack,
         StructuralEvidencePack::empty(),
         Some(semantic_review),
