@@ -46,13 +46,18 @@ pub(crate) fn render_file_tree_header(
         .gap(px(10.0))
         .child(
             div()
+                .min_w_0()
                 .text_size(px(12.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(fg_emphasis())
+                .whitespace_nowrap()
+                .overflow_x_hidden()
+                .text_ellipsis()
                 .child(file_tree_label.to_string()),
         )
         .child(
             div()
+                .flex_shrink_0()
                 .flex()
                 .items_center()
                 .gap(px(6.0))

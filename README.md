@@ -58,8 +58,9 @@ states are treated as visible review states, not generic loading states.
 
 ## Notes
 
-Remiss uses a small fork of difftastic for embedded structural diffs. See
-`THIRD_PARTY_NOTICES.md` for attribution and fork details.
+Remiss uses small forks of difftastic and sem for embedded structural diffs and
+semantic review evidence. See `THIRD_PARTY_NOTICES.md` for attribution and fork
+details.
 
 `PLAN.md` captures the product direction. `DESIGN_LANGUAGE.md` and
 `UI_IMPLEMENTATION_GUIDE.md` capture the current interface and GPUI rules.

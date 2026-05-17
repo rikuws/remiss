@@ -1553,13 +1553,13 @@ mod tests {
     }
 
     #[test]
-    fn stack_timeline_initializes_at_base_branch_row() {
+    fn stack_timeline_initializes_with_base_branch_at_top() {
         let list_state = ListState::new(0, ListAlignment::Top, px(36.0));
 
         sync_stack_timeline_item_count(&list_state, 5);
 
         let scroll_top = list_state.logical_scroll_top();
-        assert_eq!(scroll_top.item_ix, 5);
+        assert_eq!(scroll_top.item_ix, 0);
         assert_eq!(scroll_top.offset_in_item, px(0.0));
     }
 

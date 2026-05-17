@@ -730,8 +730,9 @@ fn render_stack_navigation_pane(
         .map(|layer| layer.id.clone());
     let selected_layer_index = review_stack.selected_layer_index(selected_layer_id.as_deref());
     let progress_label = match (selected_layer_index, review_stack.layers.len()) {
-        (Some(index), total) if total > 0 => format!("{} of {total}", index + 1),
-        (_, total) => format!("0 of {total}"),
+        (Some(index), total) if total > 0 => format!("Layer {}/{}", index + 1, total),
+        (_, total) if total > 0 => format!("{total} layers"),
+        _ => "No layers".to_string(),
     };
     let trunk_branch = review_stack
         .trunk_branch
@@ -811,21 +812,22 @@ fn render_stack_navigation_pane(
                         let trunk_branch = trunk_branch.clone();
                         move |ix, _window, _cx| {
                             let layer_count = review_stack.layers.len();
-                            if ix < layer_count {
-                                let layer = &review_stack.layers[layer_count - ix - 1];
+                            if ix == 0 {
+                                render_stack_base_branch_row(&trunk_branch, layer_count > 0)
+                                    .into_any_element()
+                            } else {
+                                let layer_ix = ix - 1;
+                                let layer = &review_stack.layers[layer_ix];
                                 render_stack_view_layer_card(
                                     &state,
                                     detail.as_ref(),
                                     review_stack.as_ref(),
                                     layer,
                                     selected_layer_id.as_deref() == Some(layer.id.as_str()),
-                                    ix > 0,
                                     true,
+                                    layer_ix + 1 < layer_count,
                                 )
                                 .into_any_element()
-                            } else {
-                                render_stack_base_branch_row(&trunk_branch, layer_count > 0)
-                                    .into_any_element()
                             }
                         }
                     })
@@ -933,11 +935,18 @@ fn render_stack_file_tree_section(
 }
 
 fn render_stack_view_header(progress_label: String, draft: bool) -> impl IntoElement {
-    let label = if draft { "GUIDE DRAFT" } else { "GUIDE" };
+    let label = if draft { "DRAFT STACK" } else { "STACK" };
+    let subtitle = if draft {
+        "Planning layers"
+    } else {
+        "Base to head"
+    };
     div()
         .px(px(14.0))
-        .pt(px(20.0))
-        .pb(px(12.0))
+        .pt(px(14.0))
+        .pb(px(10.0))
+        .border_b(px(1.0))
+        .border_color(diff_annotation_border())
         .flex()
         .items_center()
         .justify_between()
@@ -949,6 +958,18 @@ fn render_stack_view_header(progress_label: String, draft: bool) -> impl IntoEle
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(fg_muted())
                 .child(label),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .flex_grow()
+                .text_size(px(10.0))
+                .font_family(mono_font_family())
+                .text_color(fg_subtle())
+                .whitespace_nowrap()
+                .overflow_x_hidden()
+                .text_ellipsis()
+                .child(subtitle),
         )
         .child(
             div()
@@ -1015,7 +1036,11 @@ fn render_stack_view_layer_card(
                         .flex()
                         .items_center()
                         .gap(px(8.0))
-                        .child(lucide_icon(LucideIcon::GitBranch, 13.0, success()))
+                        .child(lucide_icon(
+                            LucideIcon::GitBranch,
+                            13.0,
+                            if is_active { accent() } else { success() },
+                        ))
                         .child(
                             div()
                                 .min_w_0()
@@ -1083,13 +1108,13 @@ fn stack_view_layer_title_parts(layer: &ReviewStackLayer) -> (Option<String>, St
     (None, layer.title.clone())
 }
 
-fn render_stack_base_branch_row(branch_name: &str, connector_above: bool) -> impl IntoElement {
+fn render_stack_base_branch_row(branch_name: &str, connector_below: bool) -> impl IntoElement {
     div()
         .w_full()
         .h(px(26.0))
         .relative()
-        .when(connector_above, |el| {
-            el.child(render_stack_timeline_segment(0.0, 6.0))
+        .when(connector_below, |el| {
+            el.child(render_stack_timeline_segment(19.0, 7.0))
         })
         .child(
             div()
@@ -1099,6 +1124,18 @@ fn render_stack_base_branch_row(branch_name: &str, connector_above: bool) -> imp
                 .items_center()
                 .gap(px(8.0))
                 .child(lucide_icon(LucideIcon::Circle, 13.0, fg_subtle()))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .px(px(4.0))
+                        .py(px(1.0))
+                        .rounded(px(3.0))
+                        .bg(bg_subtle())
+                        .text_size(px(9.0))
+                        .font_family(mono_font_family())
+                        .text_color(fg_subtle())
+                        .child("base"),
+                )
                 .child(
                     div()
                         .min_w_0()
@@ -1328,13 +1365,8 @@ pub(super) fn sync_stack_timeline_item_count(list_state: &ListState, item_count:
         return;
     }
 
-    let should_scroll_to_bottom = list_state.item_count() == 0 && item_count > 0;
-    if should_scroll_to_bottom {
+    if list_state.item_count() == 0 {
         list_state.reset(item_count);
-        list_state.scroll_to(ListOffset {
-            item_ix: item_count,
-            offset_in_item: px(0.0),
-        });
     } else {
         reset_list_state_preserving_scroll(list_state, item_count);
     }
@@ -2832,9 +2864,9 @@ pub(super) fn prepare_review_file_tree_rows(
 fn review_file_tree_label(mode: StackDiffMode) -> &'static str {
     match mode {
         StackDiffMode::WholePr => "Files",
-        StackDiffMode::CurrentLayerOnly => "Layer Files",
-        StackDiffMode::UpToCurrentLayer => "Stack Files",
-        StackDiffMode::CurrentAndDependents => "Dependent Files",
+        StackDiffMode::CurrentLayerOnly => "Files in Layer",
+        StackDiffMode::UpToCurrentLayer => "Files to Layer",
+        StackDiffMode::CurrentAndDependents => "Files with Dependents",
         StackDiffMode::SinceLastReviewed => "Unreviewed Files",
     }
 }
