@@ -1,9 +1,12 @@
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 use serde_json::{json, Value};
 
@@ -380,6 +383,7 @@ fn run_copilot_cli(
 ) -> Result<CopilotRun, String> {
     let mut command = Command::new(binary);
     prepend_binary_parent_to_command_path(&mut command, binary);
+    configure_copilot_child_process(&mut command);
 
     let mut child = command
         .arg("-p")
@@ -452,7 +456,7 @@ fn run_copilot_cli(
             }
             Ok(None) => {}
             Err(error) => {
-                let _ = child.kill();
+                terminate_copilot_child_tree(&mut child);
                 return Err(format!("Failed to poll the Copilot CLI: {error}"));
             }
         }
@@ -507,8 +511,7 @@ fn run_copilot_cli(
     let should_stop_child =
         outcome.abort.is_some() || outcome_has_unknown_tool_allowlist_error(&outcome);
     if should_stop_child {
-        let _ = child.kill();
-        let _ = child.wait();
+        terminate_copilot_child_tree(&mut child);
     }
 
     let _ = stdout_handle.join();
@@ -543,6 +546,60 @@ fn run_copilot_cli(
         exit_status,
         diagnostic_log_path,
     })
+}
+
+#[cfg(unix)]
+fn configure_copilot_child_process(command: &mut Command) {
+    // SAFETY: `pre_exec` runs after fork and before exec. The closure only calls
+    // libc `setpgid`, which is safe in this context, so timeout cancellation can
+    // terminate the Copilot CLI plus its Node child processes as one group.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn configure_copilot_child_process(_command: &mut Command) {}
+
+#[cfg(unix)]
+fn terminate_copilot_child_tree(child: &mut Child) {
+    signal_copilot_process_group(child, libc::SIGTERM);
+    for _ in 0..10 {
+        if child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    signal_copilot_process_group(child, libc::SIGKILL);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(unix)]
+fn signal_copilot_process_group(child: &Child, signal: libc::c_int) {
+    let process_group_id = child.id() as libc::pid_t;
+    if process_group_id <= 0 {
+        return;
+    }
+
+    // SAFETY: `configure_copilot_child_process` puts the spawned Copilot process
+    // in a process group whose pgid is the child pid. A negative pid signals
+    // that process group.
+    unsafe {
+        let _ = libc::kill(-process_group_id, signal);
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_copilot_child_tree(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn handle_stream_line(

@@ -46,8 +46,8 @@ impl AgentJsonPromptOptions {
             task_label: "Guided Review stack planning",
             codex_overall_timeout_ms: 90_000,
             codex_inactivity_timeout_ms: 35_000,
-            copilot_overall_timeout_ms: 120_000,
-            copilot_inactivity_timeout_ms: 45_000,
+            copilot_overall_timeout_ms: 420_000,
+            copilot_inactivity_timeout_ms: 300_000,
         }
     }
 
@@ -132,4 +132,17 @@ pub fn load_all_statuses() -> Vec<CodeTourProviderStatus> {
                 })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copilot_stack_planning_timeout_allows_silent_long_first_turns() {
+        let options = AgentJsonPromptOptions::stack_planning();
+
+        assert_eq!(options.copilot_overall_timeout_ms, 420_000);
+        assert_eq!(options.copilot_inactivity_timeout_ms, 300_000);
+    }
 }
