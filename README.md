@@ -1,11 +1,10 @@
 # Remiss
 
-Remiss is a native macOS workspace for GitHub pull request review.
+Remiss is a native macOS workspace for pull request and local change review.
 
-It is read-only by design. The app is meant for understanding a change,
-navigating the surrounding code, keeping review state in one place, and leaving
-clear review feedback. It is not an editor, merge tool, or chat-first code
-assistant.
+The app is meant for understanding a change, navigating the surrounding code,
+keeping review state in one place, and leaving clear review feedback. It is not
+an editor, merge tool, or chat-first code assistant.
 
 ## Download
 
@@ -18,10 +17,14 @@ provider setup, and distribution are still being hardened.
 ## What Remiss Does
 
 - Opens GitHub pull requests in a focused desktop review workspace.
+- Opens local working checkouts as PR-like change reviews before a pull request
+  exists.
 - Combines PR metadata, changed files, review threads, and local checkout
   context.
 - Provides diff navigation, structural diff views, and a read-only source
   browser for nearby code.
+- Stages files, commits reviewed local changes, and pushes the current branch
+  from the local change review flow.
 - Keeps review comments, status, and submission actions inside the review flow.
 - Generates Review Briefs and Guided Review routes when an AI provider is
   configured.
@@ -33,14 +36,17 @@ Remiss is built around the part of review where most time is lost:
 understanding what changed, finding the important context, judging risk, and
 staying oriented across a longer review.
 
-A typical review starts from a GitHub pull request, loads the PR data and local
-checkout context, then moves through the diff, source browser, comments, Review
-Brief, and Guided Review surfaces as needed. The center of the app is the review
-workspace, not a browser tab or a prompt box.
+A typical review starts from a GitHub pull request or a working checkout, loads
+the change data and local code context, then moves through the diff, source
+browser, comments, Review Brief, and Guided Review surfaces as needed. The
+center of the app is the review workspace, not a browser tab or a prompt box.
 
 ## Boundaries
 
-- Remiss does not edit code, stage files, merge branches, or resolve conflicts.
+- Remiss does not edit code, manage branches, pull, merge, rebase, stash,
+  force-push, or resolve conflicts.
+- Mutable Git support is limited to staging files, committing staged local
+  changes, and pushing the current branch from user-linked checkouts.
 - macOS is the primary target today.
 - Pull request data comes through the GitHub CLI, so `gh auth login` is required.
 - Local code intelligence prefers a checked-out copy of the repository at the PR

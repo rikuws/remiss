@@ -15,6 +15,7 @@ use crate::github::{
     PullRequestDetail, PullRequestDetailSnapshot, PullRequestQueue, PullRequestReviewThread,
     PullRequestSummary, RepositoryFileContent, ReviewAction, WorkspaceSnapshot,
 };
+use crate::local_git::{LocalChangeStatus, LocalGitOperationState};
 use crate::local_repo::LocalRepositoryStatus;
 use crate::local_review::{self, RememberedLocalRepository};
 use crate::lsp::{LspServerStatus, LspSessionManager, LspSymbolDetails};
@@ -113,6 +114,8 @@ pub struct DetailState {
     pub syncing: bool,
     pub error: Option<String>,
     pub local_repository_status: Option<LocalRepositoryStatus>,
+    pub local_change_status: Option<LocalChangeStatus>,
+    pub local_git_operation: LocalGitOperationState,
     pub local_repository_loading: bool,
     pub local_repository_error: Option<String>,
     pub source_file_tree: SourceFileTreeState,
@@ -145,6 +148,8 @@ impl Default for DetailState {
             syncing: false,
             error: None,
             local_repository_status: None,
+            local_change_status: None,
+            local_git_operation: LocalGitOperationState::default(),
             local_repository_loading: false,
             local_repository_error: None,
             source_file_tree: SourceFileTreeState::default(),
@@ -1079,6 +1084,7 @@ pub struct AppState {
     // Review form
     pub review_action: ReviewAction,
     pub review_body: String,
+    pub local_commit_message: String,
     pub review_editor_active: bool,
     pub review_editor_preview: bool,
     pub review_finish_modal_open: bool,
@@ -1229,6 +1235,7 @@ impl AppState {
             hovered_temp_source_target: None,
             review_action: ReviewAction::Comment,
             review_body: String::new(),
+            local_commit_message: String::new(),
             review_editor_active: false,
             review_editor_preview: false,
             review_finish_modal_open: false,

@@ -1878,6 +1878,7 @@ fn set_markdown_preview(
     state.update(cx, |state, cx| {
         match field {
             AppTextFieldKind::ReviewBody => state.review_editor_preview = preview,
+            AppTextFieldKind::LocalCommitMessage => {}
             AppTextFieldKind::InlineCommentDraft => state.inline_comment_preview = preview,
             _ => {}
         }
@@ -1928,6 +1929,7 @@ fn replace_current_emoji_query(
 fn markdown_field_text(state: &AppState, field: AppTextFieldKind) -> &str {
     match field {
         AppTextFieldKind::ReviewBody => state.review_body.as_str(),
+        AppTextFieldKind::LocalCommitMessage => state.local_commit_message.as_str(),
         AppTextFieldKind::InlineCommentDraft => state.inline_comment_draft.as_str(),
         AppTextFieldKind::WaymarkDraft => state.waymark_draft.as_str(),
         AppTextFieldKind::PaletteQuery => state.palette_query.as_str(),
@@ -1938,6 +1940,7 @@ fn markdown_field_text(state: &AppState, field: AppTextFieldKind) -> &str {
 fn markdown_field_text_mut(state: &mut AppState, field: AppTextFieldKind) -> &mut String {
     match field {
         AppTextFieldKind::ReviewBody => &mut state.review_body,
+        AppTextFieldKind::LocalCommitMessage => &mut state.local_commit_message,
         AppTextFieldKind::InlineCommentDraft => &mut state.inline_comment_draft,
         AppTextFieldKind::WaymarkDraft => &mut state.waymark_draft,
         AppTextFieldKind::PaletteQuery => &mut state.palette_query,

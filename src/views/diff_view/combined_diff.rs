@@ -271,6 +271,7 @@ pub(super) fn render_combined_diff_files(
                 review_stack.clone(),
                 header,
                 wrap_diff_lines,
+                cx,
             ))
         })
         .into_any_element()
@@ -1108,6 +1109,7 @@ fn render_combined_diff_view_item(
                             item_ix,
                             context,
                         )),
+                        cx,
                     ))
                     .into_any_element()
             })
@@ -1440,6 +1442,7 @@ fn render_floating_diff_file_header(
     review_stack: Arc<ReviewStack>,
     header: CombinedDiffFloatingHeader,
     wrap_diff_lines: bool,
+    cx: &App,
 ) -> impl IntoElement {
     div()
         .absolute()
@@ -1461,6 +1464,7 @@ fn render_floating_diff_file_header(
             header.collapsed,
             header.reviewed,
             header.collapse_scroll,
+            cx,
         ))
 }
 
@@ -1473,9 +1477,11 @@ fn render_diff_file_header_row(
     collapsed: bool,
     reviewed: bool,
     collapse_scroll: Option<DiffFileCollapseScrollAdjustment>,
+    cx: &App,
 ) -> impl IntoElement {
     let key = header.path.clone();
     let scope = scope.into();
+    let local_stage_toggle = render_local_file_stage_toggle(state, key.clone(), scope.clone(), cx);
 
     render_review_file_header_with_controls(
         header,
@@ -1494,6 +1500,7 @@ fn render_diff_file_header_row(
                 .flex()
                 .items_center()
                 .gap(px(6.0))
+                .when_some(local_stage_toggle, |el, toggle| el.child(toggle))
                 .child(
                     render_diff_file_review_toggle(
                         state,
@@ -1610,6 +1617,102 @@ fn render_diff_file_review_toggle(
             14.0,
             if reviewed { success() } else { fg_muted() },
         ))
+}
+
+fn render_local_file_stage_toggle(
+    state: &Entity<AppState>,
+    path: String,
+    scope: String,
+    cx: &App,
+) -> Option<AnyElement> {
+    let (stage, disabled, tooltip, icon, color, bg) = {
+        let app_state = state.read(cx);
+        if !app_state.active_is_local_review() {
+            return None;
+        }
+        let detail_state = app_state.active_detail_state()?;
+        let status = detail_state.local_change_status.as_ref()?;
+        let file = status.file(&path)?;
+        let running = detail_state.local_git_operation.running.is_some();
+
+        if file.conflicted {
+            (
+                true,
+                true,
+                "Resolve conflict outside Remiss",
+                LucideIcon::Plus,
+                warning(),
+                warning_muted(),
+            )
+        } else if file.is_stageable() {
+            (
+                true,
+                running,
+                "Stage file",
+                LucideIcon::Plus,
+                fg_muted(),
+                diff_annotation_bg(),
+            )
+        } else if file.staged {
+            (
+                false,
+                running,
+                "Unstage file",
+                LucideIcon::Minus,
+                success(),
+                success_muted(),
+            )
+        } else {
+            return None;
+        }
+    };
+
+    let state_for_action = state.clone();
+    let action_path = path.clone();
+    let button = div()
+        .id(ElementId::Name(
+            format!("diff-file-stage-toggle-{scope}-{path}").into(),
+        ))
+        .h(px(28.0))
+        .w(px(30.0))
+        .flex_shrink_0()
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(transparent())
+        .bg(bg)
+        .flex()
+        .items_center()
+        .justify_center()
+        .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
+        .child(lucide_icon(icon, 14.0, color));
+
+    if disabled {
+        Some(button.opacity(0.45).into_any_element())
+    } else {
+        Some(
+            button
+                .hover(|style| style.bg(bg_selected()))
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    if stage {
+                        trigger_stage_local_file(
+                            &state_for_action,
+                            action_path.clone(),
+                            window,
+                            cx,
+                        );
+                    } else {
+                        trigger_unstage_local_file(
+                            &state_for_action,
+                            action_path.clone(),
+                            window,
+                            cx,
+                        );
+                    }
+                    cx.stop_propagation();
+                })
+                .into_any_element(),
+        )
+    }
 }
 
 fn render_diff_line_wrap_toggle(

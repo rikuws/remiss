@@ -24,6 +24,7 @@ const TEXT_TOOLTIP_SHOW_DELAY: Duration = Duration::from_millis(500);
 pub enum AppTextFieldKind {
     PaletteQuery,
     ReviewBody,
+    LocalCommitMessage,
     WaymarkDraft,
     InlineCommentDraft,
     WaypointSpotlightQuery,
@@ -741,6 +742,7 @@ impl AppTextInput {
             match self.field {
                 AppTextFieldKind::PaletteQuery => app_state.palette_query.clone(),
                 AppTextFieldKind::ReviewBody => app_state.review_body.clone(),
+                AppTextFieldKind::LocalCommitMessage => app_state.local_commit_message.clone(),
                 AppTextFieldKind::WaymarkDraft => app_state.waymark_draft.clone(),
                 AppTextFieldKind::InlineCommentDraft => app_state.inline_comment_draft.clone(),
                 AppTextFieldKind::WaypointSpotlightQuery => {
@@ -1203,6 +1205,7 @@ fn input_text_for_field<'a>(state: &'a AppState, field: AppTextFieldKind) -> &'a
     match field {
         AppTextFieldKind::PaletteQuery => state.palette_query.as_str(),
         AppTextFieldKind::ReviewBody => state.review_body.as_str(),
+        AppTextFieldKind::LocalCommitMessage => state.local_commit_message.as_str(),
         AppTextFieldKind::WaymarkDraft => state.waymark_draft.as_str(),
         AppTextFieldKind::InlineCommentDraft => state.inline_comment_draft.as_str(),
         AppTextFieldKind::WaypointSpotlightQuery => state.waypoint_spotlight_query.as_str(),
@@ -1224,6 +1227,9 @@ fn set_input_text_for_field(state: &mut AppState, field: AppTextFieldKind, value
         }
         AppTextFieldKind::ReviewBody => {
             state.review_body = value;
+        }
+        AppTextFieldKind::LocalCommitMessage => {
+            state.local_commit_message = value;
         }
         AppTextFieldKind::WaymarkDraft => {
             state.waymark_draft = value;
@@ -1321,6 +1327,7 @@ fn normalize_paste(field: AppTextFieldKind, text: &str) -> String {
     match field {
         AppTextFieldKind::PaletteQuery => text.replace('\n', " "),
         AppTextFieldKind::ReviewBody => text.to_string(),
+        AppTextFieldKind::LocalCommitMessage => text.replace('\n', " "),
         AppTextFieldKind::WaymarkDraft => text.replace('\n', " "),
         AppTextFieldKind::InlineCommentDraft => text.to_string(),
         AppTextFieldKind::WaypointSpotlightQuery => text.replace('\n', " "),

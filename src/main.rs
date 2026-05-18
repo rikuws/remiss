@@ -52,6 +52,7 @@ mod github;
 mod icons;
 mod inline_diff;
 mod local_documents;
+mod local_git;
 mod local_repo;
 mod local_review;
 mod lsp;

@@ -40,7 +40,7 @@ impl WizardStepTarget {
             Self::GithubSetup => "GitHub CLI",
             Self::TutorialReview => "Review surface",
             Self::GuidedReview => "Guided Review",
-            Self::LocalReview => "Local Review",
+            Self::LocalReview => "Local Changes",
             Self::ReviewFeedback => "Review feedback",
         }
     }
@@ -303,12 +303,12 @@ const WELCOME_STEPS: &[WizardStepDefinition] = &[
     },
     WizardStepDefinition {
         id: "local-review",
-        title: "Local review catches work before it is pushed",
-        body: "Add a working checkout to review unpushed local changes with the same review surface before you open a pull request.",
+        title: "Local changes become a local PR",
+        body: "Add a working checkout to review, stage, commit, and push changes before you open a pull request.",
         bullets: &[
             "Local repositories are remembered for quick refreshes.",
             "The app inspects the working checkout and reports setup problems in place.",
-            "You can review local changes without waiting for a pull request.",
+            "You can review local changes before a pull request exists.",
         ],
         tone: WizardTone::Local,
         target: WizardStepTarget::LocalReview,

@@ -83,7 +83,11 @@ use super::file_tree::{
     render_file_tree_state_message, render_structural_warmup_status, ReviewFileRowOpenHandler,
     ReviewFileRowOpenMode, REVIEW_FILE_TREE_ROW_HEIGHT,
 };
-use super::root::refresh_active_local_review;
+use super::root::{
+    refresh_active_local_review, trigger_commit_local_changes, trigger_push_local_branch,
+    trigger_stage_all_local_changes, trigger_stage_local_file, trigger_unstage_all_local_changes,
+    trigger_unstage_local_file,
+};
 use super::sections::{
     badge, badge_success, error_text, eyebrow, format_relative_time, ghost_button, nested_panel,
     panel_state_text, review_button, success_text, user_avatar,
@@ -1097,6 +1101,9 @@ fn render_diff_panel(
             !has_textual_diff,
             app_state.is_onboarding_target(WizardStepTarget::ReviewFeedback),
         ))
+        .when(crate::local_review::is_local_review_detail(detail), |el| {
+            el.child(render_local_change_action_bar(state, app_state))
+        })
         .child(
             div()
                 .flex_grow()
@@ -1343,6 +1350,198 @@ fn render_diff_toolbar(
                 refresh_active_local_review(&state_for_refresh, window, cx);
             }))
         })
+}
+
+fn render_local_change_action_bar(
+    state: &Entity<AppState>,
+    app_state: &AppState,
+) -> impl IntoElement {
+    let detail_state = app_state.active_detail_state();
+    let status = detail_state.and_then(|detail_state| detail_state.local_change_status.as_ref());
+    let operation = detail_state
+        .map(|detail_state| detail_state.local_git_operation.clone())
+        .unwrap_or_default();
+    let running = operation.running.is_some();
+    let commit_message_empty = app_state.local_commit_message.trim().is_empty();
+    let has_stageable = status
+        .map(|status| status.has_stageable_files())
+        .unwrap_or(false);
+    let has_unstageable = status
+        .map(|status| status.has_unstageable_files())
+        .unwrap_or(false);
+    let has_conflicts = status.map(|status| status.has_conflicts).unwrap_or(false);
+    let can_commit = status.map(|status| status.can_commit()).unwrap_or(false)
+        && !commit_message_empty
+        && !running;
+    let can_push = status.map(|status| status.can_push()).unwrap_or(false) && !running;
+    let summary = status
+        .map(|status| status.summary_label())
+        .unwrap_or_else(|| "Inspecting local changes".to_string());
+    let branch = status
+        .map(|status| status.branch.as_str())
+        .unwrap_or("local branch");
+    let push_label = status
+        .and_then(|status| status.push_target.as_deref())
+        .map(|target| format!("Push to {target}"))
+        .unwrap_or_else(|| "Push".to_string());
+    let state_for_stage_all = state.clone();
+    let state_for_unstage_all = state.clone();
+    let state_for_commit = state.clone();
+    let state_for_push = state.clone();
+
+    div()
+        .px(px(20.0))
+        .py(px(10.0))
+        .bg(diff_editor_surface())
+        .border_b(px(1.0))
+        .border_color(diff_annotation_border())
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .child(
+            div()
+                .min_w_0()
+                .flex_grow()
+                .flex()
+                .flex_col()
+                .gap(px(5.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .min_w_0()
+                        .child(lucide_icon(LucideIcon::GitBranch, 13.0, fg_muted()))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .font_family(mono_font_family())
+                                .text_size(px(11.0))
+                                .text_color(fg_muted())
+                                .whitespace_nowrap()
+                                .overflow_x_hidden()
+                                .text_ellipsis()
+                                .child(format!("{branch} / {summary}")),
+                        ),
+                )
+                .when_some(operation.message.clone().or(operation.error.clone()), |el, message| {
+                    let error = operation.error.is_some();
+                    el.child(
+                        div()
+                            .text_size(px(11.0))
+                            .line_height(px(15.0))
+                            .text_color(if error { danger() } else { fg_subtle() })
+                            .child(message),
+                    )
+                })
+                .when(has_conflicts, |el| {
+                    el.child(
+                        div()
+                            .text_size(px(11.0))
+                            .line_height(px(15.0))
+                            .text_color(warning())
+                            .child("Resolve merge conflicts outside Remiss before committing or pushing."),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .w(px(260.0))
+                .flex_shrink_0()
+                .px(px(10.0))
+                .py(px(7.0))
+                .rounded(radius_sm())
+                .border_1()
+                .border_color(border_muted())
+                .bg(bg_surface())
+                .text_size(px(12.0))
+                .text_color(if commit_message_empty {
+                    fg_subtle()
+                } else {
+                    fg_emphasis()
+                })
+                .child(AppTextInput::new(
+                    "local-commit-message",
+                    state.clone(),
+                    AppTextFieldKind::LocalCommitMessage,
+                    "Commit message",
+                )),
+        )
+        .child(local_change_button(
+            "Stage all",
+            false,
+            running || has_conflicts || !has_stageable,
+            move |_, window, cx| {
+                trigger_stage_all_local_changes(&state_for_stage_all, window, cx);
+            },
+        ))
+        .child(local_change_button(
+            "Unstage all",
+            false,
+            running || has_conflicts || !has_unstageable,
+            move |_, window, cx| {
+                trigger_unstage_all_local_changes(&state_for_unstage_all, window, cx);
+            },
+        ))
+        .child(local_change_button(
+            "Commit",
+            true,
+            !can_commit,
+            move |_, window, cx| {
+                trigger_commit_local_changes(&state_for_commit, window, cx);
+            },
+        ))
+        .child(local_change_button(
+            &push_label,
+            false,
+            !can_push,
+            move |_, window, cx| {
+                trigger_push_local_branch(&state_for_push, window, cx);
+            },
+        ))
+}
+
+fn local_change_button(
+    label: &str,
+    primary: bool,
+    disabled: bool,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let button = div()
+        .px(px(11.0))
+        .py(px(7.0))
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(transparent())
+        .bg(if primary {
+            primary_action_bg()
+        } else {
+            control_button_bg()
+        })
+        .text_color(if primary {
+            fg_on_primary_action()
+        } else {
+            fg_default()
+        })
+        .text_size(px(12.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .whitespace_nowrap()
+        .child(label.to_string());
+
+    if disabled {
+        button.opacity(0.45).into_any_element()
+    } else {
+        button
+            .hover(move |style| {
+                style.bg(if primary {
+                    primary_action_hover()
+                } else {
+                    control_button_hover_bg()
+                })
+            })
+            .on_mouse_down(MouseButton::Left, on_click)
+            .into_any_element()
+    }
 }
 
 fn diff_toolbar_primary_button(

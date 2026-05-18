@@ -1223,7 +1223,7 @@ pub(super) fn render_local_review_empty_state(
 ) -> impl IntoElement {
     let state_for_refresh = state.clone();
     let title = if local_repo_loading {
-        "Refreshing local review"
+        "Refreshing local changes"
     } else {
         "No local changes"
     };
@@ -1243,7 +1243,7 @@ pub(super) fn render_local_review_empty_state(
         .child(
             nested_panel()
                 .max_w(px(560.0))
-                .child(eyebrow("Local review"))
+                .child(eyebrow("Local changes"))
                 .child(
                     div()
                         .mt(px(8.0))

@@ -17,6 +17,7 @@ use crate::{
         AuthState, PullRequestDataCompleteness, PullRequestDetail, PullRequestDetailSnapshot,
         PullRequestFile, PullRequestSummary,
     },
+    local_git::{self, LocalChangeStatus},
     local_repo::LocalRepositoryStatus,
 };
 
@@ -72,6 +73,7 @@ pub struct LocalReviewInspection {
     pub status: LocalReviewStatusKind,
     pub message: String,
     pub local_repository_status: LocalRepositoryStatus,
+    pub local_change_status: LocalChangeStatus,
     pub detail: PullRequestDetail,
     pub summary: PullRequestSummary,
     pub key: String,
@@ -95,14 +97,14 @@ pub fn reusable_local_repository_status(
 
     let Some(status) = status else {
         return Err(
-            "Local Review needs the inspected working checkout. Refresh the local review and retry."
+            "Local Changes needs the inspected working checkout. Refresh local changes and retry."
                 .to_string(),
         );
     };
 
     if status.source != "local-review" {
         return Err(
-            "Local Review has an unexpected checkout state. Refresh the local review and retry."
+            "Local Changes has an unexpected checkout state. Refresh local changes and retry."
                 .to_string(),
         );
     }
@@ -193,7 +195,7 @@ pub fn inspect_working_checkout(path: &Path, fetch: bool) -> Result<LocalReviewI
     }
 
     let branch = current_branch(&root)?.ok_or_else(|| {
-        "This checkout is detached. Check out a branch before starting a local review.".to_string()
+        "This checkout is detached. Check out a branch before reviewing local changes.".to_string()
     })?;
     let head_oid = current_head_oid(&root)?.ok_or_else(|| {
         "This checkout does not have a HEAD commit yet. Make an initial commit first.".to_string()
@@ -242,6 +244,7 @@ pub fn inspect_working_checkout(path: &Path, fetch: bool) -> Result<LocalReviewI
 
     let additions = files.iter().map(|file| file.additions).sum::<i64>();
     let deletions = files.iter().map(|file| file.deletions).sum::<i64>();
+    let local_change_status = local_git::inspect_status(&root, &branch, commits_count)?;
     let local_repository_status = LocalRepositoryStatus {
         repository: repository.clone(),
         path: Some(root.display().to_string()),
@@ -284,6 +287,7 @@ pub fn inspect_working_checkout(path: &Path, fetch: bool) -> Result<LocalReviewI
         status,
         message,
         local_repository_status,
+        local_change_status,
         detail,
         summary,
         key,
@@ -298,7 +302,7 @@ pub fn detail_snapshot_from_inspection(
             is_authenticated: false,
             active_login: None,
             active_hostname: None,
-            message: "Local review".to_string(),
+            message: "Local changes".to_string(),
         },
         loaded_from_cache: false,
         fetched_at_ms: Some(now_ms()),
@@ -309,12 +313,12 @@ pub fn detail_snapshot_from_inspection(
 fn synthetic_detail(input: SyntheticDetailInput) -> PullRequestDetail {
     let title = match input.status {
         LocalReviewStatusKind::NoDiff => {
-            format!("Local review: {} has no local changes", input.branch)
+            format!("Local changes: {} has no local changes", input.branch)
         }
         LocalReviewStatusKind::Blocked => {
-            format!("Local review blocked: {}", input.branch)
+            format!("Local changes blocked: {}", input.branch)
         }
-        _ => format!("Local review: {}", input.branch),
+        _ => format!("Local changes: {}", input.branch),
     };
 
     PullRequestDetail {
@@ -420,7 +424,7 @@ fn reject_app_managed_checkout(root: &Path) -> Result<(), String> {
     let managed_root = app_storage::managed_repositories_root();
     if root.starts_with(&managed_root) {
         return Err(
-            "Local Review uses your working checkouts, not Remiss-managed pull request checkouts."
+            "Local Changes uses your working checkouts, not Remiss-managed pull request checkouts."
                 .to_string(),
         );
     }
@@ -746,17 +750,17 @@ fn local_review_head_identity(head_oid: &str, clean: bool, raw_diff: &str) -> St
 fn local_review_ready_message(clean: bool, commits_count: i64) -> String {
     if clean {
         return format!(
-            "{} committed change{} ready for local review.",
+            "{} committed change{} ready for review.",
             commits_count,
             if commits_count == 1 { "" } else { "s" }
         );
     }
 
     if commits_count == 0 {
-        "Working tree changes ready for local review.".to_string()
+        "Working tree changes ready for review.".to_string()
     } else {
         format!(
-            "Working tree changes and {} committed change{} ready for local review.",
+            "Working tree changes and {} committed change{} ready for review.",
             commits_count,
             if commits_count == 1 { "" } else { "s" }
         )
@@ -1204,7 +1208,7 @@ mod tests {
         assert_eq!(
             reusable_local_repository_status(&inspection.detail, None)
                 .expect_err("missing local review status should be reported"),
-            "Local Review needs the inspected working checkout. Refresh the local review and retry."
+            "Local Changes needs the inspected working checkout. Refresh local changes and retry."
         );
     }
 

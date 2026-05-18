@@ -95,8 +95,8 @@ fn workspace_menu() -> Menu {
             MenuItem::separator(),
             MenuItem::action("Sync Workspace", SyncWorkspace),
             MenuItem::separator(),
-            MenuItem::action("Add Local Repository...", AddLocalRepository),
-            MenuItem::action("Refresh Local Repositories", RefreshLocalRepositories),
+            MenuItem::action("Add Local Changes Repository...", AddLocalRepository),
+            MenuItem::action("Refresh Local Changes", RefreshLocalRepositories),
         ],
     }
 }
