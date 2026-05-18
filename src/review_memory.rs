@@ -503,7 +503,7 @@ pub fn review_memory_prompt_context(
     ReviewMemoryPromptContext {
         signals: signals
             .into_iter()
-            .take(max_signals.max(1).min(MAX_PROMPT_SIGNALS))
+            .take(max_signals.clamp(1, MAX_PROMPT_SIGNALS))
             .collect(),
         limitations,
     }

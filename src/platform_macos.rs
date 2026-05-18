@@ -25,9 +25,21 @@ pub fn show_about_panel() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+pub fn app_short_version() -> String {
+    current_app_contents_dir()
+        .and_then(|contents_dir| bundle_short_version(&contents_dir))
+        .unwrap_or_else(|| crate::branding::APP_VERSION.to_string())
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn show_about_panel() -> Result<(), String> {
     Err("The native About panel is only available on macOS.".to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn app_short_version() -> String {
+    crate::branding::APP_VERSION.to_string()
 }
 
 #[cfg(target_os = "macos")]
@@ -54,6 +66,37 @@ fn app_contents_dir_for_executable(executable: &std::path::Path) -> Option<std::
 fn current_app_contents_dir() -> Option<std::path::PathBuf> {
     let executable = std::env::current_exe().ok()?;
     app_contents_dir_for_executable(&executable)
+}
+
+#[cfg(target_os = "macos")]
+fn bundle_short_version(contents_dir: &std::path::Path) -> Option<String> {
+    let plist = std::fs::read_to_string(contents_dir.join("Info.plist")).ok()?;
+    extract_info_plist_string_value(&plist, "CFBundleShortVersionString")
+}
+
+#[cfg(target_os = "macos")]
+fn extract_info_plist_string_value(plist: &str, key: &str) -> Option<String> {
+    let needle = format!("<key>{key}</key>");
+    let value_block = plist.split_once(&needle)?.1;
+    let value_start = value_block.find("<string>")? + "<string>".len();
+    let value = &value_block[value_start..];
+    let value_end = value.find("</string>")?;
+    let value = value[..value_end].trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(decode_info_plist_string(value))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn decode_info_plist_string(value: &str) -> String {
+    value
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
 }
 
 #[cfg(target_os = "macos")]
@@ -615,6 +658,42 @@ mod tests {
         );
         assert_eq!(
             app_contents_dir_for_executable(Path::new("/tmp/Remiss")),
+            None
+        );
+    }
+
+    #[test]
+    fn extracts_short_version_from_info_plist() {
+        let plist = r#"
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>
+  <string>Remiss</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.4.0</string>
+</dict>
+</plist>
+"#;
+
+        assert_eq!(
+            super::extract_info_plist_string_value(plist, "CFBundleShortVersionString"),
+            Some("0.4.0".to_string())
+        );
+    }
+
+    #[test]
+    fn ignores_empty_short_version_values() {
+        let plist = r#"
+<plist version="1.0">
+<dict>
+  <key>CFBundleShortVersionString</key>
+  <string>   </string>
+</dict>
+</plist>
+"#;
+
+        assert_eq!(
+            super::extract_info_plist_string_value(plist, "CFBundleShortVersionString"),
             None
         );
     }

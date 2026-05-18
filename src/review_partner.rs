@@ -41,10 +41,10 @@ mod tests;
 
 use self::context::*;
 
-pub const REVIEW_PARTNER_GENERATOR_VERSION: &str = "review-partner-v20";
+pub const REVIEW_PARTNER_GENERATOR_VERSION: &str = "review-partner-v21";
 pub const REVIEW_PARTNER_CONTEXT_VERSION: &str = "review-partner-context-v5";
 
-const REVIEW_PARTNER_CACHE_KEY_PREFIX: &str = "review-partner-v20";
+const REVIEW_PARTNER_CACHE_KEY_PREFIX: &str = "review-partner-v21";
 const MAX_PARTNER_LAYERS: usize = 24;
 const MAX_LAYER_ATOMS: usize = 32;
 pub const MAX_FOCUS_RECORDS: usize = 160;
@@ -800,6 +800,8 @@ pub fn build_review_partner_prompt(input: &GenerateReviewPartnerInput) -> String
         "Generate focusRecords for the supplied focusTargets. Each focus record explains one stack layer, not one diff hunk.",
         "Each focus record must include one complete natural-language summary paragraph that synthesizes what changed, how the code behaves, the invariant/state change/error handling it affects, the supported intent or trade-off, and any relevant history signal.",
         "The summary must not be a file inventory, line list, stack-generator explanation, or statement about how Remiss grouped the change.",
+        "Do not name changed files in the summary unless one specific file is itself the behavior being explained. Prefer the subsystem, flow, symbol contract, state, or invariant.",
+        "Never write placeholder scaffolding such as 'the useful meaning is', 'what state changes', or 'which invariant'. Fill in the concrete behavior or leave the uncertainty to assumptions.",
         "Include only understandingCheckpoints that help the reviewer understand or verify the code, not generic review advice.",
         "A checkpoint should name the concrete invariant, edge case, assumption, or codebase pattern the reviewer should keep in mind.",
         "Use assumptions for inferred intent or behavior that is plausible but not directly proven by the supplied context.",
@@ -931,10 +933,11 @@ fn merge_layer(
 ) -> ReviewPartnerLayer {
     let fallback = fallback_layer(layer, input);
     let _legacy_usage_context = response.usage_context;
+    let brief = normalize_layer_brief(layer, response.brief, &fallback.brief);
     ReviewPartnerLayer {
         layer_id: layer.id.clone(),
         title: normalize_stack_layer_title(&layer.title, "Stack layer"),
-        brief: default_if_empty(response.brief, &fallback.brief),
+        brief,
         changed_items: normalize_items_or(response.changed_items, fallback.changed_items),
         removed_items: normalize_items_or(response.removed_items, fallback.removed_items),
         usage_context: fallback.usage_context,
@@ -1013,31 +1016,44 @@ fn fallback_layer_brief(
     layer: &ReviewStackLayer,
     context: Option<&ReviewPartnerCollectedLayer>,
 ) -> String {
+    let fallback = fallback_layer_title_summary(layer);
     context
         .and_then(|context| semantic_layer_brief(layer, context))
-        .unwrap_or_else(|| default_if_empty(layer.summary.clone(), &layer.title))
+        .map(|summary| normalize_layer_brief(layer, summary, &fallback))
+        .unwrap_or_else(|| normalize_layer_brief(layer, layer.summary.clone(), &fallback))
+}
+
+fn fallback_layer_title_summary(layer: &ReviewStackLayer) -> String {
+    let action = layer_action_verb_lower(&layer.title);
+    let subject = layer_subject_for_sentence(&layer.title);
+    limit_text(
+        format!("This change {action} {subject}."),
+        MAX_BRIEF_TEXT_CHARS,
+    )
+}
+
+fn normalize_layer_brief(
+    layer: &ReviewStackLayer,
+    brief: impl AsRef<str>,
+    fallback: &str,
+) -> String {
+    normalize_review_partner_summary_text(brief.as_ref())
+        .or_else(|| normalize_review_partner_summary_text(fallback))
+        .unwrap_or_else(|| fallback_layer_title_summary(layer))
 }
 
 fn semantic_layer_brief(
     layer: &ReviewStackLayer,
     context: &ReviewPartnerCollectedLayer,
 ) -> Option<String> {
-    if context.semantic_layers.is_empty() {
-        return None;
-    }
-
     let mut files = BTreeSet::<String>::new();
     let mut entities = BTreeSet::<String>::new();
 
     for semantic_layer in &context.semantic_layers {
         files.extend(semantic_layer.file_paths.iter().cloned());
-        entities.extend(
-            semantic_layer
-                .entity_names
-                .iter()
-                .filter(|name| !name.trim().is_empty())
-                .cloned(),
-        );
+        for name in &semantic_layer.entity_names {
+            insert_summary_entity_name(&mut entities, name);
+        }
     }
     for focus in &context.semantic_focus {
         if let Some(entity) = focus
@@ -1045,9 +1061,17 @@ fn semantic_layer_brief(
             .as_ref()
             .or_else(|| focus.overlapping_entities.first())
         {
-            entities.insert(entity.name.clone());
+            insert_summary_entity_name(&mut entities, &entity.name);
             files.insert(entity.file_path.clone());
         }
+    }
+    for symbol in context
+        .changed_symbols
+        .iter()
+        .chain(context.removed_symbols.iter())
+    {
+        insert_summary_entity_name(&mut entities, &symbol.symbol);
+        files.insert(symbol.path.clone());
     }
 
     if files.is_empty() && entities.is_empty() {
@@ -1059,7 +1083,7 @@ fn semantic_layer_brief(
     let meaning = layer_meaning_sentence(&files, &entities);
 
     Some(limit_text(
-        format!("This layer {action} {scope}. {meaning}"),
+        format!("This change {action} {scope}. {meaning}"),
         MAX_BRIEF_TEXT_CHARS,
     ))
 }
@@ -1069,44 +1093,47 @@ fn layer_scope_description(
     files: &BTreeSet<String>,
     entities: &BTreeSet<String>,
 ) -> String {
-    let file_list = natural_list(files.iter().map(String::as_str), 3);
+    let subject = layer_subject_for_sentence(&layer.title);
     if !files.is_empty() && files.iter().all(|path| is_lockfile_path(path)) {
-        return format!("dependency lock state in {file_list}");
+        return "dependency resolution state".to_string();
     }
     if !files.is_empty() && files.iter().all(|path| is_config_path(path)) {
-        return format!("build or configuration behavior in {file_list}");
+        return "build or runtime configuration".to_string();
     }
     if !files.is_empty() && files.iter().all(|path| is_test_path(path)) {
-        return format!("test coverage in {file_list}");
+        return format!("test coverage for {subject}");
     }
     if !entities.is_empty() {
-        return format!(
-            "{} in {}",
-            natural_list(entities.iter().map(String::as_str), 3),
-            file_list
-        );
+        let entity_list = natural_symbol_list(entities.iter().map(String::as_str), 3);
+        return format!("{subject} around {entity_list}");
     }
-    if !files.is_empty() {
-        return format!("behavior in {file_list}");
-    }
-
-    strip_line_inventory(&layer_subject(&layer.title))
+    subject
 }
 
-fn layer_meaning_sentence(files: &BTreeSet<String>, entities: &BTreeSet<String>) -> &'static str {
+fn layer_meaning_sentence(files: &BTreeSet<String>, entities: &BTreeSet<String>) -> String {
     if !files.is_empty() && files.iter().all(|path| is_lockfile_path(path)) {
-        return "The useful meaning is the dependency or build resolution being pinned: why that version movement is intended, whether it preserves the expected build invariant, and which tests or prior requirements explain the change.";
+        return "It affects the pinned version set every build resolves, not application control flow.".to_string();
     }
     if !files.is_empty() && files.iter().all(|path| is_config_path(path)) {
-        return "The useful meaning is the build or runtime assumption being changed, the invariant that should still hold across environments, and the history or tests that justify the new configuration.";
+        return "It affects the environment or build invariant the rest of the code now relies on."
+            .to_string();
     }
     if !files.is_empty() && files.iter().all(|path| is_test_path(path)) {
-        return "The useful meaning is the behavior the tests now protect, the edge case or regression they encode, and whether that history matches the implementation change.";
+        return "It records the behavior, edge case, or regression the test suite now protects."
+            .to_string();
     }
     if !entities.is_empty() {
-        return "The useful meaning is the behavior these symbols now express: what state changes, which invariant or edge case is covered or silently ignored, and what tests, comments, callers, or prior signals imply about the intent.";
+        return "It affects the behavior, state, and caller contract attached to those symbols."
+            .to_string();
     }
-    "The useful meaning is the behavior behind the edit: what state changes, which invariant or edge case is protected or silently ignored, and what tests, comments, callers, or prior signals imply about the intent."
+    "It affects the scoped behavior carried by the diff and the surfaced usage context.".to_string()
+}
+
+fn insert_summary_entity_name(entities: &mut BTreeSet<String>, name: &str) {
+    let name = clean_symbol(name);
+    if !name.is_empty() && !name.contains('/') && !name.contains('\\') {
+        entities.insert(name);
+    }
 }
 
 fn is_lockfile_path(path: &str) -> bool {
@@ -1156,6 +1183,23 @@ fn strip_line_inventory(value: &str) -> String {
     default_if_empty(trimmed.to_string(), "this change")
 }
 
+fn layer_subject_for_sentence(title: &str) -> String {
+    let subject = strip_line_inventory(&layer_subject(title));
+    let lower = subject.to_ascii_lowercase();
+    if lower == "this layer" || lower == "stack layer" || lower == "this change" {
+        return "the scoped behavior".to_string();
+    }
+    if lower.starts_with("the ")
+        || lower.starts_with("a ")
+        || lower.starts_with("an ")
+        || lower.starts_with("this ")
+    {
+        subject
+    } else {
+        format!("the {subject}")
+    }
+}
+
 fn layer_action_verb_lower(title: &str) -> &'static str {
     match layer_action_verb(title) {
         "Adds" => "adds",
@@ -1164,7 +1208,7 @@ fn layer_action_verb_lower(title: &str) -> &'static str {
         "Renames" => "renames",
         "Refactors" => "refactors",
         "Updates" => "updates",
-        _ => "covers",
+        _ => "affects",
     }
 }
 
@@ -1209,38 +1253,29 @@ fn layer_subject(title: &str) -> String {
     default_if_empty(title.to_string(), "this layer")
 }
 
-fn natural_list<'a>(values: impl Iterator<Item = &'a str>, max_items: usize) -> String {
+fn natural_symbol_list<'a>(values: impl Iterator<Item = &'a str>, max_items: usize) -> String {
     let values = values
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .collect::<Vec<_>>();
     if values.is_empty() {
-        return "this area".to_string();
+        return "the affected symbols".to_string();
     }
 
     let visible = values.iter().take(max_items).copied().collect::<Vec<_>>();
     let extra_count = values.len().saturating_sub(visible.len());
     match visible.as_slice() {
         [one] if extra_count == 0 => (*one).to_string(),
-        [one] => format!(
-            "{one} plus {extra_count} other{}",
-            if extra_count == 1 { "" } else { "s" }
-        ),
+        [one] => format!("{one} and related symbols"),
         [one, two] if extra_count == 0 => format!("{one} and {two}"),
-        _ => {
+        _ if extra_count == 0 => {
             let mut text = visible.join(", ");
-            if extra_count == 0 {
-                if let Some((head, tail)) = text.rsplit_once(", ") {
-                    text = format!("{head}, and {tail}");
-                }
-                text
-            } else {
-                format!(
-                    "{text}, plus {extra_count} other{}",
-                    if extra_count == 1 { "" } else { "s" }
-                )
+            if let Some((head, tail)) = text.rsplit_once(", ") {
+                text = format!("{head}, and {tail}");
             }
+            text
         }
+        _ => format!("{}, and related symbols", visible.join(", ")),
     }
 }
 
@@ -1291,28 +1326,32 @@ fn merge_focus_record(
 }
 
 fn normalize_focus_summary(target: &ReviewPartnerFocusTarget, summary: &str) -> String {
+    normalize_review_partner_summary_text(summary).unwrap_or_else(|| target.title.clone())
+}
+
+fn normalize_review_partner_summary_text(summary: &str) -> Option<String> {
     let summary = summary.trim().trim_end_matches("...").trim_end();
     if summary.is_empty() {
-        return target.title.clone();
+        return None;
     }
 
     if let Some((_, remainder)) = summary.split_once('?') {
         let remainder = remainder.trim();
         if !remainder.is_empty() {
-            return normalize_focus_summary(target, remainder);
+            return normalize_review_partner_summary_text(remainder);
         }
-        return target.title.clone();
+        return None;
     }
 
-    if review_partner_summary_starts_like_prompt(summary) {
-        return target.title.clone();
+    if review_partner_summary_starts_like_prompt(summary)
+        || review_partner_summary_mentions_internal_tooling(summary)
+        || review_partner_summary_contains_prompt_scaffold(summary)
+        || review_partner_summary_looks_like_file_inventory(summary)
+    {
+        return None;
     }
 
-    if review_partner_summary_mentions_internal_tooling(summary) {
-        return target.title.clone();
-    }
-
-    summary.to_string()
+    Some(summary.to_string())
 }
 
 fn review_partner_summary_starts_like_prompt(summary: &str) -> bool {
@@ -1360,6 +1399,86 @@ fn review_partner_summary_mentions_internal_tooling(summary: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
+fn review_partner_summary_contains_prompt_scaffold(summary: &str) -> bool {
+    let lower = summary.trim_start().to_ascii_lowercase();
+    [
+        "the useful meaning is",
+        "useful meaning is",
+        "what state changes",
+        "which invariant or edge case",
+        "what tests, comments, callers, or prior signals",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn review_partner_summary_looks_like_file_inventory(summary: &str) -> bool {
+    let lower = summary.trim_start().to_ascii_lowercase();
+    if lower.contains("changed files")
+        || lower.contains("file inventory")
+        || lower.contains("files changed")
+    {
+        return true;
+    }
+
+    let path_like_tokens = summary
+        .split_whitespace()
+        .filter(|token| review_partner_summary_token_looks_like_path(token))
+        .count();
+    let starts_like_inventory = [
+        "this layer covers ",
+        "this layer includes ",
+        "this layer touches ",
+        "this change covers ",
+        "this change includes ",
+        "this change touches ",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix));
+    let has_plus_others = lower.contains(" plus ") && lower.contains(" other");
+
+    path_like_tokens >= 2
+        || (starts_like_inventory && path_like_tokens >= 1)
+        || (starts_like_inventory && has_plus_others)
+}
+
+fn review_partner_summary_token_looks_like_path(token: &str) -> bool {
+    let token = token.trim_matches(|ch: char| {
+        ch == ','
+            || ch == '.'
+            || ch == ';'
+            || ch == ':'
+            || ch == '('
+            || ch == ')'
+            || ch == '['
+            || ch == ']'
+            || ch == '`'
+            || ch == '"'
+            || ch == '\''
+    });
+    if token.is_empty() {
+        return false;
+    }
+    let lower = token.to_ascii_lowercase();
+    let has_path_separator = lower.contains('/') || lower.contains('\\');
+    let pathy_prefix = lower.starts_with("src/")
+        || lower.starts_with("test/")
+        || lower.starts_with("tests/")
+        || lower.starts_with("backend/")
+        || lower.starts_with("frontend/")
+        || lower.starts_with("app/")
+        || lower.starts_with("packages/");
+    let known_extension = [
+        ".rs", ".kt", ".java", ".ts", ".tsx", ".js", ".jsx", ".swift", ".go", ".py", ".rb",
+        ".toml", ".json", ".yaml", ".yml", ".xml", ".gradle", ".md",
+    ]
+    .iter()
+    .any(|extension| lower.ends_with(extension));
+
+    (has_path_separator && (known_extension || pathy_prefix || lower.matches('/').count() >= 2))
+        || known_extension && has_path_separator
+}
+
 fn fallback_focus_summary_from_stack(
     target: &ReviewPartnerFocusTarget,
     stack: &ReviewStack,
@@ -1372,10 +1491,11 @@ fn fallback_focus_summary_from_stack(
         return target.title.clone();
     };
     let layer_context = context.layer(layer_id);
-    let summary = layer_context
+    let fallback = fallback_layer_title_summary(layer);
+    layer_context
         .and_then(|context| semantic_layer_brief(layer, context))
-        .unwrap_or_else(|| default_if_empty(layer.summary.clone(), &layer.rationale));
-    normalize_focus_summary(target, &summary)
+        .map(|summary| normalize_layer_brief(layer, summary, &fallback))
+        .unwrap_or_else(|| normalize_layer_brief(layer, &layer.summary, &fallback))
 }
 
 pub fn fallback_focus_record(
@@ -2542,6 +2662,8 @@ fn build_focus_record_prompt(
         "Avoid emoji, markdown headings, decorative labels, code fences, and code sketches.",
         "Include one complete natural-language summary paragraph that synthesizes what changed, how the code behaves, the invariant/state change/error handling it affects, the supported intent or trade-off, and any relevant history signal.",
         "The summary must not be a file inventory, line list, stack-generator explanation, or statement about how Remiss grouped the change.",
+        "Do not name changed files in the summary unless one specific file is itself the behavior being explained. Prefer the subsystem, flow, symbol contract, state, or invariant.",
+        "Never write placeholder scaffolding such as 'the useful meaning is', 'what state changes', or 'which invariant'. Fill in the concrete behavior or leave the uncertainty to assumptions.",
         "Include only understandingCheckpoints that help the reviewer understand or verify the code, not generic review advice.",
         "A checkpoint should name the concrete invariant, edge case, assumption, or codebase pattern the reviewer should keep in mind.",
         "Use assumptions for inferred intent or behavior that is plausible but not directly proven by the supplied context.",

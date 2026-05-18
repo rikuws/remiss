@@ -24,7 +24,7 @@ fn partner_cache_key_includes_versions() {
         "context-y",
     );
 
-    assert!(key.starts_with("review-partner-v20:"));
+    assert!(key.starts_with("review-partner-v21:"));
     assert!(key.contains("stack-x"));
     assert!(key.contains("context-y"));
 }
@@ -39,6 +39,8 @@ fn review_partner_prompt_requires_concrete_summary_copy() {
     assert!(prompt.contains("Never end a summary with an ellipsis"));
     assert!(prompt.contains("Match the supplied focus scope exactly"));
     assert!(prompt.contains("what changed, how the code behaves"));
+    assert!(prompt.contains("Do not name changed files in the summary"));
+    assert!(prompt.contains("Never write placeholder scaffolding"));
     assert!(prompt.contains("Never mention Sem"));
     assert!(prompt.contains("understanding checkpoints"));
     assert!(prompt.contains("understandingCheckpoints"));
@@ -154,7 +156,9 @@ fn review_partner_prompt_and_focus_records_include_semantic_context() {
         .map(|layer| layer.brief.clone())
         .unwrap_or_default();
     assert!(!layer_brief.contains("Sem"));
-    assert!(layer_brief.contains("The useful meaning"));
+    assert!(!layer_brief.contains("The useful meaning"));
+    assert!(!layer_brief.contains("src/lib.rs"));
+    assert!(layer_brief.contains("removed_helper"));
 
     let focus_prompt = build_focus_record_prompt(&partner, &partner.focus_targets[0]);
     assert!(focus_prompt.contains("semanticEvidence"));
@@ -684,6 +688,98 @@ fn do_led_focus_summary_keeps_concrete_remainder() {
         partner.focus_records[0].summary,
         "Adds portable asset lookup."
     );
+}
+
+#[test]
+fn file_inventory_focus_summary_uses_behavior_fallback() {
+    let mut input = input(ReviewPartnerContextPack {
+        version: REVIEW_PARTNER_CONTEXT_VERSION.to_string(),
+        layers: vec![ReviewPartnerCollectedLayer {
+            layer_id: "layer-1".to_string(),
+            semantic_layers: Vec::new(),
+            semantic_focus: Vec::new(),
+            changed_symbols: vec![
+                ReviewPartnerCollectedSymbol {
+                    symbol: "ApiClient".to_string(),
+                    path: "backend/common/src/main/kotlin/fi/fintraffic/common/integration/ApiClient.kt"
+                        .to_string(),
+                    line: Some(12),
+                    atom_ids: vec!["atom-1".to_string()],
+                    search_strategy: "test".to_string(),
+                    reference_count: 0,
+                    references: Vec::new(),
+                },
+                ReviewPartnerCollectedSymbol {
+                    symbol: "CachedJwt".to_string(),
+                    path: "backend/common/src/main/kotlin/fi/fintraffic/common/integration/CachedJwt.kt"
+                        .to_string(),
+                    line: Some(24),
+                    atom_ids: vec!["atom-1".to_string()],
+                    search_strategy: "test".to_string(),
+                    reference_count: 0,
+                    references: Vec::new(),
+                },
+            ],
+            removed_symbols: Vec::new(),
+            similar_locations: Vec::new(),
+            style_notes: Vec::new(),
+            limitations: Vec::new(),
+        }],
+        warnings: Vec::new(),
+    });
+    input.stack.layers[0].title = "Webview JWT signing flow".to_string();
+    input.stack.layers[0].summary =
+        "This layer covers ApiClient, CachedJwt, plus 7 others. The useful meaning is what state changes."
+            .to_string();
+    let fallback =
+        fallback_focus_summary_from_stack(&input.focus_targets[0], &input.stack, &input.context);
+    assert!(
+        fallback.contains("Webview JWT signing flow"),
+        "fallback was: {fallback}"
+    );
+    let response = ReviewPartnerResponse {
+        stack_brief: "brief".to_string(),
+        stack_concerns: Vec::new(),
+        limitations: Vec::new(),
+        warnings: Vec::new(),
+        layers: Vec::new(),
+        focus_records: vec![ReviewPartnerFocusRecordResponse {
+            key: "layer:layer-1".to_string(),
+            title: "Focus record".to_string(),
+            subtitle: None,
+            summary: Some("This layer covers ApiClient, ApiClientTest, CachedJwt, plus 7 others in backend/common/src/main/kotlin/fi/fintraffic/common/integration/ApiClient.kt, backend/common/src/test/kotlin/fi/fintraffic/common/integration/ApiClientTest.kt. The useful meaning is the behavior these symbols now express: what state changes.".to_string()),
+            usage_context: Vec::new(),
+            codebase_fit: Some(ReviewPartnerCodebaseFitResponse {
+                follows: true,
+                summary: "follows codebase style".to_string(),
+                evidence: Vec::new(),
+            }),
+            sections: Vec::new(),
+            understanding_checkpoints: Vec::new(),
+            assumptions: Vec::new(),
+            history_signals: Vec::new(),
+            limitations: Vec::new(),
+        }],
+    };
+
+    let partner = merge_review_partner(response, &input, None).expect("partner context");
+    let summary = &partner.focus_records[0].summary;
+
+    assert!(
+        summary.contains("Webview JWT signing flow"),
+        "summary was: {summary}"
+    );
+    assert!(summary.contains("ApiClient"), "summary was: {summary}");
+    assert!(summary.contains("CachedJwt"), "summary was: {summary}");
+    assert!(
+        !summary.contains("backend/common"),
+        "summary was: {summary}"
+    );
+    assert!(
+        !summary.contains("useful meaning"),
+        "summary was: {summary}"
+    );
+    assert!(!summary.contains("plus 7"), "summary was: {summary}");
 }
 
 #[test]

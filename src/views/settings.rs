@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use gpui::prelude::*;
 use gpui::*;
 
-use crate::branding::{APP_NAME, APP_VERSION};
+use crate::branding::APP_NAME;
 use crate::code_tour::{self, CodeTourProvider, CodeTourProviderStatus};
 use crate::icons::{lucide_icon, LucideIcon};
 use crate::managed_lsp::{
@@ -632,7 +632,7 @@ fn render_software_update_panel(state: &Entity<AppState>, s: &AppState) -> impl 
     let status = platform_macos::updates::updater_status();
     let message = s.software_update_message.clone();
     let error = s.software_update_error.clone();
-    let running_version = format!("{APP_NAME} v{APP_VERSION}");
+    let running_version = format!("{APP_NAME} v{}", platform_macos::app_short_version());
 
     panel().child(
         div()

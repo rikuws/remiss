@@ -3,10 +3,11 @@ use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
+use crate::app_storage;
 use crate::code_tour::{
     CodeTourProgressUpdate, CodeTourProvider, CodeTourProviderStatus, GenerateCodeTourInput,
     GeneratedCodeTour,
@@ -27,6 +28,13 @@ const POLL_INTERVAL: Duration = Duration::from_millis(120);
 const MAX_PROMPT_BYTES: usize = 120_000;
 const MAX_STACK_PLAN_PROMPT_BYTES: usize = 140_000;
 const COPILOT_TOOL_ALLOWLISTS: &[&str] = &["view,rg,glob", "view,grep,glob", "view,glob"];
+const COPILOT_DIAGNOSTICS_ENV: &str = "REMISS_COPILOT_DIAGNOSTICS";
+const COPILOT_DIAGNOSTICS_INCLUDE_PROMPT_ENV: &str = "REMISS_COPILOT_DIAGNOSTICS_INCLUDE_PROMPT";
+const COPILOT_DIAGNOSTICS_FLAG_FILE: &str = "copilot-diagnostics.enabled";
+const COPILOT_DIAGNOSTIC_LOG_DIR: &str = "copilot-diagnostics";
+const MAX_DIAGNOSTIC_EVENTS: usize = 240;
+const MAX_DIAGNOSTIC_LINE_CHARS: usize = 4_000;
+const MAX_DIAGNOSTIC_RESPONSE_CHARS: usize = 80_000;
 
 pub struct CopilotBackend;
 
@@ -53,11 +61,13 @@ struct CopilotOutcome {
     stderr_text: String,
     current_turn_stream: String,
     exit_code: Option<i32>,
+    stream_events: Vec<String>,
 }
 
 struct CopilotRun {
     outcome: CopilotOutcome,
     exit_status: Option<ExitStatus>,
+    diagnostic_log_path: Option<String>,
 }
 
 enum StreamLine {
@@ -141,19 +151,24 @@ impl CodingAgentBackend for CopilotBackend {
         let CopilotRun {
             outcome,
             exit_status,
+            diagnostic_log_path,
         } = run_copilot_with_tool_allowlist_retries(
             &binary,
             &input.working_directory,
             &prompt,
             OVERALL_TIMEOUT_MS,
             INACTIVITY_TIMEOUT_MS,
+            "the code tour",
             true,
             on_progress,
         )?;
 
         if let Some(abort) = &outcome.abort {
             if !has_usable_final_text(&outcome) {
-                let summary = generation_abort_message("GitHub Copilot", "the code tour", &abort);
+                let summary = append_diagnostic_log_suffix(
+                    generation_abort_message("GitHub Copilot", "the code tour", &abort),
+                    diagnostic_log_path.as_deref(),
+                );
                 on_progress(make_progress(
                     "timeout",
                     summary.clone(),
@@ -185,7 +200,10 @@ impl CodingAgentBackend for CopilotBackend {
             return Ok(build_copilot_fallback_tour(
                 input,
                 outcome.model.clone(),
-                fallback_reason(&outcome, exit_status.as_ref()),
+                append_diagnostic_log_suffix(
+                    fallback_reason(&outcome, exit_status.as_ref()),
+                    diagnostic_log_path.as_deref(),
+                ),
             ));
         };
 
@@ -194,7 +212,10 @@ impl CodingAgentBackend for CopilotBackend {
             return Ok(build_copilot_fallback_tour(
                 input,
                 outcome.model.clone(),
-                fallback_reason(&outcome, exit_status.as_ref()),
+                append_diagnostic_log_suffix(
+                    fallback_reason(&outcome, exit_status.as_ref()),
+                    diagnostic_log_path.as_deref(),
+                ),
             ));
         }
 
@@ -239,22 +260,23 @@ pub fn run_json_prompt(
     let CopilotRun {
         outcome,
         exit_status,
+        diagnostic_log_path,
     } = run_copilot_with_tool_allowlist_retries(
         &binary,
         working_directory,
         &prompt,
         options.copilot_overall_timeout_ms,
         options.copilot_inactivity_timeout_ms,
+        options.task_label,
         false,
         &mut ignore_progress,
     )?;
 
     if let Some(abort) = &outcome.abort {
         if !has_usable_final_text(&outcome) {
-            return Err(generation_abort_message(
-                "GitHub Copilot",
-                options.task_label,
-                abort,
+            return Err(append_diagnostic_log_suffix(
+                generation_abort_message("GitHub Copilot", options.task_label, abort),
+                diagnostic_log_path.as_deref(),
             ));
         }
     }
@@ -264,12 +286,18 @@ pub fn run_json_prompt(
     }
 
     let Some(final_text) = outcome.final_text.as_deref() else {
-        return Err(fallback_reason(&outcome, exit_status.as_ref()));
+        return Err(append_diagnostic_log_suffix(
+            fallback_reason(&outcome, exit_status.as_ref()),
+            diagnostic_log_path.as_deref(),
+        ));
     };
 
     let trimmed = final_text.trim();
     if trimmed.is_empty() {
-        return Err(fallback_reason(&outcome, exit_status.as_ref()));
+        return Err(append_diagnostic_log_suffix(
+            fallback_reason(&outcome, exit_status.as_ref()),
+            diagnostic_log_path.as_deref(),
+        ));
     }
 
     Ok(AgentTextResponse {
@@ -284,6 +312,7 @@ fn run_copilot_with_tool_allowlist_retries(
     prompt: &str,
     overall_timeout_ms: u64,
     inactivity_timeout_ms: u64,
+    task_label: &str,
     emit_progress: bool,
     on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
 ) -> Result<CopilotRun, String> {
@@ -309,6 +338,9 @@ fn run_copilot_with_tool_allowlist_retries(
             available_tools,
             overall_timeout_ms,
             inactivity_timeout_ms,
+            task_label,
+            attempt_ix + 1,
+            COPILOT_TOOL_ALLOWLISTS.len(),
             emit_progress,
             on_progress,
         )?;
@@ -340,6 +372,9 @@ fn run_copilot_cli(
     available_tools: &str,
     overall_timeout_ms: u64,
     inactivity_timeout_ms: u64,
+    task_label: &str,
+    attempt: usize,
+    max_attempts: usize,
     emit_progress: bool,
     on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
 ) -> Result<CopilotRun, String> {
@@ -393,6 +428,7 @@ fn run_copilot_cli(
     }
 
     let start = Instant::now();
+    let started_at_ms = now_ms();
     let mut last_activity = Instant::now();
     let mut last_ticker = Instant::now();
     let mut exit_status: Option<ExitStatus> = None;
@@ -432,9 +468,7 @@ fn run_copilot_cli(
             break;
         }
 
-        if !outcome.saw_meaningful_progress
-            && now.duration_since(last_activity) > Duration::from_millis(inactivity_timeout_ms)
-        {
+        if now.duration_since(last_activity) > Duration::from_millis(inactivity_timeout_ms) {
             outcome.abort = Some(AbortReason {
                 kind: AbortKind::Inactivity,
                 timeout_ms: inactivity_timeout_ms,
@@ -483,10 +517,31 @@ fn run_copilot_cli(
         handle_stream_line(line, &mut outcome, on_progress);
     }
     promote_stream_to_final(&mut outcome);
+    let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let diagnostic_log_path = if copilot_diagnostics_enabled() {
+        write_copilot_diagnostic_log(CopilotDiagnosticLogInput {
+            started_at_ms,
+            duration_ms,
+            task_label,
+            binary,
+            working_directory,
+            available_tools,
+            overall_timeout_ms,
+            inactivity_timeout_ms,
+            prompt,
+            outcome: &outcome,
+            exit_status: exit_status.as_ref(),
+            attempt,
+            max_attempts,
+        })
+    } else {
+        None
+    };
 
     Ok(CopilotRun {
         outcome,
         exit_status,
+        diagnostic_log_path,
     })
 }
 
@@ -496,8 +551,12 @@ fn handle_stream_line(
     on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
 ) {
     match line {
-        StreamLine::Stdout(line) => handle_stdout_line(&line, outcome, on_progress),
+        StreamLine::Stdout(line) => {
+            record_stream_event(outcome, "stdout", &line);
+            handle_stdout_line(&line, outcome, on_progress)
+        }
         StreamLine::Stderr(line) => {
+            record_stream_event(outcome, "stderr", &line);
             append_line(&mut outcome.stderr_text, &line);
             let trimmed = line.trim();
             if !trimmed.is_empty() {
@@ -771,6 +830,190 @@ fn fallback_reason(outcome: &CopilotOutcome, exit_status: Option<&ExitStatus>) -
         Some(code) => format!("GitHub Copilot exited with status code {code}."),
         None => "GitHub Copilot returned an empty code tour response.".to_string(),
     }
+}
+
+struct CopilotDiagnosticLogInput<'a> {
+    started_at_ms: u64,
+    duration_ms: u64,
+    task_label: &'a str,
+    binary: &'a str,
+    working_directory: &'a str,
+    available_tools: &'a str,
+    overall_timeout_ms: u64,
+    inactivity_timeout_ms: u64,
+    prompt: &'a str,
+    outcome: &'a CopilotOutcome,
+    exit_status: Option<&'a ExitStatus>,
+    attempt: usize,
+    max_attempts: usize,
+}
+
+fn copilot_diagnostics_enabled() -> bool {
+    env_truthy(COPILOT_DIAGNOSTICS_ENV)
+        || app_storage::data_dir_root()
+            .join(COPILOT_DIAGNOSTICS_FLAG_FILE)
+            .exists()
+}
+
+fn copilot_diagnostics_include_prompt() -> bool {
+    env_truthy(COPILOT_DIAGNOSTICS_INCLUDE_PROMPT_ENV)
+}
+
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
+fn write_copilot_diagnostic_log(input: CopilotDiagnosticLogInput<'_>) -> Option<String> {
+    let log_dir = app_storage::data_dir_root().join(COPILOT_DIAGNOSTIC_LOG_DIR);
+    if let Err(error) = std::fs::create_dir_all(&log_dir) {
+        eprintln!(
+            "Failed to create Copilot diagnostic log directory '{}': {error}",
+            log_dir.display()
+        );
+        return None;
+    }
+
+    let file_name = format!(
+        "{}-{}-attempt-{}.json",
+        input.started_at_ms,
+        sanitize_log_path_component(input.task_label),
+        input.attempt
+    );
+    let path = log_dir.join(file_name);
+    let abort = input.outcome.abort.as_ref().map(|reason| {
+        json!({
+            "kind": abort_kind_label(reason.kind),
+            "timeoutMs": reason.timeout_ms,
+            "lastVisibleActivity": reason.last_visible_activity,
+        })
+    });
+    let log = json!({
+        "startedAtMs": input.started_at_ms,
+        "durationMs": input.duration_ms,
+        "taskLabel": input.task_label,
+        "binary": input.binary,
+        "workingDirectory": input.working_directory,
+        "availableTools": input.available_tools,
+        "attempt": input.attempt,
+        "maxAttempts": input.max_attempts,
+        "timeouts": {
+            "overallMs": input.overall_timeout_ms,
+            "inactivityMs": input.inactivity_timeout_ms,
+        },
+        "model": input.outcome.model,
+        "exitStatusCode": input.exit_status.and_then(ExitStatus::code).or(input.outcome.exit_code),
+        "abort": abort,
+        "error": input.outcome.error,
+        "lastVisibleActivity": input.outcome.last_visible_activity,
+        "sawMeaningfulProgress": input.outcome.saw_meaningful_progress,
+        "stderr": input.outcome.stderr_text,
+        "finalTextBytes": input.outcome.final_text.as_deref().map(str::len),
+        "currentTurnStreamBytes": input.outcome.current_turn_stream.len(),
+        "currentTurnStreamPreview": limit_diagnostic_text(&input.outcome.current_turn_stream),
+        "streamEvents": input.outcome.stream_events,
+        "promptBytes": input.prompt.len(),
+        "promptIncluded": copilot_diagnostics_include_prompt(),
+        "prompt": if copilot_diagnostics_include_prompt() {
+            Some(input.prompt)
+        } else {
+            None
+        },
+    });
+
+    let serialized = match serde_json::to_string_pretty(&log) {
+        Ok(serialized) => serialized,
+        Err(error) => {
+            eprintln!("Failed to serialize Copilot diagnostic log: {error}");
+            return None;
+        }
+    };
+
+    if let Err(error) = std::fs::write(&path, &serialized) {
+        eprintln!(
+            "Failed to write Copilot diagnostic log '{}': {error}",
+            path.display()
+        );
+        return None;
+    }
+
+    let latest_path = log_dir.join("latest.json");
+    if let Err(error) = std::fs::write(&latest_path, &serialized) {
+        eprintln!(
+            "Failed to write latest Copilot diagnostic log '{}': {error}",
+            latest_path.display()
+        );
+    }
+
+    let path = path.display().to_string();
+    eprintln!("Copilot diagnostic log written: {path}");
+    Some(path)
+}
+
+fn record_stream_event(outcome: &mut CopilotOutcome, kind: &str, line: &str) {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    outcome.stream_events.push(format!(
+        "{kind}: {}",
+        limit_text(trimmed, MAX_DIAGNOSTIC_LINE_CHARS)
+    ));
+    if outcome.stream_events.len() > MAX_DIAGNOSTIC_EVENTS {
+        let remove_count = outcome.stream_events.len() - MAX_DIAGNOSTIC_EVENTS;
+        outcome.stream_events.drain(0..remove_count);
+    }
+}
+
+fn limit_diagnostic_text(value: &str) -> String {
+    limit_text(value, MAX_DIAGNOSTIC_RESPONSE_CHARS)
+}
+
+fn append_diagnostic_log_suffix(mut message: String, diagnostic_log_path: Option<&str>) -> String {
+    if let Some(path) = diagnostic_log_path {
+        message.push_str(" Diagnostic log: ");
+        message.push_str(path);
+        message.push('.');
+    }
+    message
+}
+
+fn abort_kind_label(kind: AbortKind) -> &'static str {
+    match kind {
+        AbortKind::Overall => "overall",
+        AbortKind::Inactivity => "inactivity",
+    }
+}
+
+fn sanitize_log_path_component(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let sanitized = sanitized.trim_matches('_');
+    if sanitized.is_empty() {
+        "copilot".to_string()
+    } else {
+        sanitized.to_string()
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 fn promote_stream_to_final(outcome: &mut CopilotOutcome) {
