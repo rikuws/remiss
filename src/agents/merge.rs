@@ -840,7 +840,7 @@ fn is_leap(year: i32) -> bool {
 }
 
 #[cfg(not(any()))]
-pub(crate) const _: () = ();
+const _: () = ();
 
 #[cfg(test)]
 mod tests {

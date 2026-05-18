@@ -15,7 +15,7 @@ use crate::{
     agents::{self, jsonrepair::parse_tolerant, AgentJsonPromptOptions},
     cache::CacheStore,
     code_tour::{
-        find_parsed_diff_file, tour_code_version_key, CodeTourProvider,
+        find_parsed_diff_file, tour_code_version_key, CodeTourProgressUpdate, CodeTourProvider,
         CodeTourPullRequestCommentContext, CodeTourReviewCommentContext, CodeTourReviewContext,
         CodeTourReviewThreadContext,
     },
@@ -35,11 +35,13 @@ use crate::{
 };
 
 mod context;
+mod util;
 
 #[cfg(test)]
 mod tests;
 
 use self::context::*;
+use self::util::*;
 
 pub const REVIEW_PARTNER_GENERATOR_VERSION: &str = "review-partner-v21";
 pub const REVIEW_PARTNER_CONTEXT_VERSION: &str = "review-partner-context-v5";
@@ -562,6 +564,14 @@ pub fn generate_review_partner_context(
     cache: &CacheStore,
     input: GenerateReviewPartnerInput,
 ) -> Result<GeneratedReviewPartnerContext, String> {
+    generate_review_partner_context_with_progress(cache, input, &mut |_| {})
+}
+
+pub fn generate_review_partner_context_with_progress(
+    cache: &CacheStore,
+    input: GenerateReviewPartnerInput,
+    on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
+) -> Result<GeneratedReviewPartnerContext, String> {
     if input.working_directory.trim().is_empty() {
         return Err("Review Partner generation requires a local checkout path.".to_string());
     }
@@ -574,11 +584,12 @@ pub fn generate_review_partner_context(
     }
 
     let prompt = build_review_partner_prompt(&input);
-    let response = agents::run_json_prompt_with_options(
+    let response = agents::run_json_prompt_with_options_and_progress(
         input.provider,
         &input.working_directory,
         prompt,
         AgentJsonPromptOptions::review_partner(),
+        on_progress,
     )?;
     let parsed = parse_tolerant::<ReviewPartnerResponse>(&response.text)
         .map_err(|error| format!("Failed to parse Review Partner JSON: {}", error.message))?;
@@ -1475,8 +1486,7 @@ fn review_partner_summary_token_looks_like_path(token: &str) -> bool {
     .iter()
     .any(|extension| lower.ends_with(extension));
 
-    (has_path_separator && (known_extension || pathy_prefix || lower.matches('/').count() >= 2))
-        || known_extension && has_path_separator
+    has_path_separator && (known_extension || pathy_prefix || lower.matches('/').count() >= 2)
 }
 
 fn fallback_focus_summary_from_stack(
@@ -1746,6 +1756,20 @@ pub fn generate_review_partner_focus_record(
     target: ReviewPartnerFocusTarget,
     working_directory: &str,
 ) -> Result<ReviewPartnerFocusRecord, String> {
+    generate_review_partner_focus_record_with_progress(
+        document,
+        target,
+        working_directory,
+        &mut |_| {},
+    )
+}
+
+pub fn generate_review_partner_focus_record_with_progress(
+    document: &GeneratedReviewPartnerContext,
+    target: ReviewPartnerFocusTarget,
+    working_directory: &str,
+    on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
+) -> Result<ReviewPartnerFocusRecord, String> {
     if working_directory.trim().is_empty() {
         return Err("Review Partner focus generation requires a local checkout path.".to_string());
     }
@@ -1758,11 +1782,12 @@ pub fn generate_review_partner_focus_record(
     }
 
     let prompt = build_focus_record_prompt(document, &target);
-    let response = agents::run_json_prompt_with_options(
+    let response = agents::run_json_prompt_with_options_and_progress(
         document.provider,
         working_directory,
         prompt,
         AgentJsonPromptOptions::review_partner_focus(),
+        on_progress,
     )?;
     let parsed =
         parse_tolerant::<ReviewPartnerSingleFocusResponse>(&response.text).map_err(|error| {
@@ -2896,264 +2921,4 @@ fn default_if_empty(value: String, fallback: &str) -> String {
     } else {
         limit_text(trimmed, MAX_BRIEF_TEXT_CHARS)
     }
-}
-
-fn symbol_position_in_document(
-    document: &str,
-    range: Option<LineRange>,
-    symbol: &str,
-) -> Option<(usize, usize)> {
-    if let Some(line) = range.and_then(line_from_range) {
-        if let Some(column) = column_for_symbol(document, line, symbol) {
-            return Some((line, column));
-        }
-    }
-
-    document
-        .lines()
-        .enumerate()
-        .find_map(|(index, line)| identifier_column(line, symbol).map(|column| (index + 1, column)))
-}
-
-fn column_for_symbol(document: &str, line: usize, symbol: &str) -> Option<usize> {
-    let line_text = document.lines().nth(line.checked_sub(1)?)?;
-    identifier_column(line_text, symbol)
-}
-
-fn identifier_column(line: &str, symbol: &str) -> Option<usize> {
-    let byte_index = line.find(symbol)?;
-    if !identifier_bounds_match(line, byte_index, symbol.len()) {
-        return None;
-    }
-    Some(line[..byte_index].chars().count() + 1)
-}
-
-fn line_from_range(range: LineRange) -> Option<usize> {
-    usize::try_from(range.start).ok().filter(|line| *line > 0)
-}
-
-fn read_checkout_line(checkout_root: &Path, path: &str, line: usize) -> Option<String> {
-    let text = fs::read_to_string(checkout_root.join(path)).ok()?;
-    text.lines()
-        .nth(line.checked_sub(1)?)
-        .map(|line| trim_text(line, MAX_PROMPT_SNIPPET_CHARS))
-}
-
-fn clean_symbol(symbol: &str) -> String {
-    symbol
-        .trim()
-        .trim_matches(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == ':'))
-        .to_string()
-}
-
-fn is_searchable_symbol(symbol: &str) -> bool {
-    symbol.len() > 2 && symbol.chars().any(|ch| ch.is_ascii_alphabetic()) && !is_keyword(symbol)
-}
-
-fn declaration_symbol(line: &str) -> Option<String> {
-    let trimmed = line
-        .trim()
-        .trim_start_matches("pub ")
-        .trim_start_matches("async ")
-        .trim_start_matches("export ")
-        .trim_start_matches("default ");
-    for prefix in [
-        "fn ",
-        "struct ",
-        "enum ",
-        "trait ",
-        "impl ",
-        "type ",
-        "const ",
-        "static ",
-        "class ",
-        "function ",
-        "interface ",
-        "def ",
-    ] {
-        if let Some(rest) = trimmed.strip_prefix(prefix) {
-            let symbol = rest
-                .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == ':'))
-                .find(|token| is_searchable_symbol(token))?;
-            return Some(symbol.to_string());
-        }
-    }
-    None
-}
-
-fn similar_search_token(symbol: &str) -> Option<String> {
-    let parts = split_symbol_parts(symbol);
-    parts
-        .into_iter()
-        .filter(|part| part.len() >= 4 && !is_keyword(part))
-        .max_by_key(|part| part.len())
-}
-
-fn split_symbol_parts(symbol: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    for ch in symbol.chars() {
-        if ch == '_' || ch == ':' || ch == '-' {
-            if current.len() > 1 {
-                parts.push(current.to_lowercase());
-            }
-            current.clear();
-            continue;
-        }
-        if ch.is_ascii_uppercase() && !current.is_empty() {
-            parts.push(current.to_lowercase());
-            current.clear();
-        }
-        if ch.is_ascii_alphanumeric() {
-            current.push(ch);
-        }
-    }
-    if current.len() > 1 {
-        parts.push(current.to_lowercase());
-    }
-    if parts.is_empty() && symbol.len() >= 4 {
-        parts.push(symbol.to_lowercase());
-    }
-    parts
-}
-
-fn contains_identifier(line: &str, symbol: &str) -> bool {
-    let mut start = 0usize;
-    while let Some(relative) = line[start..].find(symbol) {
-        let index = start + relative;
-        if identifier_bounds_match(line, index, symbol.len()) {
-            return true;
-        }
-        start = index + symbol.len();
-        if start >= line.len() {
-            break;
-        }
-    }
-    false
-}
-
-fn identifier_bounds_match(line: &str, byte_index: usize, len: usize) -> bool {
-    let before = line[..byte_index].chars().next_back();
-    let after = line[byte_index + len..].chars().next();
-    !before.map(is_identifier_char).unwrap_or(false)
-        && !after.map(is_identifier_char).unwrap_or(false)
-}
-
-fn is_identifier_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || ch == '_'
-}
-
-fn is_keyword(symbol: &str) -> bool {
-    matches!(
-        symbol,
-        "let"
-            | "mut"
-            | "pub"
-            | "fn"
-            | "struct"
-            | "enum"
-            | "impl"
-            | "trait"
-            | "type"
-            | "const"
-            | "static"
-            | "self"
-            | "Self"
-            | "crate"
-            | "super"
-            | "return"
-            | "async"
-            | "await"
-            | "function"
-            | "class"
-            | "interface"
-            | "import"
-            | "export"
-            | "from"
-            | "def"
-    )
-}
-
-fn should_skip_directory(name: &str) -> bool {
-    matches!(
-        name,
-        ".git"
-            | "target"
-            | "node_modules"
-            | ".next"
-            | "dist"
-            | "build"
-            | ".swiftpm"
-            | "DerivedData"
-    )
-}
-
-fn is_text_search_candidate(path: &Path) -> bool {
-    let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
-        return false;
-    };
-    matches!(
-        extension,
-        "rs" | "swift"
-            | "ts"
-            | "tsx"
-            | "js"
-            | "jsx"
-            | "go"
-            | "py"
-            | "rb"
-            | "java"
-            | "kt"
-            | "c"
-            | "cc"
-            | "cpp"
-            | "h"
-            | "hpp"
-            | "m"
-            | "mm"
-            | "cs"
-            | "php"
-            | "scala"
-            | "md"
-            | "toml"
-            | "json"
-            | "yaml"
-            | "yml"
-    )
-}
-
-fn relative_path(root: &Path, path: &Path) -> String {
-    normalize_repo_path(
-        path.strip_prefix(root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .as_ref(),
-    )
-}
-
-fn normalize_repo_path(path: &str) -> String {
-    path.replace('\\', "/").trim_start_matches("./").to_string()
-}
-
-fn trim_text(value: &str, max_length: usize) -> String {
-    let normalized = value.trim();
-    if normalized.chars().count() <= max_length {
-        return normalized.to_string();
-    }
-    let truncated = normalized
-        .chars()
-        .take(max_length.saturating_sub(1))
-        .collect::<String>();
-    format!("{}...", truncated.trim_end())
-}
-
-fn limit_text(value: impl Into<String>, max_length: usize) -> String {
-    trim_text(&value.into(), max_length)
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
 }

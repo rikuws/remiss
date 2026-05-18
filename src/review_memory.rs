@@ -10,7 +10,7 @@ use sha1::{Digest, Sha1};
 use crate::{
     agents::{self, jsonrepair::parse_tolerant, AgentJsonPromptOptions},
     cache::CacheStore,
-    code_tour::CodeTourProvider,
+    code_tour::{CodeTourProgressUpdate, CodeTourProvider},
     diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk},
     github::{PullRequestDetail, PullRequestReviewThread},
 };
@@ -363,6 +363,24 @@ pub fn generate_llm_review_memory_candidates(
     working_directory: &str,
     force: bool,
 ) -> Result<ReviewMemoryLlmExtractionDocument, String> {
+    generate_llm_review_memory_candidates_with_progress(
+        cache,
+        detail,
+        provider,
+        working_directory,
+        force,
+        &mut |_| {},
+    )
+}
+
+pub fn generate_llm_review_memory_candidates_with_progress(
+    cache: &CacheStore,
+    detail: &PullRequestDetail,
+    provider: CodeTourProvider,
+    working_directory: &str,
+    force: bool,
+    on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
+) -> Result<ReviewMemoryLlmExtractionDocument, String> {
     if working_directory.trim().is_empty() {
         return Err("Review Memory extraction requires a local checkout path.".to_string());
     }
@@ -391,11 +409,12 @@ pub fn generate_llm_review_memory_candidates(
     }
 
     let prompt = build_llm_review_memory_prompt(detail);
-    let response = agents::run_json_prompt_with_options(
+    let response = agents::run_json_prompt_with_options_and_progress(
         provider,
         working_directory,
         prompt,
         AgentJsonPromptOptions::review_memory(),
+        on_progress,
     )?;
     let parsed = parse_tolerant::<LlmReviewMemoryResponse>(&response.text).map_err(|error| {
         format!(

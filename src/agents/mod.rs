@@ -87,11 +87,27 @@ pub fn run_json_prompt(
     working_directory: &str,
     prompt: String,
 ) -> Result<AgentTextResponse, String> {
-    run_json_prompt_with_options(
+    run_json_prompt_with_options_and_progress(
         provider,
         working_directory,
         prompt,
         AgentJsonPromptOptions::stack_planning(),
+        &mut |_| {},
+    )
+}
+
+pub fn run_json_prompt_with_progress(
+    provider: CodeTourProvider,
+    working_directory: &str,
+    prompt: String,
+    on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
+) -> Result<AgentTextResponse, String> {
+    run_json_prompt_with_options_and_progress(
+        provider,
+        working_directory,
+        prompt,
+        AgentJsonPromptOptions::stack_planning(),
+        on_progress,
     )
 }
 
@@ -101,9 +117,29 @@ pub fn run_json_prompt_with_options(
     prompt: String,
     options: AgentJsonPromptOptions,
 ) -> Result<AgentTextResponse, String> {
+    run_json_prompt_with_options_and_progress(
+        provider,
+        working_directory,
+        prompt,
+        options,
+        &mut |_| {},
+    )
+}
+
+pub fn run_json_prompt_with_options_and_progress(
+    provider: CodeTourProvider,
+    working_directory: &str,
+    prompt: String,
+    options: AgentJsonPromptOptions,
+    on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
+) -> Result<AgentTextResponse, String> {
     match provider {
-        CodeTourProvider::Codex => codex::run_json_prompt(working_directory, prompt, options),
-        CodeTourProvider::Copilot => copilot::run_json_prompt(working_directory, prompt, options),
+        CodeTourProvider::Codex => {
+            codex::run_json_prompt_with_progress(working_directory, prompt, options, on_progress)
+        }
+        CodeTourProvider::Copilot => {
+            copilot::run_json_prompt_with_progress(working_directory, prompt, options, on_progress)
+        }
     }
 }
 

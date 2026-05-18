@@ -15,7 +15,7 @@ const COMMON_BIN_DIRS: &[&str] = &[
 ];
 const SYSTEM_BIN_DIRS: &[&str] = &["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 const NVM_NODE_VERSIONS_RELATIVE_PATH: &str = ".nvm/versions/node";
-const NODE_HOSTED_TOOL_NAMES: &[&str] = &["codex", "copilot"];
+const NODE_HOSTED_TOOL_NAMES: &[&str] = &["codex"];
 
 #[derive(Clone, Copy)]
 struct ToolBinarySpec<'a> {
@@ -56,35 +56,6 @@ pub fn find_codex_binary() -> Option<String> {
         ],
         home_relative_paths: &[".codex/bin/codex", ".local/bin/codex", ".cargo/bin/codex"],
     })
-}
-
-pub fn find_copilot_binary() -> Option<String> {
-    find_tool_binary(ToolBinarySpec {
-        name: "copilot",
-        env_vars: &["REMISS_COPILOT_BINARY", "GH_UI_TOOL_COPILOT_BINARY"],
-        well_known_paths: &[
-            "/opt/homebrew/bin/copilot",
-            "/usr/local/bin/copilot",
-            "/usr/bin/copilot",
-        ],
-        home_relative_paths: &[".local/bin/copilot", ".cargo/bin/copilot"],
-    })
-}
-
-pub fn prepend_binary_parent_to_command_path(command: &mut Command, binary: &str) {
-    let binary_path = Path::new(binary);
-    if binary_path.components().count() <= 1 {
-        return;
-    }
-
-    let Some(parent) = binary_path.parent() else {
-        return;
-    };
-    let Some(path) = path_with_prepended_dir(env::var_os("PATH"), parent) else {
-        return;
-    };
-
-    command.env("PATH", path);
 }
 
 fn find_tool_binary(spec: ToolBinarySpec<'_>) -> Option<String> {
@@ -292,20 +263,6 @@ fn parse_version_component(component: &str) -> Option<u64> {
     (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
 }
 
-fn path_with_prepended_dir(current_path: Option<OsString>, directory: &Path) -> Option<OsString> {
-    if directory.as_os_str().is_empty() {
-        return None;
-    }
-
-    let mut segments = vec![directory.to_path_buf()];
-    if let Some(existing) = current_path {
-        segments
-            .extend(env::split_paths(&existing).filter(|segment| segment.as_path() != directory));
-    }
-
-    env::join_paths(segments).ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,14 +390,14 @@ mod tests {
     }
 
     #[test]
-    fn resolves_copilot_from_nvm_versioned_node_install() {
-        let home_dir = unique_test_home("nvm-copilot");
-        let copilot = home_dir.join(".nvm/versions/node/v22.17.0/bin/copilot");
-        write_test_file(&copilot);
+    fn resolves_codex_from_nvm_versioned_node_install() {
+        let home_dir = unique_test_home("nvm-codex");
+        let codex = home_dir.join(".nvm/versions/node/v22.17.0/bin/codex");
+        write_test_file(&codex);
 
         let spec = ToolBinarySpec {
-            name: "copilot",
-            env_vars: &["REMISS_COPILOT_BINARY"],
+            name: "codex",
+            env_vars: &["REMISS_CODEX_BINARY"],
             well_known_paths: &[],
             home_relative_paths: &[],
         };
@@ -455,22 +412,22 @@ mod tests {
             |path| path.is_file(),
         );
 
-        assert_path_result_eq(result.as_deref(), &copilot);
+        assert_path_result_eq(result.as_deref(), &codex);
         let _ = fs::remove_dir_all(home_dir);
     }
 
     #[test]
     fn prefers_newest_nvm_node_version_with_requested_tool() {
         let home_dir = unique_test_home("nvm-newest-tool");
-        let older = home_dir.join(".nvm/versions/node/v18.20.3/bin/copilot");
+        let older = home_dir.join(".nvm/versions/node/v18.20.3/bin/codex");
         let newer_without_tool = home_dir.join(".nvm/versions/node/v23.0.0/bin/node");
-        let newer = home_dir.join(".nvm/versions/node/v22.17.0/bin/copilot");
+        let newer = home_dir.join(".nvm/versions/node/v22.17.0/bin/codex");
         write_test_file(&older);
         write_test_file(&newer_without_tool);
         write_test_file(&newer);
 
         let spec = ToolBinarySpec {
-            name: "copilot",
+            name: "codex",
             env_vars: &[],
             well_known_paths: &[],
             home_relative_paths: &[],
@@ -486,9 +443,9 @@ mod tests {
     #[test]
     fn augmented_path_adds_nvm_dirs_that_host_agent_tools() {
         let home_dir = unique_test_home("nvm-path");
-        let copilot_dir = home_dir.join(".nvm/versions/node/v22.17.0/bin");
+        let codex_dir = home_dir.join(".nvm/versions/node/v22.17.0/bin");
         let node_only_dir = home_dir.join(".nvm/versions/node/v23.0.0/bin");
-        write_test_file(&copilot_dir.join("copilot"));
+        write_test_file(&codex_dir.join("codex"));
         write_test_file(&node_only_dir.join("node"));
 
         let result = augmented_path(
@@ -499,26 +456,9 @@ mod tests {
         .expect("path should join");
         let segments = env::split_paths(&result).collect::<Vec<_>>();
 
-        assert!(segments.iter().any(|segment| segment == &copilot_dir));
+        assert!(segments.iter().any(|segment| segment == &codex_dir));
         assert!(!segments.iter().any(|segment| segment == &node_only_dir));
         let _ = fs::remove_dir_all(home_dir);
-    }
-
-    #[test]
-    fn prepends_binary_parent_to_child_command_path() {
-        let tool_dir = Path::new("/Users/example/.nvm/versions/node/v22.17.0/bin");
-        let path =
-            path_with_prepended_dir(Some(OsString::from("/usr/bin:/bin")), tool_dir).unwrap();
-        let segments = env::split_paths(&path).collect::<Vec<_>>();
-
-        assert_eq!(segments.first().map(PathBuf::as_path), Some(tool_dir));
-        assert_eq!(
-            segments
-                .iter()
-                .filter(|segment| segment.as_path() == tool_dir)
-                .count(),
-            1
-        );
     }
 
     fn unique_test_home(label: &str) -> PathBuf {

@@ -10,7 +10,7 @@ use crate::{
         prompt::{build_stack_planning_prompt, build_stack_planning_refinement_prompt},
     },
     app_storage,
-    code_tour::CodeTourProvider,
+    code_tour::{CodeTourProgressUpdate, CodeTourProvider},
     github::PullRequestDetail,
     semantic_review::{summarize_semantic_review, RemissSemanticReview},
     structural_evidence::{StructuralEvidencePack, STRUCTURAL_EVIDENCE_VERSION},
@@ -43,6 +43,16 @@ pub fn discover(
     repo_context: &RepoContext,
     _sizing: &VirtualStackSizing,
     provider: CodeTourProvider,
+) -> Result<Option<ReviewStack>, StackDiscoveryError> {
+    discover_with_progress(selected_pr, repo_context, _sizing, provider, &mut |_| {})
+}
+
+pub fn discover_with_progress(
+    selected_pr: &PullRequestDetail,
+    repo_context: &RepoContext,
+    _sizing: &VirtualStackSizing,
+    provider: CodeTourProvider,
+    on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
 ) -> Result<Option<ReviewStack>, StackDiscoveryError> {
     let atoms = extract_change_atoms(selected_pr);
     if atoms.is_empty() {
@@ -127,10 +137,11 @@ pub fn discover(
 
     loop {
         attempt += 1;
-        let response = match agents::run_json_prompt(
+        let response = match agents::run_json_prompt_with_progress(
             provider,
             working_directory.to_string_lossy().as_ref(),
             prompt.clone(),
+            on_progress,
         ) {
             Ok(response) => response,
             Err(error) => {

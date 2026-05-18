@@ -7,8 +7,9 @@ use crate::{
     agents::{self, jsonrepair::parse_tolerant},
     cache::CacheStore,
     code_tour::{
-        tour_code_version_key, CodeTourProvider, CodeTourPullRequestCommentContext,
-        CodeTourReviewCommentContext, CodeTourReviewContext, CodeTourReviewThreadContext,
+        tour_code_version_key, CodeTourProgressUpdate, CodeTourProvider,
+        CodeTourPullRequestCommentContext, CodeTourReviewCommentContext, CodeTourReviewContext,
+        CodeTourReviewThreadContext,
     },
     diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk, ParsedDiffLine},
     github::{
@@ -173,6 +174,14 @@ pub fn generate_review_brief(
     cache: &CacheStore,
     input: GenerateReviewBriefInput,
 ) -> Result<ReviewBrief, String> {
+    generate_review_brief_with_progress(cache, input, &mut |_| {})
+}
+
+pub fn generate_review_brief_with_progress(
+    cache: &CacheStore,
+    input: GenerateReviewBriefInput,
+    on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
+) -> Result<ReviewBrief, String> {
     if input.working_directory.trim().is_empty() {
         return Err("Review brief generation requires a local checkout path.".to_string());
     }
@@ -188,11 +197,12 @@ pub fn generate_review_brief(
         return Err("Review brief generation needs pull request files or a raw diff.".to_string());
     }
 
-    let (parsed, model) = request_review_brief_response(&input, false)?;
+    let (parsed, model) = request_review_brief_response(&input, false, on_progress)?;
     let brief = match merge_review_brief(parsed, &input, model) {
         Ok(brief) => brief,
         Err(error) if is_review_brief_budget_error(&error) => {
-            let (retry_parsed, retry_model) = request_review_brief_response(&input, true)?;
+            let (retry_parsed, retry_model) =
+                request_review_brief_response(&input, true, on_progress)?;
             merge_review_brief(retry_parsed, &input, retry_model).map_err(|retry_error| {
                 if is_review_brief_budget_error(&retry_error) {
                     format!(
@@ -220,9 +230,15 @@ pub fn generate_review_brief(
 fn request_review_brief_response(
     input: &GenerateReviewBriefInput,
     compact_retry: bool,
+    on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
 ) -> Result<(ReviewBriefResponse, Option<String>), String> {
     let prompt = build_review_brief_prompt_for_attempt(input, compact_retry);
-    let response = agents::run_json_prompt(input.provider, &input.working_directory, prompt)?;
+    let response = agents::run_json_prompt_with_progress(
+        input.provider,
+        &input.working_directory,
+        prompt,
+        on_progress,
+    )?;
     let parsed = parse_tolerant::<ReviewBriefResponse>(&response.text)
         .map_err(|error| format!("Failed to parse review brief JSON: {}", error.message))?;
 

@@ -2,7 +2,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Mutex,
+        mpsc, Mutex,
     },
     time::Duration,
 };
@@ -12,7 +12,10 @@ use once_cell::sync::Lazy;
 
 use crate::{
     cache::CacheStore,
-    code_tour::{self, build_tour_request_key, tour_code_version_key, CodeTourProvider},
+    code_tour::{
+        self, build_tour_request_key, tour_code_version_key, CodeTourProgressUpdate,
+        CodeTourProvider,
+    },
     github::PullRequestDetail,
     local_repo, local_review,
     review_brief::{self, build_review_brief_request_key},
@@ -22,8 +25,8 @@ use crate::{
     stacks::{
         atoms::extract_change_atoms,
         cache::{load_ai_review_stack, save_ai_review_stack},
-        discover_review_stack,
         model::{Confidence, RepoContext, ReviewStack, StackDiscoveryOptions},
+        providers::ai_virtual,
     },
     state::{AppState, DetailState},
     structural_diff::checkout_head_oid,
@@ -1189,62 +1192,149 @@ async fn generate_or_load_stack(
         })
         .ok();
 
-    let stack_result = cx
-        .background_executor()
-        .spawn({
-            let cache = CacheStore::clone(cache);
-            let detail = detail.clone();
-            let working_directory = PathBuf::from(working_directory);
-            let head_oid = checkout_head_oid(local_repo_status);
-            async move {
-                run_foreground_blocking(|| {
-                    let atoms = extract_change_atoms(&detail);
-                    let semantic_review = semantic_review::build_and_cache_semantic_review(
-                        &cache,
-                        &detail,
-                        &atoms,
-                        &detail.repository,
-                        working_directory.as_path(),
-                        head_oid.as_deref(),
-                        force,
-                    );
-                    let structural_evidence = head_oid
-                        .as_deref()
-                        .map(|head_oid| {
-                            structural_evidence::build_structural_evidence_pack(
-                                &cache,
-                                &detail,
-                                &atoms,
-                                &detail.repository,
-                                working_directory.as_path(),
-                                head_oid,
-                            )
-                        })
-                        .unwrap_or_else(|| {
-                            let mut pack = structural_evidence::StructuralEvidencePack::empty();
-                            pack.warnings.push(
-                                "Structural evidence could not be built because checkout head was unavailable."
-                                    .to_string(),
-                            );
-                            pack
-                        });
-                    let options = guided_review_stack_discovery_options(provider);
+    let (progress_tx, progress_rx) = mpsc::channel::<CodeTourProgressUpdate>();
+    let (result_tx, result_rx) = mpsc::channel::<
+        Result<(ReviewStack, Option<semantic_review::RemissSemanticReview>), String>,
+    >();
+    std::thread::spawn({
+        let cache = CacheStore::clone(cache);
+        let detail = detail.clone();
+        let working_directory = PathBuf::from(working_directory);
+        let head_oid = checkout_head_oid(local_repo_status);
+        move || {
+            let result = run_foreground_blocking(|| {
+                let atoms = extract_change_atoms(&detail);
+                let semantic_review = semantic_review::build_and_cache_semantic_review(
+                    &cache,
+                    &detail,
+                    &atoms,
+                    &detail.repository,
+                    working_directory.as_path(),
+                    head_oid.as_deref(),
+                    force,
+                );
+                let structural_evidence = head_oid
+                    .as_deref()
+                    .map(|head_oid| {
+                        structural_evidence::build_structural_evidence_pack(
+                            &cache,
+                            &detail,
+                            &atoms,
+                            &detail.repository,
+                            working_directory.as_path(),
+                            head_oid,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        let mut pack = structural_evidence::StructuralEvidencePack::empty();
+                        pack.warnings.push(
+                            "Structural evidence could not be built because checkout head was unavailable."
+                                .to_string(),
+                        );
+                        pack
+                    });
+                let options = guided_review_stack_discovery_options(provider);
 
-                    let repo_context = RepoContext {
-                        open_pull_requests,
-                        local_repo_path: Some(working_directory),
-                        trunk_branch: None,
-                        structural_evidence: Some(structural_evidence),
-                        semantic_review: semantic_review.clone(),
-                    };
+                let repo_context = RepoContext {
+                    open_pull_requests,
+                    local_repo_path: Some(working_directory),
+                    trunk_branch: None,
+                    structural_evidence: Some(structural_evidence),
+                    semantic_review: semantic_review.clone(),
+                };
 
-                    discover_review_stack(&detail, &repo_context, options)
+                ai_virtual::discover_with_progress(
+                    &detail,
+                    &repo_context,
+                    &options.sizing,
+                    provider,
+                    &mut |progress| {
+                        let _ = progress_tx.send(progress);
+                    },
+                )
+                .map_err(|error| error.message)
+                .and_then(|stack| {
+                    stack
                         .map(|stack| (stack, semantic_review))
-                        .map_err(|error| error.message)
+                        .ok_or_else(|| "No stack provider produced a stack.".to_string())
                 })
+            });
+            let _ = result_tx.send(result);
+        }
+    });
+
+    let stack_result = loop {
+        while let Ok(progress) = progress_rx.try_recv() {
+            model
+                .update(cx, |state, cx| {
+                    if let Some(detail_state) = state.detail_states.get_mut(detail_key) {
+                        if detail_state.ai_stack_state.request_key.as_deref() == Some(request_key) {
+                            detail_state.ai_stack_state.message =
+                                Some(progress_status_text(&progress));
+                        }
+
+                        if reflect_tour_progress {
+                            set_tour_pipeline_progress(
+                                detail_state,
+                                provider,
+                                tour_request_key,
+                                false,
+                                true,
+                                &progress.summary,
+                                &progress_detail_text(&progress),
+                            );
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+        }
+
+        match result_rx.try_recv() {
+            Ok(result) => {
+                while let Ok(progress) = progress_rx.try_recv() {
+                    model
+                        .update(cx, |state, cx| {
+                            if let Some(detail_state) = state.detail_states.get_mut(detail_key) {
+                                if detail_state.ai_stack_state.request_key.as_deref()
+                                    == Some(request_key)
+                                {
+                                    detail_state.ai_stack_state.message =
+                                        Some(progress_status_text(&progress));
+                                }
+
+                                if reflect_tour_progress {
+                                    set_tour_pipeline_progress(
+                                        detail_state,
+                                        provider,
+                                        tour_request_key,
+                                        false,
+                                        true,
+                                        &progress.summary,
+                                        &progress_detail_text(&progress),
+                                    );
+                                }
+                            }
+                            cx.notify();
+                        })
+                        .ok();
+                }
+                break result;
             }
-        })
-        .await;
+            Err(mpsc::TryRecvError::Disconnected) => {
+                break Err(
+                    "Guided Review stack planning stopped before returning a result.".to_string(),
+                );
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+
+        cx.background_executor()
+            .spawn(async move {
+                std::thread::sleep(Duration::from_millis(120));
+            })
+            .await;
+    };
 
     match stack_result {
         Ok((stack, semantic_review)) if !stack_is_ai_unavailable(&stack) => {
@@ -1379,95 +1469,144 @@ async fn generate_or_load_partner(
         })
         .ok();
 
-    let partner_result = cx
-        .background_executor()
-        .spawn({
-            let cache = CacheStore::clone(cache);
-            let detail = detail.clone();
-            let stack = stack.clone();
-            let semantic_review = semantic_review.clone();
-            let working_directory = PathBuf::from(working_directory);
-            let head_oid = checkout_head_oid(local_repo_status);
-            let lsp_session_manager = lsp_session_manager.clone();
-            async move {
-                run_foreground_blocking(|| {
-                    let semantic_review = semantic_review.or_else(|| {
-                        semantic_review::build_and_cache_semantic_review(
+    let (progress_tx, progress_rx) = mpsc::channel::<CodeTourProgressUpdate>();
+    let (result_tx, result_rx) =
+        mpsc::channel::<Result<review_partner::GeneratedReviewPartnerContext, String>>();
+    std::thread::spawn({
+        let cache = CacheStore::clone(cache);
+        let detail = detail.clone();
+        let stack = stack.clone();
+        let semantic_review = semantic_review.clone();
+        let working_directory = PathBuf::from(working_directory);
+        let head_oid = checkout_head_oid(local_repo_status);
+        let lsp_session_manager = lsp_session_manager.clone();
+        move || {
+            let result = run_foreground_blocking(|| {
+                let semantic_review = semantic_review.or_else(|| {
+                    semantic_review::build_and_cache_semantic_review(
+                        &cache,
+                        &detail,
+                        &stack.atoms,
+                        &detail.repository,
+                        working_directory.as_path(),
+                        head_oid.as_deref(),
+                        force,
+                    )
+                });
+                let structural_evidence = head_oid
+                    .as_deref()
+                    .map(|head_oid| {
+                        structural_evidence::build_structural_evidence_pack(
                             &cache,
                             &detail,
                             &stack.atoms,
                             &detail.repository,
                             working_directory.as_path(),
-                            head_oid.as_deref(),
-                            force,
+                            head_oid,
                         )
+                    })
+                    .unwrap_or_else(|| {
+                        let mut pack = structural_evidence::StructuralEvidencePack::empty();
+                        pack.warnings.push(
+                            "Structural evidence could not be built because checkout head was unavailable."
+                                .to_string(),
+                        );
+                        pack
                     });
-                    let structural_evidence = head_oid
-                        .as_deref()
-                        .map(|head_oid| {
-                            structural_evidence::build_structural_evidence_pack(
-                                &cache,
-                                &detail,
-                                &stack.atoms,
-                                &detail.repository,
-                                working_directory.as_path(),
-                                head_oid,
-                            )
-                        })
-                        .unwrap_or_else(|| {
-                            let mut pack = structural_evidence::StructuralEvidencePack::empty();
-                            pack.warnings.push(
-                                "Structural evidence could not be built because checkout head was unavailable."
-                                    .to_string(),
-                            );
-                            pack
-                        });
-                    let memory_targets = stack
-                        .atoms
-                        .iter()
-                        .flat_map(|atom| {
-                            atom.symbol_name
-                                .iter()
-                                .chain(atom.defined_symbols.iter())
-                                .map(move |symbol| review_memory::ReviewMemoryTarget {
-                                    path: atom.path.clone(),
-                                    symbol_name: Some(symbol.clone()),
-                                    symbol_kind: atom.semantic_kind.clone(),
-                                })
-                        })
-                        .collect::<Vec<_>>();
-                    let review_memory =
-                        review_memory::review_memory_prompt_context_for_detail(
-                            &cache,
-                            &detail,
-                            &memory_targets,
-                            3,
-                        )
-                        .unwrap_or_default();
-                    let mut input = review_partner::build_review_partner_generation_input(
-                        &detail,
-                        provider,
-                        working_directory.to_string_lossy().as_ref(),
-                        stack,
-                        structural_evidence,
-                        semantic_review,
-                        Some(lsp_session_manager),
-                    );
-                    input.review_memory = review_memory;
+                let memory_targets = stack
+                    .atoms
+                    .iter()
+                    .flat_map(|atom| {
+                        atom.symbol_name
+                            .iter()
+                            .chain(atom.defined_symbols.iter())
+                            .map(move |symbol| review_memory::ReviewMemoryTarget {
+                                path: atom.path.clone(),
+                                symbol_name: Some(symbol.clone()),
+                                symbol_kind: atom.semantic_kind.clone(),
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                let review_memory = review_memory::review_memory_prompt_context_for_detail(
+                    &cache,
+                    &detail,
+                    &memory_targets,
+                    3,
+                )
+                .unwrap_or_default();
+                let mut input = review_partner::build_review_partner_generation_input(
+                    &detail,
+                    provider,
+                    working_directory.to_string_lossy().as_ref(),
+                    stack,
+                    structural_evidence,
+                    semantic_review,
+                    Some(lsp_session_manager),
+                );
+                input.review_memory = review_memory;
 
-                    match review_partner::generate_review_partner_context(&cache, input.clone()) {
-                        Ok(partner) => partner,
-                        Err(error) => {
-                            review_partner::fallback_review_partner_context(
-                                &input,
-                                Some(format!("AI Review Partner context unavailable: {error}")),
-                            )
+                let partner = match review_partner::generate_review_partner_context_with_progress(
+                    &cache,
+                    input.clone(),
+                    &mut |progress| {
+                        let _ = progress_tx.send(progress);
+                    },
+                ) {
+                    Ok(partner) => partner,
+                    Err(error) => review_partner::fallback_review_partner_context(
+                        &input,
+                        Some(format!("AI Review Partner context unavailable: {error}")),
+                    ),
+                };
+                Ok(partner)
+            });
+            let _ = result_tx.send(result);
+        }
+    });
+
+    let partner_result = loop {
+        while let Ok(progress) = progress_rx.try_recv() {
+            model
+                .update(cx, |state, cx| {
+                    if let Some(detail_state) = state.detail_states.get_mut(detail_key) {
+                        if detail_state.review_partner_state.request_key.as_deref()
+                            == Some(partner_request_key)
+                        {
+                            detail_state.review_partner_state.progress_text =
+                                Some(progress_status_text(&progress));
                         }
                     }
+                    cx.notify();
                 })
+                .ok();
+        }
+
+        match result_rx.try_recv() {
+            Ok(Ok(partner)) => break partner,
+            Ok(Err(error)) => {
+                set_partner_error(model, detail_key, partner_request_key, error, cx).await;
+                return;
             }
-        })
-        .await;
+            Err(mpsc::TryRecvError::Disconnected) => {
+                set_partner_error(
+                    model,
+                    detail_key,
+                    partner_request_key,
+                    "Review Partner generation stopped before returning a result.".to_string(),
+                    cx,
+                )
+                .await;
+                return;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+
+        cx.background_executor()
+            .spawn(async move {
+                std::thread::sleep(Duration::from_millis(120));
+            })
+            .await;
+    };
 
     let partner_message = if partner_result.fallback_reason.is_some() {
         Some("Using deterministic Review Partner fallback.".to_string())
@@ -1607,31 +1746,62 @@ async fn generate_or_load_brief(
         })
         .ok();
 
-    let generation_result = cx
-        .background_executor()
-        .spawn({
-            let cache = CacheStore::clone(cache);
-            let detail = detail.clone();
-            let working_directory = working_directory.clone();
-            async move {
-                run_foreground_blocking(|| {
-                    let mut input = review_brief::build_review_brief_generation_input(
-                        &detail,
-                        provider,
-                        &working_directory,
-                    );
-                    input.review_memory = review_memory::review_memory_prompt_context_for_detail(
-                        &cache,
-                        &detail,
-                        &[],
-                        3,
-                    )
-                    .unwrap_or_default();
-                    review_brief::generate_review_brief(&cache, input)
+    let (progress_tx, progress_rx) = mpsc::channel::<CodeTourProgressUpdate>();
+    let (result_tx, result_rx) = mpsc::channel::<Result<review_brief::ReviewBrief, String>>();
+    std::thread::spawn({
+        let cache = CacheStore::clone(cache);
+        let detail = detail.clone();
+        let working_directory = working_directory.clone();
+        move || {
+            let result = run_foreground_blocking(|| {
+                let mut input = review_brief::build_review_brief_generation_input(
+                    &detail,
+                    provider,
+                    &working_directory,
+                );
+                input.review_memory =
+                    review_memory::review_memory_prompt_context_for_detail(&cache, &detail, &[], 3)
+                        .unwrap_or_default();
+                review_brief::generate_review_brief_with_progress(&cache, input, &mut |progress| {
+                    let _ = progress_tx.send(progress);
                 })
+            });
+            let _ = result_tx.send(result);
+        }
+    });
+
+    let generation_result = loop {
+        while let Ok(progress) = progress_rx.try_recv() {
+            model
+                .update(cx, |state, cx| {
+                    if let Some(detail_state) = state.detail_states.get_mut(detail_key) {
+                        set_review_brief_progress(
+                            detail_state,
+                            request_key,
+                            false,
+                            true,
+                            &progress_status_text(&progress),
+                        );
+                    }
+                    cx.notify();
+                })
+                .ok();
+        }
+
+        match result_rx.try_recv() {
+            Ok(result) => break result,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                break Err("Review brief generation stopped before returning a result.".to_string());
             }
-        })
-        .await;
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+
+        cx.background_executor()
+            .spawn(async move {
+                std::thread::sleep(Duration::from_millis(120));
+            })
+            .await;
+    };
 
     match generation_result {
         Ok(brief) => {
@@ -2001,6 +2171,24 @@ fn set_tour_pipeline_progress(
     tour_state.error = None;
     tour_state.message = None;
     tour_state.success = false;
+}
+
+fn progress_status_text(progress: &CodeTourProgressUpdate) -> String {
+    progress
+        .detail
+        .as_deref()
+        .or(progress.log.as_deref())
+        .unwrap_or(progress.summary.as_str())
+        .to_string()
+}
+
+fn progress_detail_text(progress: &CodeTourProgressUpdate) -> String {
+    progress
+        .detail
+        .as_deref()
+        .or(progress.log.as_deref())
+        .unwrap_or(progress.summary.as_str())
+        .to_string()
 }
 
 fn set_review_brief_progress(

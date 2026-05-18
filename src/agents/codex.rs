@@ -151,6 +151,15 @@ pub fn run_json_prompt(
     prompt: String,
     options: AgentJsonPromptOptions,
 ) -> Result<AgentTextResponse, String> {
+    run_json_prompt_with_progress(working_directory, prompt, options, &mut |_| {})
+}
+
+pub fn run_json_prompt_with_progress(
+    working_directory: &str,
+    prompt: String,
+    options: AgentJsonPromptOptions,
+    on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
+) -> Result<AgentTextResponse, String> {
     let Some(binary) = find_codex_binary() else {
         return Err("Codex CLI is not installed on PATH.".to_string());
     };
@@ -178,11 +187,15 @@ pub fn run_json_prompt(
     });
 
     loop {
-        while progress_rx.try_recv().is_ok() {}
+        while let Ok(progress) = progress_rx.try_recv() {
+            on_progress(progress);
+        }
 
         match result_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(outcome) => {
-                while progress_rx.try_recv().is_ok() {}
+                while let Ok(progress) = progress_rx.try_recv() {
+                    on_progress(progress);
+                }
                 let _ = worker.join();
                 return finalize_text_turn(outcome, options.task_label);
             }
