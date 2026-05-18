@@ -47,12 +47,18 @@ struct MarkdownBuilder {
     list_items: Vec<AnyElement>,
     list_ordered: bool,
     list_counter: u64,
+    /// Nested blockquote children being collected before wrapping.
+    blockquote_blocks: Vec<Vec<AnyElement>>,
     id_prefix: String,
     block_id: usize,
     /// Table state.
     table_rows: Vec<Vec<String>>,
     table_current_row: Vec<String>,
     in_table_head: bool,
+    #[cfg(test)]
+    completed_top_level_blocks: usize,
+    #[cfg(test)]
+    completed_blockquotes: Vec<usize>,
 }
 
 #[derive(Clone)]
@@ -90,11 +96,16 @@ impl MarkdownBuilder {
             list_items: Vec::new(),
             list_ordered: false,
             list_counter: 0,
+            blockquote_blocks: Vec::new(),
             id_prefix: id_prefix.to_string(),
             block_id: 0,
             table_rows: Vec::new(),
             table_current_row: Vec::new(),
             in_table_head: false,
+            #[cfg(test)]
+            completed_top_level_blocks: 0,
+            #[cfg(test)]
+            completed_blockquotes: Vec::new(),
         }
     }
 
@@ -140,14 +151,13 @@ impl MarkdownBuilder {
                 });
             }
             Event::Rule => {
-                self.blocks.push(
-                    div()
-                        .w_full()
-                        .h(px(1.0))
-                        .bg(bg_subtle())
-                        .my(px(16.0))
-                        .into_any_element(),
-                );
+                let el = div()
+                    .w_full()
+                    .h(px(1.0))
+                    .bg(bg_subtle())
+                    .my(px(16.0))
+                    .into_any_element();
+                self.push_completed_block(el);
             }
             Event::TaskListMarker(checked) => {
                 let marker = if checked { "\u{2611} " } else { "\u{2610} " };
@@ -164,6 +174,58 @@ impl MarkdownBuilder {
         }
     }
 
+    fn push_completed_block(&mut self, block: AnyElement) {
+        if self.block_stack.last() == Some(&BlockContext::BlockQuote) {
+            if let Some(blockquote) = self.blockquote_blocks.last_mut() {
+                blockquote.push(block);
+                return;
+            }
+        }
+
+        #[cfg(test)]
+        {
+            self.completed_top_level_blocks += 1;
+        }
+        self.blocks.push(block);
+    }
+
+    fn is_directly_in_blockquote(&self) -> bool {
+        self.block_stack.last() == Some(&BlockContext::BlockQuote)
+    }
+
+    fn render_blockquote(&mut self, id: &str, mut children: Vec<AnyElement>) -> AnyElement {
+        if !self.inline_buffer.is_empty() {
+            children.push(self.flush_inline_paragraph(&format!("{id}-inline"), true));
+        }
+
+        #[cfg(test)]
+        {
+            self.completed_blockquotes.push(children.len());
+        }
+
+        div()
+            .w_full()
+            .min_w_0()
+            .my(px(6.0))
+            .rounded(radius_sm())
+            .border_l(px(3.0))
+            .border_color(border_muted())
+            .bg(with_alpha(bg_subtle(), 0.72))
+            .pl(px(12.0))
+            .pr(px(10.0))
+            .py(px(8.0))
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .children(children),
+            )
+            .into_any_element()
+    }
+
     fn start_tag(&mut self, tag: Tag) {
         match tag {
             Tag::Paragraph => {
@@ -173,6 +235,7 @@ impl MarkdownBuilder {
                 self.block_stack.push(BlockContext::Heading(level as u8));
             }
             Tag::BlockQuote(_) => {
+                self.blockquote_blocks.push(Vec::new());
                 self.block_stack.push(BlockContext::BlockQuote);
             }
             Tag::CodeBlock(kind) => {
@@ -239,40 +302,42 @@ impl MarkdownBuilder {
             TagEnd::Paragraph => {
                 self.block_stack.pop();
                 let id = self.next_block_id("paragraph");
-                let el = self.flush_inline_paragraph(&id);
-                self.blocks.push(el);
+                let quoted = self.is_directly_in_blockquote();
+                let el = self.flush_inline_paragraph(&id, quoted);
+                self.push_completed_block(el);
             }
             TagEnd::Heading(level) => {
                 self.block_stack.pop();
                 let id = self.next_block_id("heading");
-                let el = self.flush_inline_heading(&id, level as u8);
-                self.blocks.push(el);
+                let quoted = self.is_directly_in_blockquote();
+                let el = self.flush_inline_heading(&id, level as u8, quoted);
+                self.push_completed_block(el);
             }
             TagEnd::BlockQuote(_) => {
                 self.block_stack.pop();
+                let children = self.blockquote_blocks.pop().unwrap_or_default();
                 let id = self.next_block_id("blockquote");
-                let el = self.flush_inline_blockquote(&id);
-                self.blocks.push(el);
+                let el = self.render_blockquote(&id, children);
+                self.push_completed_block(el);
             }
             TagEnd::CodeBlock => {
                 self.block_stack.pop();
                 let text = std::mem::take(&mut self.code_block_text);
                 let lang = self.code_block_lang.take();
                 let code_id = self.next_block_id("code");
-                self.blocks
-                    .push(render_code_block(&code_id, &text, lang.as_deref()));
+                let el = render_code_block(&code_id, &text, lang.as_deref());
+                self.push_completed_block(el);
             }
             TagEnd::List(_) => {
                 let items = std::mem::take(&mut self.list_items);
-                self.blocks.push(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.0))
-                        .my(px(8.0))
-                        .children(items)
-                        .into_any_element(),
-                );
+                let el = div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .my(px(8.0))
+                    .children(items)
+                    .into_any_element();
+                self.push_completed_block(el);
             }
             TagEnd::Item => {
                 self.block_stack.pop();
@@ -304,7 +369,8 @@ impl MarkdownBuilder {
                 self.block_stack.pop();
                 let rows = std::mem::take(&mut self.table_rows);
                 let table_id = self.next_block_id("table");
-                self.blocks.push(render_table(&table_id, &rows));
+                let el = render_table(&table_id, &rows);
+                self.push_completed_block(el);
             }
             TagEnd::TableHead => {
                 self.in_table_head = false;
@@ -349,19 +415,20 @@ impl MarkdownBuilder {
         });
     }
 
-    fn flush_inline_paragraph(&mut self, id: &str) -> AnyElement {
+    fn flush_inline_paragraph(&mut self, id: &str, quoted: bool) -> AnyElement {
         let spans = std::mem::take(&mut self.inline_buffer);
+        let color = if quoted { fg_muted() } else { fg_default() };
         render_inline_block(
             id,
             &spans,
             px(PROSE_TEXT_SIZE),
             px(PROSE_LINE_HEIGHT),
-            fg_default(),
+            color,
             false,
         )
     }
 
-    fn flush_inline_heading(&mut self, id: &str, level: u8) -> AnyElement {
+    fn flush_inline_heading(&mut self, id: &str, level: u8, quoted: bool) -> AnyElement {
         let spans = std::mem::take(&mut self.inline_buffer);
         let (size, line_height) = match level {
             1 => (px(22.0), px(28.0)),
@@ -369,32 +436,8 @@ impl MarkdownBuilder {
             3 => (px(16.0), px(22.0)),
             _ => (px(14.0), px(21.0)),
         };
-        render_inline_block(id, &spans, size, line_height, fg_emphasis(), true)
-    }
-
-    fn flush_inline_blockquote(&mut self, id: &str) -> AnyElement {
-        let spans = std::mem::take(&mut self.inline_buffer);
-        div()
-            .w_full()
-            .min_w_0()
-            .pl(px(12.0))
-            .py(px(4.0))
-            .border_l(px(2.0))
-            .border_color(border_default())
-            .my(px(8.0))
-            .child(
-                render_inline_div(
-                    id,
-                    &spans,
-                    px(PROSE_TEXT_SIZE),
-                    fg_default(),
-                    FontWeight::NORMAL,
-                )
-                .w_full()
-                .min_w_0()
-                .line_height(px(PROSE_LINE_HEIGHT)),
-            )
-            .into_any_element()
+        let color = if quoted { fg_muted() } else { fg_emphasis() };
+        render_inline_block(id, &spans, size, line_height, color, true)
     }
 
     fn finish(self) -> Div {
@@ -594,8 +637,9 @@ fn render_list_item(id: &str, prefix: &str, spans: &[InlineSpan]) -> AnyElement 
 
 #[cfg(test)]
 mod tests {
-    use super::is_suggestion_language;
+    use super::{is_suggestion_language, MarkdownBuilder};
     use crate::emoji::replace_shortcode_emoji;
+    use pulldown_cmark::{Options, Parser};
 
     #[test]
     fn recognizes_suggestion_fence_language() {
@@ -608,6 +652,23 @@ mod tests {
     #[test]
     fn renders_emoji_shortcodes_as_glyph_text() {
         assert_eq!(replace_shortcode_emoji("ship it :+1:"), "ship it 👍");
+    }
+
+    #[test]
+    fn keeps_blockquote_paragraphs_inside_quote_container() {
+        let options = Options::ENABLE_GFM
+            | Options::ENABLE_STRIKETHROUGH
+            | Options::ENABLE_TABLES
+            | Options::ENABLE_TASKLISTS;
+        let parser = Parser::new_ext("> quoted comment\n\nreply", options);
+        let mut builder = MarkdownBuilder::new("test");
+
+        for event in parser {
+            builder.push_event(event);
+        }
+
+        assert_eq!(builder.completed_blockquotes, vec![1]);
+        assert_eq!(builder.completed_top_level_blocks, 2);
     }
 }
 
