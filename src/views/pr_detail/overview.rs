@@ -365,12 +365,7 @@ fn render_review_brief_document(brief: &ReviewBrief) -> impl IntoElement {
             .w_full()
             .min_w_0()
             .max_w(px(760.0))
-            .whitespace_normal()
-            .text_size(px(13.0))
-            .line_height(px(20.0))
-            .font_weight(FontWeight::NORMAL)
-            .text_color(fg_default())
-            .child(brief.brief_paragraph.clone()),
+            .child(render_markdown("review-brief-body", &brief.brief_paragraph)),
     )
 }
 

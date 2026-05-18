@@ -1075,7 +1075,7 @@ fn render_brief_details_view(
 }
 
 fn render_brief_labels_section(labels: &[String]) -> impl IntoElement {
-    brief_section_shell("Labels", true)
+    brief_section_shell("Labels")
         .when(labels.is_empty(), |el| {
             el.child(brief_empty_text("No labels"))
         })
@@ -1094,7 +1094,7 @@ fn render_brief_reviewers_section(
     detail: &github::PullRequestDetail,
     review_status: &ReviewStatusSummary,
 ) -> impl IntoElement {
-    brief_section_shell("Reviewers", true)
+    brief_section_shell("Reviewers")
         .when(detail.reviewers.is_empty(), |el| {
             el.child(brief_empty_text("No reviewers requested"))
         })
@@ -1118,7 +1118,7 @@ fn render_brief_reviewers_section(
 fn render_brief_participants_section(participants: &[ParticipantItem]) -> impl IntoElement {
     let visible_count = 8usize;
 
-    brief_section_shell("Participants", false)
+    brief_section_shell("Participants")
         .when(participants.is_empty(), |el| {
             el.child(brief_empty_text("No participant activity yet"))
         })
@@ -1157,7 +1157,7 @@ fn render_brief_metadata_section(detail: &github::PullRequestDetail) -> impl Int
         .map(|thread| thread.comments.len())
         .sum::<usize>();
 
-    brief_section_shell("Details", false).child(
+    brief_section_shell("Details").child(
         div()
             .flex()
             .flex_col()
@@ -1185,41 +1185,24 @@ fn render_brief_metadata_section(detail: &github::PullRequestDetail) -> impl Int
     )
 }
 
-fn brief_section_shell(title: &str, show_add: bool) -> Div {
+fn brief_section_shell(title: &str) -> Div {
     div()
         .w_full()
         .flex()
         .flex_col()
         .gap(px(14.0))
-        .child(brief_section_header(title, show_add))
+        .child(brief_section_header(title))
 }
 
-fn brief_section_header(title: &str, show_add: bool) -> impl IntoElement {
-    div()
-        .h(px(16.0))
-        .flex()
-        .items_center()
-        .justify_between()
-        .child(
-            div()
-                .font_family(mono_font_family())
-                .text_size(px(12.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(fg_muted())
-                .child(title.to_uppercase()),
-        )
-        .when(show_add, |el| {
-            el.child(
-                div()
-                    .size(px(20.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_color(fg_muted())
-                    .opacity(0.85)
-                    .child(lucide_icon(LucideIcon::Plus, 15.0, fg_muted())),
-            )
-        })
+fn brief_section_header(title: &str) -> impl IntoElement {
+    div().h(px(16.0)).flex().items_center().child(
+        div()
+            .font_family(mono_font_family())
+            .text_size(px(12.0))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(fg_muted())
+            .child(title.to_uppercase()),
+    )
 }
 
 fn brief_empty_text(text: &str) -> impl IntoElement {
@@ -1252,7 +1235,16 @@ fn brief_reviewer_row(
                 .overflow_x_hidden()
                 .child(participant_display_name(reviewer)),
         )
-        .child(brief_review_status_dot(reviewer, review_status))
+        .child(
+            div()
+                .w(px(20.0))
+                .h(px(22.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .flex_shrink_0()
+                .child(brief_review_status_dot(reviewer, review_status)),
+        )
 }
 
 fn brief_review_status_dot(login: &str, review_status: &ReviewStatusSummary) -> impl IntoElement {

@@ -18,7 +18,7 @@ use crate::{
     review_memory::ReviewMemoryPromptContext,
 };
 
-const REVIEW_BRIEF_CACHE_KEY_PREFIX: &str = "review-brief-v4";
+const REVIEW_BRIEF_CACHE_KEY_PREFIX: &str = "review-brief-v5";
 const REVIEW_BRIEF_BUDGET_ERROR_PREFIX: &str = "Review brief compact budget exceeded";
 const REVIEW_BRIEF_PARAGRAPH_MAX_CHARS: usize = 280;
 const REVIEW_BRIEF_RETRY_PARAGRAPH_TARGET_CHARS: usize = 220;
@@ -341,7 +341,7 @@ fn build_review_brief_prompt_for_attempt(
         "You are generating a compact Review Brief for a GitHub pull request before the reviewer opens the diff.".to_string(),
         "Act like a senior reviewer giving scan-mode orientation to another reviewer who knows the product context but has not loaded this change into working memory.".to_string(),
         "This brief is scan-mode orientation only. Do not imply that the reviewer can judge the PR from this brief.".to_string(),
-        "Return strict JSON only. No markdown fences, no prose outside JSON.".to_string(),
+        "Return strict JSON only. Do not wrap the JSON response in markdown fences, and return no prose outside JSON.".to_string(),
         "Stay grounded in the provided PR metadata, author body when present, raw diff, parsed diff, files, review threads, reviews, and local checkout.".to_string(),
         "Use historyContext.signals only as evidence-backed review memory; do not treat prior signals as current truth when the current diff contradicts them.".to_string(),
         "When historyContext conflicts with current code or is stale, surface that as missing context or the next reading question.".to_string(),
@@ -360,7 +360,7 @@ fn build_review_brief_prompt_for_attempt(
         "Use risksQuestions for the single best next reading question, not a generic risk.".to_string(),
         "When the PR is large, mixed-purpose, generated, or weakly explained, make the risk question point to the area where understanding is most likely to fail.".to_string(),
         format!(
-            "briefParagraph must be one natural-prose paragraph under {REVIEW_BRIEF_PARAGRAPH_MAX_CHARS} characters: no bullets, no markdown, no newlines, and no section labels like Likely intent, Changes, Watch, or Risk."
+            "briefParagraph must be compact markdown-prose under {REVIEW_BRIEF_PARAGRAPH_MAX_CHARS} characters: no bullets, no markdown headings, no section labels like Likely intent, Changes, Watch, or Risk. Use markdown only for inline code spans or short fenced code blocks when naming exact code identifiers or snippets."
         ),
         format!(
             "Use changedSummary for {REVIEW_BRIEF_CHANGED_MIN_ITEMS}-{REVIEW_BRIEF_CHANGED_MAX_ITEMS} concrete code-change points, each under {REVIEW_BRIEF_ITEM_MAX_CHARS} characters."
@@ -658,25 +658,11 @@ fn normalized_required_text(value: String, field: &str) -> Result<String, String
 }
 
 fn normalize_brief_paragraph(value: String) -> Result<String, String> {
-    let value = normalized_required_limited_text(
-        value,
-        "briefParagraph",
-        REVIEW_BRIEF_PARAGRAPH_MAX_CHARS,
-    )?;
-    let trimmed = value.trim_start();
+    let value = normalized_required_text(value, "briefParagraph")?;
+    validate_compact_char_count(&value, "briefParagraph", REVIEW_BRIEF_PARAGRAPH_MAX_CHARS)?;
     let lower = value.to_ascii_lowercase();
 
-    if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
-        return Err(compact_budget_error(
-            "briefParagraph must be natural prose, not a bullet.".to_string(),
-        ));
-    }
-
-    if value.contains('`') || value.contains("**") {
-        return Err(compact_budget_error(
-            "briefParagraph must not use markdown formatting.".to_string(),
-        ));
-    }
+    validate_brief_paragraph_markdown(&value)?;
 
     if lower.contains("likely intent:")
         || lower.contains("changes:")
@@ -692,6 +678,57 @@ fn normalize_brief_paragraph(value: String) -> Result<String, String> {
     Ok(value)
 }
 
+fn validate_brief_paragraph_markdown(value: &str) -> Result<(), String> {
+    if value.contains('\r') {
+        return Err(compact_budget_error(
+            "briefParagraph must not include carriage returns.".to_string(),
+        ));
+    }
+
+    let mut in_code_fence = false;
+    let mut code_fence_lines = 0usize;
+
+    for line in value.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            in_code_fence = !in_code_fence;
+            code_fence_lines += 1;
+            continue;
+        }
+
+        if in_code_fence {
+            continue;
+        }
+
+        if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
+            return Err(compact_budget_error(
+                "briefParagraph must be natural prose, not a bullet.".to_string(),
+            ));
+        }
+
+        if trimmed.starts_with('#') || line.contains("**") {
+            return Err(compact_budget_error(
+                "briefParagraph may only use inline code or fenced code blocks as markdown formatting."
+                    .to_string(),
+            ));
+        }
+    }
+
+    if in_code_fence {
+        return Err(compact_budget_error(
+            "briefParagraph must close fenced code blocks.".to_string(),
+        ));
+    }
+
+    if value.contains('\n') && code_fence_lines == 0 {
+        return Err(compact_budget_error(
+            "briefParagraph newlines are only allowed for fenced code blocks.".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn normalized_required_limited_text(
     value: String,
     field: &str,
@@ -703,16 +740,22 @@ fn normalized_required_limited_text(
 }
 
 fn validate_compact_text(value: &str, field: &str, max_chars: usize) -> Result<(), String> {
-    let char_count = value.chars().count();
-    if char_count > max_chars {
-        return Err(compact_budget_error(format!(
-            "{field} has {char_count} characters, max {max_chars}."
-        )));
-    }
+    validate_compact_char_count(value, field, max_chars)?;
 
     if value.contains('\n') || value.contains('\r') {
         return Err(compact_budget_error(format!(
             "{field} must be a single line."
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_compact_char_count(value: &str, field: &str, max_chars: usize) -> Result<(), String> {
+    let char_count = value.chars().count();
+    if char_count > max_chars {
+        return Err(compact_budget_error(format!(
+            "{field} has {char_count} characters, max {max_chars}."
         )));
     }
 
@@ -926,7 +969,7 @@ mod tests {
             review_brief_cache_key(&changed, CodeTourProvider::Codex)
         );
         assert!(
-            review_brief_cache_key(&first, CodeTourProvider::Codex).starts_with("review-brief-v4:")
+            review_brief_cache_key(&first, CodeTourProvider::Codex).starts_with("review-brief-v5:")
         );
     }
 
@@ -973,8 +1016,8 @@ mod tests {
 
         assert!(prompt.contains("JSON schema:"));
         assert!(prompt.contains("briefParagraph"));
-        assert!(prompt.contains("one natural-prose paragraph"));
-        assert!(prompt.contains("no bullets, no markdown, no newlines"));
+        assert!(prompt.contains("compact markdown-prose"));
+        assert!(prompt.contains("inline code spans or short fenced code blocks"));
         assert!(prompt.contains("no section labels"));
         assert!(prompt.contains("\"workingDirectory\": \"/tmp/acme-api\""));
         assert!(prompt.contains("\"rawDiff\""));
@@ -1053,6 +1096,40 @@ mod tests {
             brief.understanding_warnings,
             vec!["Existing session behavior needs confirmation."]
         );
+    }
+
+    #[test]
+    fn review_brief_merge_allows_inline_and_fenced_code_markdown() {
+        let input = build_review_brief_generation_input(
+            &detail(
+                "2026-04-17T10:00:00Z",
+                Some("head123"),
+                "diff --git a/src/session.rs b/src/session.rs\n+require_token();\n",
+            ),
+            CodeTourProvider::Codex,
+            "/tmp/acme-api",
+        );
+        let brief = merge_review_brief(
+            ReviewBriefResponse {
+                confidence: ReviewBriefConfidence::High,
+                reading_mode: ReviewBriefReadingMode::Scan,
+                brief_paragraph: "The session guard now calls `require_token()` before access:\n```rust\nrequire_token();\n```\nRead session restore next.".to_string(),
+                likely_intent: "Tighten session checks.".to_string(),
+                changed_summary: vec!["Adds a token requirement.".to_string()],
+                risks_questions: vec!["Verify existing sessions still work.".to_string()],
+                next_best_reading_action: "Read the session guard path before approval.".to_string(),
+                confidence_reason: "The diff shows the guard change directly.".to_string(),
+                understanding_warnings: Vec::new(),
+                warnings: Vec::new(),
+                related_file_paths: vec!["src/session.rs".to_string()],
+            },
+            &input,
+            Some("model".to_string()),
+        )
+        .expect("code markdown should be allowed in the brief body");
+
+        assert!(brief.brief_paragraph.contains("`require_token()`"));
+        assert!(brief.brief_paragraph.contains("```rust"));
     }
 
     #[test]
