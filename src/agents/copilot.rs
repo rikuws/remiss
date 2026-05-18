@@ -57,6 +57,7 @@ struct CopilotOutcome {
     error: Option<String>,
     model: Option<String>,
     saw_meaningful_progress: bool,
+    saw_tool_request_message: bool,
     current_turn_stream: String,
     tool_names: HashMap<String, String>,
 }
@@ -224,15 +225,16 @@ pub fn run_json_prompt_with_progress(
         truncate_to_byte_limit(&mut prompt, MAX_STACK_PLAN_PROMPT_BYTES);
     }
 
-    let CopilotRun { outcome } = run_copilot_with_tool_allowlist_retries(
+    let CopilotRun { outcome } = runtime::shared().block_on(run_copilot_sdk_session(
         working_directory,
         &prompt,
+        &[],
         options.copilot_overall_timeout_ms,
         options.copilot_inactivity_timeout_ms,
         options.task_label,
         true,
         on_progress,
-    )?;
+    ))?;
 
     if let Some(abort) = &outcome.abort {
         if !has_usable_final_text(&outcome) {
@@ -363,14 +365,27 @@ async fn run_copilot_sdk_session(
         let mut events = session.subscribe();
 
         if emit_progress {
+            let (summary, detail, activity) = if available_tools.is_empty() {
+                (
+                    "GitHub Copilot is drafting the response",
+                    "Waiting for streamed Copilot SDK events without repository tools.",
+                    "Waiting for Copilot SDK event stream (repository tools disabled)".to_string(),
+                )
+            } else {
+                (
+                    "GitHub Copilot is inspecting the checkout",
+                    "Waiting for streamed Copilot SDK events from the linked repository.",
+                    format!(
+                        "Waiting for Copilot SDK event stream ({})",
+                        available_tools.join(",")
+                    ),
+                )
+            };
             on_progress(make_progress(
                 "running",
-                "GitHub Copilot is inspecting the checkout",
-                Some("Waiting for streamed Copilot SDK events from the linked repository.".to_string()),
-                Some(format!(
-                    "Waiting for Copilot SDK event stream ({})",
-                    available_tools.join(",")
-                )),
+                summary,
+                Some(detail.to_string()),
+                Some(activity),
             ));
         }
 
@@ -471,7 +486,12 @@ async fn run_copilot_sdk_session(
         if let Some(result) = send_result {
             match result {
                 Ok(Some(final_event)) => {
-                    handle_sdk_event(final_event, &mut outcome, emit_progress, on_progress);
+                    handle_terminal_sdk_event(
+                        final_event,
+                        &mut outcome,
+                        emit_progress,
+                        on_progress,
+                    );
                 }
                 Ok(None) => {}
                 Err(error) => {
@@ -587,12 +607,19 @@ fn handle_sdk_event(
         }
         "assistant.message" => {
             if let Some(content) = first_string(&event.data, &["content", "message", "text"]) {
-                if !event_has_tool_requests(&event.data) || text_contains_json_payload(&content) {
+                let has_tool_requests = event_has_tool_requests(&event.data);
+                if has_tool_requests {
+                    outcome.saw_tool_request_message = true;
+                }
+                if has_tool_requests || !content.trim().is_empty() {
+                    outcome.saw_meaningful_progress = true;
+                }
+                if !has_tool_requests || text_contains_json_payload(&content) {
                     record_final_text_candidate(outcome, content);
                 }
                 outcome.current_turn_stream.clear();
                 outcome.saw_meaningful_progress = true;
-                outcome.last_visible_activity = Some(if event_has_tool_requests(&event.data) {
+                outcome.last_visible_activity = Some(if has_tool_requests {
                     "Copilot requested repository tools".to_string()
                 } else {
                     "Copilot returned an assistant message".to_string()
@@ -708,6 +735,20 @@ fn handle_sdk_event(
             }
         }
         _ => {}
+    }
+}
+
+fn handle_terminal_sdk_event(
+    event: SessionEvent,
+    outcome: &mut CopilotOutcome,
+    emit_progress: bool,
+    on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
+) {
+    match event.event_type.as_str() {
+        "assistant.message" | "session.task_complete" => {
+            record_final_text_from_event(&event, outcome);
+        }
+        _ => handle_sdk_event(event, outcome, emit_progress, on_progress),
     }
 }
 
@@ -834,7 +875,14 @@ fn record_final_text_from_event(event: &SessionEvent, outcome: &mut CopilotOutco
     match event.event_type.as_str() {
         "assistant.message" => {
             if let Some(content) = first_string(&event.data, &["content", "message", "text"]) {
-                if !event_has_tool_requests(&event.data) || text_contains_json_payload(&content) {
+                let has_tool_requests = event_has_tool_requests(&event.data);
+                if has_tool_requests {
+                    outcome.saw_tool_request_message = true;
+                }
+                if has_tool_requests || !content.trim().is_empty() {
+                    outcome.saw_meaningful_progress = true;
+                }
+                if !has_tool_requests || text_contains_json_payload(&content) {
                     record_final_text_candidate(outcome, content);
                 }
             }
@@ -844,6 +892,9 @@ fn record_final_text_from_event(event: &SessionEvent, outcome: &mut CopilotOutco
         }
         "session.task_complete" => {
             if let Some(summary) = first_string(&event.data, &["summary"]) {
+                if !summary.trim().is_empty() {
+                    outcome.saw_meaningful_progress = true;
+                }
                 if text_contains_json_payload(&summary) {
                     record_final_text_candidate(outcome, summary);
                 }
@@ -895,6 +946,12 @@ fn fallback_reason(outcome: &CopilotOutcome) -> String {
     }
     if !outcome.saw_meaningful_progress {
         return "GitHub Copilot did not emit any streamed SDK progress before ending.".to_string();
+    }
+    if outcome.saw_tool_request_message {
+        return "GitHub Copilot ended after requesting repository tools without returning the required JSON response.".to_string();
+    }
+    if outcome.last_visible_activity.as_deref() == Some("Copilot session is idle") {
+        return "GitHub Copilot finished without returning the required JSON response.".to_string();
     }
     outcome
         .last_visible_activity
@@ -1038,6 +1095,48 @@ mod tests {
         assert_eq!(
             outcome.last_visible_activity.as_deref(),
             Some("Copilot requested repository tools")
+        );
+    }
+
+    #[test]
+    fn terminal_tool_request_message_does_not_replace_idle_activity() {
+        let mut outcome = CopilotOutcome {
+            last_visible_activity: Some("Copilot session is idle".to_string()),
+            ..CopilotOutcome::default()
+        };
+
+        record_final_text_from_event(
+            &event(
+                "assistant.message",
+                json!({
+                    "messageId": "m1",
+                    "content": "I'll inspect the current PR diff first.",
+                    "toolRequests": [{ "toolCallId": "tool-1", "name": "view" }]
+                }),
+            ),
+            &mut outcome,
+        );
+
+        assert!(outcome.final_text.is_none());
+        assert!(outcome.saw_tool_request_message);
+        assert_eq!(
+            outcome.last_visible_activity.as_deref(),
+            Some("Copilot session is idle")
+        );
+    }
+
+    #[test]
+    fn fallback_reason_explains_tool_request_without_json() {
+        let outcome = CopilotOutcome {
+            saw_meaningful_progress: true,
+            saw_tool_request_message: true,
+            last_visible_activity: Some("Copilot requested repository tools".to_string()),
+            ..CopilotOutcome::default()
+        };
+
+        assert_eq!(
+            fallback_reason(&outcome),
+            "GitHub Copilot ended after requesting repository tools without returning the required JSON response."
         );
     }
 
