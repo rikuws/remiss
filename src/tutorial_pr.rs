@@ -135,6 +135,7 @@ pub fn review_brief(detail: &PullRequestDetail) -> ReviewBrief {
         generated_at_ms: GENERATED_AT,
         code_version_key: tour_code_version_key(detail),
         confidence: ReviewBriefConfidence::High,
+        reading_mode: crate::review_brief::ReviewBriefReadingMode::Scan,
         brief_paragraph: "This tutorial PR adds a compact review feedback toolbar path and a regression test for preserving draft context.".to_string(),
         likely_intent: "Make review feedback easier to finish without losing line-level context.".to_string(),
         changed_summary: vec![
@@ -145,6 +146,10 @@ pub fn review_brief(detail: &PullRequestDetail) -> ReviewBrief {
             "Check that pending comments and waypoints stay visible while switching review modes."
                 .to_string(),
         ],
+        next_best_reading_action:
+            "Read the toolbar state change before the fixture test.".to_string(),
+        confidence_reason: "The tutorial fixture is generated from a narrow, known diff.".to_string(),
+        understanding_warnings: Vec::new(),
         warnings: Vec::new(),
         related_file_paths: vec![
             "src/review_toolbar.rs".to_string(),
@@ -408,6 +413,14 @@ pub fn review_partner(
                 }],
             },
         ],
+        understanding_checkpoints: vec![ReviewPartnerItem {
+            title: "Pending state invariant".to_string(),
+            detail: "The finish action should not hide unresolved waypoint context.".to_string(),
+            path: Some("src/views/diff_view.rs".to_string()),
+            line: Some(1),
+        }],
+        assumptions: Vec::new(),
+        history_signals: Vec::new(),
         limitations: Vec::new(),
         generated_at_ms: GENERATED_AT,
     };
@@ -434,6 +447,7 @@ pub fn review_partner(
         stack,
         structural_evidence,
         semantic_review: None,
+        review_memory: crate::review_memory::ReviewMemoryPromptContext::default(),
         context: ReviewPartnerContextPack::empty(),
         layers: vec![
             ReviewPartnerLayer {

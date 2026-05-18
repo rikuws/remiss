@@ -700,7 +700,7 @@ pub(super) fn stack_file_visibility(
     StackFileVisibility {
         layer_id: selected_layer.map(|layer| layer.id.clone()),
         layer_title: selected_layer
-            .map(|layer| layer.title.clone())
+            .map(|layer| normalize_stack_layer_title(&layer.title, "Stack layer"))
             .unwrap_or_else(|| "Stack layer".to_string()),
         layer_rationale: selected_layer
             .map(|layer| layer.rationale.clone())

@@ -14,10 +14,10 @@ use super::super::{
     atoms::extract_change_atoms,
     dependencies::{build_atom_dependencies, DependencyKind},
     model::{
-        stack_now_ms, ChangeAtom, ChangeAtomId, ChangeRole, Confidence, LayerMetrics,
-        LayerReviewStatus, RepoContext, ReviewStack, ReviewStackLayer, StackDiscoveryError,
-        StackKind, StackProviderMetadata, StackSource, StackWarning, VirtualLayerRef,
-        VirtualStackSizing, STACK_GENERATOR_VERSION,
+        normalize_stack_layer_title, stack_layer_title_quality_error, stack_now_ms, ChangeAtom,
+        ChangeAtomId, ChangeRole, Confidence, LayerMetrics, LayerReviewStatus, RepoContext,
+        ReviewStack, ReviewStackLayer, StackDiscoveryError, StackKind, StackProviderMetadata,
+        StackSource, StackWarning, VirtualLayerRef, VirtualStackSizing, STACK_GENERATOR_VERSION,
     },
     validation::{atom_is_substantive, atom_noise_kind, requires_manual_review},
 };
@@ -878,8 +878,9 @@ fn dedup_strings(values: &mut Vec<String>) {
 }
 
 fn polished_layer_title(group: &SemLayerGroup, atoms: &[&ChangeAtom], role: ChangeRole) -> String {
-    let original = clean_layer_text(&group.title, "Sem review layer", 90);
-    if !sem_title_needs_polish(&original) {
+    let original = normalize_stack_layer_title(&group.title, "Sem review layer");
+    if !sem_title_needs_polish(&original) && stack_layer_title_quality_error(&group.title).is_none()
+    {
         return original;
     }
 
@@ -887,7 +888,7 @@ fn polished_layer_title(group: &SemLayerGroup, atoms: &[&ChangeAtom], role: Chan
     let terms = title_terms(group, atoms);
     domain_layer_title(&terms, &file_paths)
         .or_else(|| file_based_layer_title(&file_paths, role))
-        .map(|title| clean_layer_text(&title, &original, 90))
+        .map(|title| normalize_stack_layer_title(&title, &original))
         .unwrap_or(original)
 }
 
@@ -1524,6 +1525,52 @@ mod tests {
             ]
         );
         assert!(!titles.contains(&"Update related code"));
+        assert_exact_stack_coverage(&stack);
+    }
+
+    #[test]
+    fn sem_stack_polishes_comma_list_titles_from_layer_context() {
+        let mut atom = atom(
+            "config",
+            "src/app_config.rs",
+            ChangeRole::CoreLogic,
+            Some("function"),
+            12,
+        );
+        atom.symbol_name = Some("configure_app".to_string());
+        atom.defined_symbols = vec!["configure_app".to_string()];
+        let review = semantic_review(
+            vec![sem_layer_with_entities(
+                "sem-config",
+                0,
+                "Update configuration, account, region, globalRegion, edgeRegion",
+                vec!["src/app_config.rs"],
+                vec![
+                    "configuration",
+                    "account",
+                    "region",
+                    "globalRegion",
+                    "edgeRegion",
+                ],
+                vec![0],
+            )],
+            vec![mapping(
+                "sem-config",
+                vec!["config"],
+                vec!["src/app_config.rs"],
+            )],
+        );
+
+        let stack = build_stack_from_semantic_review(
+            &detail(),
+            vec![atom],
+            &review,
+            &VirtualStackSizing::default(),
+        )
+        .expect("sem stack");
+
+        assert_eq!(stack.layers[0].title, "App Config behavior");
+        assert!(!stack.layers[0].title.contains("globalRegion"));
         assert_exact_stack_coverage(&stack);
     }
 

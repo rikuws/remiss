@@ -128,6 +128,10 @@ pub const REVIEW_BRIEF_OUTPUT_SCHEMA_JSON: &str = r#"{
       "type": "string",
       "enum": ["low", "medium", "high"]
     },
+    "readingMode": {
+      "type": "string",
+      "enum": ["scan"]
+    },
     "briefParagraph": {
       "type": "string",
       "minLength": 1,
@@ -158,6 +162,24 @@ pub const REVIEW_BRIEF_OUTPUT_SCHEMA_JSON: &str = r#"{
       "minItems": 1,
       "maxItems": 1
     },
+    "nextBestReadingAction": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "confidenceReason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "understandingWarnings": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 140
+      },
+      "maxItems": 3
+    },
     "warnings": {
       "type": "array",
       "items": {
@@ -173,10 +195,14 @@ pub const REVIEW_BRIEF_OUTPUT_SCHEMA_JSON: &str = r#"{
   },
   "required": [
     "confidence",
+    "readingMode",
     "briefParagraph",
     "likelyIntent",
     "changedSummary",
     "risksQuestions",
+    "nextBestReadingAction",
+    "confidenceReason",
+    "understandingWarnings",
     "warnings",
     "relatedFilePaths"
   ],
@@ -257,6 +283,14 @@ mod tests {
             Some(1)
         );
         assert_eq!(
+            value["properties"]["nextBestReadingAction"]["maxLength"].as_u64(),
+            Some(160)
+        );
+        assert_eq!(
+            value["properties"]["understandingWarnings"]["maxItems"].as_u64(),
+            Some(3)
+        );
+        assert_eq!(
             value["properties"]["warnings"]["maxItems"].as_u64(),
             Some(1)
         );
@@ -270,5 +304,10 @@ mod tests {
             .unwrap()
             .iter()
             .any(|value| value.as_str() == Some("high")));
+        assert!(value["properties"]["readingMode"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value.as_str() == Some("scan")));
     }
 }

@@ -57,9 +57,10 @@ use crate::source_browser::render_source_browser;
 use crate::stacks::{
     discover_review_stack,
     model::{
-        ChangeAtomId, Confidence, LayerDiffFilter, LayerMetrics, LayerReviewStatus, RepoContext,
-        ReviewStack, ReviewStackLayer, StackDiffMode, StackDiscoveryOptions, StackKind,
-        StackSource, StackWarning, VirtualLayerRef, STACK_GENERATOR_VERSION,
+        normalize_stack_layer_title, ChangeAtomId, Confidence, LayerDiffFilter, LayerMetrics,
+        LayerReviewStatus, RepoContext, ReviewStack, ReviewStackLayer, StackDiffMode,
+        StackDiscoveryOptions, StackKind, StackSource, StackWarning, VirtualLayerRef,
+        STACK_GENERATOR_VERSION,
     },
 };
 use crate::state::*;

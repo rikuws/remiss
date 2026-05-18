@@ -7,19 +7,27 @@ use crate::{
     agents::{self, jsonrepair::parse_tolerant},
     cache::CacheStore,
     code_tour::{
-        tour_code_version_key, CodeTourProvider, CodeTourReviewCommentContext,
-        CodeTourReviewContext, CodeTourReviewThreadContext,
+        tour_code_version_key, CodeTourProvider, CodeTourPullRequestCommentContext,
+        CodeTourReviewCommentContext, CodeTourReviewContext, CodeTourReviewThreadContext,
     },
     diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk, ParsedDiffLine},
-    github::{PullRequestDetail, PullRequestFile, PullRequestReview, PullRequestReviewThread},
+    github::{
+        PullRequestComment, PullRequestDetail, PullRequestFile, PullRequestReview,
+        PullRequestReviewThread,
+    },
+    review_memory::ReviewMemoryPromptContext,
 };
 
-const REVIEW_BRIEF_CACHE_KEY_PREFIX: &str = "review-brief-v2";
+const REVIEW_BRIEF_CACHE_KEY_PREFIX: &str = "review-brief-v4";
 const REVIEW_BRIEF_BUDGET_ERROR_PREFIX: &str = "Review brief compact budget exceeded";
 const REVIEW_BRIEF_PARAGRAPH_MAX_CHARS: usize = 280;
 const REVIEW_BRIEF_RETRY_PARAGRAPH_TARGET_CHARS: usize = 220;
 const REVIEW_BRIEF_INTENT_MAX_CHARS: usize = 120;
 const REVIEW_BRIEF_ITEM_MAX_CHARS: usize = 100;
+const REVIEW_BRIEF_READING_ACTION_MAX_CHARS: usize = 160;
+const REVIEW_BRIEF_CONFIDENCE_REASON_MAX_CHARS: usize = 160;
+const REVIEW_BRIEF_UNDERSTANDING_WARNING_MAX_CHARS: usize = 140;
+const REVIEW_BRIEF_UNDERSTANDING_WARNINGS_MAX_ITEMS: usize = 3;
 const REVIEW_BRIEF_CHANGED_MIN_ITEMS: usize = 1;
 const REVIEW_BRIEF_CHANGED_MAX_ITEMS: usize = 2;
 const REVIEW_BRIEF_RISKS_REQUIRED_ITEMS: usize = 1;
@@ -55,6 +63,13 @@ impl ReviewBriefConfidence {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReviewBriefReadingMode {
+    #[default]
+    Scan,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewBrief {
@@ -62,10 +77,18 @@ pub struct ReviewBrief {
     pub generated_at_ms: i64,
     pub code_version_key: String,
     pub confidence: ReviewBriefConfidence,
+    #[serde(default)]
+    pub reading_mode: ReviewBriefReadingMode,
     pub brief_paragraph: String,
     pub likely_intent: String,
     pub changed_summary: Vec<String>,
     pub risks_questions: Vec<String>,
+    #[serde(default)]
+    pub next_best_reading_action: String,
+    #[serde(default)]
+    pub confidence_reason: String,
+    #[serde(default)]
+    pub understanding_warnings: Vec<String>,
     #[serde(default)]
     pub warnings: Vec<String>,
     #[serde(default)]
@@ -107,20 +130,28 @@ pub struct GenerateReviewBriefInput {
     pub changed_files: i64,
     pub commits_count: i64,
     pub files: Vec<ReviewBriefFileContext>,
+    pub comments: Vec<CodeTourPullRequestCommentContext>,
     pub raw_diff: String,
     pub parsed_diff: Vec<ParsedDiffFile>,
     pub latest_reviews: Vec<CodeTourReviewContext>,
     pub review_threads: Vec<CodeTourReviewThreadContext>,
+    #[serde(default)]
+    pub review_memory: ReviewMemoryPromptContext,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ReviewBriefResponse {
     confidence: ReviewBriefConfidence,
+    reading_mode: ReviewBriefReadingMode,
     brief_paragraph: String,
     likely_intent: String,
     changed_summary: Vec<String>,
     risks_questions: Vec<String>,
+    next_best_reading_action: String,
+    confidence_reason: String,
+    #[serde(default)]
+    understanding_warnings: Vec<String>,
     #[serde(default)]
     warnings: Vec<String>,
     #[serde(default)]
@@ -225,6 +256,12 @@ pub fn build_review_brief_generation_input(
         changed_files: detail.changed_files,
         commits_count: detail.commits_count,
         files: detail.files.iter().map(map_file_context).collect(),
+        comments: detail
+            .comments
+            .iter()
+            .take(MAX_THREADS)
+            .map(map_comment_context)
+            .collect(),
         raw_diff: trim_text(&detail.raw_diff, MAX_RAW_DIFF_CHARS),
         parsed_diff: detail.parsed_diff.clone(),
         latest_reviews: detail
@@ -238,6 +275,7 @@ pub fn build_review_brief_generation_input(
             .take(MAX_THREADS)
             .map(|thread| map_thread_context(&thread))
             .collect(),
+        review_memory: ReviewMemoryPromptContext::default(),
     }
 }
 
@@ -301,14 +339,26 @@ fn build_review_brief_prompt_for_attempt(
 
     let mut lines = vec![
         "You are generating a compact Review Brief for a GitHub pull request before the reviewer opens the diff.".to_string(),
-        "Act like a senior reviewer orienting another reviewer who already knows the codebase.".to_string(),
+        "Act like a senior reviewer giving scan-mode orientation to another reviewer who knows the product context but has not loaded this change into working memory.".to_string(),
+        "This brief is scan-mode orientation only. Do not imply that the reviewer can judge the PR from this brief.".to_string(),
         "Return strict JSON only. No markdown fences, no prose outside JSON.".to_string(),
         "Stay grounded in the provided PR metadata, author body when present, raw diff, parsed diff, files, review threads, reviews, and local checkout.".to_string(),
+        "Use historyContext.signals only as evidence-backed review memory; do not treat prior signals as current truth when the current diff contradicts them.".to_string(),
+        "When historyContext conflicts with current code or is stale, surface that as missing context or the next reading question.".to_string(),
         "Use the local checkout only for quick read-only verification of changed files or direct supporting context.".to_string(),
         "Do not edit files, run write commands, create branches, or write back to GitHub.".to_string(),
         "If the author body is empty or unhelpful, infer intent neutrally from the title, diff, files, and discussion.".to_string(),
         "Use likelyIntent for the neutral inferred intent; do not prefix any field with 'Likely intent:'.".to_string(),
         "Do not call out an empty, missing, or weak author description as a warning.".to_string(),
+        "Prefer naming the part of the change that deserves deeper reading over giving a confident verdict.".to_string(),
+        "Set readingMode to scan.".to_string(),
+        "Use nextBestReadingAction for the single concrete place or question the reviewer should read next.".to_string(),
+        "Use confidenceReason for the grounded reason behind the confidence rating, including missing context when confidence is low or medium.".to_string(),
+        format!(
+            "Use understandingWarnings for up to {REVIEW_BRIEF_UNDERSTANDING_WARNINGS_MAX_ITEMS} missing-context or comprehension-debt warnings under {REVIEW_BRIEF_UNDERSTANDING_WARNING_MAX_CHARS} characters each."
+        ),
+        "Use risksQuestions for the single best next reading question, not a generic risk.".to_string(),
+        "When the PR is large, mixed-purpose, generated, or weakly explained, make the risk question point to the area where understanding is most likely to fail.".to_string(),
         format!(
             "briefParagraph must be one natural-prose paragraph under {REVIEW_BRIEF_PARAGRAPH_MAX_CHARS} characters: no bullets, no markdown, no newlines, and no section labels like Likely intent, Changes, Watch, or Risk."
         ),
@@ -317,6 +367,9 @@ fn build_review_brief_prompt_for_attempt(
         ),
         format!(
             "Use risksQuestions for exactly {REVIEW_BRIEF_RISKS_REQUIRED_ITEMS} concrete review risk, check, or unresolved question under {REVIEW_BRIEF_ITEM_MAX_CHARS} characters."
+        ),
+        format!(
+            "Keep nextBestReadingAction under {REVIEW_BRIEF_READING_ACTION_MAX_CHARS} characters and confidenceReason under {REVIEW_BRIEF_CONFIDENCE_REASON_MAX_CHARS} characters."
         ),
         format!(
             "Keep likelyIntent under {REVIEW_BRIEF_INTENT_MAX_CHARS} characters and warnings to at most {REVIEW_BRIEF_WARNINGS_MAX_ITEMS} hidden item."
@@ -342,6 +395,21 @@ fn build_review_brief_prompt_for_attempt(
 }
 
 fn build_prompt_context(input: &GenerateReviewBriefInput) -> Value {
+    let mut issue_texts = vec![input.title.as_str(), input.author_body.as_str()];
+    issue_texts.extend(input.comments.iter().map(|comment| comment.body.as_str()));
+    issue_texts.extend(
+        input
+            .latest_reviews
+            .iter()
+            .map(|review| review.body.as_str()),
+    );
+    issue_texts.extend(
+        input
+            .review_threads
+            .iter()
+            .flat_map(|thread| thread.comments.iter().map(|comment| comment.body.as_str())),
+    );
+
     json!({
         "repository": input.repository,
         "workingDirectory": input.working_directory,
@@ -377,6 +445,37 @@ fn build_prompt_context(input: &GenerateReviewBriefInput) -> Value {
                 "deletions": file.deletions,
             }))
             .collect::<Vec<_>>(),
+        "historyContext": {
+            "signals": input.review_memory.signals,
+            "limitations": input.review_memory.limitations,
+            "commitMessages": [],
+            "linkedIssues": crate::agents::prompt::linked_issue_refs(issue_texts),
+            "prComments": input
+                .comments
+                .iter()
+                .take(MAX_THREADS)
+                .map(|comment| json!({
+                    "authorLogin": comment.author_login,
+                    "createdAt": comment.created_at,
+                    "body": trim_text(&comment.body, MAX_COMMENT_BODY_CHARS),
+                }))
+                .collect::<Vec<_>>(),
+            "currentReviewThreadsForTouchedFiles": input
+                .review_threads
+                .iter()
+                .take(MAX_THREADS)
+                .map(|thread| json!({
+                    "path": thread.path,
+                    "line": thread.line,
+                    "diffSide": thread.diff_side,
+                    "subjectType": thread.subject_type,
+                    "isResolved": thread.is_resolved,
+                }))
+                .collect::<Vec<_>>(),
+            "olderReviewThreadsForTouchedFiles": [],
+            "recentChangesToTouchedFiles": [],
+            "knownPriorPatterns": [],
+        },
         "rawDiff": trim_text(&input.raw_diff, MAX_RAW_DIFF_CHARS),
         "parsedDiff": summarize_parsed_diff(&input.parsed_diff),
         "latestReviews": input
@@ -488,6 +587,28 @@ fn merge_review_brief(
         REVIEW_BRIEF_RISKS_REQUIRED_ITEMS,
         REVIEW_BRIEF_ITEM_MAX_CHARS,
     )?;
+    let next_best_reading_action = normalized_required_limited_text(
+        response.next_best_reading_action,
+        "nextBestReadingAction",
+        REVIEW_BRIEF_READING_ACTION_MAX_CHARS,
+    )?;
+    let confidence_reason = normalized_required_limited_text(
+        response.confidence_reason,
+        "confidenceReason",
+        REVIEW_BRIEF_CONFIDENCE_REASON_MAX_CHARS,
+    )?;
+    let understanding_warnings = normalize_optional_text_items(
+        response.understanding_warnings,
+        "understandingWarnings",
+        REVIEW_BRIEF_UNDERSTANDING_WARNING_MAX_CHARS,
+    )?;
+    if understanding_warnings.len() > REVIEW_BRIEF_UNDERSTANDING_WARNINGS_MAX_ITEMS {
+        return Err(compact_budget_error(format!(
+            "understandingWarnings returned {} items, max {}.",
+            understanding_warnings.len(),
+            REVIEW_BRIEF_UNDERSTANDING_WARNINGS_MAX_ITEMS
+        )));
+    }
     let warnings =
         normalize_optional_text_items(response.warnings, "warnings", REVIEW_BRIEF_ITEM_MAX_CHARS)?
             .into_iter()
@@ -513,10 +634,14 @@ fn merge_review_brief(
         generated_at_ms: now_ms(),
         code_version_key: input.code_version_key.clone(),
         confidence: response.confidence,
+        reading_mode: response.reading_mode,
         brief_paragraph,
         likely_intent,
         changed_summary,
         risks_questions,
+        next_best_reading_action,
+        confidence_reason,
+        understanding_warnings,
         warnings,
         related_file_paths,
         model,
@@ -662,6 +787,14 @@ fn map_file_context(file: &PullRequestFile) -> ReviewBriefFileContext {
     }
 }
 
+fn map_comment_context(comment: &PullRequestComment) -> CodeTourPullRequestCommentContext {
+    CodeTourPullRequestCommentContext {
+        author_login: comment.author_login.clone(),
+        body: trim_text(&comment.body, MAX_COMMENT_BODY_CHARS),
+        created_at: comment.created_at.clone(),
+    }
+}
+
 fn map_review_context(review: &PullRequestReview) -> CodeTourReviewContext {
     CodeTourReviewContext {
         author_login: review.author_login.clone(),
@@ -793,7 +926,7 @@ mod tests {
             review_brief_cache_key(&changed, CodeTourProvider::Codex)
         );
         assert!(
-            review_brief_cache_key(&first, CodeTourProvider::Codex).starts_with("review-brief-v2:")
+            review_brief_cache_key(&first, CodeTourProvider::Codex).starts_with("review-brief-v4:")
         );
     }
 
@@ -847,6 +980,12 @@ mod tests {
         assert!(prompt.contains("\"rawDiff\""));
         assert!(prompt.contains("\"parsedDiff\""));
         assert!(prompt.contains("src/session.rs"));
+        assert!(prompt.contains("scan-mode orientation only"));
+        assert!(prompt.contains("readingMode"));
+        assert!(prompt.contains("nextBestReadingAction"));
+        assert!(prompt.contains("understandingWarnings"));
+        assert!(prompt.contains("historyContext"));
+        assert!(prompt.contains("\"signals\": []"));
         assert!(prompt.contains("Use likelyIntent for the neutral inferred intent"));
         assert!(prompt.contains(
             "Do not call out an empty, missing, or weak author description as a warning"
@@ -885,10 +1024,14 @@ mod tests {
         let brief = merge_review_brief(
             ReviewBriefResponse {
                 confidence: ReviewBriefConfidence::High,
+                reading_mode: ReviewBriefReadingMode::Scan,
                 brief_paragraph: "This tightens session checks by requiring a token before allowing access; verify existing sessions still authenticate cleanly.".to_string(),
                 likely_intent: "Tighten session checks.".to_string(),
                 changed_summary: vec!["Adds a token requirement.".to_string()],
                 risks_questions: vec!["Verify existing sessions still work.".to_string()],
+                next_best_reading_action: "Read the session guard path before approval.".to_string(),
+                confidence_reason: "The diff shows the guard change directly.".to_string(),
+                understanding_warnings: vec!["Existing session behavior needs confirmation.".to_string()],
                 warnings: vec![
                     "Missing PR description.".to_string(),
                     "Generated file is large.".to_string(),
@@ -901,6 +1044,15 @@ mod tests {
         .expect("brief should merge");
 
         assert_eq!(brief.warnings, vec!["Generated file is large."]);
+        assert_eq!(brief.reading_mode, ReviewBriefReadingMode::Scan);
+        assert_eq!(
+            brief.next_best_reading_action,
+            "Read the session guard path before approval."
+        );
+        assert_eq!(
+            brief.understanding_warnings,
+            vec!["Existing session behavior needs confirmation."]
+        );
     }
 
     #[test]
@@ -917,10 +1069,15 @@ mod tests {
         let error = merge_review_brief(
             ReviewBriefResponse {
                 confidence: ReviewBriefConfidence::High,
+                reading_mode: ReviewBriefReadingMode::Scan,
                 brief_paragraph: "a".repeat(REVIEW_BRIEF_PARAGRAPH_MAX_CHARS + 1),
                 likely_intent: "Tighten session checks.".to_string(),
                 changed_summary: vec!["Adds a token requirement.".to_string()],
                 risks_questions: vec!["Verify existing sessions still work.".to_string()],
+                next_best_reading_action: "Read the session guard path before approval."
+                    .to_string(),
+                confidence_reason: "The diff shows the guard change directly.".to_string(),
+                understanding_warnings: Vec::new(),
                 warnings: Vec::new(),
                 related_file_paths: Vec::new(),
             },
@@ -947,6 +1104,7 @@ mod tests {
         let error = merge_review_brief(
             ReviewBriefResponse {
                 confidence: ReviewBriefConfidence::High,
+                reading_mode: ReviewBriefReadingMode::Scan,
                 brief_paragraph: "This tightens session checks by requiring a token before allowing access; verify existing sessions still authenticate cleanly.".to_string(),
                 likely_intent: "Tighten session checks.".to_string(),
                 changed_summary: vec![
@@ -955,6 +1113,9 @@ mod tests {
                     "Refreshes related checks.".to_string(),
                 ],
                 risks_questions: vec!["Verify existing sessions still work.".to_string()],
+                next_best_reading_action: "Read the session guard path before approval.".to_string(),
+                confidence_reason: "The diff shows the guard change directly.".to_string(),
+                understanding_warnings: Vec::new(),
                 warnings: Vec::new(),
                 related_file_paths: Vec::new(),
             },

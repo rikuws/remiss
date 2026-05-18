@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{semantic_review::RemissSemanticReview, structural_evidence::StructuralEvidencePack};
 
-pub const STACK_GENERATOR_VERSION: &str = "virtual-stacks-v4";
+pub const STACK_GENERATOR_VERSION: &str = "virtual-stacks-v5";
+pub const STACK_LAYER_TITLE_MAX_CHARS: usize = 56;
+pub const STACK_LAYER_TITLE_MAX_WORDS: usize = 10;
 
 pub type ReviewStackId = String;
 pub type ReviewStackLayerId = String;
@@ -505,4 +507,259 @@ pub fn stack_now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as i64)
         .unwrap_or_default()
+}
+
+pub fn normalize_stack_layer_title(value: &str, fallback: &str) -> String {
+    let mut title = strip_title_wrappers(&collapse_title_whitespace(value));
+    if title.is_empty() {
+        title = strip_title_wrappers(&collapse_title_whitespace(fallback));
+    }
+    if title.is_empty() {
+        title = "Stack layer".to_string();
+    }
+    truncate_title(&title, STACK_LAYER_TITLE_MAX_CHARS)
+}
+
+pub fn stack_layer_title_quality_error(value: &str) -> Option<&'static str> {
+    let raw = value.trim();
+    if raw.is_empty() {
+        return Some("missing title");
+    }
+    if raw.contains('\n') || raw.contains('\r') {
+        return Some("title must be one line");
+    }
+
+    let normalized = strip_title_wrappers(&collapse_title_whitespace(raw));
+    if normalized.is_empty() {
+        return Some("missing title");
+    }
+    if is_forbidden_stack_layer_title(&normalized) {
+        return Some("generic title");
+    }
+    if normalized.chars().count() > STACK_LAYER_TITLE_MAX_CHARS {
+        return Some("title must be 56 characters or fewer");
+    }
+    if title_word_count(&normalized) > STACK_LAYER_TITLE_MAX_WORDS {
+        return Some("title must be 10 words or fewer");
+    }
+    if normalized.chars().filter(|ch| *ch == ',').count() >= 3 {
+        return Some("title must not be a comma-separated symbol list");
+    }
+    if looks_like_sentence_title(&normalized) {
+        return Some("title must be a short label, not a sentence");
+    }
+    if looks_like_code_title(&normalized) {
+        return Some("title must not contain code-like syntax");
+    }
+
+    None
+}
+
+fn collapse_title_whitespace(value: &str) -> String {
+    let mut output = String::new();
+    let mut pending_space = false;
+    for ch in value.chars() {
+        if ch.is_control() || ch.is_whitespace() {
+            pending_space = !output.is_empty();
+            continue;
+        }
+        if pending_space {
+            output.push(' ');
+            pending_space = false;
+        }
+        output.push(ch);
+    }
+    output.trim().to_string()
+}
+
+fn strip_title_wrappers(value: &str) -> String {
+    let mut title = value.trim();
+    loop {
+        let stripped = title
+            .strip_prefix("**")
+            .and_then(|text| text.strip_suffix("**"))
+            .or_else(|| {
+                title
+                    .strip_prefix('`')
+                    .and_then(|text| text.strip_suffix('`'))
+            })
+            .or_else(|| {
+                title
+                    .strip_prefix('"')
+                    .and_then(|text| text.strip_suffix('"'))
+            })
+            .or_else(|| {
+                title
+                    .strip_prefix('\'')
+                    .and_then(|text| text.strip_suffix('\''))
+            });
+
+        let Some(next) = stripped else {
+            break;
+        };
+        let next = next.trim();
+        if next.is_empty() || next == title {
+            break;
+        }
+        title = next;
+    }
+    title.to_string()
+}
+
+fn truncate_title(value: &str, limit: usize) -> String {
+    if value.chars().count() <= limit {
+        return value.to_string();
+    }
+    if limit <= 3 {
+        return value.chars().take(limit).collect();
+    }
+    let truncated = value
+        .chars()
+        .take(limit - 3)
+        .collect::<String>()
+        .trim_end_matches(|ch: char| {
+            ch.is_whitespace() || matches!(ch, ',' | ';' | ':' | '-' | '/')
+        })
+        .to_string();
+    format!("{truncated}...")
+}
+
+fn title_word_count(value: &str) -> usize {
+    value.split_whitespace().count()
+}
+
+fn looks_like_sentence_title(value: &str) -> bool {
+    value.ends_with('.') || value.contains(". ")
+}
+
+fn looks_like_code_title(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    if [
+        "fn ",
+        "struct ",
+        "enum ",
+        "trait ",
+        "class ",
+        "interface ",
+        "impl ",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix))
+    {
+        return true;
+    }
+    value.contains("::")
+        || value.contains("=>")
+        || value.chars().any(|ch| {
+            matches!(
+                ch,
+                '{' | '}' | '[' | ']' | '(' | ')' | ';' | '=' | '<' | '>' | '\\'
+            )
+        })
+}
+
+fn is_forbidden_stack_layer_title(title: &str) -> bool {
+    let normalized = title
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    matches!(
+        normalized.as_str(),
+        "layer"
+            | "review layer"
+            | "misc"
+            | "misc changes"
+            | "remaining"
+            | "remaining changes"
+            | "other"
+            | "other files"
+            | "cleanup"
+            | "clean up"
+            | "imports"
+            | "update imports"
+            | "updates"
+            | "update files"
+            | "add changes"
+            | "implementation"
+            | "final changes"
+            | "everything else"
+            | "tests"
+            | "add tests"
+            | "update tests"
+            | "test coverage"
+            | "coverage"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        normalize_stack_layer_title, stack_layer_title_quality_error, STACK_LAYER_TITLE_MAX_CHARS,
+    };
+
+    #[test]
+    fn stack_layer_title_normalization_collapses_multiline_titles() {
+        assert_eq!(
+            normalize_stack_layer_title("Update config\nand deployment", "Fallback"),
+            "Update config and deployment"
+        );
+    }
+
+    #[test]
+    fn stack_layer_title_normalization_strips_wrappers_and_falls_back() {
+        assert_eq!(
+            normalize_stack_layer_title("  `Shortcut labels`  ", "Fallback"),
+            "Shortcut labels"
+        );
+        assert_eq!(
+            normalize_stack_layer_title("", "Review layer"),
+            "Review layer"
+        );
+    }
+
+    #[test]
+    fn stack_layer_title_normalization_caps_display_length() {
+        let title = normalize_stack_layer_title(
+            "This title is much too long to fit inside the fixed stack layer row safely",
+            "Fallback",
+        );
+        assert!(title.ends_with("..."));
+        assert!(title.chars().count() <= STACK_LAYER_TITLE_MAX_CHARS);
+    }
+
+    #[test]
+    fn stack_layer_title_quality_rejects_bad_shapes() {
+        assert_eq!(
+            stack_layer_title_quality_error("Config\naccount routing"),
+            Some("title must be one line")
+        );
+        assert_eq!(
+            stack_layer_title_quality_error(
+                "configuration, account, region, globalRegion, edgeRegion"
+            ),
+            Some("title must not be a comma-separated symbol list")
+        );
+        assert_eq!(
+            stack_layer_title_quality_error("fn configure_app(app: &mut App)"),
+            Some("title must not contain code-like syntax")
+        );
+        assert_eq!(
+            stack_layer_title_quality_error("Remaining changes"),
+            Some("generic title")
+        );
+    }
+
+    #[test]
+    fn stack_layer_title_quality_accepts_short_review_labels() {
+        assert_eq!(
+            stack_layer_title_quality_error("Tool discovery and bundled assets"),
+            None
+        );
+        assert_eq!(stack_layer_title_quality_error("Review action UI"), None);
+    }
 }

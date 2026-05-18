@@ -21,7 +21,10 @@ pub const MAX_SNIPPET_CHARS: usize = 500;
 pub const BASE_INSTRUCTIONS: &[&str] = &[
     "You are generating a guided code tour for a GitHub pull request.",
     "Act like a senior pair programmer walking a reviewer through the change.",
-    "Assume the reviewer already knows the codebase well. Be direct, useful, and never condescending.",
+    "Assume the reviewer knows the product and engineering context, but does not yet have this change loaded into their working memory.",
+    "Optimize for rebuilding the reviewer's mental model, not for summarizing the diff.",
+    "Separate what is visible from the diff, what is inferred from surrounding code, and what remains unknown.",
+    "Be direct, useful, and never condescending.",
     "Stay grounded in the provided pull-request data and the provided local checkout.",
     "Do not edit files, propose patches, or imply that you changed the code.",
     "Finish the whole task in this turn. Do not wait for more instructions.",
@@ -39,6 +42,15 @@ pub const BASE_INSTRUCTIONS: &[&str] = &[
     "Return JSON only with no markdown fences or extra commentary.",
     "Always use the provided candidate step ids. Never invent ids.",
     "Explain the whole pull request first, then organize the changed files into related sections.",
+    "Structure the tour around code reading, not diff summarization.",
+    "For each important section, cover the deepest applicable reading levels:",
+    "- mechanics: what changed syntactically or structurally",
+    "- behavior: what state, data flow, control flow, invariants, or error handling changed",
+    "- intent: what problem, trade-off, or assumption the change appears to encode",
+    "- history/context: prior discussion, review thread, commit, nearby pattern, or older behavior when provided or verified",
+    "Do not claim intent or history unless supported by PR text, review discussion, tests, commit context, or verified surrounding code.",
+    "Use historyContext.signals only as evidence-backed context. Do not treat a prior signal as current truth if the touched code appears to have changed since the evidence.",
+    "When historyContext conflicts with current code, surface that conflict as an open question instead of resolving it silently.",
     "Use the section stepIds to cover the whole changeset. Reuse each candidate file step at most once across sections.",
     "Each section is an AI-authored semantic change group: title it as a reviewer-facing story, not as a path bucket or generic diff kind.",
     "Each section must choose exactly one category from sectionCategoryCatalog and one priority from sectionPriorityCatalog.",
@@ -50,6 +62,10 @@ pub const BASE_INSTRUCTIONS: &[&str] = &[
     "Treat each JSON section as one visible GPUI group: section.title is the plain title, section.summary is the short gist, section.detail is the brief explanation, and section.stepIds identifies the diff blocks rendered underneath.",
     "Keep section prose short, scannable, and grounded in the provided diff. Prefer simple words and one main idea per sentence.",
     "Do not invent intent that is not supported by the pull request context, changed files, review threads, or local checkout.",
+    "Use reviewPoints for critical-review checks: invariants, edge cases, assumptions, behavioral regressions, and generated-code verification.",
+    "Use openQuestions for missing intent, missing historical context, ambiguous behavior, or unsupported assumptions.",
+    "Be selective, but do not overstate understanding. If the supplied context is not enough to reconstruct intent, say so in openQuestions.",
+    "Prefer a smaller number of well-grounded sections over broad coverage that hides uncertainty.",
     "For new or materially changed APIs, helpers, components, types, or commands, include concrete verified callsites when they help teach the change.",
     "Only include callsites you can support from the provided checkout. Keep callsite snippets compact.",
     "Surface unresolved review concerns in openQuestions when appropriate.",
@@ -84,6 +100,8 @@ pub fn build_stack_planning_prompt(input_json: &Value) -> String {
         "",
         "A good stack is an ordered sequence of conceptual, independently reviewable, dependency-respecting layers.",
         "Each layer must answer one clear review question and contain at least one substantive change.",
+        "Each layer must be an understanding unit: after reading it, the reviewer should have one coherent piece of the change loaded into memory.",
+        "Prefer layers that separate reading modes: foundation/context, behavior change, integration impact, critical risk surface, and verification/tests.",
         "Do not create layers from superficial diff categories such as imports, whitespace, comments, or small cleanup unless the whole layer is a coherent mechanical formatting/comment-only change.",
         "",
         "Critical rules:",
@@ -107,7 +125,12 @@ pub fn build_stack_planning_prompt(input_json: &Value) -> String {
         "- The final layer must not become a garbage bucket. If the last layer contains more than 40% of substantive atoms or more than two unrelated concerns, split it.",
         "- Use manual_review_atom_ids for generated, binary, huge, ambiguous, or low-confidence atoms.",
         "- Preserve reviewer trust by making uncertainty explicit.",
+        "- Do not hide intention gaps. If a layer's purpose cannot be reconstructed from PR text, atoms, semantic evidence, structural evidence, tests, commits, or discussions, lower confidence and add a warning.",
+        "- Use review_question to ask the deepest useful reading question for that layer, not a generic validation task.",
+        "- Favor layers that help a reviewer compare the implementation with their own expected design, especially for generated or mechanically large changes.",
         "- Prefer fewer coherent layers over many artificial layers.",
+        "- Layer titles are compact UI labels: one line, 4-8 words preferred, 56 characters maximum, no full sentence, no code snippet, and no comma-separated symbol/key list.",
+        "- Put explanation, scope, verification detail, and uncertainty in review_question, summary, rationale, or warnings rather than title.",
         "",
         "Choose the dominant decomposition pattern:",
         "- dependency_chain: foundation/types/schema -> core logic -> integration/API -> UI -> broad tests/docs",
@@ -116,6 +139,7 @@ pub fn build_stack_planning_prompt(input_json: &Value) -> String {
         "- vertical_feature_slices when independent subfeatures are each reviewable end-to-end",
         "- risk_isolation",
         "- reviewer_boundary",
+        "- comprehension_first: context/foundation -> behavior -> impact/callsites -> edge cases/tests -> historical or unresolved questions",
         "",
         "Substantive atoms include type/model/schema/API contracts, core behavior, algorithms, data/control flow, structural refactors, test behavior, integration/wiring, UI behavior, runtime config, generated code when it is the point of the layer, and version bumps.",
         "Non-substantive atoms include imports, formatting, comment-only edits, small rename fallout, mechanical call-site noise, and file reordering. Attach non-substantive atoms to the substantive atom that caused them.",
@@ -136,12 +160,12 @@ pub fn build_stack_planning_prompt(input_json: &Value) -> String {
         "",
         "Required output schema:",
         r#"{
-  "strategy": "dependency_chain | refactor_then_change | mechanical_then_use | vertical_feature_slices | risk_isolation | reviewer_boundary | semantic_virtual_stack | hybrid_virtual_stack | commit_virtual_stack | flat_manual_review",
+  "strategy": "dependency_chain | refactor_then_change | mechanical_then_use | vertical_feature_slices | risk_isolation | reviewer_boundary | comprehension_first | semantic_virtual_stack | hybrid_virtual_stack | commit_virtual_stack | flat_manual_review",
   "confidence": "high | medium | low",
   "rationale": "short explanation",
   "layers": [
     {
-      "title": "imperative, specific, meaningful layer title",
+      "title": "one-line review label, <=56 chars, 4-8 words, no code or comma list",
       "review_question": "what the reviewer should verify",
       "summary": "what this layer contains",
       "rationale": "why these atoms belong together and why this layer appears here",
@@ -210,12 +234,99 @@ pub fn trim_text(value: &str, max_length: usize) -> String {
     format!("{}…", truncated.trim_end())
 }
 
+pub fn linked_issue_refs<'a>(texts: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut refs = Vec::<String>::new();
+    let mut seen = std::collections::BTreeSet::<String>::new();
+
+    for text in texts {
+        for token in text.split_whitespace() {
+            let trimmed = token.trim_matches(|ch: char| {
+                matches!(
+                    ch,
+                    ',' | '.' | ';' | ':' | ')' | '(' | '[' | ']' | '{' | '}' | '"' | '\'' | '`'
+                )
+            });
+            for issue_ref in issue_refs_from_token(trimmed) {
+                if seen.insert(issue_ref.clone()) {
+                    refs.push(issue_ref);
+                    if refs.len() >= 12 {
+                        return refs;
+                    }
+                }
+            }
+        }
+    }
+
+    refs
+}
+
+fn issue_refs_from_token(token: &str) -> Vec<String> {
+    let mut refs = Vec::new();
+    let token = token.trim();
+    if token.is_empty() {
+        return refs;
+    }
+
+    if let Some(issue) = token.strip_prefix("https://github.com/") {
+        let parts = issue.split('/').collect::<Vec<_>>();
+        if parts.len() >= 4 && matches!(parts[2], "issues" | "pull") {
+            let number = leading_digits(parts[3]);
+            if !number.is_empty() {
+                refs.push(format!("{}/{}#{}", parts[0], parts[1], number));
+            }
+        }
+    }
+
+    for (index, _) in token.match_indices('#') {
+        let prefix = &token[..index];
+        let rest = &token[index + 1..];
+        let number = leading_digits(rest);
+        if number.is_empty() {
+            continue;
+        }
+        let repo_prefix = prefix
+            .rsplit_once(char::is_whitespace)
+            .map(|(_, suffix)| suffix)
+            .unwrap_or(prefix)
+            .trim_matches(|ch: char| matches!(ch, '(' | '[' | '{' | '"' | '\''));
+        if repo_prefix.contains('/') && !repo_prefix.ends_with('/') {
+            refs.push(format!("{repo_prefix}#{number}"));
+        } else {
+            refs.push(format!("#{number}"));
+        }
+    }
+
+    refs
+}
+
+fn leading_digits(value: &str) -> &str {
+    let end = value
+        .char_indices()
+        .find_map(|(index, ch)| (!ch.is_ascii_digit()).then_some(index))
+        .unwrap_or(value.len());
+    &value[..end]
+}
+
 fn build_prompt_context(input: &GenerateCodeTourInput) -> Value {
     let overview_step = input.candidate_steps.first();
     let file_steps: Vec<&TourStep> = input.candidate_steps.iter().skip(1).collect();
 
     let mut prioritized = input.review_threads.clone();
     prioritized.sort_by_key(|thread| thread.is_resolved);
+    let mut issue_texts = vec![input.title.as_str(), input.body.as_str()];
+    issue_texts.extend(input.comments.iter().map(|comment| comment.body.as_str()));
+    issue_texts.extend(
+        input
+            .latest_reviews
+            .iter()
+            .map(|review| review.body.as_str()),
+    );
+    issue_texts.extend(
+        input
+            .review_threads
+            .iter()
+            .flat_map(|thread| thread.comments.iter().map(|comment| comment.body.as_str())),
+    );
 
     json!({
         "repository": input.repository,
@@ -259,6 +370,36 @@ fn build_prompt_context(input: &GenerateCodeTourInput) -> Value {
                 "body": trim_text(&review.body, MAX_REVIEW_BODY_CHARS),
             }))
             .collect::<Vec<_>>(),
+        "historyContext": {
+            "signals": input.review_memory.signals,
+            "limitations": input.review_memory.limitations,
+            "commitMessages": [],
+            "linkedIssues": linked_issue_refs(issue_texts),
+            "prComments": input
+                .comments
+                .iter()
+                .take(MAX_THREADS)
+                .map(|comment| json!({
+                    "authorLogin": comment.author_login,
+                    "createdAt": comment.created_at,
+                    "body": trim_text(&comment.body, MAX_COMMENT_BODY_CHARS),
+                }))
+                .collect::<Vec<_>>(),
+            "currentReviewThreadsForTouchedFiles": prioritized
+                .iter()
+                .take(MAX_THREADS)
+                .map(|thread| json!({
+                    "path": thread.path,
+                    "line": thread.line,
+                    "diffSide": thread.diff_side,
+                    "subjectType": thread.subject_type,
+                    "isResolved": thread.is_resolved,
+                }))
+                .collect::<Vec<_>>(),
+            "olderReviewThreadsForTouchedFiles": [],
+            "recentChangesToTouchedFiles": [],
+            "knownPriorPatterns": [],
+        },
         "reviewThreads": prioritized
             .iter()
             .take(MAX_THREADS)
@@ -390,8 +531,10 @@ mod tests {
             changed_files: 3,
             commits_count: 2,
             files: vec![],
+            comments: vec![],
             latest_reviews: vec![],
             review_threads: vec![],
+            review_memory: crate::review_memory::ReviewMemoryPromptContext::default(),
             candidate_steps: vec![TourStep {
                 id: "overview".to_string(),
                 kind: "overview".to_string(),
@@ -421,6 +564,24 @@ mod tests {
         assert!(prompt.contains("\"value\": \"auth-security\""));
         assert!(prompt.contains("sectionPriorityCatalog"));
         assert!(prompt.contains("\"value\": \"high\""));
+        assert!(prompt.contains("mental model"));
+        assert!(prompt.contains("mechanics"));
+        assert!(prompt.contains("behavior"));
+        assert!(prompt.contains("intent"));
+        assert!(prompt.contains("history"));
+        assert!(prompt.contains("do not overstate understanding"));
+        assert!(prompt.contains("historyContext"));
+        assert!(prompt.contains("\"signals\": []"));
+    }
+
+    #[test]
+    fn stack_planning_prompt_uses_understanding_units() {
+        let prompt = build_stack_planning_prompt(&json!({ "atoms": [] }));
+
+        assert!(prompt.contains("understanding unit"));
+        assert!(prompt.contains("deepest useful reading question"));
+        assert!(prompt.contains("comprehension_first"));
+        assert!(prompt.contains("Do not hide intention gaps"));
     }
 
     #[test]

@@ -232,7 +232,10 @@ fn collect_changed_symbols(
                         let result =
                             search_symbol_locations(checkout_root, &symbol, MAX_RG_LOCATIONS);
                         if let Some(error) = result.warning {
-                            warnings.push(format!("{}: {error}", layer.title));
+                            warnings.push(format!(
+                                "{}: {error}",
+                                normalize_stack_layer_title(&layer.title, "Stack layer")
+                            ));
                         }
                         (result.locations, result.reference_count, result.strategy)
                     }
@@ -918,7 +921,7 @@ pub(super) fn items_from_semantic_layers(
         .iter()
         .map(|layer| {
             ReviewPartnerItem::new(
-                layer.title.clone(),
+                normalize_stack_layer_title(&layer.title, "Stack layer"),
                 default_if_empty(layer.summary.clone(), &layer.rationale),
                 layer.file_paths.first().cloned(),
                 None,

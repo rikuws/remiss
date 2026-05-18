@@ -70,6 +70,16 @@ impl AgentJsonPromptOptions {
             copilot_inactivity_timeout_ms: 180_000,
         }
     }
+
+    pub const fn review_memory() -> Self {
+        Self {
+            task_label: "Review Memory candidate extraction",
+            codex_overall_timeout_ms: 600_000,
+            codex_inactivity_timeout_ms: 180_000,
+            copilot_overall_timeout_ms: 600_000,
+            copilot_inactivity_timeout_ms: 180_000,
+        }
+    }
 }
 
 pub fn run_json_prompt(

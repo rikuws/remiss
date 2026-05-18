@@ -64,6 +64,7 @@ mod review_brief;
 mod review_file_header;
 mod review_file_tree;
 mod review_intelligence;
+mod review_memory;
 mod review_partner;
 mod review_queue;
 mod review_routes;

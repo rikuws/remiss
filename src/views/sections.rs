@@ -8,12 +8,12 @@ use crate::shader_surface::{
 };
 use crate::state::*;
 use crate::theme::*;
-use crate::{github, notifications};
+use crate::{github, notifications, review_memory};
 
 use super::diff_view::{ensure_structural_diff_warmup_started, warm_structural_diffs_flow};
 use super::settings::render_settings_view;
 use super::workspace_sync::trigger_sync_workspace;
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 const DETAIL_AUTO_REFRESH_TTL_MS: i64 = 5 * 60 * 1000;
 const OVERVIEW_CONTENT_MAX_WIDTH: f32 = 1440.0;
@@ -2423,6 +2423,7 @@ pub fn open_pull_request(
                     Ok(snapshot) => detail_snapshot_needs_background_refresh(snapshot),
                     Err(_) => true,
                 };
+                let cached_memory_snapshot = cached_result.as_ref().ok().cloned();
 
                 model
                     .update(cx, |s, cx| {
@@ -2442,6 +2443,10 @@ pub fn open_pull_request(
                         cx.notify();
                     })
                     .ok();
+
+                if let Some(snapshot) = cached_memory_snapshot {
+                    record_review_memory_snapshot(cache.clone(), snapshot, cx).await;
+                }
 
                 warm_structural_diffs_flow(model.clone(), cx).await;
                 refresh_brief_if_active_overview(model.clone(), &detail_key, cx).await;
@@ -2479,6 +2484,10 @@ pub fn open_pull_request(
                     }
                 })
                 .await;
+            let sync_memory_snapshot = sync_result
+                .as_ref()
+                .ok()
+                .map(|(snapshot, _)| snapshot.clone());
 
             model
                 .update(cx, |s, cx| {
@@ -2504,10 +2513,29 @@ pub fn open_pull_request(
                 })
                 .ok();
 
+            if let Some(snapshot) = sync_memory_snapshot {
+                record_review_memory_snapshot(cache.clone(), snapshot, cx).await;
+            }
+
             warm_structural_diffs_flow(model.clone(), cx).await;
             refresh_brief_if_active_overview(model.clone(), &detail_key, cx).await;
         })
         .detach();
+}
+
+async fn record_review_memory_snapshot(
+    cache: Arc<crate::cache::CacheStore>,
+    snapshot: github::PullRequestDetailSnapshot,
+    cx: &mut AsyncWindowContext,
+) {
+    let Some(detail) = snapshot.detail else {
+        return;
+    };
+
+    let _ = cx
+        .background_executor()
+        .spawn(async move { review_memory::record_pull_request_memory(cache.as_ref(), &detail) })
+        .await;
 }
 
 async fn refresh_brief_if_active_overview(

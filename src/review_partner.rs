@@ -14,16 +14,22 @@ use tree_sitter::{Node, Parser};
 use crate::{
     agents::{self, jsonrepair::parse_tolerant, AgentJsonPromptOptions},
     cache::CacheStore,
-    code_tour::{find_parsed_diff_file, tour_code_version_key, CodeTourProvider},
+    code_tour::{
+        find_parsed_diff_file, tour_code_version_key, CodeTourProvider,
+        CodeTourPullRequestCommentContext, CodeTourReviewCommentContext, CodeTourReviewContext,
+        CodeTourReviewThreadContext,
+    },
     diff::{DiffLineKind, ParsedDiffFile},
-    github::PullRequestDetail,
+    github::{PullRequestComment, PullRequestDetail, PullRequestReview, PullRequestReviewThread},
     lsp::{LspSessionManager, LspTextDocumentRequest},
+    review_memory::{ReviewMemoryPromptContext, ReviewMemorySignal, ReviewMemoryStatus},
     semantic_review::{
         summarize_semantic_review, RemissSemanticFocusSummary, RemissSemanticLayerSummary,
         RemissSemanticReview, RemissSemanticReviewSummary,
     },
     stacks::model::{
-        ChangeAtom, LineRange, ReviewStack, ReviewStackLayer, STACK_GENERATOR_VERSION,
+        normalize_stack_layer_title, ChangeAtom, LineRange, ReviewStack, ReviewStackLayer,
+        STACK_GENERATOR_VERSION,
     },
     structural_evidence::{StructuralEvidencePack, StructuralEvidenceStatus},
 };
@@ -35,10 +41,10 @@ mod tests;
 
 use self::context::*;
 
-pub const REVIEW_PARTNER_GENERATOR_VERSION: &str = "review-partner-v15";
+pub const REVIEW_PARTNER_GENERATOR_VERSION: &str = "review-partner-v19";
 pub const REVIEW_PARTNER_CONTEXT_VERSION: &str = "review-partner-context-v5";
 
-const REVIEW_PARTNER_CACHE_KEY_PREFIX: &str = "review-partner-v15";
+const REVIEW_PARTNER_CACHE_KEY_PREFIX: &str = "review-partner-v19";
 const MAX_PARTNER_LAYERS: usize = 24;
 const MAX_LAYER_ATOMS: usize = 32;
 pub const MAX_FOCUS_RECORDS: usize = 160;
@@ -50,8 +56,10 @@ const MAX_REFERENCES_PER_SYMBOL: usize = 8;
 const MAX_SIMILAR_LOCATIONS_PER_LAYER: usize = 8;
 const MAX_STYLE_NOTES_PER_LAYER: usize = 5;
 const MAX_SECTION_ITEMS: usize = 8;
+const MAX_COMMENTS_PER_THREAD: usize = 3;
 const MAX_BRIEF_TEXT_CHARS: usize = 1200;
 const MAX_ITEM_TEXT_CHARS: usize = 260;
+const MAX_HISTORY_ITEM_TEXT_CHARS: usize = 1_000;
 const MAX_LIMITATION_TEXT_CHARS: usize = 500;
 const MAX_PROMPT_SNIPPET_CHARS: usize = 260;
 const MAX_RG_LOCATIONS: usize = 18;
@@ -85,6 +93,8 @@ pub struct GeneratedReviewPartnerContext {
     pub structural_evidence: StructuralEvidencePack,
     #[serde(default)]
     pub semantic_review: Option<RemissSemanticReviewSummary>,
+    #[serde(default)]
+    pub review_memory: ReviewMemoryPromptContext,
     pub context: ReviewPartnerContextPack,
     pub layers: Vec<ReviewPartnerLayer>,
     #[serde(default)]
@@ -166,6 +176,12 @@ pub struct ReviewPartnerFocusRecord {
     pub codebase_fit: ReviewPartnerCodebaseFit,
     #[serde(default)]
     pub sections: Vec<ReviewPartnerFocusSection>,
+    #[serde(default)]
+    pub understanding_checkpoints: Vec<ReviewPartnerItem>,
+    #[serde(default)]
+    pub assumptions: Vec<ReviewPartnerItem>,
+    #[serde(default)]
+    pub history_signals: Vec<ReviewPartnerItem>,
     #[serde(default)]
     pub limitations: Vec<String>,
     pub generated_at_ms: i64,
@@ -262,9 +278,19 @@ impl ReviewPartnerItem {
         path: Option<String>,
         line: Option<usize>,
     ) -> Self {
+        Self::new_with_limits(title, detail, path, line, MAX_ITEM_TEXT_CHARS)
+    }
+
+    fn new_with_limits(
+        title: impl Into<String>,
+        detail: impl Into<String>,
+        path: Option<String>,
+        line: Option<usize>,
+        detail_max_length: usize,
+    ) -> Self {
         Self {
             title: limit_text(title.into(), MAX_ITEM_TEXT_CHARS),
-            detail: limit_text(detail.into(), MAX_ITEM_TEXT_CHARS),
+            detail: limit_text(detail.into(), detail_max_length),
             path: path.filter(|path| !path.trim().is_empty()),
             line: line.filter(|line| *line > 0),
         }
@@ -369,9 +395,13 @@ pub struct GenerateReviewPartnerInput {
     pub url: String,
     pub base_ref_name: String,
     pub head_ref_name: String,
+    pub comments: Vec<CodeTourPullRequestCommentContext>,
+    pub latest_reviews: Vec<CodeTourReviewContext>,
+    pub review_threads: Vec<CodeTourReviewThreadContext>,
     pub stack: ReviewStack,
     pub structural_evidence: StructuralEvidencePack,
     pub semantic_review: Option<RemissSemanticReviewSummary>,
+    pub review_memory: ReviewMemoryPromptContext,
     pub context: ReviewPartnerContextPack,
     pub focus_targets: Vec<ReviewPartnerFocusTarget>,
 }
@@ -457,6 +487,12 @@ struct ReviewPartnerFocusRecordResponse {
     codebase_fit: Option<ReviewPartnerCodebaseFitResponse>,
     #[serde(default)]
     sections: Vec<ReviewPartnerFocusSectionResponse>,
+    #[serde(default)]
+    understanding_checkpoints: Vec<ReviewPartnerItemResponse>,
+    #[serde(default)]
+    assumptions: Vec<ReviewPartnerItemResponse>,
+    #[serde(default)]
+    history_signals: Vec<ReviewPartnerItemResponse>,
     #[serde(default)]
     limitations: Vec<String>,
 }
@@ -577,6 +613,7 @@ pub fn fallback_review_partner_context(
         stack: input.stack.clone(),
         structural_evidence: input.structural_evidence.clone(),
         semantic_review: input.semantic_review.clone(),
+        review_memory: input.review_memory.clone(),
         context: input.context.clone(),
         layers: input
             .stack
@@ -627,9 +664,27 @@ pub fn build_review_partner_generation_input(
         url: detail.url.clone(),
         base_ref_name: detail.base_ref_name.clone(),
         head_ref_name: detail.head_ref_name.clone(),
+        comments: detail
+            .comments
+            .iter()
+            .take(MAX_PARTNER_LAYERS)
+            .map(map_comment_context)
+            .collect(),
+        latest_reviews: detail
+            .latest_reviews
+            .iter()
+            .take(MAX_PARTNER_LAYERS)
+            .map(map_review_context)
+            .collect(),
+        review_threads: prioritize_review_threads(&detail.review_threads)
+            .into_iter()
+            .take(MAX_PARTNER_LAYERS)
+            .map(|thread| map_thread_context(&thread))
+            .collect(),
         stack,
         structural_evidence,
         semantic_review,
+        review_memory: ReviewMemoryPromptContext::default(),
         context,
         focus_targets,
     }
@@ -649,6 +704,52 @@ pub fn build_review_partner_request_key(
         STACK_GENERATOR_VERSION,
         REVIEW_PARTNER_CONTEXT_VERSION,
     )
+}
+
+fn map_comment_context(comment: &PullRequestComment) -> CodeTourPullRequestCommentContext {
+    CodeTourPullRequestCommentContext {
+        author_login: comment.author_login.clone(),
+        body: trim_text(&comment.body, MAX_PROMPT_SNIPPET_CHARS),
+        created_at: comment.created_at.clone(),
+    }
+}
+
+fn map_review_context(review: &PullRequestReview) -> CodeTourReviewContext {
+    CodeTourReviewContext {
+        author_login: review.author_login.clone(),
+        state: review.state.clone(),
+        body: trim_text(&review.body, MAX_PROMPT_SNIPPET_CHARS),
+        submitted_at: review.submitted_at.clone(),
+    }
+}
+
+fn map_thread_context(thread: &PullRequestReviewThread) -> CodeTourReviewThreadContext {
+    CodeTourReviewThreadContext {
+        path: thread.path.clone(),
+        line: thread.line.or(thread.original_line),
+        diff_side: if thread.diff_side.trim().is_empty() {
+            thread.start_diff_side.clone()
+        } else {
+            Some(thread.diff_side.clone())
+        },
+        is_resolved: thread.is_resolved,
+        subject_type: thread.subject_type.clone(),
+        comments: thread
+            .comments
+            .iter()
+            .take(MAX_COMMENTS_PER_THREAD)
+            .map(|comment| CodeTourReviewCommentContext {
+                author_login: comment.author_login.clone(),
+                body: trim_text(&comment.body, MAX_PROMPT_SNIPPET_CHARS),
+            })
+            .collect(),
+    }
+}
+
+fn prioritize_review_threads(threads: &[PullRequestReviewThread]) -> Vec<PullRequestReviewThread> {
+    let mut prioritized = threads.to_vec();
+    prioritized.sort_by_key(|thread| thread.is_resolved);
+    prioritized
 }
 
 pub fn review_partner_cache_key(detail: &PullRequestDetail, provider: CodeTourProvider) -> String {
@@ -689,13 +790,21 @@ pub fn build_review_partner_prompt(input: &GenerateReviewPartnerInput) -> String
 
     [
         "You are generating compact code explanation context for Remiss, a read-only pull request review IDE.",
-        "The goal is explaining the scoped code. Produce code explanations, not review prompts or assignments.",
+        "The goal is explaining the scoped code. Produce code explanations and understanding checkpoints, not review prompts or assignments.",
         "The virtual stack layers are already validated. Preserve layer order, layer IDs, and atom coverage.",
         "Avoid checklists, verdict tables, evidence ledgers, pass/fail reports, tutorials, walkthroughs, and generic guides.",
         "Avoid emoji, markdown headings, decorative labels, code fences, and code sketches.",
         "Return compact right-rail explanation the reader cannot infer from the visible diff alone: concrete stack-layer summary, removed-code impact, similar existing code, grounded codebase-fit mismatch, and concrete implementation concerns when supported.",
+        "Use historyContext.signals only as evidence-backed review memory. Do not treat prior signals as current truth when the current code contradicts them.",
+        "When historyContext conflicts with current code, surface the conflict in assumptions, historySignals, or limitations instead of resolving it silently.",
         "Generate focusRecords for the supplied focusTargets. Each focus record explains one stack layer, not one diff hunk.",
         "Each focus record must include one complete concrete summary paragraph that explains what changed in this stack layer, how the code behaves, and why this layer is relevant.",
+        "Include only understandingCheckpoints that help the reviewer understand or verify the code, not generic review advice.",
+        "A checkpoint should name the concrete invariant, edge case, assumption, or codebase pattern the reviewer should keep in mind.",
+        "Use assumptions for inferred intent or behavior that is plausible but not directly proven by the supplied context.",
+        "Use historySignals only for prior PRs, older behavior, supplied historyContext.signals, or verified historical context. Do not turn discussion from the current pull request into History rows.",
+        "When explaining a layer, distinguish visible behavior from inferred intent and from unverifiable history.",
+        "If generated, mechanical, or broad AI-assisted changes are present, call out the human verification surface: edge cases, invariants, and callsites that cannot be trusted from generation alone.",
         "Write the summary as factual code explanation, never as a question, instruction, checklist item, or review task.",
         "Rewrite any question-shaped draft into a declarative explanation before returning JSON.",
         "Never end a summary with an ellipsis.",
@@ -775,7 +884,15 @@ fn merge_review_partner(
         .map(|target| {
             response_focus_records
                 .remove(&target.key)
-                .map(|record| merge_focus_record(target, record, &input.context))
+                .map(|record| {
+                    merge_focus_record(
+                        target,
+                        record,
+                        &input.context,
+                        &input.stack,
+                        &input.review_memory,
+                    )
+                })
                 .unwrap_or_else(|| fallback_focus_record(input, target, None))
         })
         .collect::<Vec<_>>();
@@ -796,6 +913,7 @@ fn merge_review_partner(
         stack: input.stack.clone(),
         structural_evidence: input.structural_evidence.clone(),
         semantic_review: input.semantic_review.clone(),
+        review_memory: input.review_memory.clone(),
         context: input.context.clone(),
         layers,
         focus_targets: input.focus_targets.clone(),
@@ -812,7 +930,7 @@ fn merge_layer(
     let _legacy_usage_context = response.usage_context;
     ReviewPartnerLayer {
         layer_id: layer.id.clone(),
-        title: layer.title.clone(),
+        title: normalize_stack_layer_title(&layer.title, "Stack layer"),
         brief: default_if_empty(response.brief, &fallback.brief),
         changed_items: normalize_items_or(response.changed_items, fallback.changed_items),
         removed_items: normalize_items_or(response.removed_items, fallback.removed_items),
@@ -848,7 +966,7 @@ fn fallback_layer(
 
     ReviewPartnerLayer {
         layer_id: layer.id.clone(),
-        title: layer.title.clone(),
+        title: normalize_stack_layer_title(&layer.title, "Stack layer"),
         brief: fallback_layer_brief(layer, context),
         changed_items: context
             .map(items_from_semantic_focus)
@@ -1049,6 +1167,8 @@ fn merge_focus_record(
     target: &ReviewPartnerFocusTarget,
     response: ReviewPartnerFocusRecordResponse,
     context: &ReviewPartnerContextPack,
+    stack: &ReviewStack,
+    review_memory: &ReviewMemoryPromptContext,
 ) -> ReviewPartnerFocusRecord {
     let _legacy_usage_context = normalize_usage_groups(response.usage_context);
     let (sections, legacy_codebase_fit_items) = normalize_focus_sections(response.sections);
@@ -1062,6 +1182,11 @@ fn merge_focus_record(
         .map(|summary| normalize_focus_summary(target, &summary))
         .filter(|summary| !summary.trim().is_empty())
         .unwrap_or_else(|| target.title.clone());
+    let history_signals = merge_history_signals(
+        review_memory_history_items_for_target(target, stack, review_memory),
+        normalize_items(response.history_signals),
+    );
+
     ReviewPartnerFocusRecord {
         key: target.key.clone(),
         title: default_if_empty(response.title, &target.title),
@@ -1075,6 +1200,9 @@ fn merge_focus_record(
         usage_context,
         codebase_fit,
         sections,
+        understanding_checkpoints: normalize_items(response.understanding_checkpoints),
+        assumptions: normalize_items(response.assumptions),
+        history_signals,
         limitations: normalize_text_items(response.limitations),
         generated_at_ms: now_ms(),
     }
@@ -1171,7 +1299,8 @@ pub fn fallback_focus_record(
     }
 
     let mut limitations = fallback_layer
-        .map(|layer| layer.limitations)
+        .as_ref()
+        .map(|layer| layer.limitations.clone())
         .unwrap_or_default();
     if let Some(warning) = warning {
         limitations.push(warning);
@@ -1190,9 +1319,175 @@ pub fn fallback_focus_record(
             .filter(|section| !section.items.is_empty())
             .take(MAX_FOCUS_SECTIONS)
             .collect(),
+        understanding_checkpoints: fallback_understanding_checkpoints(
+            target,
+            fallback_layer.as_ref(),
+        ),
+        assumptions: Vec::new(),
+        history_signals: review_memory_history_items_for_target(
+            target,
+            &input.stack,
+            &input.review_memory,
+        ),
         limitations: limitations.into_iter().take(MAX_SECTION_ITEMS).collect(),
         generated_at_ms: now_ms(),
     }
+}
+
+fn fallback_understanding_checkpoints(
+    target: &ReviewPartnerFocusTarget,
+    layer: Option<&ReviewPartnerLayer>,
+) -> Vec<ReviewPartnerItem> {
+    let Some(layer) = layer else {
+        return Vec::new();
+    };
+
+    let mut items = focus_items_for_target(target, &layer.concerns);
+    items.extend(focus_items_for_target(target, &layer.codebase_fit));
+    items.truncate(MAX_SECTION_ITEMS);
+    items
+}
+
+fn review_memory_history_items_for_target(
+    target: &ReviewPartnerFocusTarget,
+    stack: &ReviewStack,
+    review_memory: &ReviewMemoryPromptContext,
+) -> Vec<ReviewPartnerItem> {
+    review_memory
+        .signals
+        .iter()
+        .filter(|signal| review_memory_signal_matches_target(signal, target, stack))
+        .map(review_memory_signal_item)
+        .take(MAX_SECTION_ITEMS)
+        .collect()
+}
+
+fn review_memory_signal_matches_target(
+    signal: &ReviewMemorySignal,
+    target: &ReviewPartnerFocusTarget,
+    stack: &ReviewStack,
+) -> bool {
+    let signal_path = signal
+        .path
+        .as_deref()
+        .or_else(|| signal.scope.path())
+        .unwrap_or_default();
+    if signal_path.is_empty() {
+        return false;
+    }
+
+    if signal_path == target.file_path {
+        return true;
+    }
+
+    target.atom_ids.iter().any(|atom_id| {
+        stack.atom(atom_id).is_some_and(|atom| {
+            atom.path == signal_path
+                || atom.previous_path.as_deref() == Some(signal_path)
+                || signal
+                    .scope
+                    .symbol_name()
+                    .map(|signal_symbol| {
+                        atom.symbol_name
+                            .as_deref()
+                            .map(|atom_symbol| {
+                                review_memory_symbols_match(atom_symbol, signal_symbol)
+                            })
+                            .unwrap_or(false)
+                            || atom
+                                .defined_symbols
+                                .iter()
+                                .any(|defined| review_memory_symbols_match(defined, signal_symbol))
+                    })
+                    .unwrap_or(false)
+        })
+    })
+}
+
+fn review_memory_signal_item(signal: &ReviewMemorySignal) -> ReviewPartnerItem {
+    let status = review_memory_status_label(&signal.status);
+    let pr = signal
+        .last_seen_pr
+        .or(signal.first_seen_pr)
+        .map(|number| format!("PR #{number} "))
+        .unwrap_or_default();
+    let title = format!(
+        "{pr}{status} {} {}",
+        signal.reading_level.label(),
+        signal.kind.label()
+    );
+    let mut detail = format!(
+        "{} Origin: {}. Evidence: {}",
+        signal.statement.trim_end_matches('.'),
+        signal.origin.label(),
+        signal.evidence_summary
+    );
+    if let Some(why_useful_next_time) = signal.why_useful_next_time.as_deref() {
+        detail.push_str(" Next time: ");
+        detail.push_str(why_useful_next_time);
+    }
+    ReviewPartnerItem::new_with_limits(
+        title,
+        detail,
+        signal.path.clone(),
+        signal.line.and_then(|line| usize::try_from(line).ok()),
+        MAX_HISTORY_ITEM_TEXT_CHARS,
+    )
+}
+
+fn merge_history_signals(
+    memory_items: Vec<ReviewPartnerItem>,
+    model_items: Vec<ReviewPartnerItem>,
+) -> Vec<ReviewPartnerItem> {
+    let mut seen = BTreeSet::<(String, String, Option<String>, Option<usize>)>::new();
+    memory_items
+        .into_iter()
+        .chain(model_items)
+        .filter(|item| {
+            seen.insert((
+                item.title.clone(),
+                item.detail.clone(),
+                item.path.clone(),
+                item.line,
+            ))
+        })
+        .take(MAX_SECTION_ITEMS)
+        .collect()
+}
+
+fn review_memory_status_label(status: &ReviewMemoryStatus) -> &'static str {
+    match status {
+        ReviewMemoryStatus::Candidate => "candidate",
+        ReviewMemoryStatus::Open => "open",
+        ReviewMemoryStatus::Resolved => "resolved",
+        ReviewMemoryStatus::Promoted => "promoted",
+        ReviewMemoryStatus::Stale => "stale",
+        ReviewMemoryStatus::Hidden => "hidden",
+    }
+}
+
+fn review_memory_symbols_match(left: &str, right: &str) -> bool {
+    let left = normalize_review_memory_symbol(left);
+    let right = normalize_review_memory_symbol(right);
+    left == right || left.ends_with(&format!("::{right}")) || right.ends_with(&format!("::{left}"))
+}
+
+fn normalize_review_memory_symbol(value: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches("fn ")
+        .trim_start_matches("struct ")
+        .trim_start_matches("enum ")
+        .trim_start_matches("trait ")
+        .trim_start_matches("impl ")
+        .trim_start_matches("type ")
+        .trim_start_matches("class ")
+        .trim_start_matches("interface ")
+        .trim_start_matches("function ")
+        .trim_start_matches("def ")
+        .trim_start_matches("func ")
+        .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != ':')
+        .to_ascii_lowercase()
 }
 
 pub fn generate_review_partner_focus_record(
@@ -1229,6 +1524,8 @@ pub fn generate_review_partner_focus_record(
         &target,
         parsed.record,
         &document.context,
+        &document.stack,
+        &document.review_memory,
     ))
 }
 
@@ -1565,7 +1862,10 @@ fn focus_target_from_layer(
             .cloned()
             .collect(),
         layer_id: Some(layer.id.clone()),
-        title: limit_text(layer.title.clone(), MAX_FOCUS_TITLE_CHARS),
+        title: limit_text(
+            normalize_stack_layer_title(&layer.title, "Stack layer"),
+            MAX_FOCUS_TITLE_CHARS,
+        ),
         subtitle,
         match_kind: ReviewPartnerFocusMatchKind::Layer,
     }
@@ -1678,6 +1978,21 @@ fn short_hash(value: &str) -> String {
 }
 
 fn build_prompt_context(input: &GenerateReviewPartnerInput) -> Value {
+    let mut issue_texts = vec![input.title.as_str(), input.body.as_str()];
+    issue_texts.extend(input.comments.iter().map(|comment| comment.body.as_str()));
+    issue_texts.extend(
+        input
+            .latest_reviews
+            .iter()
+            .map(|review| review.body.as_str()),
+    );
+    issue_texts.extend(
+        input
+            .review_threads
+            .iter()
+            .flat_map(|thread| thread.comments.iter().map(|comment| comment.body.as_str())),
+    );
+
     json!({
         "repository": input.repository,
         "workingDirectory": input.working_directory,
@@ -1688,6 +2003,37 @@ fn build_prompt_context(input: &GenerateReviewPartnerInput) -> Value {
             "baseRefName": input.base_ref_name,
             "headRefName": input.head_ref_name,
             "body": trim_text(&input.body, 2_500),
+        },
+        "historyContext": {
+            "signals": input.review_memory.signals,
+            "limitations": input.review_memory.limitations,
+            "commitMessages": [],
+            "linkedIssues": crate::agents::prompt::linked_issue_refs(issue_texts),
+            "prComments": input
+                .comments
+                .iter()
+                .take(MAX_PARTNER_LAYERS)
+                .map(|comment| json!({
+                    "authorLogin": comment.author_login,
+                    "createdAt": comment.created_at,
+                    "body": trim_text(&comment.body, MAX_PROMPT_SNIPPET_CHARS),
+                }))
+                .collect::<Vec<_>>(),
+            "currentReviewThreadsForTouchedFiles": input
+                .review_threads
+                .iter()
+                .take(MAX_PARTNER_LAYERS)
+                .map(|thread| json!({
+                    "path": thread.path,
+                    "line": thread.line,
+                    "diffSide": thread.diff_side,
+                    "subjectType": thread.subject_type,
+                    "isResolved": thread.is_resolved,
+                }))
+                .collect::<Vec<_>>(),
+            "olderReviewThreadsForTouchedFiles": [],
+            "recentChangesToTouchedFiles": [],
+            "knownPriorPatterns": [],
         },
         "partnerVersion": REVIEW_PARTNER_GENERATOR_VERSION,
         "contextVersion": input.context.version,
@@ -1933,9 +2279,12 @@ fn review_partner_output_schema() -> Value {
             "subtitle": { "type": ["string", "null"] },
             "summary": { "type": "string" },
             "codebaseFit": codebase_fit_schema,
-            "sections": { "type": "array", "items": focus_section_schema }
+            "sections": { "type": "array", "items": focus_section_schema },
+            "understandingCheckpoints": { "type": "array", "items": item_schema.clone() },
+            "assumptions": { "type": "array", "items": item_schema.clone() },
+            "historySignals": { "type": "array", "items": item_schema.clone() }
         },
-        "required": ["key", "title", "summary", "codebaseFit", "sections"],
+        "required": ["key", "title", "summary", "codebaseFit", "sections", "understandingCheckpoints", "assumptions", "historySignals"],
         "additionalProperties": false
     });
 
@@ -2012,9 +2361,12 @@ fn focus_record_output_schema() -> Value {
                     "subtitle": { "type": ["string", "null"] },
                     "summary": { "type": "string" },
                     "codebaseFit": codebase_fit_schema,
-                    "sections": { "type": "array", "items": section_schema }
+                    "sections": { "type": "array", "items": section_schema },
+                    "understandingCheckpoints": { "type": "array", "items": item_schema.clone() },
+                    "assumptions": { "type": "array", "items": item_schema.clone() },
+                    "historySignals": { "type": "array", "items": item_schema.clone() }
                 },
-                "required": ["key", "title", "summary", "codebaseFit", "sections"],
+                "required": ["key", "title", "summary", "codebaseFit", "sections", "understandingCheckpoints", "assumptions", "historySignals"],
                 "additionalProperties": false
             }
         },
@@ -2039,6 +2391,10 @@ fn build_focus_record_prompt(
             .and_then(|layer_id| document.layer(layer_id))
             .map(summarize_partner_layer_for_prompt),
         "targetAtoms": target.atom_ids.iter().filter_map(|atom_id| document.stack.atom(atom_id)).collect::<Vec<_>>(),
+        "historyContext": {
+            "signals": document.review_memory.signals,
+            "limitations": document.review_memory.limitations,
+        },
         "collectedContext": summarize_context_pack(&document.context),
         "structuralEvidence": summarize_structural_evidence(&document.structural_evidence),
         "semanticEvidence": summarize_semantic_evidence(document.semantic_review.as_ref()),
@@ -2050,8 +2406,16 @@ fn build_focus_record_prompt(
         "This record appears in the right rail for the selected stack layer.",
         "The goal is explaining the scoped code, not assigning work or asking review questions.",
         "Return only context the reader cannot infer from the visible diff alone.",
+        "Use historyContext.signals only as evidence-backed review memory. Do not treat prior signals as current truth when the current code contradicts them.",
+        "When historyContext conflicts with current code, surface the conflict in assumptions, historySignals, or limitations instead of resolving it silently.",
         "Avoid emoji, markdown headings, decorative labels, code fences, and code sketches.",
         "Include one complete concrete summary paragraph that explains what changed in this stack layer, how the code behaves, and why this layer is relevant.",
+        "Include only understandingCheckpoints that help the reviewer understand or verify the code, not generic review advice.",
+        "A checkpoint should name the concrete invariant, edge case, assumption, or codebase pattern the reviewer should keep in mind.",
+        "Use assumptions for inferred intent or behavior that is plausible but not directly proven by the supplied context.",
+        "Use historySignals only for prior PRs, older behavior, supplied historyContext.signals, or verified historical context. Do not turn discussion from the current pull request into History rows.",
+        "Distinguish visible behavior from inferred intent and from unverifiable history.",
+        "If generated, mechanical, or broad AI-assisted changes are present, call out the human verification surface: edge cases, invariants, and callsites that cannot be trusted from generation alone.",
         "Write the summary as factual code explanation, never as a question, instruction, checklist item, or review task.",
         "Rewrite any question-shaped draft into a declarative explanation before returning JSON.",
         "Never end a summary with an ellipsis.",

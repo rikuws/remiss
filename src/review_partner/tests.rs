@@ -2,6 +2,10 @@ use super::*;
 use std::{collections::BTreeMap, path::PathBuf};
 
 use crate::diff::{ParsedDiffHunk, ParsedDiffLine};
+use crate::review_memory::{
+    ReviewMemoryConfidence, ReviewMemoryKind, ReviewMemoryOrigin, ReviewMemoryReadingLevel,
+    ReviewMemoryScope, ReviewMemorySignal, ReviewMemoryStatus,
+};
 use crate::semantic_review::{build_semantic_review_from_contents, RemissSemFileContents};
 use crate::stacks::model::{
     stack_now_ms, ChangeAtomSource, ChangeRole, Confidence, LayerMetrics, LayerReviewStatus,
@@ -20,7 +24,7 @@ fn partner_cache_key_includes_versions() {
         "context-y",
     );
 
-    assert!(key.starts_with("review-partner-v15:"));
+    assert!(key.starts_with("review-partner-v19:"));
     assert!(key.contains("stack-x"));
     assert!(key.contains("context-y"));
 }
@@ -34,8 +38,62 @@ fn review_partner_prompt_requires_concrete_summary_copy() {
     assert!(prompt.contains("never as a question"));
     assert!(prompt.contains("Never end a summary with an ellipsis"));
     assert!(prompt.contains("Match the supplied focus scope exactly"));
+    assert!(prompt.contains("understanding checkpoints"));
+    assert!(prompt.contains("understandingCheckpoints"));
+    assert!(prompt.contains("historySignals"));
+    assert!(prompt.contains("\"signals\": []"));
+    assert!(prompt.contains("human verification surface"));
     assert!(!prompt.contains("Act like a strong reviewer"));
-    assert!(!prompt.contains("Do not"));
+    assert!(!prompt.contains("Request changes if"));
+}
+
+#[test]
+fn fallback_focus_record_includes_review_memory_history_signal() {
+    let mut input = input(ReviewPartnerContextPack::empty());
+    input.review_memory = ReviewMemoryPromptContext {
+        signals: vec![ReviewMemorySignal {
+            id: "memory-1".to_string(),
+            kind: ReviewMemoryKind::ReviewConcern,
+            reading_level: ReviewMemoryReadingLevel::History,
+            origin: ReviewMemoryOrigin::Deterministic,
+            scope: ReviewMemoryScope::Symbol {
+                path: "src/lib.rs".to_string(),
+                name: "removed_helper".to_string(),
+                kind: "function".to_string(),
+            },
+            statement: format!(
+                "{} FINAL_HISTORY_MARKER",
+                "Prior review asked whether removed_helper should stay explanation-only. "
+                    .repeat(8)
+            ),
+            why_useful_next_time: Some(
+                "Future reviewers should see the complete history note without premature clipping."
+                    .to_string(),
+            ),
+            evidence_summary: "PR #12 review thread on src/lib.rs:1, resolved".to_string(),
+            confidence: ReviewMemoryConfidence::High,
+            status: ReviewMemoryStatus::Resolved,
+            first_seen_pr: Some(12),
+            last_seen_pr: Some(12),
+            path: Some("src/lib.rs".to_string()),
+            line: Some(1),
+        }],
+        limitations: vec!["Only locally cached review history was searched.".to_string()],
+    };
+
+    let target = input.focus_targets[0].clone();
+    let record = fallback_focus_record(&input, &target, None);
+
+    assert_eq!(record.history_signals.len(), 1);
+    assert!(record.history_signals[0]
+        .detail
+        .contains("Evidence: PR #12"));
+    assert!(record.history_signals[0]
+        .detail
+        .contains("FINAL_HISTORY_MARKER"));
+    assert!(record.history_signals[0]
+        .detail
+        .contains("without premature clipping"));
 }
 
 #[test]
@@ -98,6 +156,8 @@ fn review_partner_prompt_and_focus_records_include_semantic_context() {
 
     let focus_prompt = build_focus_record_prompt(&partner, &partner.focus_targets[0]);
     assert!(focus_prompt.contains("semanticEvidence"));
+    assert!(focus_prompt.contains("understandingCheckpoints"));
+    assert!(focus_prompt.contains("historySignals"));
 }
 
 #[test]
@@ -127,6 +187,11 @@ fn review_partner_schema_requires_focus_records() {
     let focus_record = &schema["properties"]["focusRecords"]["items"];
     assert!(focus_record["properties"].get("usageContext").is_none());
     assert!(focus_record["properties"].get("codebaseFit").is_some());
+    assert!(focus_record["properties"]
+        .get("understandingCheckpoints")
+        .is_some());
+    assert!(focus_record["properties"].get("assumptions").is_some());
+    assert!(focus_record["properties"].get("historySignals").is_some());
     assert!(focus_record["properties"].get("limitations").is_none());
     let single_focus_schema = focus_record_output_schema();
     let single_focus_record = &single_focus_schema["properties"]["record"];
@@ -304,6 +369,9 @@ fn upsert_focus_record_adds_overflow_target() {
                 Some(9),
             )],
         }],
+        understanding_checkpoints: Vec::new(),
+        assumptions: Vec::new(),
+        history_signals: Vec::new(),
         limitations: Vec::new(),
         generated_at_ms: 1,
     };
@@ -396,6 +464,14 @@ fn merge_preserves_stack_order_and_clips_items() {
                     line: None,
                 }],
             }],
+            understanding_checkpoints: vec![ReviewPartnerItemResponse {
+                title: "Invariant".to_string(),
+                detail: "Keep the usage contract stable.".to_string(),
+                path: None,
+                line: None,
+            }],
+            assumptions: Vec::new(),
+            history_signals: Vec::new(),
             limitations: Vec::new(),
         }],
     };
@@ -407,6 +483,7 @@ fn merge_preserves_stack_order_and_clips_items() {
     assert_eq!(partner.layers[0].brief, "partner brief");
     assert_eq!(partner.layers[0].changed_items.len(), MAX_SECTION_ITEMS);
     assert_eq!(partner.focus_records.len(), 1);
+    assert_eq!(partner.focus_records[0].understanding_checkpoints.len(), 1);
     assert_eq!(partner.model.as_deref(), Some("model"));
 }
 
@@ -472,6 +549,9 @@ fn merge_uses_collected_tree_sitter_usages_instead_of_llm_usages() {
                 evidence: Vec::new(),
             }),
             sections: Vec::new(),
+            understanding_checkpoints: Vec::new(),
+            assumptions: Vec::new(),
+            history_signals: Vec::new(),
             limitations: Vec::new(),
         }],
     };
@@ -513,6 +593,9 @@ fn focus_summary_preserves_complete_explanation_above_item_limit() {
                 evidence: Vec::new(),
             }),
             sections: Vec::new(),
+            understanding_checkpoints: Vec::new(),
+            assumptions: Vec::new(),
+            history_signals: Vec::new(),
             limitations: Vec::new(),
         }],
     };
@@ -547,6 +630,9 @@ fn question_led_focus_summary_keeps_concrete_remainder() {
                 evidence: Vec::new(),
             }),
             sections: Vec::new(),
+            understanding_checkpoints: Vec::new(),
+            assumptions: Vec::new(),
+            history_signals: Vec::new(),
             limitations: Vec::new(),
         }],
     };
@@ -583,6 +669,9 @@ fn do_led_focus_summary_keeps_concrete_remainder() {
                 evidence: Vec::new(),
             }),
             sections: Vec::new(),
+            understanding_checkpoints: Vec::new(),
+            assumptions: Vec::new(),
+            history_signals: Vec::new(),
             limitations: Vec::new(),
         }],
     };
@@ -656,6 +745,9 @@ fn ungrounded_codebase_fit_mismatch_becomes_follows() {
                 }],
             }),
             sections: Vec::new(),
+            understanding_checkpoints: Vec::new(),
+            assumptions: Vec::new(),
+            history_signals: Vec::new(),
             limitations: Vec::new(),
         }],
     };
@@ -694,6 +786,9 @@ fn grounded_codebase_fit_mismatch_keeps_evidence() {
                 }],
             }),
             sections: Vec::new(),
+            understanding_checkpoints: Vec::new(),
+            assumptions: Vec::new(),
+            history_signals: Vec::new(),
             limitations: Vec::new(),
         }],
     };
@@ -932,9 +1027,13 @@ fn input(context: ReviewPartnerContextPack) -> GenerateReviewPartnerInput {
         url: "https://github.com/acme/widgets/pull/42".to_string(),
         base_ref_name: "main".to_string(),
         head_ref_name: "feature".to_string(),
+        comments: Vec::new(),
+        latest_reviews: Vec::new(),
+        review_threads: Vec::new(),
         stack,
         structural_evidence,
         semantic_review: None,
+        review_memory: ReviewMemoryPromptContext::default(),
         context,
         focus_targets,
     }
@@ -1011,6 +1110,7 @@ fn partner_document(
         stack,
         structural_evidence,
         semantic_review: None,
+        review_memory: ReviewMemoryPromptContext::default(),
         context: ReviewPartnerContextPack::empty(),
         layers: Vec::new(),
         focus_targets,

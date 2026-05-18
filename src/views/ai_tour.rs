@@ -9,6 +9,7 @@ use crate::code_tour::{
 use crate::local_repo;
 use crate::local_review;
 use crate::review_intelligence::{self, ReviewIntelligenceScope};
+use crate::review_memory;
 use crate::state::{AppState, CodeTourState};
 use crate::{code_tour, github};
 
@@ -551,7 +552,11 @@ pub(crate) async fn generate_tour_flow(
         })
         .ok();
 
-    let generation_input = build_code_tour_generation_input(&detail, provider, &working_directory);
+    let mut generation_input =
+        build_code_tour_generation_input(&detail, provider, &working_directory);
+    generation_input.review_memory =
+        review_memory::review_memory_prompt_context_for_detail(&cache, &detail, &[], 3)
+            .unwrap_or_default();
     let (progress_tx, progress_rx) = mpsc::channel::<CodeTourProgressUpdate>();
     let (result_tx, result_rx) = mpsc::channel::<Result<GeneratedCodeTour, String>>();
     std::thread::spawn({

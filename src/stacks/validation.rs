@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     dependencies::{build_atom_dependencies, DependencyKind},
-    model::{ChangeAtom, ChangeAtomId, ChangeAtomSource, ChangeRole, Confidence},
+    model::{
+        stack_layer_title_quality_error, ChangeAtom, ChangeAtomId, ChangeAtomSource, ChangeRole,
+        Confidence,
+    },
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -19,6 +22,7 @@ pub enum AiStackPlanStrategy {
     VerticalFeatureSlices,
     RiskIsolation,
     ReviewerBoundary,
+    ComprehensionFirst,
     FlatManualReview,
 }
 
@@ -297,11 +301,12 @@ fn validate_layer_text(
     layer: &AiStackPlanLayer,
     layer_index: usize,
 ) -> Result<(), AiStackPlanValidationError> {
-    if is_forbidden_generic_title(&layer.title) {
+    if let Some(error) = stack_layer_title_quality_error(&layer.title) {
         return Err(AiStackPlanValidationError::new(format!(
-            "AI stack plan layer {} has a generic title '{}'.",
+            "AI stack plan layer {} has an invalid title '{}': {}.",
             layer_index + 1,
-            layer.title
+            layer.title,
+            error
         )));
     }
 
@@ -707,29 +712,6 @@ fn title_or_question_mentions_any(layer: &AiStackPlanLayer, needles: &[&str]) ->
     needles.iter().any(|needle| haystack.contains(needle))
 }
 
-fn is_forbidden_generic_title(title: &str) -> bool {
-    let normalized = normalize_layer_text(title);
-    matches!(
-        normalized.as_str(),
-        "misc"
-            | "misc changes"
-            | "remaining"
-            | "remaining changes"
-            | "other"
-            | "other files"
-            | "cleanup"
-            | "clean up"
-            | "imports"
-            | "update imports"
-            | "updates"
-            | "update files"
-            | "add changes"
-            | "implementation"
-            | "final changes"
-            | "everything else"
-    )
-}
-
 fn is_generic_test_layer_title(title: &str) -> bool {
     matches!(
         normalize_layer_text(title).as_str(),
@@ -986,6 +968,23 @@ mod tests {
         assert!(error.message.contains("generic title"));
     }
 
+    #[test]
+    fn rejects_invalid_layer_title_shapes() {
+        let atoms = vec![atom("atom_core", ChangeRole::CoreLogic)];
+        let mut plan = plan_with_layers(vec![vec!["atom_core"]], vec![]);
+        plan.layers[0].title =
+            "configuration, account, region, globalRegion, edgeRegion".to_string();
+
+        let error =
+            validate_ai_stack_plan(&plan, &atoms, 120).expect_err("comma list should reject");
+        assert!(error.message.contains("comma-separated symbol list"));
+
+        plan.layers[0].title = "fn configure_app(app: &mut App)".to_string();
+        let error = validate_ai_stack_plan(&plan, &atoms, 120)
+            .expect_err("code-shaped title should reject");
+        assert!(error.message.contains("code-like syntax"));
+    }
+
     fn plan_with_layers(layer_atom_ids: Vec<Vec<&str>>, manual_atom_ids: Vec<&str>) -> AiStackPlan {
         AiStackPlan {
             strategy: AiStackPlanStrategy::SemanticVirtualStack,
@@ -994,8 +993,9 @@ mod tests {
             layers: layer_atom_ids
                 .into_iter()
                 .map(|atom_ids| AiStackPlanLayer {
-                    title: "Layer".to_string(),
-                    review_question: "Does this layer answer one review question?".to_string(),
+                    title: "Core behavior path".to_string(),
+                    review_question: "Does the grouped behavior preserve its expected invariants?"
+                        .to_string(),
                     summary: "Summary".to_string(),
                     rationale: "Rationale".to_string(),
                     substantive_atom_ids: Vec::new(),

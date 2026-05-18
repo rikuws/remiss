@@ -8,10 +8,11 @@ use crate::{
     agents,
     cache::CacheStore,
     diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk, ParsedDiffLine},
-    github::{PullRequestDetail, PullRequestFile, PullRequestReviewThread},
+    github::{PullRequestComment, PullRequestDetail, PullRequestFile, PullRequestReviewThread},
+    review_memory::ReviewMemoryPromptContext,
 };
 
-const CODE_TOUR_CACHE_KEY_PREFIX: &str = "code-tour-v5";
+const CODE_TOUR_CACHE_KEY_PREFIX: &str = "code-tour-v6";
 const CODE_TOUR_SETTINGS_CACHE_KEY: &str = "code-tour-settings-v1";
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -316,6 +317,14 @@ pub struct CodeTourReviewCommentContext {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CodeTourPullRequestCommentContext {
+    pub author_login: String,
+    pub body: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CodeTourReviewThreadContext {
     pub path: String,
     pub line: Option<i64>,
@@ -357,8 +366,11 @@ pub struct GenerateCodeTourInput {
     pub changed_files: i64,
     pub commits_count: i64,
     pub files: Vec<CodeTourFileContext>,
+    pub comments: Vec<CodeTourPullRequestCommentContext>,
     pub latest_reviews: Vec<CodeTourReviewContext>,
     pub review_threads: Vec<CodeTourReviewThreadContext>,
+    #[serde(default)]
+    pub review_memory: ReviewMemoryPromptContext,
     pub candidate_steps: Vec<TourStep>,
     pub candidate_groups: Vec<CodeTourCandidateGroup>,
 }
@@ -466,6 +478,12 @@ pub fn build_code_tour_generation_input(
             .iter()
             .map(map_code_tour_file_context)
             .collect(),
+        comments: detail
+            .comments
+            .iter()
+            .take(12)
+            .map(map_code_tour_comment_context)
+            .collect(),
         latest_reviews: detail
             .latest_reviews
             .iter()
@@ -477,6 +495,7 @@ pub fn build_code_tour_generation_input(
             .take(12)
             .map(|thread| map_code_tour_review_thread_context(&thread))
             .collect(),
+        review_memory: ReviewMemoryPromptContext::default(),
         candidate_steps: if let Some(overview) = overview_step {
             let mut steps = vec![overview];
             steps.extend(file_steps);
@@ -1172,6 +1191,16 @@ fn map_code_tour_file_context(file: &PullRequestFile) -> CodeTourFileContext {
         additions: file.additions,
         deletions: file.deletions,
         change_type: file.change_type.clone(),
+    }
+}
+
+fn map_code_tour_comment_context(
+    comment: &PullRequestComment,
+) -> CodeTourPullRequestCommentContext {
+    CodeTourPullRequestCommentContext {
+        author_login: comment.author_login.clone(),
+        body: trim_text(&comment.body, 500),
+        created_at: comment.created_at.clone(),
     }
 }
 

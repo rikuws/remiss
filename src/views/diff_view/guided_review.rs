@@ -508,6 +508,33 @@ fn render_guided_review_focus_record(
                 ))
             },
         )
+        .when(!record.understanding_checkpoints.is_empty(), |el| {
+            el.child(render_review_partner_item_list_section(
+                state,
+                "Checkpoints",
+                &record.understanding_checkpoints,
+                LucideIcon::ListChecks,
+                fg_muted(),
+            ))
+        })
+        .when(!record.assumptions.is_empty(), |el| {
+            el.child(render_review_partner_item_list_section(
+                state,
+                "Assumptions",
+                &record.assumptions,
+                LucideIcon::CircleHelp,
+                warning(),
+            ))
+        })
+        .when(!record.history_signals.is_empty(), |el| {
+            el.child(render_review_partner_item_list_section(
+                state,
+                "History",
+                &record.history_signals,
+                LucideIcon::BookOpenText,
+                fg_muted(),
+            ))
+        })
         .children(
             record
                 .sections
@@ -718,6 +745,29 @@ fn render_review_partner_codebase_fit_section(
         body,
     )
     .into_any_element()
+}
+
+fn render_review_partner_item_list_section(
+    state: &Entity<AppState>,
+    title: &str,
+    items: &[crate::review_partner::ReviewPartnerItem],
+    icon: LucideIcon,
+    tone: Rgba,
+) -> impl IntoElement {
+    let detail = format!(
+        "{} item{}",
+        items.len(),
+        if items.len() == 1 { "" } else { "s" }
+    );
+    let body = items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            render_review_partner_item_row(state, title, index, item, None, tone).into_any_element()
+        })
+        .collect::<Vec<_>>();
+
+    render_review_partner_flat_section(title.to_string(), Some(detail), icon, tone, body)
 }
 
 fn render_review_partner_secondary_section(

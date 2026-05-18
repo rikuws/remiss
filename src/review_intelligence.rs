@@ -16,6 +16,7 @@ use crate::{
     github::PullRequestDetail,
     local_repo, local_review,
     review_brief::{self, build_review_brief_request_key},
+    review_memory,
     review_partner::{self, build_review_partner_request_key},
     semantic_review,
     stacks::{
@@ -272,9 +273,13 @@ pub fn request_active_review_partner_focus(
                                     url: String::new(),
                                     base_ref_name: String::new(),
                                     head_ref_name: String::new(),
+                                    comments: Vec::new(),
+                                    latest_reviews: Vec::new(),
+                                    review_threads: Vec::new(),
                                     stack: current.stack.clone(),
                                     structural_evidence: current.structural_evidence.clone(),
                                     semantic_review: current.semantic_review.clone(),
+                                    review_memory: current.review_memory.clone(),
                                     context: current.context.clone(),
                                     focus_targets: vec![target.clone()],
                                 };
@@ -1324,6 +1329,15 @@ async fn generate_or_load_partner(
                 cx,
             )
             .await;
+            if let Some(working_directory) = local_repo_status.path.as_ref() {
+                spawn_review_memory_candidate_extraction(
+                    CacheStore::clone(cache),
+                    detail.clone(),
+                    provider,
+                    working_directory.clone(),
+                    false,
+                );
+            }
             return;
         }
     }
@@ -1402,7 +1416,29 @@ async fn generate_or_load_partner(
                             );
                             pack
                         });
-                    let input = review_partner::build_review_partner_generation_input(
+                    let memory_targets = stack
+                        .atoms
+                        .iter()
+                        .flat_map(|atom| {
+                            atom.symbol_name
+                                .iter()
+                                .chain(atom.defined_symbols.iter())
+                                .map(move |symbol| review_memory::ReviewMemoryTarget {
+                                    path: atom.path.clone(),
+                                    symbol_name: Some(symbol.clone()),
+                                    symbol_kind: atom.semantic_kind.clone(),
+                                })
+                        })
+                        .collect::<Vec<_>>();
+                    let review_memory =
+                        review_memory::review_memory_prompt_context_for_detail(
+                            &cache,
+                            &detail,
+                            &memory_targets,
+                            3,
+                        )
+                        .unwrap_or_default();
+                    let mut input = review_partner::build_review_partner_generation_input(
                         &detail,
                         provider,
                         working_directory.to_string_lossy().as_ref(),
@@ -1411,6 +1447,7 @@ async fn generate_or_load_partner(
                         semantic_review,
                         Some(lsp_session_manager),
                     );
+                    input.review_memory = review_memory;
 
                     match review_partner::generate_review_partner_context(&cache, input.clone()) {
                         Ok(partner) => partner,
@@ -1441,6 +1478,34 @@ async fn generate_or_load_partner(
         cx,
     )
     .await;
+
+    spawn_review_memory_candidate_extraction(
+        CacheStore::clone(cache),
+        detail.clone(),
+        provider,
+        working_directory.clone(),
+        force,
+    );
+}
+
+fn spawn_review_memory_candidate_extraction(
+    cache: CacheStore,
+    detail: PullRequestDetail,
+    provider: CodeTourProvider,
+    working_directory: String,
+    force: bool,
+) {
+    std::thread::spawn(move || {
+        let _ = run_background_blocking(|| {
+            review_memory::generate_llm_review_memory_candidates(
+                &cache,
+                &detail,
+                provider,
+                &working_directory,
+                force,
+            )
+        });
+    });
 }
 
 async fn generate_or_load_brief(
@@ -1544,11 +1609,18 @@ async fn generate_or_load_brief(
             let working_directory = working_directory.clone();
             async move {
                 run_foreground_blocking(|| {
-                    let input = review_brief::build_review_brief_generation_input(
+                    let mut input = review_brief::build_review_brief_generation_input(
                         &detail,
                         provider,
                         &working_directory,
                     );
+                    input.review_memory = review_memory::review_memory_prompt_context_for_detail(
+                        &cache,
+                        &detail,
+                        &[],
+                        3,
+                    )
+                    .unwrap_or_default();
                     review_brief::generate_review_brief(&cache, input)
                 })
             }

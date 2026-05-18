@@ -871,8 +871,10 @@ mod tests {
             changed_files: 2,
             commits_count: 1,
             files: Vec::new(),
+            comments: Vec::new(),
             latest_reviews: Vec::new(),
             review_threads: Vec::new(),
+            review_memory: crate::review_memory::ReviewMemoryPromptContext::default(),
             candidate_steps: vec![
                 TourStep {
                     id: "overview".into(),

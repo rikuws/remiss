@@ -20,10 +20,10 @@ use super::super::{
     atoms::extract_change_atoms,
     dependencies::{build_atom_dependencies, dependency_depths, AtomDependency, DependencyKind},
     model::{
-        stack_now_ms, ChangeAtom, ChangeAtomId, ChangeAtomSource, ChangeRole, Confidence,
-        LayerMetrics, LayerReviewStatus, RepoContext, ReviewStack, ReviewStackLayer,
-        StackDiscoveryError, StackKind, StackProviderMetadata, StackSource, StackWarning,
-        VirtualLayerRef, VirtualStackSizing, STACK_GENERATOR_VERSION,
+        normalize_stack_layer_title, stack_now_ms, ChangeAtom, ChangeAtomId, ChangeAtomSource,
+        ChangeRole, Confidence, LayerMetrics, LayerReviewStatus, RepoContext, ReviewStack,
+        ReviewStackLayer, StackDiscoveryError, StackKind, StackProviderMetadata, StackSource,
+        StackWarning, VirtualLayerRef, VirtualStackSizing, STACK_GENERATOR_VERSION,
     },
     validation::{
         atom_is_substantive, atom_noise_kind, requires_manual_review, validate_ai_stack_plan,
@@ -739,7 +739,7 @@ pub fn build_stack_from_validated_plan(
         layers.push(ReviewStackLayer {
             id: layer_id,
             index,
-            title: clean_layer_text(&plan_layer.title, "AI review layer", 90),
+            title: normalize_stack_layer_title(&plan_layer.title, "AI review layer"),
             summary: clean_layer_text(
                 &layer_summary_with_review_question(plan_layer),
                 "AI grouped review layer.",
@@ -956,6 +956,7 @@ fn build_stack_planning_input(
             .iter()
             .map(commit_summary_json)
             .collect::<Vec<_>>(),
+        "historyContext": stack_history_context_json(selected_pr, commit_context),
         "dependency_edges": dependencies
             .iter()
             .filter(|dep| matches!(
@@ -1235,6 +1236,75 @@ fn commit_summary_json(commit: &CommitSummary) -> Value {
         "message": &commit.subject,
         "changed_lines": commit.changed_lines,
         "roles": commit.roles.iter().map(ChangeRole::label).collect::<Vec<_>>(),
+    })
+}
+
+fn stack_history_context_json(
+    selected_pr: &PullRequestDetail,
+    commit_context: &CommitContext,
+) -> Value {
+    const MAX_HISTORY_ITEMS: usize = 12;
+    let mut issue_texts = vec![selected_pr.title.as_str(), selected_pr.body.as_str()];
+    issue_texts.extend(
+        selected_pr
+            .comments
+            .iter()
+            .map(|comment| comment.body.as_str()),
+    );
+    issue_texts.extend(
+        selected_pr
+            .latest_reviews
+            .iter()
+            .map(|review| review.body.as_str()),
+    );
+    issue_texts.extend(
+        selected_pr
+            .review_threads
+            .iter()
+            .flat_map(|thread| thread.comments.iter().map(|comment| comment.body.as_str())),
+    );
+
+    json!({
+        "commitMessages": commit_context
+            .commits
+            .iter()
+            .take(MAX_HISTORY_ITEMS)
+            .map(|commit| json!({
+                "oid": &commit.oid,
+                "message": crate::agents::prompt::trim_text(&commit.subject, 220),
+            }))
+            .collect::<Vec<_>>(),
+        "linkedIssues": crate::agents::prompt::linked_issue_refs(issue_texts),
+        "prComments": selected_pr
+            .comments
+            .iter()
+            .take(MAX_HISTORY_ITEMS)
+            .map(|comment| json!({
+                "authorLogin": &comment.author_login,
+                "createdAt": &comment.created_at,
+                "body": crate::agents::prompt::trim_text(&comment.body, 500),
+            }))
+            .collect::<Vec<_>>(),
+        "currentReviewThreadsForTouchedFiles": selected_pr
+            .review_threads
+            .iter()
+            .take(MAX_HISTORY_ITEMS)
+            .map(|thread| json!({
+                "path": &thread.path,
+                "line": thread.line.or(thread.original_line),
+                "diffSide": if thread.diff_side.trim().is_empty() {
+                    thread.start_diff_side.as_deref()
+                } else {
+                    Some(thread.diff_side.as_str())
+                },
+                "subjectType": &thread.subject_type,
+                "isResolved": thread.is_resolved,
+                "isOutdated": thread.is_outdated,
+            }))
+            .collect::<Vec<_>>(),
+        "olderReviewThreadsForTouchedFiles": [],
+        "recentChangesToTouchedFiles": [],
+        "knownPriorPatterns": [],
     })
 }
 
@@ -1725,6 +1795,17 @@ mod tests {
         assert!(prompt.contains("input.structural_evidence"));
         assert!(prompt.contains("input.semantic_evidence"));
         assert!(prompt.contains("Assign every atom exactly once"));
+        assert!(prompt.contains("Layer titles are compact UI labels"));
+        assert!(prompt.contains("56 characters maximum"));
+        assert!(prompt.contains("understanding unit"));
+        assert!(prompt.contains("comprehension_first"));
+        assert_eq!(
+            input["historyContext"]["commitMessages"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
     }
 
     #[test]

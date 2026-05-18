@@ -1100,10 +1100,16 @@ fn stack_view_layer_title_parts(layer: &ReviewStackLayer) -> (Option<String>, St
             .filter(|title| !title.is_empty())
             .unwrap_or(layer.title.as_str())
             .to_string();
-        return (Some(number), title);
+        return (
+            Some(number),
+            normalize_stack_layer_title(&title, "Stack layer"),
+        );
     }
 
-    (None, layer.title.clone())
+    (
+        None,
+        normalize_stack_layer_title(&layer.title, "Stack layer"),
+    )
 }
 
 fn render_stack_base_branch_row(branch_name: &str, connector_below: bool) -> impl IntoElement {
@@ -2377,7 +2383,7 @@ fn render_stack_layer_summary_row(
                                 .whitespace_nowrap()
                                 .overflow_x_hidden()
                                 .text_ellipsis()
-                                .child(layer.title.clone()),
+                                .child(normalize_stack_layer_title(&layer.title, "Stack layer")),
                         ),
                 )
                 .child(
@@ -2517,7 +2523,7 @@ fn render_stack_layer_row(
                                 .whitespace_nowrap()
                                 .overflow_x_hidden()
                                 .text_ellipsis()
-                                .child(layer.title.clone()),
+                                .child(normalize_stack_layer_title(&layer.title, "Stack layer")),
                         ),
                 )
                 .child(
