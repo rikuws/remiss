@@ -879,13 +879,22 @@ fn write_copilot_diagnostic_log(input: CopilotDiagnosticLogInput<'_>) -> Option<
         return None;
     }
 
+    let task_slug = sanitize_log_path_component(input.task_label);
     let file_name = format!(
         "{}-{}-attempt-{}.json",
-        input.started_at_ms,
-        sanitize_log_path_component(input.task_label),
-        input.attempt
+        input.started_at_ms, task_slug, input.attempt
     );
     let path = log_dir.join(file_name);
+    let latest_path = log_dir.join("latest.json");
+    let task_latest_path = log_dir.join(copilot_diagnostic_task_latest_file_name(input.task_label));
+    let problem_latest_path = diagnostic_log_has_problem(input.outcome, input.exit_status)
+        .then(|| log_dir.join("latest-problem.json"));
+    let path_display = path.display().to_string();
+    let latest_path_display = latest_path.display().to_string();
+    let task_latest_path_display = task_latest_path.display().to_string();
+    let problem_latest_path_display = problem_latest_path
+        .as_ref()
+        .map(|path| path.display().to_string());
     let abort = input.outcome.abort.as_ref().map(|reason| {
         json!({
             "kind": abort_kind_label(reason.kind),
@@ -894,6 +903,10 @@ fn write_copilot_diagnostic_log(input: CopilotDiagnosticLogInput<'_>) -> Option<
         })
     });
     let log = json!({
+        "diagnosticLogPath": path_display,
+        "latestLogPath": latest_path_display,
+        "taskLatestLogPath": task_latest_path_display,
+        "problemLatestLogPath": problem_latest_path_display,
         "startedAtMs": input.started_at_ms,
         "durationMs": input.duration_ms,
         "taskLabel": input.task_label,
@@ -942,17 +955,40 @@ fn write_copilot_diagnostic_log(input: CopilotDiagnosticLogInput<'_>) -> Option<
         return None;
     }
 
-    let latest_path = log_dir.join("latest.json");
-    if let Err(error) = std::fs::write(&latest_path, &serialized) {
-        eprintln!(
-            "Failed to write latest Copilot diagnostic log '{}': {error}",
-            latest_path.display()
-        );
+    write_copilot_diagnostic_alias(&latest_path, &serialized, "latest");
+    write_copilot_diagnostic_alias(&task_latest_path, &serialized, "task latest");
+    if let Some(problem_latest_path) = problem_latest_path.as_ref() {
+        write_copilot_diagnostic_alias(problem_latest_path, &serialized, "problem latest");
     }
 
     let path = path.display().to_string();
     eprintln!("Copilot diagnostic log written: {path}");
     Some(path)
+}
+
+fn write_copilot_diagnostic_alias(path: &Path, serialized: &str, label: &str) {
+    if let Err(error) = std::fs::write(path, serialized) {
+        eprintln!(
+            "Failed to write {label} Copilot diagnostic log '{}': {error}",
+            path.display()
+        );
+    }
+}
+
+fn diagnostic_log_has_problem(outcome: &CopilotOutcome, exit_status: Option<&ExitStatus>) -> bool {
+    outcome.abort.is_some()
+        || outcome
+            .error
+            .as_deref()
+            .map(|error| !error.trim().is_empty())
+            .unwrap_or(false)
+        || exit_status
+            .map(|status| !status.success())
+            .unwrap_or_else(|| outcome.exit_code.map(|code| code != 0).unwrap_or(false))
+}
+
+fn copilot_diagnostic_task_latest_file_name(task_label: &str) -> String {
+    format!("latest-{}.json", sanitize_log_path_component(task_label))
 }
 
 fn record_stream_event(outcome: &mut CopilotOutcome, kind: &str, line: &str) {
@@ -1250,6 +1286,18 @@ mod tests {
         assert_eq!(COPILOT_TOOL_ALLOWLISTS[0], "view,rg,glob");
         assert_eq!(COPILOT_TOOL_ALLOWLISTS[1], "view,grep,glob");
         assert_eq!(COPILOT_TOOL_ALLOWLISTS[2], "view,glob");
+    }
+
+    #[test]
+    fn diagnostic_task_latest_file_name_is_task_scoped() {
+        assert_eq!(
+            copilot_diagnostic_task_latest_file_name("Review Partner context"),
+            "latest-Review_Partner_context.json"
+        );
+        assert_eq!(
+            copilot_diagnostic_task_latest_file_name("Review Memory candidate extraction"),
+            "latest-Review_Memory_candidate_extraction.json"
+        );
     }
 
     #[test]

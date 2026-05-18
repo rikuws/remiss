@@ -322,7 +322,9 @@ pub fn render_pr_workspace(
         .flex()
         .flex_col()
         .flex_grow()
+        .h_full()
         .min_h_0()
+        .overflow_hidden()
         // Content area (scrollable or flex-fill depending on surface)
         .when(show_loading_state, |el| {
             el.child(
@@ -341,6 +343,7 @@ pub fn render_pr_workspace(
                     div()
                         .px(px(32.0))
                         .flex_grow()
+                        .h_full()
                         .min_h_0()
                         .flex()
                         .flex_col()
@@ -348,6 +351,7 @@ pub fn render_pr_workspace(
                         .id("pr-overview-scroll")
                         .overflow_y_scroll()
                         .scrollbar_width(px(8.0))
+                        .track_scroll(&s.pr_overview_scroll_handle)
                         .pt(px(16.0))
                         .pb(px(12.0))
                         .child(

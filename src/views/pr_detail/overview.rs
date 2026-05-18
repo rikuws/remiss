@@ -696,12 +696,6 @@ fn render_change_meter(additions: i64, deletions: i64) -> impl IntoElement {
                     div().w(px(8.0)).h(px(4.0)).rounded(px(2.0)).bg(bg)
                 })),
         )
-        .child(
-            div()
-                .text_size(px(12.0))
-                .text_color(fg_subtle())
-                .child("diff".to_string()),
-        )
 }
 
 fn readable_text(text: String) -> impl IntoElement {

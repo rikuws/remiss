@@ -1101,6 +1101,7 @@ pub struct AppState {
     pub review_comment_action_loading_id: Option<String>,
     pub review_thread_action_error: Option<String>,
     pub pr_header_compact: bool,
+    pub pr_overview_scroll_handle: ScrollHandle,
 
     // Command palette
     pub palette_open: bool,
@@ -1251,6 +1252,7 @@ impl AppState {
             review_comment_action_loading_id: None,
             review_thread_action_error: None,
             pr_header_compact: false,
+            pr_overview_scroll_handle: ScrollHandle::new(),
             palette_open: false,
             palette_closing: false,
             palette_close_generation: 0,
