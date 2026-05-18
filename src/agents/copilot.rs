@@ -480,6 +480,11 @@ async fn run_copilot_sdk_session(
             }
         }
 
+        if let Ok(events) = session.get_messages().await {
+            for event in events {
+                record_final_text_from_event(&event, &mut outcome);
+            }
+        }
         promote_stream_to_final(&mut outcome);
         let _ = session.disconnect().await;
         Ok(CopilotRun { outcome })
@@ -577,16 +582,37 @@ fn handle_sdk_event(
                 }
             }
         }
+        "assistant.message_start" => {
+            outcome.current_turn_stream.clear();
+        }
         "assistant.message" => {
             if let Some(content) = first_string(&event.data, &["content", "message", "text"]) {
-                outcome.final_text = Some(content);
+                if !event_has_tool_requests(&event.data) || text_contains_json_payload(&content) {
+                    record_final_text_candidate(outcome, content);
+                }
                 outcome.current_turn_stream.clear();
                 outcome.saw_meaningful_progress = true;
-                outcome.last_visible_activity =
-                    Some("Copilot returned a final message".to_string());
+                outcome.last_visible_activity = Some(if event_has_tool_requests(&event.data) {
+                    "Copilot requested repository tools".to_string()
+                } else {
+                    "Copilot returned an assistant message".to_string()
+                });
             }
             if let Some(model) = first_string(&event.data, &["model"]) {
                 outcome.model = Some(model);
+            }
+        }
+        "session.task_complete" => {
+            if let Some(summary) = first_string(&event.data, &["summary"]) {
+                let trimmed = summary.trim();
+                if text_contains_json_payload(trimmed) {
+                    record_final_text_candidate(outcome, trimmed.to_string());
+                }
+                if !trimmed.is_empty() {
+                    outcome.saw_meaningful_progress = true;
+                    outcome.last_visible_activity =
+                        Some(format!("Task complete: {}", limit_text(trimmed, 160)));
+                }
             }
         }
         "tool.execution_start" => {
@@ -796,6 +822,52 @@ fn tool_detail(tool_name: &str, data: &Value) -> String {
     format!("{tool_name}: {}", limit_text(&argument_text, 240))
 }
 
+fn event_has_tool_requests(data: &Value) -> bool {
+    ["toolRequests", "tool_requests"].iter().any(|key| {
+        data.get(*key)
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty())
+    })
+}
+
+fn record_final_text_from_event(event: &SessionEvent, outcome: &mut CopilotOutcome) {
+    match event.event_type.as_str() {
+        "assistant.message" => {
+            if let Some(content) = first_string(&event.data, &["content", "message", "text"]) {
+                if !event_has_tool_requests(&event.data) || text_contains_json_payload(&content) {
+                    record_final_text_candidate(outcome, content);
+                }
+            }
+            if let Some(model) = first_string(&event.data, &["model"]) {
+                outcome.model = Some(model);
+            }
+        }
+        "session.task_complete" => {
+            if let Some(summary) = first_string(&event.data, &["summary"]) {
+                if text_contains_json_payload(&summary) {
+                    record_final_text_candidate(outcome, summary);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn record_final_text_candidate(outcome: &mut CopilotOutcome, content: String) {
+    let candidate = content.trim();
+    if candidate.is_empty() {
+        return;
+    }
+
+    if text_contains_json_payload(candidate) {
+        outcome.final_text = Some(candidate.to_string());
+    }
+}
+
+fn text_contains_json_payload(text: &str) -> bool {
+    parse_tolerant::<Value>(text).is_ok()
+}
+
 fn has_usable_final_text(outcome: &CopilotOutcome) -> bool {
     outcome
         .final_text
@@ -805,8 +877,12 @@ fn has_usable_final_text(outcome: &CopilotOutcome) -> bool {
 }
 
 fn promote_stream_to_final(outcome: &mut CopilotOutcome) {
-    if outcome.final_text.is_none() && !outcome.current_turn_stream.trim().is_empty() {
-        outcome.final_text = Some(std::mem::take(&mut outcome.current_turn_stream));
+    if outcome.final_text.is_none() {
+        let stream = outcome.current_turn_stream.trim();
+        if !stream.is_empty() && text_contains_json_payload(stream) {
+            outcome.final_text = Some(stream.to_string());
+            outcome.current_turn_stream.clear();
+        }
     }
 }
 
@@ -932,6 +1008,100 @@ mod tests {
         assert!(progress.iter().any(|update| update.stage == "tool"));
         assert!(progress.iter().any(|update| update.stage == "drafting"));
         assert!(progress.iter().any(|update| update.stage == "finalizing"));
+    }
+
+    #[test]
+    fn treats_tool_request_messages_as_progress_not_final_json() {
+        let mut outcome = CopilotOutcome::default();
+
+        handle_sdk_event(
+            event(
+                "assistant.message",
+                json!({
+                    "messageId": "m1",
+                    "content": "I'll inspect the current PR diff first.",
+                    "toolRequests": [
+                        {
+                            "toolCallId": "tool-1",
+                            "name": "view"
+                        }
+                    ]
+                }),
+            ),
+            &mut outcome,
+            false,
+            &mut |_| {},
+        );
+        promote_stream_to_final(&mut outcome);
+
+        assert!(outcome.final_text.is_none());
+        assert_eq!(
+            outcome.last_visible_activity.as_deref(),
+            Some("Copilot requested repository tools")
+        );
+    }
+
+    #[test]
+    fn task_complete_summary_can_supply_json_payload() {
+        let mut outcome = CopilotOutcome::default();
+
+        handle_sdk_event(
+            event(
+                "assistant.message",
+                json!({
+                    "messageId": "m1",
+                    "content": "I'll inspect the current PR diff first.",
+                    "toolRequests": [{ "toolCallId": "tool-1", "name": "view" }]
+                }),
+            ),
+            &mut outcome,
+            false,
+            &mut |_| {},
+        );
+        handle_sdk_event(
+            event(
+                "session.task_complete",
+                json!({ "success": true, "summary": "{\"ok\":true}" }),
+            ),
+            &mut outcome,
+            false,
+            &mut |_| {},
+        );
+
+        assert_eq!(outcome.final_text.as_deref(), Some("{\"ok\":true}"));
+    }
+
+    #[test]
+    fn message_start_resets_stream_before_promoting_json_delta() {
+        let mut outcome = CopilotOutcome::default();
+
+        handle_sdk_event(
+            event(
+                "assistant.message_delta",
+                json!({ "messageId": "m1", "deltaContent": "I'll inspect first." }),
+            ),
+            &mut outcome,
+            false,
+            &mut |_| {},
+        );
+        handle_sdk_event(
+            event("assistant.message_start", json!({ "messageId": "m2" })),
+            &mut outcome,
+            false,
+            &mut |_| {},
+        );
+        handle_sdk_event(
+            event(
+                "assistant.message_delta",
+                json!({ "messageId": "m2", "deltaContent": "{\"ok\":true}" }),
+            ),
+            &mut outcome,
+            false,
+            &mut |_| {},
+        );
+        promote_stream_to_final(&mut outcome);
+
+        assert_eq!(outcome.final_text.as_deref(), Some("{\"ok\":true}"));
     }
 
     #[test]
