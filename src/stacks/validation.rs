@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use super::{
     dependencies::{build_atom_dependencies, DependencyKind},
     model::{
-        stack_layer_title_quality_error, ChangeAtom, ChangeAtomId, ChangeAtomSource, ChangeRole,
-        Confidence,
+        normalize_stack_layer_title, stack_layer_title_quality_error, ChangeAtom, ChangeAtomId,
+        ChangeAtomSource, ChangeRole, Confidence,
     },
 };
 
@@ -148,6 +148,7 @@ pub fn validate_ai_stack_plan(
     let mut seen = BTreeSet::<ChangeAtomId>::new();
     let mut layer_index_by_atom = BTreeMap::<ChangeAtomId, usize>::new();
     let mut substantive_counts_by_layer = Vec::<usize>::new();
+    let mut normalized_layer_titles = BTreeSet::<String>::new();
     for (layer_index, layer) in plan.layers.iter().enumerate() {
         if layer.atom_ids.is_empty() {
             return Err(AiStackPlanValidationError::new(format!(
@@ -157,6 +158,14 @@ pub fn validate_ai_stack_plan(
         }
 
         validate_layer_text(layer, layer_index)?;
+        let normalized_title =
+            normalize_stack_layer_title(&layer.title, "AI review layer").to_ascii_lowercase();
+        if !normalized_layer_titles.insert(normalized_title) {
+            return Err(AiStackPlanValidationError::new(format!(
+                "AI stack plan reused layer title '{}'. Layer titles must be distinct.",
+                layer.title
+            )));
+        }
 
         for dep_index in &layer.depends_on_layer_indexes {
             if *dep_index >= plan.layers.len() {
@@ -985,6 +994,26 @@ mod tests {
         assert!(error.message.contains("code-like syntax"));
     }
 
+    #[test]
+    fn rejects_reused_layer_titles() {
+        let atoms = vec![
+            atom("atom_foundation", ChangeRole::Foundation),
+            atom("atom_core", ChangeRole::CoreLogic),
+            atom("atom_ui", ChangeRole::Presentation),
+        ];
+        let mut plan = plan_with_layers(
+            vec![vec!["atom_foundation"], vec!["atom_core"], vec!["atom_ui"]],
+            vec![],
+        );
+        for layer in &mut plan.layers {
+            layer.title = "Layer state foundation".to_string();
+        }
+
+        let error = validate_ai_stack_plan(&plan, &atoms, 420)
+            .expect_err("duplicate layer titles should reject");
+        assert!(error.message.contains("reused layer title"));
+    }
+
     fn plan_with_layers(layer_atom_ids: Vec<Vec<&str>>, manual_atom_ids: Vec<&str>) -> AiStackPlan {
         AiStackPlan {
             strategy: AiStackPlanStrategy::SemanticVirtualStack,
@@ -992,8 +1021,9 @@ mod tests {
             rationale: "Grouped by semantic review order.".to_string(),
             layers: layer_atom_ids
                 .into_iter()
-                .map(|atom_ids| AiStackPlanLayer {
-                    title: "Core behavior path".to_string(),
+                .enumerate()
+                .map(|(index, atom_ids)| AiStackPlanLayer {
+                    title: format!("Core behavior path {}", index + 1),
                     review_question: "Does the grouped behavior preserve its expected invariants?"
                         .to_string(),
                     summary: "Summary".to_string(),

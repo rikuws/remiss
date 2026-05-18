@@ -1168,7 +1168,7 @@ async fn generate_or_load_stack(
                     detail_state.ai_stack_state.loading = false;
                     detail_state.ai_stack_state.generating = true;
                     detail_state.ai_stack_state.message =
-                        Some("Building Sem evidence for Guided Review.".to_string());
+                        Some("Planning AI Guided Review layers.".to_string());
                 }
 
                 if reflect_tour_progress {
@@ -1179,7 +1179,7 @@ async fn generate_or_load_stack(
                         false,
                         true,
                         "Generating Guided Review layers",
-                        "Sem is building deterministic review layers before the walkthrough starts.",
+                        "The selected provider is planning review layers from Sem and structural evidence.",
                     );
                 }
             }
@@ -1226,17 +1226,7 @@ async fn generate_or_load_stack(
                             );
                             pack
                         });
-                    let options = StackDiscoveryOptions {
-                        enable_github_native: false,
-                        enable_branch_topology: false,
-                        enable_local_metadata: false,
-                        enable_ai_virtual: false,
-                        enable_sem_virtual: true,
-                        enable_virtual_commits: false,
-                        enable_virtual_semantic: true,
-                        ai_provider: Some(provider),
-                        ..StackDiscoveryOptions::default()
-                    };
+                    let options = guided_review_stack_discovery_options(provider);
 
                     let repo_context = RepoContext {
                         open_pull_requests,
@@ -1292,6 +1282,20 @@ async fn generate_or_load_stack(
             set_stack_error(model, detail_key, request_key, detail, error, cx).await;
             None
         }
+    }
+}
+
+fn guided_review_stack_discovery_options(provider: CodeTourProvider) -> StackDiscoveryOptions {
+    StackDiscoveryOptions {
+        enable_github_native: false,
+        enable_branch_topology: false,
+        enable_local_metadata: false,
+        enable_ai_virtual: true,
+        enable_sem_virtual: false,
+        enable_virtual_commits: false,
+        enable_virtual_semantic: false,
+        ai_provider: Some(provider),
+        ..StackDiscoveryOptions::default()
     }
 }
 
@@ -2116,8 +2120,8 @@ fn ai_stack_for_error(detail: &PullRequestDetail, message: &str) -> ReviewStack 
 #[cfg(test)]
 mod tests {
     use super::{
-        review_intelligence_request_key, set_review_brief_error, set_review_brief_progress,
-        set_tour_pipeline_progress,
+        guided_review_stack_discovery_options, review_intelligence_request_key,
+        set_review_brief_error, set_review_brief_progress, set_tour_pipeline_progress,
     };
     use crate::{code_tour::CodeTourProvider, github::PullRequestDetail, state::DetailState};
 
@@ -2140,6 +2144,17 @@ mod tests {
             review_intelligence_request_key(&detail, CodeTourProvider::Codex),
             review_intelligence_request_key(&detail, CodeTourProvider::Copilot)
         );
+    }
+
+    #[test]
+    fn guided_review_stack_generation_uses_ai_provider_not_sem_stack() {
+        let options = guided_review_stack_discovery_options(CodeTourProvider::Copilot);
+
+        assert!(options.enable_ai_virtual);
+        assert!(!options.enable_sem_virtual);
+        assert!(!options.enable_virtual_commits);
+        assert!(!options.enable_virtual_semantic);
+        assert_eq!(options.ai_provider, Some(CodeTourProvider::Copilot));
     }
 
     #[test]

@@ -1528,11 +1528,18 @@ fn clean_layer_text(value: &str, fallback: &str, limit: usize) -> String {
     if trimmed.chars().count() <= limit {
         return trimmed.to_string();
     }
+    let suffix = "...";
     let truncated = trimmed
         .chars()
-        .take(limit.saturating_sub(1))
+        .take(limit.saturating_sub(suffix.chars().count()))
         .collect::<String>();
-    format!("{}...", truncated.trim_end())
+    if let Some((index, punctuation)) = truncated.char_indices().rev().find(|(index, ch)| {
+        matches!(ch, '.' | '!' | '?') && truncated[..*index].chars().count() >= limit / 2
+    }) {
+        let end = index + punctuation.len_utf8();
+        return truncated[..end].trim_end().to_string();
+    }
+    format!("{}{}", truncated.trim_end(), suffix)
 }
 
 fn virtual_stack_id(selected_pr: &PullRequestDetail) -> String {

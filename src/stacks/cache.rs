@@ -2,7 +2,7 @@ use crate::{cache::CacheStore, code_tour::CodeTourProvider};
 
 use super::model::{stack_now_ms, ChangeAtom, ReviewStack, StackReviewProgress};
 
-const AI_REVIEW_STACK_CACHE_PREFIX: &str = "ai-review-stack-v1";
+const AI_REVIEW_STACK_CACHE_PREFIX: &str = "ai-review-stack-v2";
 const STACK_PROGRESS_CACHE_PREFIX: &str = "stack-review-progress-v1";
 
 pub fn ai_review_stack_cache_key(

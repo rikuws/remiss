@@ -130,6 +130,7 @@ pub fn build_stack_planning_prompt(input_json: &Value) -> String {
         "- Favor layers that help a reviewer compare the implementation with their own expected design, especially for generated or mechanically large changes.",
         "- Prefer fewer coherent layers over many artificial layers.",
         "- Layer titles are compact UI labels: one line, 4-8 words preferred, 56 characters maximum, no full sentence, no code snippet, and no comma-separated symbol/key list.",
+        "- Layer titles must be distinct; do not reuse the same title for multiple layers.",
         "- Put explanation, scope, verification detail, and uncertainty in review_question, summary, rationale, or warnings rather than title.",
         "",
         "Choose the dominant decomposition pattern:",

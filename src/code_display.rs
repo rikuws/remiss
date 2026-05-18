@@ -11,6 +11,7 @@ use std::{
 use gpui::prelude::*;
 use gpui::*;
 
+use crate::icons::{lucide_icon, LucideIcon};
 use crate::lsp;
 use crate::markdown::render_markdown;
 use crate::review_session::ReviewLocation;
@@ -1108,6 +1109,7 @@ struct SharedLspHoverTooltipView {
     detail_key: String,
     query_key: String,
     token_label: String,
+    references_expanded: bool,
 }
 
 impl SharedLspHoverTooltipView {
@@ -1128,7 +1130,19 @@ impl SharedLspHoverTooltipView {
             detail_key,
             query_key,
             token_label,
+            references_expanded: false,
         }
+    }
+
+    fn toggle_references(
+        &mut self,
+        _event: &MouseDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.references_expanded = !self.references_expanded;
+        cx.notify();
+        cx.stop_propagation();
     }
 }
 
@@ -1210,9 +1224,12 @@ impl Render for SharedLspHoverTooltipView {
                                     .child(error.to_string())
                                     .into_any_element()
                             } else if let Some(details) = state.details.as_ref() {
+                                let toggle_references = cx.listener(Self::toggle_references);
                                 render_lsp_symbol_details(
                                     details,
                                     &format!("lsp-symbol-details-{}", self.query_key),
+                                    self.references_expanded,
+                                    toggle_references,
                                 )
                                 .into_any_element()
                             } else {
@@ -1233,7 +1250,12 @@ impl Render for SharedLspHoverTooltipView {
     }
 }
 
-fn render_lsp_symbol_details(details: &lsp::LspSymbolDetails, id_prefix: &str) -> AnyElement {
+fn render_lsp_symbol_details(
+    details: &lsp::LspSymbolDetails,
+    id_prefix: &str,
+    references_expanded: bool,
+    toggle_references: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
     if details.is_empty() {
         return div()
             .text_size(px(12.0))
@@ -1317,20 +1339,16 @@ fn render_lsp_symbol_details(details: &lsp::LspSymbolDetails, id_prefix: &str) -
                     .flex_col()
                     .gap(px(6.0))
                     .child(render_lsp_section_label("DEFINITION"))
-                    .children(details.definition_targets.iter().map(|target| {
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .font_family(mono_font_family())
-                            .text_size(px(12.0))
-                            .text_color(fg_default())
-                            .whitespace_normal()
-                            .child(format!("{}:{}", target.path, target.line))
-                    })),
+                    .children(details.definition_targets.iter().map(render_lsp_target_row)),
             )
         })
         .when(!details.reference_targets.is_empty(), |el| {
-            let extra_count = details.reference_targets.len().saturating_sub(6);
+            let reference_count = details.reference_targets.len();
+            let icon = if references_expanded {
+                LucideIcon::ChevronDown
+            } else {
+                LucideIcon::ChevronRight
+            };
             el.child(
                 div()
                     .w_full()
@@ -1338,28 +1356,55 @@ fn render_lsp_symbol_details(details: &lsp::LspSymbolDetails, id_prefix: &str) -
                     .flex()
                     .flex_col()
                     .gap(px(6.0))
-                    .child(render_lsp_section_label("REFERENCES"))
-                    .children(details.reference_targets.iter().take(6).map(|target| {
+                    .child(
                         div()
+                            .id(ElementId::Name(
+                                format!("{id_prefix}-references-disclosure").into(),
+                            ))
                             .w_full()
                             .min_w_0()
-                            .font_family(mono_font_family())
-                            .text_size(px(12.0))
-                            .text_color(fg_default())
-                            .whitespace_normal()
-                            .child(format!("{}:{}", target.path, target.line))
-                    }))
-                    .when(extra_count > 0, |el| {
-                        el.child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(fg_muted())
-                                .child(format!("+{extra_count} more references")),
-                        )
+                            .rounded(px(4.0))
+                            .px(px(3.0))
+                            .py(px(4.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .hover(|style| style.bg(bg_selected()))
+                            .on_mouse_down(MouseButton::Left, toggle_references)
+                            .child(lucide_icon(icon, 12.0, fg_muted()))
+                            .child(
+                                div()
+                                    .font_family(mono_font_family())
+                                    .text_size(px(11.0))
+                                    .text_color(accent())
+                                    .child(lsp_reference_count_label(reference_count)),
+                            ),
+                    )
+                    .when(references_expanded, |el| {
+                        el.children(details.reference_targets.iter().map(render_lsp_target_row))
                     }),
             )
         })
         .into_any_element()
+}
+
+fn render_lsp_target_row(target: &lsp::LspDefinitionTarget) -> impl IntoElement {
+    div()
+        .w_full()
+        .min_w_0()
+        .font_family(mono_font_family())
+        .text_size(px(12.0))
+        .text_color(fg_default())
+        .whitespace_normal()
+        .child(format!("{}:{}", target.path, target.line))
+}
+
+fn lsp_reference_count_label(count: usize) -> String {
+    if count == 1 {
+        "1 reference".to_string()
+    } else {
+        format!("{count} references")
+    }
 }
 
 fn render_lsp_section_label(label: &str) -> impl IntoElement {
@@ -1395,8 +1440,8 @@ mod tests {
     use crate::syntax::SyntaxSpan;
 
     use super::{
-        build_interactive_code_tokens, code_text_runs, prepared_code_block_element_id,
-        prepared_excerpt_range, prepared_lsp_text_id,
+        build_interactive_code_tokens, code_text_runs, lsp_reference_count_label,
+        prepared_code_block_element_id, prepared_excerpt_range, prepared_lsp_text_id,
     };
 
     fn total_run_len(runs: &[TextRun]) -> usize {
@@ -1491,5 +1536,11 @@ mod tests {
             prepared_code_block_element_id(None, 7),
             "prepared-code-block-7"
         );
+    }
+
+    #[test]
+    fn lsp_reference_count_label_pluralizes_count() {
+        assert_eq!(lsp_reference_count_label(1), "1 reference");
+        assert_eq!(lsp_reference_count_label(3), "3 references");
     }
 }
