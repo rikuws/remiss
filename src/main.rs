@@ -81,6 +81,8 @@ mod structural_diff_cache;
 mod structural_evidence;
 mod syntax;
 mod temp_source_window;
+#[cfg(test)]
+mod test_git;
 mod theme;
 mod tutorial_pr;
 mod views;

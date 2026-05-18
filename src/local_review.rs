@@ -913,22 +913,15 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        path::{Path, PathBuf},
-        process::Command,
-        sync::atomic::{AtomicUsize, Ordering},
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::{fs, path::PathBuf};
 
     use crate::cache::CacheStore;
+    use crate::test_git::{git_output, run_git, unique_test_directory};
 
     use super::{
         inspect_working_checkout, normalized_remote_repository, reusable_local_repository_status,
         upsert_remembered_repository, LocalReviewStatusKind, RememberedLocalRepository,
     };
-
-    static NEXT_TEST_ID: AtomicUsize = AtomicUsize::new(0);
 
     struct GitFixture {
         root: PathBuf,
@@ -1005,53 +998,6 @@ mod tests {
         fn checkout_branch(&self, branch: &str) {
             run_git(&self.root, ["checkout", "-b", branch]);
         }
-    }
-
-    fn unique_test_directory(prefix: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time went backwards")
-            .as_nanos();
-        let test_id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "remiss-{prefix}-{nanos}-{test_id}-{}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&path).expect("temp directory");
-        path
-    }
-
-    fn run_git<const N: usize>(path: &Path, args: [&str; N]) {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(path)
-            .args(args)
-            .output()
-            .expect("run git");
-        if !output.status.success() {
-            panic!(
-                "git {:?} failed: {}",
-                args,
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-    }
-
-    fn git_output<const N: usize>(path: &Path, args: [&str; N]) -> String {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(path)
-            .args(args)
-            .output()
-            .expect("run git");
-        if !output.status.success() {
-            panic!(
-                "git {:?} failed: {}",
-                args,
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
     #[test]
