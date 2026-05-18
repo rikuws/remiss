@@ -294,7 +294,9 @@ pub fn request_active_review_partner_focus(
                                     target.clone(),
                                     record,
                                 );
-                                document_to_save = Some(next.clone());
+                                // Keep timeout/error fallbacks session-local. Persisting them makes a
+                                // temporary provider failure look like a stable generated explanation
+                                // the next time this review is opened.
                                 detail_state.review_partner_state.document =
                                     Some(std::sync::Arc::new(next));
                             }

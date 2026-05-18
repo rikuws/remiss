@@ -24,7 +24,7 @@ fn partner_cache_key_includes_versions() {
         "context-y",
     );
 
-    assert!(key.starts_with("review-partner-v19:"));
+    assert!(key.starts_with("review-partner-v20:"));
     assert!(key.contains("stack-x"));
     assert!(key.contains("context-y"));
 }
@@ -38,6 +38,8 @@ fn review_partner_prompt_requires_concrete_summary_copy() {
     assert!(prompt.contains("never as a question"));
     assert!(prompt.contains("Never end a summary with an ellipsis"));
     assert!(prompt.contains("Match the supplied focus scope exactly"));
+    assert!(prompt.contains("what changed, how the code behaves"));
+    assert!(prompt.contains("Never mention Sem"));
     assert!(prompt.contains("understanding checkpoints"));
     assert!(prompt.contains("understandingCheckpoints"));
     assert!(prompt.contains("historySignals"));
@@ -147,12 +149,12 @@ fn review_partner_prompt_and_focus_records_include_semantic_context() {
         .layer("layer-1")
         .map(|layer| !layer.semantic_focus.is_empty())
         .unwrap_or(false));
-    assert!(partner
+    let layer_brief = partner
         .layer("layer-1")
-        .map(|layer| {
-            layer.brief.contains("Sem") && !layer.brief.contains("semantic changes across")
-        })
-        .unwrap_or(false));
+        .map(|layer| layer.brief.clone())
+        .unwrap_or_default();
+    assert!(!layer_brief.contains("Sem"));
+    assert!(layer_brief.contains("The useful meaning"));
 
     let focus_prompt = build_focus_record_prompt(&partner, &partner.focus_targets[0]);
     assert!(focus_prompt.contains("semanticEvidence"));

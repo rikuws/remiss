@@ -41,7 +41,7 @@ pub fn discover(
             selected_pr,
             repo_context,
             sizing,
-            "Sem review evidence was unavailable; used Remiss semantic fallback.",
+            "Code-structure review evidence was unavailable; used Remiss semantic fallback.",
         );
     };
 
@@ -51,7 +51,7 @@ pub fn discover(
             selected_pr,
             repo_context,
             sizing,
-            "Sem produced no atom mappings; used Remiss semantic fallback.",
+            "Code-structure evidence produced no change mappings; used Remiss semantic fallback.",
         );
     }
 
@@ -152,7 +152,7 @@ fn build_stack_from_semantic_review(
                 warnings.push(StackWarning::new(
                     "sem-layer-unmapped-atoms",
                     format!(
-                        "Sem layer '{}' referenced {ignored} duplicate or unavailable atom{}.",
+                        "A code-structure layer '{}' referenced {ignored} duplicate or unavailable change{}.",
                         layer.title,
                         if ignored == 1 { "" } else { "s" }
                     ),
@@ -217,10 +217,10 @@ fn build_stack_from_semantic_review(
                 id: layer_id,
                 index,
                 title: polished_layer_title(&group, &layer_atoms, role),
-                summary: clean_layer_text(&group.summary, "Sem grouped these changes.", 260),
+                summary: clean_layer_text(&group.summary, "Code-structure evidence groups these changes.", 260),
                 rationale: clean_layer_text(
                     &group.rationale,
-                    "Sem grouped these atoms from entity-level diff evidence.",
+                    "Entity-level diff evidence grouped these changes around the same review concern.",
                     560,
                 ),
                 pr: None,
@@ -260,9 +260,9 @@ fn build_stack_from_semantic_review(
         layers.push(ReviewStackLayer {
             id: layer_id,
             index,
-            title: "Manual review / Sem limitations".to_string(),
+            title: "Manual review / coverage limits".to_string(),
             summary: format!(
-                "{} atom{} need a direct pass because Sem could not safely place them in a review layer.",
+                "{} change{} need a direct pass because code-structure evidence could not safely place them in a review layer.",
                 manual_atom_ids.len(),
                 if manual_atom_ids.len() == 1 { "" } else { "s" }
             ),
@@ -287,7 +287,7 @@ fn build_stack_from_semantic_review(
                 .flat_map(|atom| atom.warnings.iter().cloned())
                 .chain(std::iter::once(StackWarning::new(
                     "sem-manual-review",
-                    "Sem left these atoms for manual review.",
+                    "Code-structure evidence left these changes for manual review.",
                 )))
                 .collect(),
         });
@@ -406,7 +406,7 @@ fn assign_unmapped_substantive_atoms(
             source_index: usize::MAX.saturating_sub(role.order()),
             title: fallback_title(role, &directory),
             summary: format!(
-                "{} across {}. Sem did not assign these atoms to a specific semantic layer, so Remiss kept them visible as a coverage repair group.",
+                "{} across {}. Code-structure evidence did not assign these changes to a specific review layer, so Remiss kept them visible as a coverage repair group.",
                 role.label(),
                 directory
             ),
@@ -665,7 +665,7 @@ fn merge_excess_groups(
             previous.title = format!("{} + {}", previous.title, last.title);
             previous.summary = format!("{} {}", previous.summary, last.summary);
             previous.rationale =
-                "Merged Sem groups to stay within the configured Guided Review layer budget."
+                "Merged code-structure groups to stay within the configured Guided Review layer budget."
                     .to_string();
             previous.file_paths.extend(last.file_paths);
             previous.entity_names.extend(last.entity_names);
@@ -689,19 +689,19 @@ fn validate_exact_coverage(
     for atom_id in assigned_ids {
         if !known_ids.contains(atom_id) {
             return Err(StackDiscoveryError::new(format!(
-                "Sem stack referenced unknown atom id '{atom_id}'."
+                "The code-structure stack referenced unknown change id '{atom_id}'."
             )));
         }
         if !seen.insert(atom_id.clone()) {
             return Err(StackDiscoveryError::new(format!(
-                "Sem stack assigned atom '{atom_id}' more than once."
+                "The code-structure stack assigned change '{atom_id}' more than once."
             )));
         }
     }
     let missing = known_ids.difference(&seen).collect::<Vec<_>>();
     if !missing.is_empty() {
         return Err(StackDiscoveryError::new(format!(
-            "Sem stack omitted {} atom{}.",
+            "The code-structure stack omitted {} change{}.",
             missing.len(),
             if missing.len() == 1 { "" } else { "s" }
         )));
@@ -878,7 +878,7 @@ fn dedup_strings(values: &mut Vec<String>) {
 }
 
 fn polished_layer_title(group: &SemLayerGroup, atoms: &[&ChangeAtom], role: ChangeRole) -> String {
-    let original = normalize_stack_layer_title(&group.title, "Sem review layer");
+    let original = normalize_stack_layer_title(&group.title, "Review layer");
     if !sem_title_needs_polish(&original) && stack_layer_title_quality_error(&group.title).is_none()
     {
         return original;
@@ -1349,7 +1349,7 @@ mod tests {
         assert_eq!(stack.layers[1].atom_ids, vec!["ui".to_string()]);
         assert_eq!(
             stack.layers.last().unwrap().title,
-            "Manual review / Sem limitations"
+            "Manual review / coverage limits"
         );
         assert_exact_stack_coverage(&stack);
     }

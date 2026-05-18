@@ -2104,7 +2104,10 @@ fn render_stack_rail(
             .as_ref()
             .is_some_and(|provider| provider.provider == "sem_virtual_stack") =>
         {
-            format!("Virtual stack · Sem · {} layers", stack.layers.len())
+            format!(
+                "Virtual stack · code-structured · {} layers",
+                stack.layers.len()
+            )
         }
         (crate::stacks::model::StackKind::Virtual, _) => "Virtual stack".to_string(),
     };
@@ -2126,7 +2129,7 @@ fn render_stack_rail(
             .as_ref()
             .is_some_and(|provider| provider.provider == "sem_virtual_stack") =>
         {
-            "Generated locally from Sem semantic evidence"
+            "Generated locally from code-structure evidence"
         }
         (crate::stacks::model::StackKind::Virtual, _) => "Generated locally by Remiss",
     };

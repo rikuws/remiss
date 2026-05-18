@@ -54,20 +54,20 @@ impl AgentJsonPromptOptions {
     pub const fn review_partner() -> Self {
         Self {
             task_label: "Review Partner context",
-            codex_overall_timeout_ms: 1_800_000,
-            codex_inactivity_timeout_ms: 300_000,
-            copilot_overall_timeout_ms: 1_800_000,
-            copilot_inactivity_timeout_ms: 300_000,
+            codex_overall_timeout_ms: 3_600_000,
+            codex_inactivity_timeout_ms: 600_000,
+            copilot_overall_timeout_ms: 3_600_000,
+            copilot_inactivity_timeout_ms: 600_000,
         }
     }
 
     pub const fn review_partner_focus() -> Self {
         Self {
             task_label: "Review Partner focus context",
-            codex_overall_timeout_ms: 600_000,
-            codex_inactivity_timeout_ms: 180_000,
-            copilot_overall_timeout_ms: 600_000,
-            copilot_inactivity_timeout_ms: 180_000,
+            codex_overall_timeout_ms: 1_800_000,
+            codex_inactivity_timeout_ms: 360_000,
+            copilot_overall_timeout_ms: 1_800_000,
+            copilot_inactivity_timeout_ms: 360_000,
         }
     }
 
