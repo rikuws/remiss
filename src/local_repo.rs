@@ -1425,11 +1425,12 @@ mod tests {
         fs,
         path::{Path, PathBuf},
         process::Command,
-        sync::atomic::{AtomicUsize, Ordering},
-        time::{SystemTime, UNIX_EPOCH},
     };
 
-    use crate::cache::CacheStore;
+    use crate::{
+        cache::CacheStore,
+        test_git::{git_output, run_git, unique_test_directory, unique_test_name},
+    };
 
     use super::{
         combine_process_error, ensure_local_repository_for_pull_request,
@@ -1437,8 +1438,6 @@ mod tests {
         managed_repository_directory_name, managed_repository_path,
         managed_repository_worktree_path, normalized_remote_repository, LocalRepositoryLink,
     };
-
-    static NEXT_TEST_ID: AtomicUsize = AtomicUsize::new(0);
 
     struct GitTestRepository {
         root: PathBuf,
@@ -1485,56 +1484,6 @@ mod tests {
         fn head_oid(&self) -> String {
             git_output(&self.root, ["rev-parse", "HEAD"])
         }
-    }
-
-    fn unique_test_directory(prefix: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time went backwards")
-            .as_nanos();
-        let test_id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "remiss-{prefix}-{nanos}-{test_id}-{}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&path).expect("failed to create temp directory");
-        path
-    }
-
-    fn run_git<const N: usize>(path: &Path, args: [&str; N]) {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(path)
-            .args(args)
-            .output()
-            .expect("failed to run git");
-
-        if !output.status.success() {
-            panic!(
-                "git {:?} failed: {}",
-                args,
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-    }
-
-    fn git_output<const N: usize>(path: &Path, args: [&str; N]) -> String {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(path)
-            .args(args)
-            .output()
-            .expect("failed to run git");
-
-        if !output.status.success() {
-            panic!(
-                "git {:?} failed: {}",
-                args,
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
     fn assert_path_string_eq(result: Option<&str>, expected: &Path) {
@@ -1771,10 +1720,7 @@ mod tests {
 
     #[test]
     fn ensure_local_repository_removes_stale_worktree_for_updated_pr_head() {
-        let repository_name = format!(
-            "openai/example-stale-worktree-{}",
-            NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
-        );
+        let repository_name = format!("openai/{}", unique_test_name("example-stale-worktree"));
         let linked_repository = GitTestRepository::new(&repository_name);
         linked_repository.write_file("src/lib.rs", "pub fn value() -> i32 { 1 }\n");
         let first_head = linked_repository.commit_all("initial");
@@ -1830,10 +1776,7 @@ mod tests {
 
     #[test]
     fn ensure_local_repository_falls_back_to_managed_checkout_when_linked_repo_is_dirty() {
-        let repository_name = format!(
-            "openai/example-fallback-{}",
-            NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
-        );
+        let repository_name = format!("openai/{}", unique_test_name("example-fallback"));
         let linked_repository = GitTestRepository::new(&repository_name);
         linked_repository.write_file("src/lib.rs", "pub fn value() -> i32 { 1 }\n");
         let head = linked_repository.commit_all("initial");
