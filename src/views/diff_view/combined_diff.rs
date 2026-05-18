@@ -1409,14 +1409,17 @@ fn current_combined_diff_header(
     items: &[CombinedDiffViewItem],
     selected_path: Option<&str>,
 ) -> Option<CombinedDiffFloatingHeader> {
-    let (context_ix, context) = selected_path
-        .and_then(|path| {
-            contexts
-                .iter()
-                .enumerate()
-                .find(|(_, context)| context.file.path == path)
-        })
-        .or_else(|| contexts.iter().enumerate().next())?;
+    let context_ix =
+        current_combined_diff_file_index_for_scroll_top(items, list_state.logical_scroll_top())
+            .or_else(|| {
+                selected_path.and_then(|path| {
+                    contexts
+                        .iter()
+                        .position(|context| context.file.path == path)
+                })
+            })
+            .or_else(|| contexts.first().map(|_| 0))?;
+    let context = contexts.get(context_ix)?;
     let header_item_ix = items.iter().position(|item| {
         matches!(
             item,
@@ -1433,6 +1436,65 @@ fn current_combined_diff_header(
             DiffFileCollapseScrollAdjustment::for_combined_file(list_state, header_item_ix, context)
         }),
     })
+}
+
+pub(super) fn current_combined_diff_file_index_for_scroll_top(
+    items: &[CombinedDiffViewItem],
+    scroll_top: ListOffset,
+) -> Option<usize> {
+    if items.is_empty() {
+        return None;
+    }
+
+    let item_ix = scroll_top.item_ix.min(items.len().saturating_sub(1));
+    if matches!(items.get(item_ix), Some(CombinedDiffViewItem::Header(_)))
+        && scroll_top.offset_in_item < combined_diff_header_top_padding(item_ix)
+    {
+        return combined_diff_file_index_before_item(items, item_ix)
+            .or_else(|| combined_diff_file_index_at_or_before_item(items, item_ix));
+    }
+
+    combined_diff_file_index_at_or_before_item(items, item_ix)
+}
+
+fn combined_diff_header_top_padding(item_ix: usize) -> Pixels {
+    if item_ix == 0 {
+        px(DIFF_FILE_HEADER_TOP_MARGIN_FIRST)
+    } else {
+        px(DIFF_FILE_HEADER_TOP_MARGIN)
+    }
+}
+
+fn combined_diff_file_index_before_item(
+    items: &[CombinedDiffViewItem],
+    item_ix: usize,
+) -> Option<usize> {
+    if item_ix == 0 {
+        return None;
+    }
+
+    (0..item_ix)
+        .rev()
+        .find_map(|ix| combined_diff_item_file_index(&items[ix]))
+}
+
+fn combined_diff_file_index_at_or_before_item(
+    items: &[CombinedDiffViewItem],
+    item_ix: usize,
+) -> Option<usize> {
+    (0..=item_ix.min(items.len().saturating_sub(1)))
+        .rev()
+        .find_map(|ix| combined_diff_item_file_index(&items[ix]))
+}
+
+fn combined_diff_item_file_index(item: &CombinedDiffViewItem) -> Option<usize> {
+    match item {
+        CombinedDiffViewItem::Header(file_index)
+        | CombinedDiffViewItem::StackNotice(file_index)
+        | CombinedDiffViewItem::State { file_index, .. }
+        | CombinedDiffViewItem::Row { file_index, .. } => Some(*file_index),
+        CombinedDiffViewItem::Footer => None,
+    }
 }
 
 fn render_floating_diff_file_header(

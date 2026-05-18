@@ -1515,9 +1515,10 @@ mod tests {
     };
     use super::review_sidebar::sync_stack_timeline_item_count;
     use super::{
-        build_normal_side_by_side_diff_file, focus_item_index_around,
-        max_side_by_side_column_widths, reading_focus_item_index, DiffFileCollapseScrollAdjustment,
-        SideBySideColumnWidths, StructuralDiffTerminalStatus,
+        build_normal_side_by_side_diff_file, current_combined_diff_file_index_for_scroll_top,
+        focus_item_index_around, max_side_by_side_column_widths, reading_focus_item_index,
+        CombinedDiffViewItem, DiffFileCollapseScrollAdjustment, DiffViewItem,
+        SideBySideColumnWidths, StructuralDiffTerminalStatus, DIFF_FILE_HEADER_TOP_MARGIN,
     };
 
     fn test_bounds(top: f32, bottom: f32) -> Bounds<Pixels> {
@@ -1666,6 +1667,74 @@ mod tests {
         assert_eq!(selected, None);
         assert_eq!(focus_item_index_around(4, 2, |ix| ix == 3), Some(3));
         assert_eq!(focus_item_index_around(4, 2, |ix| ix == 1), Some(1));
+    }
+
+    #[test]
+    fn floating_combined_header_waits_for_next_header_row() {
+        let items = vec![
+            CombinedDiffViewItem::Header(0),
+            CombinedDiffViewItem::Row {
+                file_index: 0,
+                item: DiffViewItem::Row(0),
+            },
+            CombinedDiffViewItem::Footer,
+            CombinedDiffViewItem::Header(1),
+            CombinedDiffViewItem::Row {
+                file_index: 1,
+                item: DiffViewItem::Row(0),
+            },
+        ];
+
+        assert_eq!(
+            current_combined_diff_file_index_for_scroll_top(
+                &items,
+                ListOffset {
+                    item_ix: 1,
+                    offset_in_item: px(0.0),
+                },
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            current_combined_diff_file_index_for_scroll_top(
+                &items,
+                ListOffset {
+                    item_ix: 2,
+                    offset_in_item: px(0.0),
+                },
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            current_combined_diff_file_index_for_scroll_top(
+                &items,
+                ListOffset {
+                    item_ix: 3,
+                    offset_in_item: px(DIFF_FILE_HEADER_TOP_MARGIN - 1.0),
+                },
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            current_combined_diff_file_index_for_scroll_top(
+                &items,
+                ListOffset {
+                    item_ix: 3,
+                    offset_in_item: px(DIFF_FILE_HEADER_TOP_MARGIN),
+                },
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            current_combined_diff_file_index_for_scroll_top(
+                &items,
+                ListOffset {
+                    item_ix: 4,
+                    offset_in_item: px(0.0),
+                },
+            ),
+            Some(1)
+        );
     }
 
     #[test]
