@@ -44,6 +44,7 @@ mod code_tour;
 mod code_tour_background;
 mod command_runner;
 mod deep_link;
+mod diagnostic_logs;
 mod diff;
 mod difftastic;
 mod emoji;

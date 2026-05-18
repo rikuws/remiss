@@ -12,7 +12,7 @@ use crate::managed_lsp::{
 use crate::selectable_text::SelectableText;
 use crate::state::{AppState, ManagedLspSettingsState};
 use crate::theme::*;
-use crate::{app_storage, platform_macos};
+use crate::{app_storage, diagnostic_logs, platform_macos};
 
 use super::pr_detail::surface_tab;
 use super::sections::{
@@ -76,6 +76,52 @@ pub fn trigger_software_update_check(state: &Entity<AppState>, cx: &mut App) {
         }
         cx.notify();
     });
+}
+
+pub fn trigger_diagnostic_log_export(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
+    let mut should_spawn = false;
+    state.update(cx, |state, cx| {
+        if state.diagnostic_export_loading {
+            return;
+        }
+        state.diagnostic_export_loading = true;
+        state.diagnostic_export_message = None;
+        state.diagnostic_export_error = None;
+        should_spawn = true;
+        cx.notify();
+    });
+    if !should_spawn {
+        return;
+    }
+
+    let model = state.clone();
+    window
+        .spawn(cx, async move |cx: &mut AsyncWindowContext| {
+            let result = cx
+                .background_executor()
+                .spawn(async { diagnostic_logs::export_diagnostic_logs_zip() })
+                .await;
+
+            model
+                .update(cx, |state, cx| {
+                    state.diagnostic_export_loading = false;
+                    match result {
+                        Ok(path) => {
+                            diagnostic_logs::reveal_export(&path);
+                            state.diagnostic_export_message =
+                                Some(format!("Exported logs to {}.", path.display()));
+                            state.diagnostic_export_error = None;
+                        }
+                        Err(error) => {
+                            state.diagnostic_export_message = None;
+                            state.diagnostic_export_error = Some(error);
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+        })
+        .detach();
 }
 
 pub fn trigger_managed_lsp_status_refresh(
@@ -521,6 +567,7 @@ pub fn render_settings_view(state: &Entity<AppState>, cx: &App) -> impl IntoElem
                     .gap(px(24.0))
                     .child(render_theme_settings_panel(state, &s))
                     .child(render_software_update_panel(state, &s))
+                    .child(render_diagnostic_logs_panel(state, &s))
                     .child(render_code_tour_settings_panel(state, &s))
                     .child(
                         panel().child(
@@ -697,6 +744,66 @@ fn render_software_update_panel(state: &Entity<AppState>, s: &AppState) -> impl 
                             trigger_software_update_check(&state, cx);
                         }
                     })),
+            )
+            .when_some(message, |el, message| el.child(success_text(&message)))
+            .when_some(error, |el, error| el.child(error_text(&error))),
+    )
+}
+
+fn render_diagnostic_logs_panel(state: &Entity<AppState>, s: &AppState) -> impl IntoElement {
+    let loading = s.diagnostic_export_loading;
+    let message = s.diagnostic_export_message.clone();
+    let error = s.diagnostic_export_error.clone();
+
+    panel().child(
+        div()
+            .p(px(28.0))
+            .px(px(32.0))
+            .flex()
+            .flex_col()
+            .gap(px(18.0))
+            .child(eyebrow("Settings / Diagnostics"))
+            .child(
+                div()
+                    .text_size(px(24.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(fg_emphasis())
+                    .child("Diagnostic logs"),
+            )
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(fg_muted())
+                    .max_w(px(760.0))
+                    .child(
+                        "Export recent Copilot, AI stack, and checkout logs as a zip file in Downloads.",
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .flex_wrap()
+                    .child(badge("local archive"))
+                    .child(ghost_button(
+                        if loading {
+                            "Exporting logs..."
+                        } else {
+                            "Export Logs Zip"
+                        },
+                        {
+                            let state = state.clone();
+                            move |_, window, cx| {
+                                trigger_diagnostic_log_export(&state, window, cx);
+                            }
+                        },
+                    ))
+                    .when(loading, |el| {
+                        el.child(panel_state_text(
+                            "Collecting logs from Application Support...",
+                        ))
+                    }),
             )
             .when_some(message, |el, message| el.child(success_text(&message)))
             .when_some(error, |el, error| el.child(error_text(&error))),

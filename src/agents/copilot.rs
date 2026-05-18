@@ -1,19 +1,22 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant as StdInstant};
+use std::time::{Duration, Instant as StdInstant, SystemTime, UNIX_EPOCH};
 
 use github_copilot_sdk::resolve::{copilot_binary_with_source, BinarySource};
 use github_copilot_sdk::{
     Client, ClientOptions, Error as SdkError, LogLevel, MessageOptions, PermissionRequestData,
     PermissionRequestKind, RecvError, SessionConfig, SessionError, SessionEvent,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::time::{Instant as TokioInstant, MissedTickBehavior};
 
-use crate::code_tour::{
-    CodeTourProgressUpdate, CodeTourProvider, CodeTourProviderStatus, GenerateCodeTourInput,
-    GeneratedCodeTour,
+use crate::{
+    app_storage,
+    code_tour::{
+        CodeTourProgressUpdate, CodeTourProvider, CodeTourProviderStatus, GenerateCodeTourInput,
+        GeneratedCodeTour,
+    },
 };
 
 use super::errors::{generation_abort_message, AbortKind, AbortReason};
@@ -29,6 +32,11 @@ const INACTIVITY_TIMEOUT_MS: u64 = 120_000;
 const RUNNING_TICKER_MS: u64 = 10_000;
 const MAX_PROMPT_BYTES: usize = 120_000;
 const MAX_STACK_PLAN_PROMPT_BYTES: usize = 140_000;
+const COPILOT_DIAGNOSTICS_INCLUDE_PROMPT_ENV: &str = "REMISS_COPILOT_DIAGNOSTICS_INCLUDE_PROMPT";
+const COPILOT_DIAGNOSTIC_LOG_DIR: &str = "copilot-diagnostics";
+const MAX_DIAGNOSTIC_EVENTS: usize = 240;
+const MAX_DIAGNOSTIC_LINE_CHARS: usize = 4_000;
+const MAX_DIAGNOSTIC_RESPONSE_CHARS: usize = 80_000;
 const COPILOT_TOOL_ALLOWLISTS: &[&[&str]] = &[
     &["view", "rg", "glob"],
     &["view", "grep", "glob"],
@@ -64,6 +72,7 @@ struct CopilotOutcome {
 
 struct CopilotRun {
     outcome: CopilotOutcome,
+    diagnostic_log_path: Option<String>,
 }
 
 impl CodingAgentBackend for CopilotBackend {
@@ -130,7 +139,10 @@ impl CodingAgentBackend for CopilotBackend {
             truncate_to_byte_limit(&mut prompt, MAX_PROMPT_BYTES);
         }
 
-        let CopilotRun { outcome } = run_copilot_with_tool_allowlist_retries(
+        let CopilotRun {
+            outcome,
+            diagnostic_log_path,
+        } = run_copilot_with_tool_allowlist_retries(
             &input.working_directory,
             &prompt,
             OVERALL_TIMEOUT_MS,
@@ -142,7 +154,10 @@ impl CodingAgentBackend for CopilotBackend {
 
         if let Some(abort) = &outcome.abort {
             if !has_usable_final_text(&outcome) {
-                let summary = generation_abort_message("GitHub Copilot", "the code tour", abort);
+                let summary = append_diagnostic_log_suffix(
+                    generation_abort_message("GitHub Copilot", "the code tour", abort),
+                    diagnostic_log_path.as_deref(),
+                );
                 on_progress(make_progress(
                     "timeout",
                     summary.clone(),
@@ -157,7 +172,10 @@ impl CodingAgentBackend for CopilotBackend {
         }
 
         if let Some(error) = &outcome.error {
-            return Err(error.clone());
+            return Err(append_diagnostic_log_suffix(
+                error.clone(),
+                diagnostic_log_path.as_deref(),
+            ));
         }
 
         on_progress(make_progress(
@@ -174,7 +192,10 @@ impl CodingAgentBackend for CopilotBackend {
             return Ok(build_copilot_fallback_tour(
                 input,
                 outcome.model.clone(),
-                fallback_reason(&outcome),
+                append_diagnostic_log_suffix(
+                    fallback_reason(&outcome),
+                    diagnostic_log_path.as_deref(),
+                ),
             ));
         };
 
@@ -183,7 +204,10 @@ impl CodingAgentBackend for CopilotBackend {
             return Ok(build_copilot_fallback_tour(
                 input,
                 outcome.model.clone(),
-                fallback_reason(&outcome),
+                append_diagnostic_log_suffix(
+                    fallback_reason(&outcome),
+                    diagnostic_log_path.as_deref(),
+                ),
             ));
         }
 
@@ -192,9 +216,12 @@ impl CodingAgentBackend for CopilotBackend {
             Err(error) => Ok(build_copilot_fallback_tour(
                 input,
                 outcome.model,
-                format!(
-                    "GitHub Copilot did not return a usable JSON code tour: {}",
-                    error.message
+                append_diagnostic_log_suffix(
+                    format!(
+                        "GitHub Copilot did not return a usable JSON code tour: {}",
+                        error.message
+                    ),
+                    diagnostic_log_path.as_deref(),
                 ),
             )),
         }
@@ -225,7 +252,10 @@ pub fn run_json_prompt_with_progress(
         truncate_to_byte_limit(&mut prompt, MAX_STACK_PLAN_PROMPT_BYTES);
     }
 
-    let CopilotRun { outcome } = runtime::shared().block_on(run_copilot_sdk_session(
+    let CopilotRun {
+        outcome,
+        diagnostic_log_path,
+    } = runtime::shared().block_on(run_copilot_sdk_session(
         working_directory,
         &prompt,
         &[],
@@ -234,29 +264,39 @@ pub fn run_json_prompt_with_progress(
         options.task_label,
         true,
         on_progress,
+        1,
+        1,
     ))?;
 
     if let Some(abort) = &outcome.abort {
         if !has_usable_final_text(&outcome) {
-            return Err(generation_abort_message(
-                "GitHub Copilot",
-                options.task_label,
-                abort,
+            return Err(append_diagnostic_log_suffix(
+                generation_abort_message("GitHub Copilot", options.task_label, abort),
+                diagnostic_log_path.as_deref(),
             ));
         }
     }
 
     if let Some(error) = &outcome.error {
-        return Err(error.clone());
+        return Err(append_diagnostic_log_suffix(
+            error.clone(),
+            diagnostic_log_path.as_deref(),
+        ));
     }
 
     let Some(final_text) = outcome.final_text.as_deref() else {
-        return Err(fallback_reason(&outcome));
+        return Err(append_diagnostic_log_suffix(
+            fallback_reason(&outcome),
+            diagnostic_log_path.as_deref(),
+        ));
     };
 
     let trimmed = final_text.trim();
     if trimmed.is_empty() {
-        return Err(fallback_reason(&outcome));
+        return Err(append_diagnostic_log_suffix(
+            fallback_reason(&outcome),
+            diagnostic_log_path.as_deref(),
+        ));
     }
 
     Ok(AgentTextResponse {
@@ -276,6 +316,7 @@ fn run_copilot_with_tool_allowlist_retries(
 ) -> Result<CopilotRun, String> {
     let mut last_tool_error: Option<String> = None;
 
+    let max_attempts = COPILOT_TOOL_ALLOWLISTS.len();
     for (attempt_ix, available_tools) in COPILOT_TOOL_ALLOWLISTS.iter().enumerate() {
         if attempt_ix > 0 && emit_progress {
             on_progress(make_progress(
@@ -301,6 +342,8 @@ fn run_copilot_with_tool_allowlist_retries(
             task_label,
             emit_progress,
             on_progress,
+            attempt_ix + 1,
+            max_attempts,
         ))?;
 
         if run
@@ -311,7 +354,9 @@ fn run_copilot_with_tool_allowlist_retries(
             .unwrap_or(false)
             && !has_usable_final_text(&run.outcome)
         {
-            last_tool_error = run.outcome.error.clone();
+            last_tool_error = run.outcome.error.clone().map(|error| {
+                append_diagnostic_log_suffix(error, run.diagnostic_log_path.as_deref())
+            });
             continue;
         }
 
@@ -333,7 +378,14 @@ async fn run_copilot_sdk_session(
     task_label: &str,
     emit_progress: bool,
     on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
+    attempt: usize,
+    max_attempts: usize,
 ) -> Result<CopilotRun, String> {
+    let started_at_ms = now_ms();
+    let run_started_at = StdInstant::now();
+    let binary = copilot_binary_with_source()
+        .ok()
+        .map(|(path, _)| path.display().to_string());
     let client_options = ClientOptions::new()
         .with_cwd(working_directory)
         .with_log_level(LogLevel::Error)
@@ -390,6 +442,7 @@ async fn run_copilot_sdk_session(
         }
 
         let mut outcome = CopilotOutcome::default();
+        let mut diagnostic_events = Vec::new();
         let start = StdInstant::now();
         let mut last_activity = TokioInstant::now();
         let mut overall_sleep = Box::pin(tokio::time::sleep_until(
@@ -415,6 +468,7 @@ async fn run_copilot_sdk_session(
                 event = events.recv() => {
                     match event {
                         Ok(event) => {
+                            record_diagnostic_event(&mut diagnostic_events, "sdk", &event);
                             handle_sdk_event(event, &mut outcome, emit_progress, on_progress);
                             last_activity = TokioInstant::now();
                             inactivity_sleep.as_mut().reset(
@@ -432,6 +486,11 @@ async fn run_copilot_sdk_session(
                                 "Skipped {} Copilot SDK event(s) while processing progress.",
                                 lagged.skipped()
                             ));
+                            record_diagnostic_line(
+                                &mut diagnostic_events,
+                                "sdk-lagged",
+                                &format!("skipped {}", lagged.skipped()),
+                            );
                             last_activity = TokioInstant::now();
                             inactivity_sleep.as_mut().reset(
                                 last_activity + Duration::from_millis(inactivity_timeout_ms)
@@ -486,6 +545,7 @@ async fn run_copilot_sdk_session(
         if let Some(result) = send_result {
             match result {
                 Ok(Some(final_event)) => {
+                    record_diagnostic_event(&mut diagnostic_events, "sdk-final", &final_event);
                     handle_terminal_sdk_event(
                         final_event,
                         &mut outcome,
@@ -502,12 +562,32 @@ async fn run_copilot_sdk_session(
 
         if let Ok(events) = session.get_messages().await {
             for event in events {
+                record_diagnostic_event(&mut diagnostic_events, "sdk-history", &event);
                 record_final_text_from_event(&event, &mut outcome);
             }
         }
         promote_stream_to_final(&mut outcome);
+        let duration_ms = u64::try_from(run_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let diagnostic_log_path = write_copilot_diagnostic_log(CopilotDiagnosticLogInput {
+            started_at_ms,
+            duration_ms,
+            task_label,
+            binary: binary.as_deref(),
+            working_directory,
+            available_tools,
+            overall_timeout_ms,
+            inactivity_timeout_ms,
+            prompt,
+            outcome: &outcome,
+            stream_events: &diagnostic_events,
+            attempt,
+            max_attempts,
+        });
         let _ = session.disconnect().await;
-        Ok(CopilotRun { outcome })
+        Ok(CopilotRun {
+            outcome,
+            diagnostic_log_path,
+        })
     }
     .await;
 
@@ -973,6 +1053,236 @@ fn is_unknown_tool_allowlist_error(text: &str) -> bool {
     let mentions_allowlist =
         lower.contains("allowlist") || lower.contains("available") || lower.contains("unknown");
     mentions_tool && mentions_allowlist
+}
+
+struct CopilotDiagnosticLogInput<'a> {
+    started_at_ms: u64,
+    duration_ms: u64,
+    task_label: &'a str,
+    binary: Option<&'a str>,
+    working_directory: &'a str,
+    available_tools: &'a [&'a str],
+    overall_timeout_ms: u64,
+    inactivity_timeout_ms: u64,
+    prompt: &'a str,
+    outcome: &'a CopilotOutcome,
+    stream_events: &'a [String],
+    attempt: usize,
+    max_attempts: usize,
+}
+
+fn write_copilot_diagnostic_log(input: CopilotDiagnosticLogInput<'_>) -> Option<String> {
+    let log_dir = app_storage::data_dir_root().join(COPILOT_DIAGNOSTIC_LOG_DIR);
+    if let Err(error) = std::fs::create_dir_all(&log_dir) {
+        eprintln!(
+            "Failed to create Copilot diagnostic log directory '{}': {error}",
+            log_dir.display()
+        );
+        return None;
+    }
+
+    let task_slug = sanitize_log_path_component(input.task_label);
+    let path = log_dir.join(format!(
+        "{}-{}-attempt-{}.json",
+        input.started_at_ms, task_slug, input.attempt
+    ));
+    let latest_path = log_dir.join("latest.json");
+    let task_latest_path = log_dir.join(copilot_diagnostic_task_latest_file_name(input.task_label));
+    let problem_latest_path =
+        diagnostic_log_has_problem(input.outcome).then(|| log_dir.join("latest-problem.json"));
+    let response_text = diagnostic_response_text(input.outcome);
+    let prompt_included = copilot_diagnostics_include_prompt();
+    let abort = input.outcome.abort.as_ref().map(|reason| {
+        json!({
+            "kind": abort_kind_label(reason.kind),
+            "timeoutMs": reason.timeout_ms,
+            "lastVisibleActivity": reason.last_visible_activity,
+        })
+    });
+    let available_tools = if input.available_tools.is_empty() {
+        "none".to_string()
+    } else {
+        input.available_tools.join(",")
+    };
+    let path_display = path.display().to_string();
+    let latest_path_display = latest_path.display().to_string();
+    let task_latest_path_display = task_latest_path.display().to_string();
+    let problem_latest_path_display = problem_latest_path
+        .as_ref()
+        .map(|path| path.display().to_string());
+
+    let log = json!({
+        "diagnosticLogPath": path_display,
+        "latestLogPath": latest_path_display,
+        "taskLatestLogPath": task_latest_path_display,
+        "problemLatestLogPath": problem_latest_path_display,
+        "startedAtMs": input.started_at_ms,
+        "durationMs": input.duration_ms,
+        "taskLabel": input.task_label,
+        "binary": input.binary,
+        "workingDirectory": input.working_directory,
+        "availableTools": available_tools,
+        "attempt": input.attempt,
+        "maxAttempts": input.max_attempts,
+        "timeouts": {
+            "overallMs": input.overall_timeout_ms,
+            "inactivityMs": input.inactivity_timeout_ms,
+        },
+        "model": input.outcome.model,
+        "exitStatusCode": null,
+        "abort": abort,
+        "error": input.outcome.error,
+        "lastVisibleActivity": input.outcome.last_visible_activity,
+        "sawMeaningfulProgress": input.outcome.saw_meaningful_progress,
+        "stderr": "",
+        "finalTextBytes": input.outcome.final_text.as_deref().map(str::len),
+        "currentTurnStreamBytes": response_text.map(str::len).unwrap_or(0),
+        "currentTurnStreamPreview": response_text.map(limit_diagnostic_text).unwrap_or_default(),
+        "streamEvents": input.stream_events,
+        "promptBytes": input.prompt.len(),
+        "promptIncluded": prompt_included,
+        "prompt": if prompt_included {
+            Some(input.prompt)
+        } else {
+            None
+        },
+    });
+
+    let serialized = match serde_json::to_string_pretty(&log) {
+        Ok(serialized) => serialized,
+        Err(error) => {
+            eprintln!("Failed to serialize Copilot diagnostic log: {error}");
+            return None;
+        }
+    };
+
+    if let Err(error) = std::fs::write(&path, &serialized) {
+        eprintln!(
+            "Failed to write Copilot diagnostic log '{}': {error}",
+            path.display()
+        );
+        return None;
+    }
+
+    write_copilot_diagnostic_alias(&latest_path, &serialized, "latest");
+    write_copilot_diagnostic_alias(&task_latest_path, &serialized, "task latest");
+    if let Some(problem_latest_path) = problem_latest_path.as_ref() {
+        write_copilot_diagnostic_alias(problem_latest_path, &serialized, "problem latest");
+    }
+
+    let path = path.display().to_string();
+    eprintln!("Copilot diagnostic log written: {path}");
+    Some(path)
+}
+
+fn write_copilot_diagnostic_alias(path: &Path, serialized: &str, label: &str) {
+    if let Err(error) = std::fs::write(path, serialized) {
+        eprintln!(
+            "Failed to write {label} Copilot diagnostic log '{}': {error}",
+            path.display()
+        );
+    }
+}
+
+fn diagnostic_response_text(outcome: &CopilotOutcome) -> Option<&str> {
+    outcome.final_text.as_deref().or_else(|| {
+        (!outcome.current_turn_stream.is_empty()).then_some(outcome.current_turn_stream.as_str())
+    })
+}
+
+fn diagnostic_log_has_problem(outcome: &CopilotOutcome) -> bool {
+    outcome.abort.is_some()
+        || outcome
+            .error
+            .as_deref()
+            .map(|error| !error.trim().is_empty())
+            .unwrap_or(false)
+        || !has_usable_final_text(outcome)
+}
+
+fn copilot_diagnostic_task_latest_file_name(task_label: &str) -> String {
+    format!("latest-{}.json", sanitize_log_path_component(task_label))
+}
+
+fn record_diagnostic_event(target: &mut Vec<String>, kind: &str, event: &SessionEvent) {
+    let serialized = serde_json::to_string(event)
+        .unwrap_or_else(|_| format!("{{\"type\":\"{}\"}}", event.event_type));
+    record_diagnostic_line(target, kind, &serialized);
+}
+
+fn record_diagnostic_line(target: &mut Vec<String>, kind: &str, line: &str) {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    target.push(format!(
+        "{kind}: {}",
+        limit_text(trimmed, MAX_DIAGNOSTIC_LINE_CHARS)
+    ));
+    if target.len() > MAX_DIAGNOSTIC_EVENTS {
+        let remove_count = target.len() - MAX_DIAGNOSTIC_EVENTS;
+        target.drain(0..remove_count);
+    }
+}
+
+fn limit_diagnostic_text(value: &str) -> String {
+    limit_text(value, MAX_DIAGNOSTIC_RESPONSE_CHARS)
+}
+
+fn copilot_diagnostics_include_prompt() -> bool {
+    env_truthy(COPILOT_DIAGNOSTICS_INCLUDE_PROMPT_ENV)
+}
+
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
+fn append_diagnostic_log_suffix(mut message: String, diagnostic_log_path: Option<&str>) -> String {
+    if let Some(path) = diagnostic_log_path {
+        message.push_str(" Diagnostic log: ");
+        message.push_str(path);
+        message.push('.');
+    }
+    message
+}
+
+fn abort_kind_label(kind: AbortKind) -> &'static str {
+    match kind {
+        AbortKind::Overall => "overall",
+        AbortKind::Inactivity => "inactivity",
+    }
+}
+
+fn sanitize_log_path_component(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let sanitized = sanitized.trim_matches('_');
+    if sanitized.is_empty() {
+        "copilot".to_string()
+    } else {
+        sanitized.to_string()
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 fn truncate_to_byte_limit(text: &mut String, max_bytes: usize) {
