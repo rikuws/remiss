@@ -16,7 +16,7 @@ const GUIDED_REVIEW_CACHE_KEY_PREFIX: &str = "guided-review-v1";
 
 pub use crate::review_ai::{
     review_code_version_key as guided_review_code_version_key, DiffAnchor, ReviewAiProgressUpdate,
-    ReviewAiProvider, ReviewAiProviderStatus, ReviewAiSettings,
+    ReviewAiProvider, ReviewAiProviderStatus,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1264,6 +1264,7 @@ mod tests {
     use crate::{
         diff::parse_unified_diff,
         github::{PullRequestDetail, PullRequestFile},
+        review_ai::ReviewAiSettings,
     };
 
     fn detail(updated_at: &str, head_ref_oid: Option<&str>, raw_diff: &str) -> PullRequestDetail {

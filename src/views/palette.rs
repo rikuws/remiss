@@ -1280,7 +1280,8 @@ mod tests {
         )
         .is_some());
         assert!(
-            fuzzy_match_score("switch to guided review guide", &fuzzy_query_chars("ai")).is_some()
+            fuzzy_match_score("switch to guided review ai guide", &fuzzy_query_chars("ai"))
+                .is_some()
         );
         assert!(
             fuzzy_match_score("switch to source source browser", &fuzzy_query_chars("src"))
