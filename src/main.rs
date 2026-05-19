@@ -40,6 +40,7 @@ mod branding;
 mod cache;
 mod cli_binary;
 mod code_display;
+mod code_symbols;
 mod code_tour;
 mod code_tour_background;
 mod command_runner;

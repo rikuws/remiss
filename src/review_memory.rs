@@ -10,6 +10,7 @@ use sha1::{Digest, Sha1};
 use crate::{
     agents::{self, jsonrepair::parse_tolerant, AgentJsonPromptOptions},
     cache::CacheStore,
+    code_symbols::{declaration_symbol, strip_declaration_modifiers},
     code_tour::{CodeTourProgressUpdate, CodeTourProvider},
     diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk},
     github::{PullRequestDetail, PullRequestReviewThread},
@@ -1587,56 +1588,10 @@ fn symbol_from_hunk_header(header: &str) -> Option<MemorySymbol> {
 }
 
 fn symbol_from_code_context(context: &str) -> Option<MemorySymbol> {
-    let trimmed = context
-        .trim()
-        .trim_start_matches("pub ")
-        .trim_start_matches("async ")
-        .trim_start_matches("export ")
-        .trim_start_matches("default ");
-
-    for (prefix, kind) in [
-        ("fn ", "function"),
-        ("struct ", "struct"),
-        ("enum ", "enum"),
-        ("trait ", "trait"),
-        ("impl ", "impl"),
-        ("mod ", "module"),
-        ("type ", "type"),
-        ("class ", "class"),
-        ("interface ", "interface"),
-        ("function ", "function"),
-        ("def ", "function"),
-        ("func ", "function"),
-    ] {
-        if let Some(name) = extract_after_pattern(trimmed, prefix) {
-            return Some(MemorySymbol {
-                name,
-                kind: kind.to_string(),
-            });
-        }
-    }
-
-    None
-}
-
-fn extract_after_pattern(value: &str, pattern: &str) -> Option<String> {
-    let (_, rest) = value.split_once(pattern)?;
-    let rest = rest.trim();
-    if rest.is_empty() {
-        return None;
-    }
-    let name = if pattern == "impl " {
-        rest.split('{').next().unwrap_or(rest).trim()
-    } else {
-        rest.split(['(', '{', '<', ':', '=', ' '])
-            .next()
-            .unwrap_or(rest)
-            .trim()
-    };
-    let clean = name
-        .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != ':')
-        .to_string();
-    (!clean.is_empty()).then_some(clean)
+    declaration_symbol(context).map(|(pattern, name)| MemorySymbol {
+        name,
+        kind: pattern.kind.to_string(),
+    })
 }
 
 fn stable_entry_id(
@@ -1738,8 +1693,7 @@ fn symbols_match(left: &str, right: &str) -> bool {
 }
 
 fn normalize_symbol_name(value: &str) -> String {
-    value
-        .trim()
+    strip_declaration_modifiers(value)
         .trim_start_matches("fn ")
         .trim_start_matches("struct ")
         .trim_start_matches("enum ")
