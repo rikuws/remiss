@@ -139,6 +139,7 @@ pub struct LspSymbolDetails {
     pub signature_help: Option<LspSignatureHelp>,
     pub definition_targets: Vec<LspDefinitionTarget>,
     pub reference_targets: Vec<LspReferenceTarget>,
+    pub warnings: Vec<String>,
 }
 
 impl LspSymbolDetails {
@@ -147,6 +148,7 @@ impl LspSymbolDetails {
             && self.signature_help.is_none()
             && self.definition_targets.is_empty()
             && self.reference_targets.is_empty()
+            && self.warnings.is_empty()
     }
 }
 
@@ -231,7 +233,14 @@ impl LspSessionManager {
 
         match session.capabilities() {
             Ok(capabilities) => {
-                LspServerStatus::ready(config.language_id, config.command, capabilities)
+                let mut status =
+                    LspServerStatus::ready(config.language_id, config.command, capabilities);
+                if status.language_id.as_deref() == Some("kotlin") {
+                    if let Some(note) = kotlin_workspace_note(repo_root, file_path) {
+                        status.message = format!("{} {note}", status.message);
+                    }
+                }
+                status
             }
             Err(error) => {
                 LspServerStatus::error(Some(config.language_id), Some(config.command), error)
@@ -259,6 +268,8 @@ impl LspSessionManager {
                 details.reference_targets = targets;
             }
         }
+        let warnings = lsp_analysis_warnings(&config.language_id, request, &details);
+        details.warnings.extend(warnings);
         Ok(details)
     }
 
@@ -529,6 +540,7 @@ impl LspSession {
             signature_help,
             definition_targets: Vec::new(),
             reference_targets: Vec::new(),
+            warnings: Vec::new(),
         })
     }
 
@@ -680,6 +692,76 @@ fn capability_summary(capabilities: &LspServerCapabilities) -> String {
     } else {
         features.join(", ")
     }
+}
+
+fn kotlin_workspace_note(repo_root: &Path, file_path: &str) -> Option<String> {
+    let relative_path = validated_repo_relative_path(file_path).ok()?;
+    let document_path = repo_root.join(relative_path);
+    let document_dir = document_path.parent().unwrap_or(repo_root);
+    let settings_file = find_nearest_file_upwards(
+        document_dir,
+        repo_root,
+        &["settings.gradle.kts", "settings.gradle"],
+    );
+    let build_file = find_nearest_file_upwards(
+        document_dir,
+        repo_root,
+        &["build.gradle.kts", "build.gradle"],
+    );
+
+    let gradle_summary = match (settings_file.as_ref(), build_file.as_ref()) {
+        (Some(settings), Some(build)) => format!(
+            "nearest Gradle settings {}; nearest build file {}",
+            display_repo_relative_path(repo_root, settings),
+            display_repo_relative_path(repo_root, build)
+        ),
+        (Some(settings), None) => format!(
+            "nearest Gradle settings {}; no build.gradle(.kts) found above the file",
+            display_repo_relative_path(repo_root, settings)
+        ),
+        (None, Some(build)) => format!(
+            "nearest build file {}; no settings.gradle(.kts) found above the file",
+            display_repo_relative_path(repo_root, build)
+        ),
+        (None, None) => {
+            "no Gradle settings/build file found above the file in this checkout".to_string()
+        }
+    };
+
+    Some(format!(
+        "Kotlin workspace root {}; {gradle_summary}.",
+        display_repo_relative_path(repo_root, repo_root)
+    ))
+}
+
+fn find_nearest_file_upwards(start: &Path, repo_root: &Path, names: &[&str]) -> Option<PathBuf> {
+    let mut current = start;
+    loop {
+        for name in names {
+            let candidate = current.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+
+        if current == repo_root {
+            break;
+        }
+        current = current.parent()?;
+        if !current.starts_with(repo_root) {
+            break;
+        }
+    }
+
+    None
+}
+
+fn display_repo_relative_path(repo_root: &Path, path: &Path) -> String {
+    path.strip_prefix(repo_root)
+        .ok()
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|| ".".to_string())
 }
 
 fn resolve_server_configuration_for_path(
@@ -1077,6 +1159,156 @@ fn parse_hover_result(result: &Value) -> Option<LspHoverResult> {
     } else {
         Some(LspHoverResult { markdown })
     }
+}
+
+fn lsp_analysis_warnings(
+    language_id: &str,
+    request: &LspTextDocumentRequest,
+    details: &LspSymbolDetails,
+) -> Vec<String> {
+    if language_id == "kotlin" {
+        kotlin_lsp_analysis_warnings(request, details)
+    } else {
+        Vec::new()
+    }
+}
+
+fn kotlin_lsp_analysis_warnings(
+    request: &LspTextDocumentRequest,
+    details: &LspSymbolDetails,
+) -> Vec<String> {
+    if details.is_empty() {
+        return word_at_text_position(request.document_text.as_ref(), request.line, request.column)
+            .map(|symbol| {
+                vec![format!(
+                    "Kotlin LSP returned no hover, definition, or reference data for `{symbol}`. If this is an imported dependency symbol, the current LSP workspace may be missing its Gradle/classpath model."
+                )]
+            })
+            .unwrap_or_default();
+    }
+
+    let Some(hover) = details.hover.as_ref() else {
+        return Vec::new();
+    };
+    let Some((variable, reported_type)) = parse_kotlin_variable_hover_type(&hover.markdown) else {
+        return Vec::new();
+    };
+    let Some(line_text) = request
+        .document_text
+        .lines()
+        .nth(request.line.saturating_sub(1))
+    else {
+        return Vec::new();
+    };
+    let Some(initializer_call) = kotlin_initializer_call_name(line_text, &variable) else {
+        return Vec::new();
+    };
+
+    if initializer_call == reported_type && starts_lowercase_identifier(&reported_type) {
+        vec![format!(
+            "Kotlin LSP reported `{reported_type}` as the inferred type for `{variable}`, matching the initializer call name. That usually means the server could not resolve that call from the current Gradle/classpath model."
+        )]
+    } else {
+        Vec::new()
+    }
+}
+
+fn parse_kotlin_variable_hover_type(markdown: &str) -> Option<(String, String)> {
+    let line = first_lsp_code_line(markdown)?;
+    let line = line.trim();
+    let declaration = line
+        .strip_prefix("val ")
+        .or_else(|| line.strip_prefix("var "))?;
+    let (name, type_name) = declaration.split_once(':')?;
+    let name = name.trim();
+    let type_name = type_name.trim();
+    if name.is_empty() || type_name.is_empty() {
+        return None;
+    }
+
+    Some((name.to_string(), type_name.to_string()))
+}
+
+fn first_lsp_code_line(markdown: &str) -> Option<&str> {
+    markdown
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .find(|line| !line.starts_with("```") && !line.starts_with("~~~"))
+}
+
+fn kotlin_initializer_call_name(line_text: &str, variable: &str) -> Option<String> {
+    let (left, right) = line_text.split_once('=')?;
+    let left = left.trim();
+    let declaration = left
+        .strip_prefix("val ")
+        .or_else(|| left.strip_prefix("var "))?;
+    if declaration.trim() != variable {
+        return None;
+    }
+
+    leading_identifier(right.trim())
+}
+
+fn word_at_text_position(text: &str, line: usize, column: usize) -> Option<String> {
+    let line_text = text.lines().nth(line.checked_sub(1)?)?;
+    let target = column.checked_sub(1)?;
+    let byte_index = byte_index_for_char_column(line_text, target)?;
+    word_at_byte_index(line_text, byte_index)
+}
+
+fn byte_index_for_char_column(line_text: &str, column_zero_based: usize) -> Option<usize> {
+    if column_zero_based == line_text.chars().count() {
+        return Some(line_text.len());
+    }
+    line_text
+        .char_indices()
+        .nth(column_zero_based)
+        .map(|(byte_index, _)| byte_index)
+}
+
+fn word_at_byte_index(line_text: &str, byte_index: usize) -> Option<String> {
+    if byte_index > line_text.len() || !line_text.is_char_boundary(byte_index) {
+        return None;
+    }
+
+    let mut start = byte_index;
+    while start > 0 {
+        let (previous, character) = line_text[..start].char_indices().next_back()?;
+        if !is_identifier_character(character) {
+            break;
+        }
+        start = previous;
+    }
+
+    let mut end = byte_index;
+    for (offset, character) in line_text[byte_index..].char_indices() {
+        if !is_identifier_character(character) {
+            break;
+        }
+        end = byte_index + offset + character.len_utf8();
+    }
+
+    (start < end).then(|| line_text[start..end].to_string())
+}
+
+fn leading_identifier(text: &str) -> Option<String> {
+    let identifier = text
+        .chars()
+        .take_while(|character| is_identifier_character(*character))
+        .collect::<String>();
+    (!identifier.is_empty()).then_some(identifier)
+}
+
+fn starts_lowercase_identifier(text: &str) -> bool {
+    text.chars()
+        .next()
+        .map(|character| character == '_' || character.is_lowercase())
+        .unwrap_or(false)
+}
+
+fn is_identifier_character(character: char) -> bool {
+    character == '_' || character.is_alphanumeric()
 }
 
 fn parse_signature_help(result: &Value) -> Option<LspSignatureHelp> {
@@ -1864,6 +2096,48 @@ mod tests {
 
         assert!(hover.markdown.contains("```rust"));
         assert!(hover.markdown.contains("Returns the current value."));
+    }
+
+    #[test]
+    fn warns_when_kotlin_variable_type_matches_initializer_call() {
+        let request = LspTextDocumentRequest {
+            file_path: "src/main/kotlin/demo/Demo.kt".to_string(),
+            document_text: std::sync::Arc::<str>::from(
+                "package demo\n\nsuspend fun demo() {\n    val reittiData = coroutineScope {\n        42\n    }\n}\n",
+            ),
+            line: 4,
+            column: 9,
+        };
+        let details = LspSymbolDetails {
+            hover: Some(LspHoverResult {
+                markdown: "````kotlin\nval reittiData: coroutineScope\n````\n".to_string(),
+            }),
+            ..Default::default()
+        };
+
+        let warnings = lsp_analysis_warnings("kotlin", &request, &details);
+
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("Gradle/classpath model"));
+        assert!(warnings[0].contains("coroutineScope"));
+    }
+
+    #[test]
+    fn warns_when_kotlin_symbol_has_no_details() {
+        let request = LspTextDocumentRequest {
+            file_path: "src/main/kotlin/demo/Demo.kt".to_string(),
+            document_text: std::sync::Arc::<str>::from(
+                "package demo\n\nsuspend fun demo() {\n    val reittiData = coroutineScope {\n        42\n    }\n}\n",
+            ),
+            line: 4,
+            column: 22,
+        };
+
+        let warnings = lsp_analysis_warnings("kotlin", &request, &LspSymbolDetails::default());
+
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("coroutineScope"));
+        assert!(warnings[0].contains("no hover, definition, or reference data"));
     }
 
     #[test]

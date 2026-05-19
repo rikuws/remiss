@@ -1330,6 +1330,9 @@ fn lsp_hover_preferred_width(
     let header_chars = longest_line_char_count(&header.code);
     let mut detail_chars = 0usize;
     if let Some(details) = details {
+        for warning in &details.warnings {
+            detail_chars = detail_chars.max(longest_line_char_count(warning));
+        }
         for target in &details.definition_targets {
             detail_chars = detail_chars.max(lsp_target_display_char_count(target));
         }
@@ -1532,6 +1535,9 @@ fn render_lsp_symbol_details(
         .flex()
         .flex_col()
         .gap(px(12.0))
+        .when(!details.warnings.is_empty(), |el| {
+            el.children(details.warnings.iter().map(render_lsp_warning))
+        })
         .when(!details.definition_targets.is_empty(), |el| {
             el.child(
                 div()
@@ -1650,6 +1656,22 @@ fn render_lsp_symbol_details(
             )
         })
         .into_any_element()
+}
+
+fn render_lsp_warning(message: &String) -> impl IntoElement {
+    div()
+        .w_full()
+        .min_w_0()
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(warning())
+        .bg(warning_muted())
+        .px(px(8.0))
+        .py(px(7.0))
+        .text_size(px(12.0))
+        .line_height(px(17.0))
+        .text_color(fg_default())
+        .child(message.clone())
 }
 
 fn render_lsp_target_row(target: &lsp::LspDefinitionTarget) -> impl IntoElement {
