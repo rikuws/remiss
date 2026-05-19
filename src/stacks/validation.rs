@@ -481,8 +481,8 @@ fn dependency_is_hard_ordering_constraint(
     match dependency.kind {
         DependencyKind::PathLocality => false,
         DependencyKind::TestTarget => true,
-        DependencyKind::RoleOrdering => dependency.confidence != Confidence::Low,
-        DependencyKind::SymbolReference => false,
+        DependencyKind::RoleOrdering => false,
+        DependencyKind::SymbolReference => dependency.confidence != Confidence::Low,
     }
 }
 
@@ -905,6 +905,28 @@ mod tests {
         let error = validate_ai_stack_plan(&plan, &atoms, 220)
             .expect_err("consumer before provider should reject");
         assert!(error.message.contains("after dependent atom"));
+    }
+
+    #[test]
+    fn accepts_role_order_only_inversions() {
+        let mut foundation = atom("atom_client_type", ChangeRole::Foundation);
+        foundation.path = "src/client.rs".to_string();
+        foundation.defined_symbols = vec!["Client".to_string()];
+        foundation.referenced_symbols = Vec::new();
+        let mut integration = atom("atom_client_impl", ChangeRole::Integration);
+        integration.path = "src/client.rs".to_string();
+        integration.defined_symbols = vec!["wire_client".to_string()];
+        integration.referenced_symbols = Vec::new();
+        let atoms = vec![foundation, integration];
+        let mut plan = plan_with_layers(
+            vec![vec!["atom_client_impl"], vec!["atom_client_type"]],
+            vec![],
+        );
+        plan.layers[0].title = "Wire client behavior".to_string();
+        plan.layers[1].title = "Update client type contract".to_string();
+
+        validate_ai_stack_plan(&plan, &atoms, 220)
+            .expect("role ordering alone should not reject a coherent AI plan");
     }
 
     #[test]

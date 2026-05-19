@@ -53,6 +53,26 @@ fn review_partner_prompt_requires_concrete_summary_copy() {
 }
 
 #[test]
+fn review_partner_prompt_puts_focus_targets_before_large_context() {
+    let prompt = build_review_partner_prompt(&input(ReviewPartnerContextPack::empty()));
+    let context = prompt
+        .split_once("Pull-request context:")
+        .map(|(_, context)| context)
+        .expect("prompt includes context");
+
+    let focus_position = context.find("\"focusTargets\"").expect("focus targets");
+    let history_position = context.find("\"historyContext\"").expect("history context");
+    let stack_position = context.find("\"stack\"").expect("stack context");
+    let collected_position = context
+        .find("\"collectedContext\"")
+        .expect("collected context");
+
+    assert!(focus_position < history_position);
+    assert!(focus_position < stack_position);
+    assert!(focus_position < collected_position);
+}
+
+#[test]
 fn fallback_focus_record_includes_review_memory_history_signal() {
     let mut input = input(ReviewPartnerContextPack::empty());
     input.review_memory = ReviewMemoryPromptContext {
@@ -414,6 +434,26 @@ fn merge_rejects_unknown_layer_ids() {
 
     let error = merge_review_partner(response, &input, None).expect_err("unknown layer rejected");
     assert!(error.contains("unknown layer id"));
+}
+
+#[test]
+fn merge_rejects_truncated_prompt_response_without_focus_records() {
+    let input = input(ReviewPartnerContextPack::empty());
+    let response = ReviewPartnerResponse {
+        stack_brief: "brief".to_string(),
+        stack_concerns: Vec::new(),
+        limitations: Vec::new(),
+        warnings: vec![
+            "The supplied prompt was truncated before any focusTargets were visible.".to_string(),
+        ],
+        layers: Vec::new(),
+        focus_records: Vec::new(),
+    };
+
+    let error = merge_review_partner(response, &input, None)
+        .expect_err("truncated prompt without focus records should not be cached as success");
+
+    assert!(error.contains("omitted focus records"));
 }
 
 #[test]

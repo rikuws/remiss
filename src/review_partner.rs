@@ -855,6 +855,13 @@ fn merge_review_partner(
     input: &GenerateReviewPartnerInput,
     model: Option<String>,
 ) -> Result<GeneratedReviewPartnerContext, String> {
+    if response_omitted_focus_records_after_prompt_truncation(&response, input) {
+        return Err(
+            "Review Partner response omitted focus records after Copilot saw a truncated prompt."
+                .to_string(),
+        );
+    }
+
     let valid_layer_ids = input
         .stack
         .layers
@@ -975,6 +982,18 @@ fn push_unique_key(keys: &mut Vec<String>, key: String) {
     if !key.trim().is_empty() && !keys.iter().any(|existing| existing == &key) {
         keys.push(key);
     }
+}
+
+fn response_omitted_focus_records_after_prompt_truncation(
+    response: &ReviewPartnerResponse,
+    input: &GenerateReviewPartnerInput,
+) -> bool {
+    !input.focus_targets.is_empty()
+        && response.focus_records.is_empty()
+        && response.warnings.iter().any(|warning| {
+            let normalized = warning.to_ascii_lowercase();
+            normalized.contains("truncated") && normalized.contains("focustarget")
+        })
 }
 
 fn merge_layer(
@@ -2320,6 +2339,10 @@ fn build_prompt_context(input: &GenerateReviewPartnerInput) -> Value {
             "headRefName": input.head_ref_name,
             "body": trim_text(&input.body, 2_500),
         },
+        "partnerVersion": REVIEW_PARTNER_GENERATOR_VERSION,
+        "contextVersion": input.context.version,
+        "structuralEvidenceVersion": input.structural_evidence.version,
+        "focusTargets": input.focus_targets.iter().map(summarize_focus_target).collect::<Vec<_>>(),
         "historyContext": {
             "signals": input.review_memory.signals,
             "limitations": input.review_memory.limitations,
@@ -2351,9 +2374,6 @@ fn build_prompt_context(input: &GenerateReviewPartnerInput) -> Value {
             "recentChangesToTouchedFiles": [],
             "knownPriorPatterns": [],
         },
-        "partnerVersion": REVIEW_PARTNER_GENERATOR_VERSION,
-        "contextVersion": input.context.version,
-        "structuralEvidenceVersion": input.structural_evidence.version,
         "stack": {
             "id": input.stack.id,
             "source": input.stack.source,
@@ -2392,7 +2412,6 @@ fn build_prompt_context(input: &GenerateReviewPartnerInput) -> Value {
         "collectedContext": summarize_context_pack(&input.context),
         "structuralEvidence": summarize_structural_evidence(&input.structural_evidence),
         "semanticEvidence": summarize_semantic_evidence(input.semantic_review.as_ref()),
-        "focusTargets": input.focus_targets.iter().map(summarize_focus_target).collect::<Vec<_>>(),
     })
 }
 
