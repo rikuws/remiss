@@ -970,7 +970,7 @@ fn scroll_combined_diff_list_to_focus(
 
     if let Some(item_ix) = item_ix {
         view_state.list_state.scroll_to(ListOffset {
-            item_ix: item_ix.saturating_sub(2),
+            item_ix: diff_focus_scroll_top_item_ix(item_ix),
             offset_in_item: px(0.0),
         });
         *last_focus_key = Some(target_key);

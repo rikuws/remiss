@@ -1510,15 +1510,12 @@ fn wrapped_segment_end_indices(layout: &WrappedLineLayout) -> Vec<usize> {
 
 fn cursor_quad_for_index(layout: &TextLayout, index: usize) -> Option<PaintQuad> {
     let position = layout.position_for_index(index)?;
-    let bounds = layout.bounds();
     let line_height = layout.line_height();
-    Some(fill(
-        Bounds::new(
-            point(bounds.left() + position.x, bounds.top() + position.y),
-            size(px(2.0), line_height),
-        ),
-        accent(),
-    ))
+    Some(cursor_quad_from_position(position, line_height))
+}
+
+fn cursor_quad_from_position(position: gpui::Point<Pixels>, line_height: Pixels) -> PaintQuad {
+    fill(Bounds::new(position, size(px(2.0), line_height)), accent())
 }
 
 fn previous_boundary(text: &str, offset: usize) -> usize {
@@ -1722,4 +1719,18 @@ fn clear_active_text_target(id: &str) {
 
 fn is_active_text_target(id: &str) -> bool {
     ACTIVE_TEXT_TARGET.with(|active| active.borrow().as_deref() == Some(id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_quad_uses_absolute_layout_position() {
+        let quad = cursor_quad_from_position(point(px(120.0), px(42.0)), px(18.0));
+
+        assert_eq!(quad.bounds.left(), px(120.0));
+        assert_eq!(quad.bounds.top(), px(42.0));
+        assert_eq!(quad.bounds.size, size(px(2.0), px(18.0)));
+    }
 }

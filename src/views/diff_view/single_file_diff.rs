@@ -430,7 +430,7 @@ fn scroll_diff_list_to_focus(
         anchor,
     ) {
         view_state.list_state.scroll_to(ListOffset {
-            item_ix: item_ix.saturating_sub(6),
+            item_ix: diff_focus_scroll_top_item_ix(item_ix),
             offset_in_item: px(0.0),
         });
         *last_focus_key = Some(focus_key);

@@ -47,8 +47,8 @@ use crate::review_file_tree::{
 };
 use crate::review_queue::{build_review_queue, ReviewQueue, ReviewQueueBucket};
 use crate::review_session::{
-    DiffLayout, ReviewCenterMode, ReviewGuideLens, ReviewLocation, ReviewSourceTarget,
-    GUIDED_REVIEW_PANEL_DEFAULT_WIDTH, GUIDED_REVIEW_PANEL_MAX_WIDTH,
+    location_label, DiffLayout, ReviewCenterMode, ReviewGuideLens, ReviewLocation,
+    ReviewSourceTarget, GUIDED_REVIEW_PANEL_DEFAULT_WIDTH, GUIDED_REVIEW_PANEL_MAX_WIDTH,
     GUIDED_REVIEW_PANEL_MIN_WIDTH,
 };
 use crate::selectable_text::{AppTextFieldKind, AppTextInput, SelectableText};
@@ -133,6 +133,13 @@ use self::review_sidebar::{
 };
 use self::side_by_side::*;
 use self::single_file_diff::*;
+
+pub(super) const DIFF_FOCUS_CONTEXT_ROWS: usize = 12;
+
+pub(super) fn diff_focus_scroll_top_item_ix(focus_item_ix: usize) -> usize {
+    focus_item_ix.saturating_sub(DIFF_FOCUS_CONTEXT_ROWS)
+}
+
 pub fn enter_files_surface(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
     state.update(cx, |s, cx| {
         s.active_surface = PullRequestSurface::Files;
@@ -767,44 +774,115 @@ fn render_waypoint_spotlight_row(
     selected: bool,
 ) -> impl IntoElement {
     let location = waymark.location.clone();
+    let location_label = waypoint_spotlight_location_label(&waymark.location);
+    let detail_label = waypoint_spotlight_detail_label(waymark, &location_label);
+    let mode_label = waymark.location.mode.label();
     let state = state.clone();
 
     div()
+        .w_full()
+        .flex_shrink_0()
         .px(px(20.0))
-        .py(px(13.0))
+        .py(px(12.0))
         .border_t(px(1.0))
         .border_color(border_muted())
         .bg(if selected {
-            bg_emphasis()
+            bg_selected()
         } else {
             bg_overlay()
         })
-        .hover(move |style| {
-            style.bg(if selected {
-                bg_emphasis()
-            } else {
-                bg_selected()
-            })
-        })
+        .hover(move |style| style.bg(if selected { bg_selected() } else { bg_subtle() }))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             close_waypoint_spotlight(&state, cx);
             open_review_location_card(&state, &location, window, cx);
         })
-        .child(render_waypoint_pill(&waymark.name, selected))
         .child(
             div()
-                .mt(px(8.0))
-                .text_size(px(12.0))
-                .text_color(fg_emphasis())
-                .child(waymark.location.label.clone()),
+                .w_full()
+                .flex()
+                .items_start()
+                .gap(px(12.0))
+                .flex_grow()
+                .min_w_0()
+                .child(
+                    div()
+                        .mt(px(1.0))
+                        .w(px(24.0))
+                        .h(px(24.0))
+                        .flex_shrink_0()
+                        .rounded(radius_sm())
+                        .border_1()
+                        .border_color(border_muted())
+                        .bg(if selected { bg_overlay() } else { bg_surface() })
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(lucide_icon(
+                            LucideIcon::Waypoints,
+                            13.0,
+                            if selected { accent() } else { fg_muted() },
+                        )),
+                )
+                .child(
+                    div()
+                        .flex_grow()
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .gap(px(4.0))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .text_size(px(12.0))
+                                .line_height(px(16.0))
+                                .font_family(mono_font_family())
+                                .text_color(fg_emphasis())
+                                .child(location_label),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .text_size(px(11.0))
+                                .line_height(px(15.0))
+                                .text_color(fg_muted())
+                                .child(
+                                    detail_label
+                                        .map(|detail| format!("{detail} · {mode_label}"))
+                                        .unwrap_or_else(|| mode_label.to_string()),
+                                ),
+                        ),
+                ),
         )
-        .child(
-            div()
-                .mt(px(4.0))
-                .text_size(px(11.0))
-                .text_color(fg_muted())
-                .child(waymark.location.mode.label()),
-        )
+}
+
+fn waypoint_spotlight_location_label(location: &ReviewLocation) -> String {
+    let line = match location.mode {
+        ReviewCenterMode::SourceBrowser => location.source_line,
+        ReviewCenterMode::SemanticDiff
+        | ReviewCenterMode::StructuralDiff
+        | ReviewCenterMode::GuidedReview => location
+            .anchor
+            .as_ref()
+            .and_then(|anchor| anchor.line)
+            .and_then(|line| usize::try_from(line).ok())
+            .filter(|line| *line > 0),
+    };
+
+    let rebuilt = location_label(&location.file_path, line);
+    if rebuilt.trim().is_empty() {
+        location.label.clone()
+    } else {
+        rebuilt
+    }
+}
+
+fn waypoint_spotlight_detail_label(
+    waymark: &crate::review_session::ReviewWaymark,
+    primary_label: &str,
+) -> Option<String> {
+    let name = waymark.name.trim();
+    (!name.is_empty() && name != primary_label && name != waymark.location.label)
+        .then(|| name.to_string())
 }
 
 pub fn render_files_view(
@@ -1510,9 +1588,11 @@ mod tests {
     use super::review_sidebar::sync_stack_timeline_item_count;
     use super::{
         build_normal_side_by_side_diff_file, current_combined_diff_file_index_for_scroll_top,
-        focus_item_index_around, max_side_by_side_column_widths, reading_focus_item_index,
-        CombinedDiffViewItem, DiffFileCollapseScrollAdjustment, DiffViewItem,
-        SideBySideColumnWidths, StructuralDiffTerminalStatus, DIFF_FILE_HEADER_TOP_MARGIN,
+        diff_focus_scroll_top_item_ix, focus_item_index_around, max_side_by_side_column_widths,
+        reading_focus_item_index, waypoint_spotlight_detail_label,
+        waypoint_spotlight_location_label, CombinedDiffViewItem, DiffFileCollapseScrollAdjustment,
+        DiffViewItem, SideBySideColumnWidths, StructuralDiffTerminalStatus,
+        DIFF_FILE_HEADER_TOP_MARGIN, DIFF_FOCUS_CONTEXT_ROWS,
     };
 
     fn test_bounds(top: f32, bottom: f32) -> Bounds<Pixels> {
@@ -1611,6 +1691,53 @@ mod tests {
         let scroll_top = list_state.logical_scroll_top();
         assert_eq!(scroll_top.item_ix, 2);
         assert_eq!(scroll_top.offset_in_item, px(7.0));
+    }
+
+    #[test]
+    fn diff_focus_scroll_uses_middle_context_offset() {
+        assert_eq!(
+            diff_focus_scroll_top_item_ix(DIFF_FOCUS_CONTEXT_ROWS + 9),
+            9
+        );
+        assert_eq!(diff_focus_scroll_top_item_ix(4), 0);
+    }
+
+    #[test]
+    fn waypoint_spotlight_rebuilds_primary_location_label() {
+        let anchor = crate::guided_review::DiffAnchor {
+            file_path: "src/views/diff_view.rs".to_string(),
+            hunk_header: None,
+            line: Some(842),
+            side: Some("RIGHT".to_string()),
+            thread_id: None,
+        };
+        let mut location = crate::review_session::ReviewLocation::from_diff(
+            "src/views/diff_view.rs",
+            Some(anchor),
+        );
+        location.label = "...".to_string();
+
+        assert_eq!(
+            waypoint_spotlight_location_label(&location),
+            "src/views/diff_view.rs:842"
+        );
+    }
+
+    #[test]
+    fn waypoint_spotlight_suppresses_duplicate_detail_label() {
+        let location =
+            crate::review_session::ReviewLocation::from_source("src/main.rs", Some(12), None);
+        let waymark = crate::review_session::ReviewWaymark {
+            id: "wm-test".to_string(),
+            name: "src/main.rs:12".to_string(),
+            location,
+            created_at_ms: 0,
+        };
+
+        assert_eq!(
+            waypoint_spotlight_detail_label(&waymark, "src/main.rs:12"),
+            None
+        );
     }
 
     #[test]
