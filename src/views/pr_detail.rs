@@ -1438,34 +1438,8 @@ fn subtle_badge(label: &str) -> impl IntoElement {
     tone_badge(label, fg_muted(), bg_emphasis(), border_muted())
 }
 
-fn activity_kind_badge(kind: &ActivityItemKind) -> AnyElement {
-    match kind {
-        ActivityItemKind::Conversation => {
-            tone_badge("comment", accent(), accent_muted(), accent()).into_any_element()
-        }
-        ActivityItemKind::Commit => {
-            tone_badge("commit", fg_muted(), bg_emphasis(), border_muted()).into_any_element()
-        }
-        ActivityItemKind::Review => {
-            tone_badge("review", fg_emphasis(), bg_emphasis(), border_muted()).into_any_element()
-        }
-        ActivityItemKind::Thread => {
-            tone_badge("thread", fg_muted(), bg_emphasis(), border_muted()).into_any_element()
-        }
-    }
-}
-
 fn activity_location_text(location: &str) -> AnyElement {
     overflow_safe_code_label(location, fg_subtle()).into_any_element()
-}
-
-fn activity_status_badge(item: &ActivityItem, status: &str) -> AnyElement {
-    if let Some(code) = item.status_code.as_deref() {
-        let (fg, bg, border) = review_state_colors(code);
-        return tone_badge(status, fg, bg, border).into_any_element();
-    }
-
-    subtle_badge(status).into_any_element()
 }
 
 fn pull_request_state_badge(state: &str, is_draft: bool) -> AnyElement {
