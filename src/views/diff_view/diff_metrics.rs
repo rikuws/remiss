@@ -626,6 +626,7 @@ pub(super) fn render_syntax_content(
                     query.detail_key.clone(),
                     query.query_key.clone(),
                     query.token_label.clone(),
+                    query.request.file_path.clone(),
                     cx,
                 ),
             ))

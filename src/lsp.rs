@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    env,
+    env, fs,
     io::{BufRead, BufReader, Write},
     path::{Component, Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
@@ -166,8 +166,15 @@ pub struct LspSignatureHelp {
 pub struct LspDefinitionTarget {
     pub uri: String,
     pub path: String,
+    pub package_path: Option<String>,
     pub line: usize,
     pub column: usize,
+}
+
+impl LspDefinitionTarget {
+    pub fn display_path(&self) -> &str {
+        self.package_path.as_deref().unwrap_or(self.path.as_str())
+    }
 }
 
 pub type LspReferenceTarget = LspDefinitionTarget;
@@ -1124,13 +1131,14 @@ fn parse_signature_parameter_label(
 }
 
 fn parse_definition_targets(repo_root: &Path, result: &Value) -> Vec<LspDefinitionTarget> {
+    let mut package_cache = HashMap::new();
     match result {
         Value::Null => Vec::new(),
         Value::Array(items) => items
             .iter()
-            .filter_map(|item| parse_definition_target(repo_root, item))
+            .filter_map(|item| parse_definition_target(repo_root, item, &mut package_cache))
             .collect(),
-        _ => parse_definition_target(repo_root, result)
+        _ => parse_definition_target(repo_root, result, &mut package_cache)
             .into_iter()
             .collect(),
     }
@@ -1140,12 +1148,17 @@ fn parse_reference_targets(repo_root: &Path, result: &Value) -> Vec<LspReference
     parse_definition_targets(repo_root, result)
 }
 
-fn parse_definition_target(repo_root: &Path, value: &Value) -> Option<LspDefinitionTarget> {
+fn parse_definition_target(
+    repo_root: &Path,
+    value: &Value,
+    package_cache: &mut HashMap<String, Option<String>>,
+) -> Option<LspDefinitionTarget> {
     let uri = value
         .get("targetUri")
         .or_else(|| value.get("uri"))
         .and_then(Value::as_str)?;
     let path = path_from_file_uri(repo_root, uri)?;
+    let package_path = package_path_for_target(repo_root, path.as_str(), package_cache);
     let start = value
         .pointer("/targetSelectionRange/start")
         .or_else(|| value.pointer("/targetRange/start"))
@@ -1154,9 +1167,87 @@ fn parse_definition_target(repo_root: &Path, value: &Value) -> Option<LspDefinit
     Some(LspDefinitionTarget {
         uri: uri.to_string(),
         path,
+        package_path,
         line: start.get("line").and_then(Value::as_u64)? as usize + 1,
         column: start.get("character").and_then(Value::as_u64)? as usize + 1,
     })
+}
+
+fn package_path_for_target(
+    repo_root: &Path,
+    path: &str,
+    package_cache: &mut HashMap<String, Option<String>>,
+) -> Option<String> {
+    if let Some(package_path) = package_cache.get(path) {
+        return package_path.clone();
+    }
+
+    let package_path = fs::read_to_string(repo_root.join(path))
+        .ok()
+        .and_then(|source| package_path_from_source(&source));
+    package_cache.insert(path.to_string(), package_path.clone());
+    package_path
+}
+
+fn package_path_from_source(source: &str) -> Option<String> {
+    let mut in_block_comment = false;
+    for line in source.lines().take(120) {
+        let trimmed = line.trim_start();
+        if in_block_comment {
+            if trimmed.contains("*/") {
+                in_block_comment = false;
+            }
+            continue;
+        }
+        if trimmed.starts_with("/*") {
+            if !trimmed.contains("*/") {
+                in_block_comment = true;
+            }
+            continue;
+        }
+        if let Some(package_path) = package_path_from_line(line) {
+            return Some(package_path);
+        }
+    }
+    None
+}
+
+fn package_path_from_line(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    if trimmed.is_empty()
+        || trimmed.starts_with("//")
+        || trimmed.starts_with("/*")
+        || trimmed.starts_with('*')
+    {
+        return None;
+    }
+
+    package_path_after_keyword(trimmed, "package")
+        .or_else(|| package_path_after_keyword(trimmed, "namespace"))
+}
+
+fn package_path_after_keyword(line: &str, keyword: &str) -> Option<String> {
+    let rest = line.strip_prefix(keyword)?;
+    if !rest
+        .chars()
+        .next()
+        .map(char::is_whitespace)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    let mut value = String::new();
+    for character in rest.trim_start().chars() {
+        if character.is_alphanumeric() || matches!(character, '_' | '.' | '`' | '\\') {
+            value.push(character);
+        } else {
+            break;
+        }
+    }
+
+    let value = value.replace('\\', ".").replace('`', "");
+    (!value.trim().is_empty()).then(|| value.trim().to_string())
 }
 
 fn markdown_from_lsp_value(value: Option<&Value>) -> Option<String> {
@@ -1829,10 +1920,64 @@ mod tests {
             vec![LspDefinitionTarget {
                 uri: target_uri,
                 path: "src/lsp.rs".to_string(),
+                package_path: None,
                 line: 10,
                 column: 5,
             }]
         );
+    }
+
+    #[test]
+    fn parses_definition_target_package_path_from_source_file() {
+        let repo_root = std::env::temp_dir().join(format!(
+            "remiss-lsp-package-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock should be after unix epoch")
+                .as_nanos()
+        ));
+        let target_path = repo_root
+            .join("src")
+            .join("main")
+            .join("kotlin")
+            .join("demo")
+            .join("User.kt");
+        std::fs::create_dir_all(target_path.parent().expect("target parent"))
+            .expect("create target parent");
+        std::fs::write(
+            &target_path,
+            "// Copyright\n\npackage com.example.demo\n\nval name: String = \"Ada\"\n",
+        )
+        .expect("write target");
+
+        let target_uri = file_uri(&target_path).expect("expected target URI");
+        let targets = parse_definition_targets(
+            &repo_root,
+            &json!({
+                "uri": target_uri.clone(),
+                "range": {
+                    "start": {
+                        "line": 4,
+                        "character": 4
+                    }
+                }
+            }),
+        );
+
+        std::fs::remove_dir_all(&repo_root).ok();
+
+        assert_eq!(
+            targets,
+            vec![LspDefinitionTarget {
+                uri: target_uri,
+                path: "src/main/kotlin/demo/User.kt".to_string(),
+                package_path: Some("com.example.demo".to_string()),
+                line: 5,
+                column: 5,
+            }]
+        );
+        assert_eq!(targets[0].display_path(), "com.example.demo");
     }
 
     #[test]
