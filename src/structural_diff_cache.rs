@@ -120,6 +120,7 @@ mod tests {
             changed_files: 1,
             comments_count: 0,
             commits_count: 1,
+            commits: Vec::new(),
             created_at: "2026-05-09T00:00:00Z".to_string(),
             updated_at: updated_at.to_string(),
             labels: Vec::new(),

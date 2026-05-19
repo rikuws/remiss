@@ -691,6 +691,7 @@ diff --git a/tests/service_test.rs b/tests/service_test.rs
             changed_files: 3,
             comments_count: 0,
             commits_count: 1,
+            commits: Vec::new(),
             created_at: String::new(),
             updated_at: "now".to_string(),
             labels: Vec::new(),

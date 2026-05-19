@@ -1587,6 +1587,7 @@ mod tests {
             changed_files: files.len() as i64,
             comments_count: 0,
             commits_count: 1,
+            commits: Vec::new(),
             created_at: String::new(),
             updated_at: String::new(),
             labels: Vec::new(),

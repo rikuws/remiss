@@ -338,6 +338,7 @@ fn synthetic_detail(input: SyntheticDetailInput) -> PullRequestDetail {
         changed_files: input.files.len() as i64,
         comments_count: 0,
         commits_count: input.commits_count,
+        commits: Vec::new(),
         created_at: input.key.clone(),
         updated_at: input.key,
         labels: Vec::new(),

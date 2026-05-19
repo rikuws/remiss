@@ -113,6 +113,7 @@ pub fn detail() -> PullRequestDetail {
         changed_files: files.len() as i64,
         comments_count: 2,
         commits_count: 2,
+            commits: Vec::new(),
         created_at: UPDATED_AT.to_string(),
         updated_at: UPDATED_AT.to_string(),
         labels: vec!["tutorial".to_string()],

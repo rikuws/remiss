@@ -46,6 +46,9 @@ pub(super) fn render_overview_surface(state: &Entity<AppState>, cx: &App) -> imp
     let thread_digest =
         summarize_thread_activity(&detail.review_threads, &s.unread_review_comment_ids);
     let recent_activity = summarize_recent_activity(detail, &s.unread_review_comment_ids);
+    let commit_freshness = viewer_login
+        .as_deref()
+        .and_then(|viewer_login| summarize_commit_freshness(detail, viewer_login));
     let automation_activity_key = automation_activity_key(detail);
     let automation_activity_expanded = s
         .expanded_automation_activity_keys
@@ -84,6 +87,7 @@ pub(super) fn render_overview_surface(state: &Entity<AppState>, cx: &App) -> imp
                 .child(render_overview_summary_strip(
                     detail,
                     is_own_pull_request,
+                    commit_freshness.as_ref(),
                     &state_for_files,
                 ))
                 .child(render_pull_request_summary_panel(
@@ -156,6 +160,7 @@ pub(super) fn pr_detail_section() -> Div {
 fn render_overview_summary_strip(
     detail: &github::PullRequestDetail,
     is_own_pull_request: bool,
+    commit_freshness: Option<&CommitFreshnessSummary>,
     state: &Entity<AppState>,
 ) -> impl IntoElement {
     let state = state.clone();
@@ -195,10 +200,39 @@ fn render_overview_summary_strip(
                     ))
                     .child(render_change_meter(detail.additions, detail.deletions)),
             )
+            .when_some(commit_freshness, |el, freshness| {
+                el.child(render_commit_freshness_chip(freshness))
+            })
             .child(review_button(action_label, move |_, window, cx| {
                 enter_files_surface(&state, window, cx)
             })),
     )
+}
+
+fn render_commit_freshness_chip(freshness: &CommitFreshnessSummary) -> impl IntoElement {
+    let commit_copy = count_copy(freshness.commits_since_activity, "commit", "commits");
+    let label = format!(
+        "{} {} since your last activity \u{2022} latest committed {}",
+        freshness.commits_since_activity,
+        commit_copy,
+        format_relative_time(&freshness.latest_commit_at),
+    );
+
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .px(px(9.0))
+        .py(px(5.0))
+        .rounded(radius_sm())
+        .bg(warning_muted())
+        .border_1()
+        .border_color(warning())
+        .text_size(px(12.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(fg_emphasis())
+        .child(lucide_icon(LucideIcon::GitCommit, 13.0, warning()))
+        .child(label)
 }
 
 fn render_review_brief_panel(
@@ -1294,12 +1328,18 @@ fn render_activity_card(
         .flex()
         .items_start()
         .gap(px(10.0))
-        .child(render_activity_timeline_avatar(
-            &item.author_login,
-            item.author_avatar_url.as_deref(),
-            connector_above,
-            connector_below,
-        ))
+        .child(if item.kind == ActivityItemKind::Commit {
+            render_activity_timeline_icon(LucideIcon::GitCommit, connector_above, connector_below)
+                .into_any_element()
+        } else {
+            render_activity_timeline_avatar(
+                &item.author_login,
+                item.author_avatar_url.as_deref(),
+                connector_above,
+                connector_below,
+            )
+            .into_any_element()
+        })
         .child(
             div()
                 .flex_1()
