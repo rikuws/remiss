@@ -1294,7 +1294,7 @@ fn fetch_pull_request_detail(repository: &str, number: i64) -> Result<PullReques
                 pageInfo { hasNextPage endCursor }
                 nodes { requestedReviewer { ... on User { login avatarUrl } ... on Team { slug avatarUrl } } }
               }
-              latestReviews(first: $count) {
+              latestReviews: reviews(first: $count, states: [APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED]) {
                 totalCount
                 pageInfo { hasNextPage endCursor }
                 nodes { id state body submittedAt author { login avatarUrl } }
@@ -1459,6 +1459,7 @@ fn fetch_pull_request_detail(repository: &str, number: i64) -> Result<PullReques
         &mut latest_reviews,
         map_pull_request_review,
     )?;
+    latest_reviews = latest_reviews_by_author(latest_reviews);
 
     let viewer_pending_review =
         map_connection_items(pending_reviews_connection, map_pending_pull_request_review)
@@ -1866,7 +1867,7 @@ fn pull_request_review_requests_selection() -> &'static str {
 
 fn pull_request_latest_reviews_selection() -> &'static str {
     r#"
-      latestReviews(first: $count, after: $cursor) {
+      latestReviews: reviews(first: $count, after: $cursor, states: [APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED]) {
         totalCount
         pageInfo { hasNextPage endCursor }
         nodes { id state body submittedAt author { login avatarUrl } }
@@ -2184,6 +2185,36 @@ fn split_reviewer_items(
         }
     }
     (reviewers, avatar_urls)
+}
+
+fn latest_reviews_by_author(reviews: Vec<PullRequestReview>) -> Vec<PullRequestReview> {
+    let mut latest = BTreeMap::<String, PullRequestReview>::new();
+
+    for review in reviews {
+        let author = review.author_login.trim().to_string();
+        if author.is_empty() {
+            continue;
+        }
+
+        let replace = latest
+            .get(&author)
+            .map(|existing| review_submitted_after(&review, existing))
+            .unwrap_or(true);
+        if replace {
+            latest.insert(author, review);
+        }
+    }
+
+    latest.into_values().collect()
+}
+
+fn review_submitted_after(left: &PullRequestReview, right: &PullRequestReview) -> bool {
+    match (left.submitted_at.as_deref(), right.submitted_at.as_deref()) {
+        (Some(left), Some(right)) => left >= right,
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        (None, None) => true,
+    }
 }
 
 fn map_pull_request_review(node: &Value) -> Option<PullRequestReview> {
@@ -2590,6 +2621,25 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_submitted_reviews_to_latest_by_author() {
+        let latest = latest_reviews_by_author(vec![
+            pull_request_review("alice", "CHANGES_REQUESTED", Some("2026-04-14T10:00:00Z")),
+            pull_request_review("bob", "COMMENTED", Some("2026-04-14T12:00:00Z")),
+            pull_request_review("alice", "APPROVED", Some("2026-04-14T11:00:00Z")),
+            pull_request_review("carol", "DISMISSED", Some("2026-04-14T09:00:00Z")),
+        ]);
+
+        let by_author = latest
+            .iter()
+            .map(|review| (review.author_login.as_str(), review.state.as_str()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        assert_eq!(by_author.get("alice").copied(), Some("APPROVED"));
+        assert_eq!(by_author.get("bob").copied(), Some("COMMENTED"));
+        assert_eq!(by_author.get("carol").copied(), Some("DISMISSED"));
+    }
+
+    #[test]
     fn maps_viewer_pending_review_comments_and_permissions() {
         let node = json!({
             "id": "PRR_pending",
@@ -2665,5 +2715,20 @@ mod tests {
         });
 
         assert_eq!(review_thread_reply_comment_id(&response), None);
+    }
+
+    fn pull_request_review(
+        author_login: &str,
+        state: &str,
+        submitted_at: Option<&str>,
+    ) -> PullRequestReview {
+        PullRequestReview {
+            id: None,
+            author_login: author_login.to_string(),
+            author_avatar_url: None,
+            state: state.to_string(),
+            body: String::new(),
+            submitted_at: submitted_at.map(str::to_string),
+        }
     }
 }

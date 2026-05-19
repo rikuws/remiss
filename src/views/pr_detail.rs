@@ -40,6 +40,25 @@ struct ReviewStatusSummary {
     changes_requested: Vec<String>,
     commented: Vec<String>,
     waiting: Vec<String>,
+    has_unattributed_changes_requested: bool,
+}
+
+impl ReviewStatusSummary {
+    fn changes_requested_display_value(&self) -> String {
+        if self.changes_requested.is_empty() && self.has_unattributed_changes_requested {
+            "1+".to_string()
+        } else {
+            self.changes_requested.len().to_string()
+        }
+    }
+
+    fn changes_requested_floor_count(&self) -> usize {
+        if self.changes_requested.is_empty() && self.has_unattributed_changes_requested {
+            1
+        } else {
+            self.changes_requested.len()
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,6 +149,7 @@ struct CommitFreshnessSummary {
 fn summarize_review_status(
     reviewers: &[String],
     latest_reviews: &[PullRequestReview],
+    review_decision: Option<&str>,
 ) -> ReviewStatusSummary {
     let mut latest_by_author = BTreeMap::<String, &PullRequestReview>::new();
     for review in latest_reviews {
@@ -137,7 +157,13 @@ fn summarize_review_status(
         if author.is_empty() {
             continue;
         }
-        latest_by_author.insert(author.to_string(), review);
+        let replace = latest_by_author
+            .get(author)
+            .map(|existing| review_submitted_after(review, existing))
+            .unwrap_or(true);
+        if replace {
+            latest_by_author.insert(author.to_string(), review);
+        }
     }
 
     let mut approved = BTreeSet::new();
@@ -152,11 +178,16 @@ fn summarize_review_status(
             "CHANGES_REQUESTED" => {
                 changes_requested.insert(author);
             }
-            _ => {
+            "COMMENTED" => {
                 commented.insert(author);
             }
+            "DISMISSED" => {}
+            _ => {}
         }
     }
+
+    let has_unattributed_changes_requested =
+        changes_requested.is_empty() && review_decision == Some("CHANGES_REQUESTED");
 
     let mut waiting = BTreeSet::new();
     for reviewer in reviewers {
@@ -177,6 +208,16 @@ fn summarize_review_status(
         changes_requested: changes_requested.into_iter().collect(),
         commented: commented.into_iter().collect(),
         waiting: waiting.into_iter().collect(),
+        has_unattributed_changes_requested,
+    }
+}
+
+fn review_submitted_after(left: &PullRequestReview, right: &PullRequestReview) -> bool {
+    match (left.submitted_at.as_deref(), right.submitted_at.as_deref()) {
+        (Some(left), Some(right)) => left >= right,
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        (None, None) => true,
     }
 }
 
@@ -1496,7 +1537,7 @@ fn build_own_pr_summary_text(
         .count();
     let waiting = review_status.waiting.len();
     let approvals = review_status.approved.len();
-    let changes_requested = review_status.changes_requested.len();
+    let changes_requested = review_status.changes_requested_floor_count();
 
     format!(
         "{} {}, {} {}, {} {}, and {} {}.",
@@ -1533,7 +1574,7 @@ fn build_review_snapshot_text(
         .filter(|item| !item.is_resolved)
         .count();
     let responded = review_status.approved.len()
-        + review_status.changes_requested.len()
+        + review_status.changes_requested_floor_count()
         + review_status.commented.len();
 
     format!(
@@ -1641,9 +1682,8 @@ fn summarize_recent_activity(
     );
 
     items.sort_by(|left, right| {
-        right
-            .timestamp
-            .cmp(&left.timestamp)
+        left.timestamp
+            .cmp(&right.timestamp)
             .then_with(|| left.title.cmp(&right.title))
     });
     items
@@ -2206,12 +2246,62 @@ mod tests {
                 review("carol", "COMMENTED", None),
                 review("", "APPROVED", None),
             ],
+            None,
         );
 
         assert_eq!(summary.approved, vec!["alice".to_string()]);
         assert_eq!(summary.changes_requested, vec!["bob".to_string()]);
         assert_eq!(summary.commented, vec!["carol".to_string()]);
         assert_eq!(summary.waiting, vec!["sam".to_string(), "zoe".to_string()]);
+        assert!(!summary.has_unattributed_changes_requested);
+        assert_eq!(summary.changes_requested_display_value(), "1");
+    }
+
+    #[test]
+    fn summarize_review_status_uses_latest_submitted_review_per_author() {
+        let summary = summarize_review_status(
+            &["alice".to_string()],
+            &[
+                review("alice", "APPROVED", Some("2026-04-14T11:00:00Z")),
+                review("alice", "CHANGES_REQUESTED", Some("2026-04-14T10:00:00Z")),
+            ],
+            Some("APPROVED"),
+        );
+
+        assert_eq!(summary.approved, vec!["alice".to_string()]);
+        assert!(summary.changes_requested.is_empty());
+        assert!(summary.waiting.is_empty());
+    }
+
+    #[test]
+    fn summarize_review_status_treats_dismissed_as_inactive() {
+        let summary = summarize_review_status(
+            &["bob".to_string()],
+            &[
+                review("bob", "CHANGES_REQUESTED", Some("2026-04-14T10:00:00Z")),
+                review("bob", "DISMISSED", Some("2026-04-14T11:00:00Z")),
+            ],
+            None,
+        );
+
+        assert!(summary.approved.is_empty());
+        assert!(summary.changes_requested.is_empty());
+        assert!(summary.commented.is_empty());
+        assert_eq!(summary.waiting, vec!["bob".to_string()]);
+    }
+
+    #[test]
+    fn summarize_review_status_exposes_unattributed_changes_requested_decision() {
+        let summary = summarize_review_status(
+            &["alice".to_string()],
+            &[review("alice", "COMMENTED", Some("2026-04-14T10:00:00Z"))],
+            Some("CHANGES_REQUESTED"),
+        );
+
+        assert!(summary.changes_requested.is_empty());
+        assert!(summary.has_unattributed_changes_requested);
+        assert_eq!(summary.changes_requested_display_value(), "1+");
+        assert_eq!(summary.changes_requested_floor_count(), 1);
     }
 
     #[test]
@@ -2315,7 +2405,7 @@ mod tests {
     }
 
     #[test]
-    fn summarize_recent_activity_sorts_conversation_reviews_threads_and_commits() {
+    fn summarize_recent_activity_sorts_visible_events_chronologically() {
         let mut detail = detail_with_activity(
             vec![issue_comment(
                 "alice",
@@ -2359,33 +2449,33 @@ mod tests {
         let items = summarize_recent_activity(&detail, &BTreeSet::new());
 
         assert_eq!(items.len(), 5);
-        assert_eq!(items[0].kind, ActivityItemKind::Commit);
-        assert_eq!(
-            items[0].title,
-            "rikuws committed Tighten commit freshness timeline"
-        );
-        assert_eq!(items[0].status_label.as_deref(), Some("6a1525e"));
-        assert_eq!(items[1].kind, ActivityItemKind::Thread);
-        assert_eq!(items[1].title, "dave commented");
-        assert_eq!(items[1].location_label.as_deref(), Some("src/main.rs:42"));
-        assert_eq!(items[1].thread_comments.len(), 2);
-        assert_eq!(items[1].thread_comments[0].author_login, "carol");
-        assert_eq!(
-            items[1].thread_comments[0].body,
-            "Please rename this helper so the intent is clearer."
-        );
-        assert_eq!(items[1].thread_comments[1].author_login, "dave");
-        assert_eq!(
-            items[1].thread_comments[1].body,
-            "Done in the follow-up commit."
-        );
+        assert_eq!(items[0].kind, ActivityItemKind::Conversation);
+        assert_eq!(items[1].kind, ActivityItemKind::Review);
+        assert_eq!(items[1].status_code.as_deref(), Some("APPROVED"));
         assert!(items[1].preview.is_empty());
         assert_eq!(items[2].kind, ActivityItemKind::Commit);
         assert_eq!(items[2].status_label.as_deref(), Some("5f34fac"));
-        assert_eq!(items[3].kind, ActivityItemKind::Review);
-        assert_eq!(items[3].status_code.as_deref(), Some("APPROVED"));
+        assert_eq!(items[3].kind, ActivityItemKind::Thread);
+        assert_eq!(items[3].title, "dave commented");
+        assert_eq!(items[3].location_label.as_deref(), Some("src/main.rs:42"));
+        assert_eq!(items[3].thread_comments.len(), 2);
+        assert_eq!(items[3].thread_comments[0].author_login, "carol");
+        assert_eq!(
+            items[3].thread_comments[0].body,
+            "Please rename this helper so the intent is clearer."
+        );
+        assert_eq!(items[3].thread_comments[1].author_login, "dave");
+        assert_eq!(
+            items[3].thread_comments[1].body,
+            "Done in the follow-up commit."
+        );
         assert!(items[3].preview.is_empty());
-        assert_eq!(items[4].kind, ActivityItemKind::Conversation);
+        assert_eq!(items[4].kind, ActivityItemKind::Commit);
+        assert_eq!(
+            items[4].title,
+            "rikuws committed Tighten commit freshness timeline"
+        );
+        assert_eq!(items[4].status_label.as_deref(), Some("6a1525e"));
     }
 
     #[test]
@@ -2525,7 +2615,11 @@ mod tests {
             )],
         );
 
-        let review_status = summarize_review_status(&detail.reviewers, &detail.latest_reviews);
+        let review_status = summarize_review_status(
+            &detail.reviewers,
+            &detail.latest_reviews,
+            detail.review_decision.as_deref(),
+        );
         let participants = summarize_participants(&detail, &review_status);
 
         let author = participants
@@ -2567,7 +2661,11 @@ mod tests {
 
         apply_submitted_review_to_detail(&mut detail, "alice", ReviewAction::Approve, "Looks good");
 
-        let review_status = summarize_review_status(&detail.reviewers, &detail.latest_reviews);
+        let review_status = summarize_review_status(
+            &detail.reviewers,
+            &detail.latest_reviews,
+            detail.review_decision.as_deref(),
+        );
         assert_eq!(
             review_status.approved,
             vec!["alice".to_string(), "bob".to_string()]

@@ -1040,6 +1040,7 @@ pub struct AppState {
     pub detail_states: std::collections::HashMap<String, DetailState>,
     pub unread_review_comment_ids: std::collections::BTreeSet<String>,
     pub expanded_automation_activity_keys: std::collections::BTreeSet<String>,
+    pub expanded_review_snapshot_keys: std::collections::BTreeSet<String>,
 
     // Bootstrap
     pub gh_available: bool,
@@ -1201,6 +1202,7 @@ impl AppState {
             detail_states: std::collections::HashMap::new(),
             unread_review_comment_ids,
             expanded_automation_activity_keys: std::collections::BTreeSet::new(),
+            expanded_review_snapshot_keys: std::collections::BTreeSet::new(),
             gh_available: false,
             gh_version: None,
             cache_path,
