@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     cache::CacheStore,
-    code_tour::find_parsed_diff_file,
     diff::{DiffLineKind, ParsedDiffHunk, ParsedDiffLine},
     github::PullRequestDetail,
+    guided_review::find_parsed_diff_file,
     stacks::model::{ChangeAtom, ChangeAtomSource, ChangeRole, LineRange},
     structural_diff::{
         build_and_cache_structural_diff, build_structural_diff_request,

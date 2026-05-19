@@ -66,15 +66,15 @@ pub(super) fn render_overview_surface(state: &Entity<AppState>, cx: &App) -> imp
         .expanded_review_snapshot_keys
         .contains(&review_snapshot_key);
     let participants = summarize_participants(detail, &review_status);
-    let provider = s.selected_tour_provider();
-    let provider_status = s.selected_tour_provider_status().cloned();
-    let provider_loading = s.code_tour_provider_loading;
-    let provider_error = s.code_tour_provider_error.clone();
+    let provider = s.selected_review_ai_provider();
+    let provider_status = s.selected_review_ai_provider_status().cloned();
+    let provider_loading = s.review_ai_provider_loading;
+    let provider_error = s.review_ai_provider_error.clone();
     let brief_automatic_enabled = s
-        .code_tour_settings
+        .review_ai_settings
         .settings
         .automatically_generates_for(&detail.repository);
-    let brief_settings_loaded = s.code_tour_settings.loaded;
+    let brief_settings_loaded = s.review_ai_settings.loaded;
 
     let state_for_review = state.clone();
     let state_for_brief = state.clone();
@@ -253,8 +253,8 @@ fn render_commit_freshness_chip(freshness: &CommitFreshnessSummary) -> impl Into
 
 fn render_review_brief_panel(
     brief_state: ReviewBriefState,
-    provider: CodeTourProvider,
-    provider_status: Option<CodeTourProviderStatus>,
+    provider: ReviewAiProvider,
+    provider_status: Option<ReviewAiProviderStatus>,
     provider_loading: bool,
     provider_error: Option<String>,
     local_repository_loading: bool,
@@ -420,8 +420,8 @@ fn render_review_brief_document(brief: &ReviewBrief) -> impl IntoElement {
 }
 
 fn render_review_brief_progress(
-    provider: CodeTourProvider,
-    provider_status: Option<&CodeTourProviderStatus>,
+    provider: ReviewAiProvider,
+    provider_status: Option<&ReviewAiProviderStatus>,
     provider_error: Option<&str>,
     local_repository_loading: bool,
     progress_text: Option<&str>,
@@ -545,7 +545,7 @@ fn render_review_brief_error(error: &str, state: &Entity<AppState>) -> impl Into
 }
 
 fn render_review_brief_setup_needed(
-    provider_status: Option<&CodeTourProviderStatus>,
+    provider_status: Option<&ReviewAiProviderStatus>,
     provider_error: Option<&str>,
     state: &Entity<AppState>,
     state_for_settings: Entity<AppState>,
@@ -627,7 +627,7 @@ fn render_review_brief_idle(
     let copy = if automatic_enabled {
         "No cached review brief is available for this pull request head yet."
     } else {
-        "Automatic briefings use the Background code tours repository setting."
+        "Automatic briefings use the Review Intelligence repository setting."
     };
 
     div()

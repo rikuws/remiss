@@ -2,9 +2,9 @@ use std::collections::{BTreeSet, HashMap};
 
 use crate::{
     code_display::build_interactive_code_tokens,
-    code_tour::DiffAnchor,
     diff::{find_parsed_diff_file, DiffLineKind, ParsedDiffFile},
     github::PullRequestDetail,
+    guided_review::DiffAnchor,
     lsp::LspReferenceTarget,
     review_session::{ReviewLocation, ReviewTaskRoute},
     semantic_diff::{build_semantic_diff_file, SemanticDiffSection},
@@ -513,7 +513,7 @@ mod tests {
             deletions: 0,
             thread_count: 0,
             line_count: 2,
-            anchor: Some(crate::code_tour::DiffAnchor {
+            anchor: Some(crate::guided_review::DiffAnchor {
                 file_path: "src/db.rs".to_string(),
                 hunk_header: Some("@@ -1,1 +1,2 @@ fn load_accounts".to_string()),
                 line: Some(2),

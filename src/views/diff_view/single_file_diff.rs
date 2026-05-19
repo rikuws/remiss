@@ -282,6 +282,7 @@ pub(super) fn render_virtualized_diff_rows(
     scrollbar_activity: DiffScrollbarActivity,
 ) -> AnyElement {
     let state = state.clone();
+    let scroll_state = state.clone();
     let has_side_by_side_rows = structural_side_by_side.is_some() || normal_side_by_side.is_some();
     let scrollbar_list_state = list_state.clone();
     let render_side_by_side_scroll_handles = side_by_side_scroll_handles.clone();
@@ -327,6 +328,7 @@ pub(super) fn render_virtualized_diff_rows(
     };
 
     render_diff_scroll_body(
+        &scroll_state,
         body,
         &scrollbar_list_state,
         item_count,
@@ -1490,7 +1492,11 @@ pub(super) fn prepare_tour_diff_view_state(
     prepare_diff_view_state_with_key(
         app_state,
         detail,
-        build_diff_view_state_key(app_state.active_pr_key.as_deref(), "tour", preview_key),
+        build_diff_view_state_key(
+            app_state.active_pr_key.as_deref(),
+            "guided-review",
+            preview_key,
+        ),
         file_path,
     )
 }
@@ -1782,6 +1788,10 @@ pub(super) fn render_virtualized_diff_row(
                         let temp_source_target = detail.and_then(|detail| {
                             temp_source_target_for_diff_line(detail, parsed, line)
                         });
+                        let text_selection = DiffTextSelectionContext::new(
+                            format!("diff-text:{path}:unified"),
+                            diff_text_row_order(*hunk_index, *line_index),
+                        );
                         render_reviewable_diff_line(
                             state,
                             gutter_layout,
@@ -1793,6 +1803,7 @@ pub(super) fn render_virtualized_diff_row(
                             selected_anchor,
                             line_lsp_context.as_ref(),
                             temp_source_target,
+                            Some(text_selection),
                             cx,
                         )
                         .into_any_element()

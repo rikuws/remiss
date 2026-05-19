@@ -15,10 +15,6 @@ use crate::code_display::{
     build_interactive_code_tokens, build_lsp_hover_tooltip_view, code_text_runs, mono_code_font,
     render_highlighted_code_block, render_highlighted_code_content, InteractiveCodeToken,
 };
-use crate::code_tour::{
-    line_matches_diff_anchor, thread_matches_diff_anchor, CodeTourProvider, CodeTourProviderStatus,
-    DiffAnchor, GeneratedCodeTour, TourSection, TourSectionCategory, TourSectionPriority, TourStep,
-};
 use crate::diff::{
     build_diff_render_rows, build_diff_render_rows_for_parsed_file, find_parsed_diff_file,
     find_parsed_diff_file_with_index, DiffLineKind, DiffRenderRow, ParsedDiffFile, ParsedDiffHunk,
@@ -29,6 +25,11 @@ use crate::emoji::{emoji_shortcode_suggestions, EmojiSuggestion};
 use crate::github::{
     PullRequestDetail, PullRequestFile, PullRequestReviewComment, PullRequestReviewThread,
     RepositoryFileContent, ReviewAction, REPOSITORY_FILE_SOURCE_LOCAL_CHECKOUT,
+};
+use crate::guided_review::{
+    line_matches_diff_anchor, thread_matches_diff_anchor, DiffAnchor, GeneratedGuidedReview,
+    GuidedReviewSection, GuidedReviewSectionCategory, GuidedReviewSectionPriority,
+    GuidedReviewStep, ReviewAiProvider, ReviewAiProviderStatus,
 };
 use crate::icons::{lucide_icon, LucideIcon};
 use crate::inline_diff::{build_hunk_inline_emphasis, normalize_inline_emphasis_ranges};
@@ -78,12 +79,12 @@ use crate::temp_source_window::{
 use crate::theme::*;
 use crate::{github, notifications, review_intelligence};
 
-use super::ai_tour::trigger_generate_tour;
 use super::file_tree::{
     render_file_tree_directory_row, render_file_tree_file_row, render_file_tree_header,
     render_file_tree_state_message, render_structural_warmup_status, ReviewFileRowOpenHandler,
     ReviewFileRowOpenMode, REVIEW_FILE_TREE_ROW_HEIGHT,
 };
+use super::guided_review::trigger_generate_guided_review;
 use super::root::refresh_active_local_review;
 use super::sections::{
     badge, badge_success, error_text, eyebrow, format_relative_time, ghost_button, nested_panel,
@@ -91,16 +92,16 @@ use super::sections::{
 };
 use super::tooltips::{build_static_tooltip, build_text_tooltip};
 
-mod ai_tour_panel;
 mod combined_diff;
 mod diff_metrics;
 mod file_content;
 mod guided_review;
+mod guided_review_diff_preview;
+mod guided_review_panel;
 mod review_comments;
 mod review_sidebar;
 mod side_by_side;
 mod single_file_diff;
-mod tour_diff_preview;
 
 pub use self::file_content::{
     ensure_selected_file_content_loaded, load_local_source_file_content_flow,
@@ -111,17 +112,18 @@ pub use self::review_comments::{
     trigger_submit_inline_comment, trigger_submit_review_from_review_mode,
 };
 
-use self::ai_tour_panel::*;
 use self::combined_diff::*;
 use self::diff_metrics::*;
 use self::guided_review::*;
+use self::guided_review_diff_preview::render_tour_diff_file_compact;
+use self::guided_review_panel::*;
 use self::review_comments::{
     begin_review_line_drag, build_review_line_action_target, finish_review_line_drag,
-    open_review_line_action, pending_review_comment_count, render_diff_open_source_icon,
-    render_diff_waypoint_icon, render_finish_review_modal, render_review_line_action_overlay,
-    render_review_thread, render_reviewable_diff_line, render_waypoint_pill,
-    review_line_action_target_with_range, review_thread_ui_state, update_review_line_drag,
-    ReviewThreadUiState,
+    open_review_line_action, pending_review_comment_count, render_diff_comment_icon,
+    render_diff_open_source_icon, render_diff_waypoint_icon, render_finish_review_modal,
+    render_review_line_action_overlay, render_review_thread, render_reviewable_diff_line,
+    render_waypoint_pill, review_line_action_target_with_range, review_thread_ui_state,
+    update_review_line_drag, ReviewThreadUiState,
 };
 use self::review_sidebar::{
     default_stack_layer, default_waymark_name, metric_pill, open_review_location_card,
@@ -131,7 +133,6 @@ use self::review_sidebar::{
 };
 use self::side_by_side::*;
 use self::single_file_diff::*;
-use self::tour_diff_preview::render_tour_diff_file_compact;
 pub fn enter_files_surface(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
     state.update(cx, |s, cx| {
         s.active_surface = PullRequestSurface::Files;
@@ -1021,10 +1022,7 @@ fn render_diff_panel(
         .active_review_session()
         .cloned()
         .unwrap_or_default();
-    let center_mode = match review_session.center_mode {
-        ReviewCenterMode::AiTour | ReviewCenterMode::Stack => ReviewCenterMode::GuidedReview,
-        mode => mode,
-    };
+    let center_mode = review_session.center_mode;
     let normal_diff_layout = review_session.normal_diff_layout;
     let structural_diff_layout = review_session.structural_diff_layout;
     let guided_review_lens = review_session.guided_review_lens;
@@ -1035,19 +1033,16 @@ fn render_diff_panel(
         }
         _ => normal_diff_layout,
     };
-    let stack_filter = matches!(
-        center_mode,
-        ReviewCenterMode::GuidedReview | ReviewCenterMode::Stack
-    )
-    .then(|| {
-        build_layer_diff_filter(
-            review_stack.as_ref(),
-            review_session.stack_diff_mode,
-            review_session.selected_stack_layer_id.as_deref(),
-            &review_session.reviewed_stack_atom_ids,
-        )
-    })
-    .flatten();
+    let stack_filter = (center_mode == ReviewCenterMode::GuidedReview)
+        .then(|| {
+            build_layer_diff_filter(
+                review_stack.as_ref(),
+                review_session.stack_diff_mode,
+                review_session.selected_stack_layer_id.as_deref(),
+                &review_session.reviewed_stack_atom_ids,
+            )
+        })
+        .flatten();
     let has_textual_diff = detail
         .parsed_diff
         .iter()
@@ -1263,7 +1258,6 @@ fn render_diff_toolbar(
         ReviewCenterMode::SemanticDiff
             | ReviewCenterMode::StructuralDiff
             | ReviewCenterMode::GuidedReview
-            | ReviewCenterMode::Stack
     );
     let is_local_review = crate::local_review::is_local_review_detail(detail);
     let state_for_refresh = state.clone();

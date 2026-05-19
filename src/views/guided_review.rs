@@ -2,20 +2,20 @@ use std::{collections::BTreeSet, sync::mpsc, time::Duration};
 
 use gpui::*;
 
-use crate::code_tour::{
-    build_code_tour_generation_input, build_tour_request_key, CodeTourProgressUpdate,
-    CodeTourProvider, GeneratedCodeTour,
+use crate::guided_review::{
+    build_guided_review_generation_input, build_guided_review_request_key, GeneratedGuidedReview,
 };
 use crate::local_repo;
 use crate::local_review;
+use crate::review_ai::{self, ReviewAiProgressUpdate, ReviewAiProvider};
 use crate::review_intelligence::{self, ReviewIntelligenceScope};
 use crate::review_memory;
-use crate::state::{AppState, CodeTourState};
-use crate::{code_tour, github};
+use crate::state::{AppState, GuidedReviewState};
+use crate::{github, guided_review};
 
 use super::diff_view::{load_local_source_file_content_flow, load_pull_request_file_content_flow};
 
-pub fn refresh_active_tour(
+pub fn refresh_active_guided_review(
     state: &Entity<AppState>,
     window: &mut Window,
     cx: &mut App,
@@ -24,12 +24,12 @@ pub fn refresh_active_tour(
     let model = state.clone();
     window
         .spawn(cx, async move |cx: &mut AsyncWindowContext| {
-            refresh_active_tour_flow(model, allow_automatic_generation, cx).await;
+            refresh_active_guided_review_flow(model, allow_automatic_generation, cx).await;
         })
         .detach();
 }
 
-pub async fn refresh_active_tour_flow(
+pub async fn refresh_active_guided_review_flow(
     model: Entity<AppState>,
     allow_automatic_generation: bool,
     cx: &mut AsyncWindowContext,
@@ -46,10 +46,10 @@ pub async fn refresh_active_tour_flow(
                 state.cache.clone(),
                 detail_key,
                 detail,
-                state.code_tour_settings.loaded,
-                state.code_tour_settings.settings.clone(),
-                state.code_tour_provider_statuses_loaded,
-                state.code_tour_provider_statuses.clone(),
+                state.review_ai_settings.loaded,
+                state.review_ai_settings.settings.clone(),
+                state.review_ai_provider_statuses_loaded,
+                state.review_ai_provider_statuses.clone(),
                 existing_local_repository_status,
             ))
         })
@@ -73,8 +73,8 @@ pub async fn refresh_active_tour_flow(
     if !settings_loaded {
         model
             .update(cx, |state, cx| {
-                state.code_tour_settings.loading = true;
-                state.code_tour_settings.error = None;
+                state.review_ai_settings.loading = true;
+                state.review_ai_settings.error = None;
                 cx.notify();
             })
             .ok();
@@ -83,8 +83,8 @@ pub async fn refresh_active_tour_flow(
     if !statuses_loaded {
         model
             .update(cx, |state, cx| {
-                state.code_tour_provider_loading = true;
-                state.code_tour_provider_error = None;
+                state.review_ai_provider_loading = true;
+                state.review_ai_provider_error = None;
                 cx.notify();
             })
             .ok();
@@ -96,7 +96,7 @@ pub async fn refresh_active_tour_flow(
         cx.background_executor()
             .spawn({
                 let cache = cache.clone();
-                async move { code_tour::load_code_tour_settings(&cache) }
+                async move { review_ai::load_review_ai_settings(&cache) }
             })
             .await
     };
@@ -105,7 +105,7 @@ pub async fn refresh_active_tour_flow(
         Ok(existing_statuses)
     } else {
         cx.background_executor()
-            .spawn(async { code_tour::load_code_tour_provider_statuses() })
+            .spawn(async { review_ai::load_review_ai_provider_statuses() })
             .await
     };
 
@@ -121,22 +121,22 @@ pub async fn refresh_active_tour_flow(
 
     model
         .update(cx, |state, cx| {
-            state.code_tour_settings.loading = false;
+            state.review_ai_settings.loading = false;
             if let Ok(settings) = &settings_result {
-                state.code_tour_settings.settings = settings.clone();
-                state.code_tour_settings.loaded = true;
-                state.code_tour_settings.error = None;
+                state.review_ai_settings.settings = settings.clone();
+                state.review_ai_settings.loaded = true;
+                state.review_ai_settings.error = None;
             } else if let Err(error) = &settings_result {
-                state.code_tour_settings.error = Some(error.clone());
+                state.review_ai_settings.error = Some(error.clone());
             }
 
-            state.code_tour_provider_loading = false;
-            state.code_tour_provider_statuses_loaded = true;
+            state.review_ai_provider_loading = false;
+            state.review_ai_provider_statuses_loaded = true;
             if let Ok(statuses) = &provider_statuses_result {
-                state.code_tour_provider_statuses = statuses.clone();
-                state.code_tour_provider_error = None;
+                state.review_ai_provider_statuses = statuses.clone();
+                state.review_ai_provider_error = None;
             } else if let Err(error) = &provider_statuses_result {
-                state.code_tour_provider_error = Some(error.clone());
+                state.review_ai_provider_error = Some(error.clone());
             }
 
             if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
@@ -146,22 +146,25 @@ pub async fn refresh_active_tour_flow(
                     detail_state.local_repository_status = Some(status.clone());
                 }
 
-                let request_key = build_tour_request_key(&detail, provider);
-                let tour_state = detail_state.tour_states.entry(provider).or_default();
-                clear_tour_progress(tour_state);
-                tour_state.loading = true;
-                tour_state.generating = false;
-                tour_state.request_key = Some(request_key);
-                tour_state.error = None;
-                tour_state.message = None;
-                tour_state.success = false;
+                let request_key = build_guided_review_request_key(&detail, provider);
+                let guided_review_state = detail_state
+                    .guided_review_states
+                    .entry(provider)
+                    .or_default();
+                clear_guided_review_progress(guided_review_state);
+                guided_review_state.loading = true;
+                guided_review_state.generating = false;
+                guided_review_state.request_key = Some(request_key);
+                guided_review_state.error = None;
+                guided_review_state.message = None;
+                guided_review_state.success = false;
             }
 
             cx.notify();
         })
         .ok();
 
-    let request_key = build_tour_request_key(&detail, provider);
+    let request_key = build_guided_review_request_key(&detail, provider);
 
     let local_repo_result = match local_review_repository_status {
         Ok(Some(status)) => Ok(status),
@@ -189,7 +192,7 @@ pub async fn refresh_active_tour_flow(
         .spawn({
             let cache = cache.clone();
             let detail = detail.clone();
-            async move { code_tour::load_code_tour(&cache, &detail, provider) }
+            async move { guided_review::load_guided_review(&cache, &detail, provider) }
         })
         .await;
 
@@ -213,7 +216,9 @@ pub async fn refresh_active_tour_flow(
         && cached_tour_error.is_none()
         && model
             .read_with(cx, |state, _| {
-                !state.automatic_tour_request_keys.contains(&request_key)
+                !state
+                    .automatic_guided_review_request_keys
+                    .contains(&request_key)
                     && detail_request_matches(state, &detail_key, provider, &request_key)
             })
             .ok()
@@ -237,17 +242,20 @@ pub async fn refresh_active_tour_flow(
                     }
                 }
 
-                let tour_state = detail_state.tour_states.entry(provider).or_default();
-                tour_state.loading = false;
-                clear_tour_progress(tour_state);
+                let guided_review_state = detail_state
+                    .guided_review_states
+                    .entry(provider)
+                    .or_default();
+                guided_review_state.loading = false;
+                clear_guided_review_progress(guided_review_state);
                 match &cached_tour_result {
                     Ok(document) => {
-                        tour_state.document = document.clone();
-                        tour_state.error = None;
+                        guided_review_state.document = document.clone();
+                        guided_review_state.error = None;
                     }
                     Err(error) => {
-                        tour_state.document = None;
-                        tour_state.error = Some(error.clone());
+                        guided_review_state.document = None;
+                        guided_review_state.error = Some(error.clone());
                     }
                 }
             }
@@ -260,22 +268,22 @@ pub async fn refresh_active_tour_flow(
         .as_ref()
         .ok()
         .and_then(|document| document.as_ref())
-        .map(tour_changed_file_paths)
+        .map(guided_review_changed_file_paths)
         .unwrap_or_default();
     let callsite_paths = cached_tour_result
         .as_ref()
         .ok()
         .and_then(|document| document.as_ref())
-        .map(tour_callsite_paths)
+        .map(guided_review_callsite_paths)
         .unwrap_or_default();
 
-    preload_tour_source_files(model.clone(), changed_file_paths, callsite_paths, cx).await;
+    preload_guided_review_source_files(model.clone(), changed_file_paths, callsite_paths, cx).await;
 
     if should_auto_generate {
         model
             .update(cx, |state, _| {
                 state
-                    .automatic_tour_request_keys
+                    .automatic_guided_review_request_keys
                     .insert(request_key.clone());
             })
             .ok();
@@ -288,7 +296,7 @@ pub async fn refresh_active_tour_flow(
     }
 }
 
-pub fn trigger_generate_tour(
+pub fn trigger_generate_guided_review(
     state: &Entity<AppState>,
     window: &mut Window,
     cx: &mut App,
@@ -310,9 +318,9 @@ pub fn trigger_generate_tour(
     review_intelligence::trigger_review_intelligence(state, window, cx, scope, true);
 }
 
-pub(crate) async fn generate_tour_flow(
+pub(crate) async fn generate_guided_review_flow(
     model: Entity<AppState>,
-    context: Option<(String, github::PullRequestDetail, CodeTourProvider, String)>,
+    context: Option<(String, github::PullRequestDetail, ReviewAiProvider, String)>,
     prepared_local_repo_status: Option<local_repo::LocalRepositoryStatus>,
     automatic: bool,
     cx: &mut AsyncWindowContext,
@@ -325,14 +333,14 @@ pub(crate) async fn generate_tour_flow(
             .read_with(cx, |state, _| {
                 let detail = state.active_detail()?.clone();
                 let detail_key = state.active_pr_key.clone()?;
-                let provider = state.selected_tour_provider();
+                let provider = state.selected_review_ai_provider();
                 Some((
                     state.cache.clone(),
                     (
                         detail_key,
                         detail.clone(),
                         provider,
-                        build_tour_request_key(&detail, provider),
+                        build_guided_review_request_key(&detail, provider),
                     ),
                 ))
             })
@@ -347,7 +355,7 @@ pub(crate) async fn generate_tour_flow(
     let provider_status = model
         .read_with(cx, |state, _| {
             state
-                .code_tour_provider_statuses
+                .review_ai_provider_statuses
                 .iter()
                 .find(|status| status.provider == provider)
                 .cloned()
@@ -357,7 +365,7 @@ pub(crate) async fn generate_tour_flow(
 
     let Some(provider_status) = provider_status else {
         if !automatic {
-            set_tour_error(
+            set_guided_review_error(
                 &model,
                 &detail_key,
                 provider,
@@ -371,7 +379,7 @@ pub(crate) async fn generate_tour_flow(
 
     if !provider_status.available {
         if !automatic {
-            set_tour_error(
+            set_guided_review_error(
                 &model,
                 &detail_key,
                 provider,
@@ -385,7 +393,7 @@ pub(crate) async fn generate_tour_flow(
 
     if !provider_status.authenticated {
         if !automatic {
-            set_tour_error(
+            set_guided_review_error(
                 &model,
                 &detail_key,
                 provider,
@@ -434,16 +442,19 @@ pub(crate) async fn generate_tour_flow(
                     detail_state.local_repository_status = Some(status.clone());
                 }
 
-                let tour_state = detail_state.tour_states.entry(provider).or_default();
-                clear_tour_progress(tour_state);
-                tour_state.request_key = Some(request_key.clone());
-                tour_state.loading = false;
-                tour_state.generating = true;
-                tour_state.error = None;
-                tour_state.message = None;
-                tour_state.success = false;
-                apply_tour_progress_message(
-                    tour_state,
+                let guided_review_state = detail_state
+                    .guided_review_states
+                    .entry(provider)
+                    .or_default();
+                clear_guided_review_progress(guided_review_state);
+                guided_review_state.request_key = Some(request_key.clone());
+                guided_review_state.loading = false;
+                guided_review_state.generating = true;
+                guided_review_state.error = None;
+                guided_review_state.message = None;
+                guided_review_state.success = false;
+                apply_guided_review_progress_message(
+                    guided_review_state,
                     if has_prepared_checkout {
                         "Using prepared checkout".to_string()
                     } else {
@@ -531,13 +542,16 @@ pub(crate) async fn generate_tour_flow(
                 detail_state.local_repository_loading = false;
                 detail_state.local_repository_status = Some(local_repo_status.clone());
                 detail_state.local_repository_error = None;
-                let tour_state = detail_state.tour_states.entry(provider).or_default();
+                let guided_review_state = detail_state
+                    .guided_review_states
+                    .entry(provider)
+                    .or_default();
                 let checkout_label = match local_repo_status.source.as_str() {
                     "linked" => "linked checkout",
                     _ => "app-managed checkout",
                 };
-                apply_tour_progress_message(
-                    tour_state,
+                apply_guided_review_progress_message(
+                    guided_review_state,
                     format!("Starting {}", provider.label()),
                     Some(format!(
                         "Launching {} in the {} and sending the pull request context.",
@@ -553,19 +567,23 @@ pub(crate) async fn generate_tour_flow(
         .ok();
 
     let mut generation_input =
-        build_code_tour_generation_input(&detail, provider, &working_directory);
+        build_guided_review_generation_input(&detail, provider, &working_directory);
     generation_input.review_memory =
         review_memory::review_memory_prompt_context_for_detail(&cache, &detail, &[], 3)
             .unwrap_or_default();
-    let (progress_tx, progress_rx) = mpsc::channel::<CodeTourProgressUpdate>();
-    let (result_tx, result_rx) = mpsc::channel::<Result<GeneratedCodeTour, String>>();
+    let (progress_tx, progress_rx) = mpsc::channel::<ReviewAiProgressUpdate>();
+    let (result_tx, result_rx) = mpsc::channel::<Result<GeneratedGuidedReview, String>>();
     std::thread::spawn({
         let cache = cache.clone();
         move || {
             let result = review_intelligence::run_foreground_blocking(|| {
-                code_tour::generate_code_tour_with_progress(&cache, generation_input, |progress| {
-                    let _ = progress_tx.send(progress);
-                })
+                guided_review::generate_guided_review_with_progress(
+                    &cache,
+                    generation_input,
+                    |progress| {
+                        let _ = progress_tx.send(progress);
+                    },
+                )
             });
             let _ = result_tx.send(result);
         }
@@ -579,8 +597,11 @@ pub(crate) async fn generate_tour_flow(
                     }
 
                     if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
-                        let tour_state = detail_state.tour_states.entry(provider).or_default();
-                        apply_tour_progress_update(tour_state, progress);
+                        let guided_review_state = detail_state
+                            .guided_review_states
+                            .entry(provider)
+                            .or_default();
+                        apply_guided_review_progress_update(guided_review_state, progress);
                     }
 
                     cx.notify();
@@ -598,9 +619,11 @@ pub(crate) async fn generate_tour_flow(
                             }
 
                             if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
-                                let tour_state =
-                                    detail_state.tour_states.entry(provider).or_default();
-                                apply_tour_progress_update(tour_state, progress);
+                                let guided_review_state = detail_state
+                                    .guided_review_states
+                                    .entry(provider)
+                                    .or_default();
+                                apply_guided_review_progress_update(guided_review_state, progress);
                             }
 
                             cx.notify();
@@ -610,7 +633,10 @@ pub(crate) async fn generate_tour_flow(
                 break result;
             }
             Err(mpsc::TryRecvError::Disconnected) => {
-                break Err("The code tour generator stopped before returning a result.".to_string());
+                break Err(
+                    "The Guided Review walkthrough generator stopped before returning a result."
+                        .to_string(),
+                );
             }
             Err(mpsc::TryRecvError::Empty) => {}
         }
@@ -629,24 +655,27 @@ pub(crate) async fn generate_tour_flow(
             }
 
             if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
-                let tour_state = detail_state.tour_states.entry(provider).or_default();
-                tour_state.generating = false;
+                let guided_review_state = detail_state
+                    .guided_review_states
+                    .entry(provider)
+                    .or_default();
+                guided_review_state.generating = false;
                 match generation_result {
                     Ok(ref document) => {
-                        clear_tour_progress(tour_state);
-                        tour_state.document = Some(document.clone());
-                        tour_state.error = None;
-                        tour_state.message = Some(if automatic {
+                        clear_guided_review_progress(guided_review_state);
+                        guided_review_state.document = Some(document.clone());
+                        guided_review_state.error = None;
+                        guided_review_state.message = Some(if automatic {
                             format!("Cached a {} guide in the background.", provider.label())
                         } else {
                             format!("Generated a {} guide.", provider.label())
                         });
-                        tour_state.success = true;
+                        guided_review_state.success = true;
                     }
                     Err(ref error) => {
-                        tour_state.error = Some(error.clone());
-                        tour_state.message = None;
-                        tour_state.success = false;
+                        guided_review_state.error = Some(error.clone());
+                        guided_review_state.message = None;
+                        guided_review_state.success = false;
                     }
                 }
             }
@@ -656,17 +685,17 @@ pub(crate) async fn generate_tour_flow(
         .ok();
 
     if let Ok(document) = &generation_result {
-        preload_tour_source_files(
+        preload_guided_review_source_files(
             model.clone(),
-            tour_changed_file_paths(document),
-            tour_callsite_paths(document),
+            guided_review_changed_file_paths(document),
+            guided_review_callsite_paths(document),
             cx,
         )
         .await;
     }
 }
 
-async fn preload_tour_source_files(
+async fn preload_guided_review_source_files(
     model: Entity<AppState>,
     changed_file_paths: BTreeSet<String>,
     callsite_paths: BTreeSet<String>,
@@ -681,7 +710,7 @@ async fn preload_tour_source_files(
     }
 }
 
-fn tour_changed_file_paths(tour: &GeneratedCodeTour) -> BTreeSet<String> {
+fn guided_review_changed_file_paths(tour: &GeneratedGuidedReview) -> BTreeSet<String> {
     tour.steps
         .iter()
         .filter_map(|step| {
@@ -693,7 +722,7 @@ fn tour_changed_file_paths(tour: &GeneratedCodeTour) -> BTreeSet<String> {
         .collect()
 }
 
-fn tour_callsite_paths(tour: &GeneratedCodeTour) -> BTreeSet<String> {
+fn guided_review_callsite_paths(tour: &GeneratedGuidedReview) -> BTreeSet<String> {
     tour.sections
         .iter()
         .flat_map(|section| {
@@ -706,22 +735,22 @@ fn tour_callsite_paths(tour: &GeneratedCodeTour) -> BTreeSet<String> {
         .collect()
 }
 
-const MAX_TOUR_PROGRESS_LOG_ITEMS: usize = 10;
+const MAX_GUIDED_REVIEW_PROGRESS_LOG_ITEMS: usize = 10;
 
-fn clear_tour_progress(tour_state: &mut CodeTourState) {
-    tour_state.progress_summary = None;
-    tour_state.progress_detail = None;
-    tour_state.progress_log.clear();
-    tour_state.progress_log_file_path = None;
+fn clear_guided_review_progress(guided_review_state: &mut GuidedReviewState) {
+    guided_review_state.progress_summary = None;
+    guided_review_state.progress_detail = None;
+    guided_review_state.progress_log.clear();
+    guided_review_state.progress_log_file_path = None;
 }
 
-fn push_tour_progress_log(tour_state: &mut CodeTourState, entry: String) {
+fn push_guided_review_progress_log(guided_review_state: &mut GuidedReviewState, entry: String) {
     let normalized = entry.trim();
     if normalized.is_empty() {
         return;
     }
 
-    if tour_state
+    if guided_review_state
         .progress_log
         .last()
         .map(|existing| existing == normalized)
@@ -730,37 +759,43 @@ fn push_tour_progress_log(tour_state: &mut CodeTourState, entry: String) {
         return;
     }
 
-    tour_state.progress_log.push(normalized.to_string());
-    if tour_state.progress_log.len() > MAX_TOUR_PROGRESS_LOG_ITEMS {
-        let overflow = tour_state.progress_log.len() - MAX_TOUR_PROGRESS_LOG_ITEMS;
-        tour_state.progress_log.drain(0..overflow);
+    guided_review_state
+        .progress_log
+        .push(normalized.to_string());
+    if guided_review_state.progress_log.len() > MAX_GUIDED_REVIEW_PROGRESS_LOG_ITEMS {
+        let overflow =
+            guided_review_state.progress_log.len() - MAX_GUIDED_REVIEW_PROGRESS_LOG_ITEMS;
+        guided_review_state.progress_log.drain(0..overflow);
     }
 }
 
-fn apply_tour_progress_message(
-    tour_state: &mut CodeTourState,
+fn apply_guided_review_progress_message(
+    guided_review_state: &mut GuidedReviewState,
     summary: String,
     detail: Option<String>,
     log_entry: Option<String>,
     log_file_path: Option<String>,
 ) {
-    tour_state.progress_summary = Some(summary);
-    tour_state.progress_detail = detail.clone();
+    guided_review_state.progress_summary = Some(summary);
+    guided_review_state.progress_detail = detail.clone();
     if let Some(path) = log_file_path {
         let trimmed = path.trim();
         if !trimmed.is_empty() {
-            tour_state.progress_log_file_path = Some(trimmed.to_string());
+            guided_review_state.progress_log_file_path = Some(trimmed.to_string());
         }
     }
 
     if let Some(log_entry) = log_entry.or_else(|| detail.clone()) {
-        push_tour_progress_log(tour_state, log_entry);
+        push_guided_review_progress_log(guided_review_state, log_entry);
     }
 }
 
-fn apply_tour_progress_update(tour_state: &mut CodeTourState, progress: CodeTourProgressUpdate) {
-    apply_tour_progress_message(
-        tour_state,
+fn apply_guided_review_progress_update(
+    guided_review_state: &mut GuidedReviewState,
+    progress: ReviewAiProgressUpdate,
+) {
+    apply_guided_review_progress_message(
+        guided_review_state,
         progress.summary,
         progress.detail,
         progress.log,
@@ -768,10 +803,10 @@ fn apply_tour_progress_update(tour_state: &mut CodeTourState, progress: CodeTour
     );
 }
 
-fn set_tour_error(
+fn set_guided_review_error(
     model: &Entity<AppState>,
     detail_key: &str,
-    provider: CodeTourProvider,
+    provider: ReviewAiProvider,
     request_key: &str,
     error: String,
     cx: &mut AsyncWindowContext,
@@ -783,12 +818,15 @@ fn set_tour_error(
             }
 
             if let Some(detail_state) = state.detail_states.get_mut(detail_key) {
-                let tour_state = detail_state.tour_states.entry(provider).or_default();
-                tour_state.generating = false;
-                tour_state.loading = false;
-                tour_state.error = Some(error);
-                tour_state.message = None;
-                tour_state.success = false;
+                let guided_review_state = detail_state
+                    .guided_review_states
+                    .entry(provider)
+                    .or_default();
+                guided_review_state.generating = false;
+                guided_review_state.loading = false;
+                guided_review_state.error = Some(error);
+                guided_review_state.message = None;
+                guided_review_state.success = false;
             }
 
             cx.notify();
@@ -799,7 +837,7 @@ fn set_tour_error(
 fn set_local_repo_error(
     model: &Entity<AppState>,
     detail_key: &str,
-    provider: CodeTourProvider,
+    provider: ReviewAiProvider,
     request_key: &str,
     error: String,
     cx: &mut AsyncWindowContext,
@@ -814,12 +852,15 @@ fn set_local_repo_error(
                 detail_state.local_repository_loading = false;
                 detail_state.local_repository_error = Some(error.clone());
 
-                let tour_state = detail_state.tour_states.entry(provider).or_default();
-                tour_state.generating = false;
-                tour_state.loading = false;
-                tour_state.error = Some(error);
-                tour_state.message = None;
-                tour_state.success = false;
+                let guided_review_state = detail_state
+                    .guided_review_states
+                    .entry(provider)
+                    .or_default();
+                guided_review_state.generating = false;
+                guided_review_state.loading = false;
+                guided_review_state.error = Some(error);
+                guided_review_state.message = None;
+                guided_review_state.success = false;
             }
 
             cx.notify();
@@ -830,7 +871,7 @@ fn set_local_repo_error(
 fn detail_request_matches(
     state: &AppState,
     detail_key: &str,
-    provider: CodeTourProvider,
+    provider: ReviewAiProvider,
     request_key: &str,
 ) -> bool {
     state
@@ -838,6 +879,6 @@ fn detail_request_matches(
         .get(detail_key)
         .and_then(|detail_state| detail_state.snapshot.as_ref())
         .and_then(|snapshot| snapshot.detail.as_ref())
-        .map(|detail| build_tour_request_key(detail, provider) == request_key)
+        .map(|detail| build_guided_review_request_key(detail, provider) == request_key)
         .unwrap_or(false)
 }

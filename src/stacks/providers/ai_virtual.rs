@@ -10,8 +10,8 @@ use crate::{
         prompt::{build_stack_planning_prompt, build_stack_planning_refinement_prompt},
     },
     app_storage,
-    code_tour::{CodeTourProgressUpdate, CodeTourProvider},
     github::PullRequestDetail,
+    review_ai::{ReviewAiProgressUpdate, ReviewAiProvider},
     semantic_review::{summarize_semantic_review, RemissSemanticReview},
     structural_evidence::{StructuralEvidencePack, STRUCTURAL_EVIDENCE_VERSION},
 };
@@ -42,7 +42,7 @@ pub fn discover(
     selected_pr: &PullRequestDetail,
     repo_context: &RepoContext,
     _sizing: &VirtualStackSizing,
-    provider: CodeTourProvider,
+    provider: ReviewAiProvider,
 ) -> Result<Option<ReviewStack>, StackDiscoveryError> {
     discover_with_progress(selected_pr, repo_context, _sizing, provider, &mut |_| {})
 }
@@ -51,8 +51,8 @@ pub fn discover_with_progress(
     selected_pr: &PullRequestDetail,
     repo_context: &RepoContext,
     _sizing: &VirtualStackSizing,
-    provider: CodeTourProvider,
-    on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
+    provider: ReviewAiProvider,
+    on_progress: &mut dyn FnMut(ReviewAiProgressUpdate),
 ) -> Result<Option<ReviewStack>, StackDiscoveryError> {
     let atoms = extract_change_atoms(selected_pr);
     if atoms.is_empty() {
@@ -607,7 +607,7 @@ fn normalize_enum_token(value: &str) -> String {
 
 struct AiStackDiagnosticLogInput<'a> {
     selected_pr: &'a PullRequestDetail,
-    provider: CodeTourProvider,
+    provider: ReviewAiProvider,
     stage: &'a str,
     working_directory: &'a str,
     input_json: &'a Value,
@@ -726,7 +726,7 @@ pub fn build_stack_from_validated_plan(
     atoms: Vec<ChangeAtom>,
     validated: ValidatedAiStackPlan,
     model_or_agent: Option<String>,
-    provider: CodeTourProvider,
+    provider: ReviewAiProvider,
     commit_context: CommitContext,
 ) -> ReviewStack {
     let plan = validated.plan;
@@ -1666,7 +1666,7 @@ mod tests {
             atoms,
             validated,
             Some("test-model".to_string()),
-            CodeTourProvider::Codex,
+            ReviewAiProvider::Codex,
             CommitContext {
                 commits: Vec::new(),
                 suitability: CommitSuitability {

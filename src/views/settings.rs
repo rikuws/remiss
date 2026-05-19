@@ -4,11 +4,11 @@ use gpui::prelude::*;
 use gpui::*;
 
 use crate::branding::APP_NAME;
-use crate::code_tour::{self, CodeTourProvider, CodeTourProviderStatus};
 use crate::icons::{lucide_icon, LucideIcon};
 use crate::managed_lsp::{
     self, ManagedServerInstallState, ManagedServerInstallStatus, ManagedServerKind,
 };
+use crate::review_ai::{self, ReviewAiProvider, ReviewAiProviderStatus};
 use crate::selectable_text::SelectableText;
 use crate::state::{AppState, ManagedLspSettingsState};
 use crate::theme::*;
@@ -31,27 +31,27 @@ pub fn ensure_managed_lsp_statuses_loaded(
     }
 }
 
-pub fn ensure_code_tour_settings_loaded(
+pub fn ensure_review_ai_settings_loaded(
     state: &Entity<AppState>,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let code_tour_settings = state.read(cx).code_tour_settings.clone();
-    if !code_tour_settings.loaded && !code_tour_settings.loading {
-        trigger_code_tour_settings_refresh(state, window, cx);
+    let review_ai_settings = state.read(cx).review_ai_settings.clone();
+    if !review_ai_settings.loaded && !review_ai_settings.loading {
+        trigger_review_ai_settings_refresh(state, window, cx);
     }
 
     let should_refresh_statuses = {
         let state = state.read(cx);
-        !state.code_tour_provider_statuses_loaded && !state.code_tour_provider_loading
+        !state.review_ai_provider_statuses_loaded && !state.review_ai_provider_loading
     };
     if should_refresh_statuses {
-        trigger_code_tour_provider_status_refresh(state, window, cx);
+        trigger_review_ai_provider_status_refresh(state, window, cx);
     }
 }
 
 pub fn prepare_settings_view(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
-    ensure_code_tour_settings_loaded(state, window, cx);
+    ensure_review_ai_settings_loaded(state, window, cx);
     ensure_managed_lsp_statuses_loaded(state, window, cx);
     let scroll_handle = state.read(cx).settings_scroll_handle.clone();
     scroll_handle.set_offset(point(px(0.0), px(0.0)));
@@ -169,18 +169,18 @@ pub fn trigger_managed_lsp_status_refresh(
         .detach();
 }
 
-pub fn trigger_code_tour_settings_refresh(
+pub fn trigger_review_ai_settings_refresh(
     state: &Entity<AppState>,
     window: &mut Window,
     cx: &mut App,
 ) {
     let mut should_spawn = false;
     state.update(cx, |state, cx| {
-        if state.code_tour_settings.loading {
+        if state.review_ai_settings.loading {
             return;
         }
-        state.code_tour_settings.loading = true;
-        state.code_tour_settings.error = None;
+        state.review_ai_settings.loading = true;
+        state.review_ai_settings.error = None;
         should_spawn = true;
         cx.notify();
     });
@@ -197,22 +197,22 @@ pub fn trigger_code_tour_settings_refresh(
                 .background_executor()
                 .spawn({
                     let cache = cache.clone();
-                    async move { code_tour::load_code_tour_settings(&cache) }
+                    async move { review_ai::load_review_ai_settings(&cache) }
                 })
                 .await;
 
             model
                 .update(cx, |state, cx| {
-                    state.code_tour_settings.loading = false;
+                    state.review_ai_settings.loading = false;
                     match result {
                         Ok(settings) => {
-                            state.code_tour_settings.settings = settings;
-                            state.code_tour_settings.loaded = true;
-                            state.code_tour_settings.error = None;
+                            state.review_ai_settings.settings = settings;
+                            state.review_ai_settings.loaded = true;
+                            state.review_ai_settings.error = None;
                         }
                         Err(error) => {
-                            state.code_tour_settings.loaded = false;
-                            state.code_tour_settings.error = Some(error);
+                            state.review_ai_settings.loaded = false;
+                            state.review_ai_settings.error = Some(error);
                         }
                     }
                     cx.notify();
@@ -222,18 +222,18 @@ pub fn trigger_code_tour_settings_refresh(
         .detach();
 }
 
-pub fn trigger_code_tour_provider_status_refresh(
+pub fn trigger_review_ai_provider_status_refresh(
     state: &Entity<AppState>,
     window: &mut Window,
     cx: &mut App,
 ) {
     let mut should_spawn = false;
     state.update(cx, |state, cx| {
-        if state.code_tour_provider_loading {
+        if state.review_ai_provider_loading {
             return;
         }
-        state.code_tour_provider_loading = true;
-        state.code_tour_provider_error = None;
+        state.review_ai_provider_loading = true;
+        state.review_ai_provider_error = None;
         should_spawn = true;
         cx.notify();
     });
@@ -246,20 +246,20 @@ pub fn trigger_code_tour_provider_status_refresh(
         .spawn(cx, async move |cx: &mut AsyncWindowContext| {
             let result = cx
                 .background_executor()
-                .spawn(async { code_tour::load_code_tour_provider_statuses() })
+                .spawn(async { review_ai::load_review_ai_provider_statuses() })
                 .await;
 
             model
                 .update(cx, |state, cx| {
-                    state.code_tour_provider_loading = false;
+                    state.review_ai_provider_loading = false;
                     match result {
                         Ok(statuses) => {
-                            state.code_tour_provider_statuses = statuses;
-                            state.code_tour_provider_statuses_loaded = true;
-                            state.code_tour_provider_error = None;
+                            state.review_ai_provider_statuses = statuses;
+                            state.review_ai_provider_statuses_loaded = true;
+                            state.review_ai_provider_error = None;
                         }
                         Err(error) => {
-                            state.code_tour_provider_error = Some(error);
+                            state.review_ai_provider_error = Some(error);
                         }
                     }
                     cx.notify();
@@ -498,20 +498,20 @@ fn trigger_managed_lsp_install(
         .detach();
 }
 
-fn update_code_tour_settings(
+fn update_review_ai_settings(
     state: &Entity<AppState>,
     window: &mut Window,
     cx: &mut App,
-    update: impl FnOnce(&mut crate::code_tour::CodeTourSettings),
+    update: impl FnOnce(&mut crate::review_ai::ReviewAiSettings),
 ) {
     let cache = state.read(cx).cache.clone();
-    let mut next_settings = state.read(cx).code_tour_settings.settings.clone();
+    let mut next_settings = state.read(cx).review_ai_settings.settings.clone();
     update(&mut next_settings);
 
     state.update(cx, |state, cx| {
-        state.code_tour_settings.settings = next_settings.clone();
-        state.code_tour_settings.loaded = true;
-        state.code_tour_settings.error = None;
+        state.review_ai_settings.settings = next_settings.clone();
+        state.review_ai_settings.loaded = true;
+        state.review_ai_settings.error = None;
         cx.notify();
     });
 
@@ -523,14 +523,14 @@ fn update_code_tour_settings(
                 .spawn({
                     let cache = cache.clone();
                     let settings = next_settings.clone();
-                    async move { code_tour::save_code_tour_settings(&cache, &settings) }
+                    async move { review_ai::save_review_ai_settings(&cache, &settings) }
                 })
                 .await;
 
             if let Err(error) = result {
                 model
                     .update(cx, |state, cx| {
-                        state.code_tour_settings.error = Some(error);
+                        state.review_ai_settings.error = Some(error);
                         cx.notify();
                     })
                     .ok();
@@ -568,7 +568,7 @@ pub fn render_settings_view(state: &Entity<AppState>, cx: &App) -> impl IntoElem
                     .child(render_theme_settings_panel(state, &s))
                     .child(render_software_update_panel(state, &s))
                     .child(render_diagnostic_logs_panel(state, &s))
-                    .child(render_code_tour_settings_panel(state, &s))
+                    .child(render_review_intelligence_settings_panel(state, &s))
                     .child(
                         panel().child(
                             div()
@@ -978,13 +978,16 @@ fn font_size_icon_button(
     }
 }
 
-fn render_code_tour_settings_panel(state: &Entity<AppState>, s: &AppState) -> impl IntoElement {
-    let settings_state = s.code_tour_settings.clone();
+fn render_review_intelligence_settings_panel(
+    state: &Entity<AppState>,
+    s: &AppState,
+) -> impl IntoElement {
+    let settings_state = s.review_ai_settings.clone();
     let configured_provider = settings_state.settings.provider;
-    let provider_statuses = s.code_tour_provider_statuses.clone();
-    let provider_status = s.selected_tour_provider_status().cloned();
-    let provider_loading = s.code_tour_provider_loading;
-    let provider_error = s.code_tour_provider_error.clone();
+    let provider_statuses = s.review_ai_provider_statuses.clone();
+    let provider_status = s.selected_review_ai_provider_status().cloned();
+    let provider_loading = s.review_ai_provider_loading;
+    let provider_error = s.review_ai_provider_error.clone();
     let repository_names = workspace_repository_names(s);
 
     panel().child(
@@ -994,13 +997,13 @@ fn render_code_tour_settings_panel(state: &Entity<AppState>, s: &AppState) -> im
             .flex()
             .flex_col()
             .gap(px(18.0))
-            .child(eyebrow("Settings / Code Tours"))
+            .child(eyebrow("Settings / Review Intelligence"))
             .child(
                 div()
                     .text_size(px(24.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(fg_emphasis())
-                    .child("Background review intelligence"),
+                    .child("Review Partner and briefs"),
             )
             .child(
                 div()
@@ -1008,7 +1011,7 @@ fn render_code_tour_settings_panel(state: &Entity<AppState>, s: &AppState) -> im
                     .text_color(fg_muted())
                     .max_w(px(760.0))
                     .child(
-                        "Pick the guide provider here, then enable automatic background generation per repository. Remiss prewarms code tours and review briefs, and only regenerates them when the pull request code version changes.",
+                        "Choose the provider Remiss uses for Review Partner, Review Brief, and Guided Review. Automatic generation prewarms reviewer context per repository and only regenerates when the pull request code version changes.",
                     ),
             )
             .child(
@@ -1026,7 +1029,7 @@ fn render_code_tour_settings_panel(state: &Entity<AppState>, s: &AppState) -> im
                         {
                             let state = state.clone();
                             move |_, window, cx| {
-                                trigger_code_tour_settings_refresh(&state, window, cx);
+                                trigger_review_ai_settings_refresh(&state, window, cx);
                             }
                         },
                     ))
@@ -1039,12 +1042,14 @@ fn render_code_tour_settings_panel(state: &Entity<AppState>, s: &AppState) -> im
                         {
                             let state = state.clone();
                             move |_, window, cx| {
-                                trigger_code_tour_provider_status_refresh(&state, window, cx);
+                                trigger_review_ai_provider_status_refresh(&state, window, cx);
                             }
                         },
                     ))
                     .when(settings_state.loading, |el| {
-                        el.child(panel_state_text("Loading saved code tour settings..."))
+                        el.child(panel_state_text(
+                            "Loading saved review intelligence settings...",
+                        ))
                     })
                     .when(provider_loading, |el| {
                         el.child(panel_state_text("Checking available providers..."))
@@ -1065,11 +1070,11 @@ fn render_code_tour_settings_panel(state: &Entity<AppState>, s: &AppState) -> im
                             .text_size(px(13.0))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(fg_emphasis())
-                            .child("Guide provider"),
+                            .child("AI provider"),
                     )
                     .child(
                         div().flex().gap(px(4.0)).flex_wrap().children(
-                            CodeTourProvider::all().iter().map(|candidate| {
+                            ReviewAiProvider::all().iter().map(|candidate| {
                                 let candidate = *candidate;
                                 let label = provider_tab_label(candidate, &provider_statuses);
                                 let state = state.clone();
@@ -1077,7 +1082,7 @@ fn render_code_tour_settings_panel(state: &Entity<AppState>, s: &AppState) -> im
                                     &label,
                                     configured_provider == candidate,
                                     move |_, window, cx| {
-                                        update_code_tour_settings(
+                                        update_review_ai_settings(
                                             &state,
                                             window,
                                             cx,
@@ -1133,7 +1138,7 @@ fn render_code_tour_settings_panel(state: &Entity<AppState>, s: &AppState) -> im
                             .text_color(fg_muted())
                             .max_w(px(760.0))
                             .child(
-                                "Repositories stay disabled by default. When you enable one, Remiss refreshes the managed checkout for matching pull requests and caches the configured guide in the background.",
+                                "Repositories stay disabled by default. When you enable one, Remiss refreshes the managed checkout for matching pull requests and caches review intelligence in the background.",
                             ),
                     )
                     .when(repository_names.is_empty(), |el| {
@@ -1145,7 +1150,7 @@ fn render_code_tour_settings_panel(state: &Entity<AppState>, s: &AppState) -> im
                         let enabled = settings_state
                             .settings
                             .automatically_generates_for(&repository);
-                        render_code_tour_repository_row(state, &repository, enabled)
+                        render_review_intelligence_repository_row(state, &repository, enabled)
                     })),
             ),
     )
@@ -1271,7 +1276,7 @@ fn managed_server_state_badge(state: ManagedServerInstallState) -> impl IntoElem
         .child(label)
 }
 
-fn provider_tab_label(provider: CodeTourProvider, statuses: &[CodeTourProviderStatus]) -> String {
+fn provider_tab_label(provider: ReviewAiProvider, statuses: &[ReviewAiProviderStatus]) -> String {
     match statuses.iter().find(|status| status.provider == provider) {
         Some(status) if status.available && status.authenticated => {
             format!("{} • ready", provider.label())
@@ -1293,7 +1298,7 @@ fn workspace_repository_names(s: &AppState) -> Vec<String> {
     }
 
     repositories.extend(
-        s.code_tour_settings
+        s.review_ai_settings
             .settings
             .automatic_repositories
             .iter()
@@ -1302,16 +1307,16 @@ fn workspace_repository_names(s: &AppState) -> Vec<String> {
     repositories.into_iter().collect()
 }
 
-fn render_code_tour_repository_row(
+fn render_review_intelligence_repository_row(
     state: &Entity<AppState>,
     repository: &str,
     enabled: bool,
 ) -> impl IntoElement {
     let repository_name = repository.to_string();
     let secondary_copy = if enabled {
-        "Automatic background guides are enabled."
+        "Automatic background review intelligence is enabled."
     } else {
-        "Automatic background guides are disabled."
+        "Automatic background review intelligence is disabled."
     };
 
     div()
@@ -1351,21 +1356,21 @@ fn render_code_tour_repository_row(
                 .gap(px(8.0))
                 .flex_wrap()
                 .child(badge(if enabled {
-                    "automatic guides on"
+                    "background on"
                 } else {
-                    "automatic guides off"
+                    "background off"
                 }))
                 .child(ghost_button(
                     if enabled {
-                        "Disable automatic guides"
+                        "Disable background generation"
                     } else {
-                        "Enable automatic guides"
+                        "Enable background generation"
                     },
                     {
                         let state = state.clone();
                         move |_, window, cx| {
                             let repository = repository_name.clone();
-                            update_code_tour_settings(&state, window, cx, move |settings| {
+                            update_review_ai_settings(&state, window, cx, move |settings| {
                                 settings.set_automatic_generation_for(&repository, !enabled);
                             });
                         }

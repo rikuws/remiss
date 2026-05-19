@@ -93,6 +93,7 @@ if (( ${#allowlisted[@]} > 0 )); then
 fi
 
 while IFS= read -r -d '' file; do
+  [[ -f "$repo_root/$file" ]] || continue
   lines="$(line_count_for "$repo_root/$file")"
   if (( lines > max_lines )); then
     if is_allowlisted "$file"; then

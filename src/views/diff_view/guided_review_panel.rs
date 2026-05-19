@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn render_ai_tour_view(
+pub(super) fn render_guided_review_document_view(
     state: &Entity<AppState>,
     detail: &PullRequestDetail,
     cx: &App,
@@ -20,35 +20,42 @@ pub(super) fn render_ai_tour_view(
         tour_message,
         tour_success,
         generated_tour,
-        ai_tour_section_list_state,
+        guided_review_section_list_state,
     ) = {
         let app_state = state.read(cx);
         let detail_state = app_state.active_detail_state();
-        let tour_state = app_state.active_tour_state();
+        let guided_review_state = app_state.active_guided_review_state();
 
         (
-            app_state.selected_tour_provider(),
-            app_state.selected_tour_provider_status().cloned(),
-            app_state.code_tour_provider_loading,
-            app_state.code_tour_provider_error.clone(),
+            app_state.selected_review_ai_provider(),
+            app_state.selected_review_ai_provider_status().cloned(),
+            app_state.review_ai_provider_loading,
+            app_state.review_ai_provider_error.clone(),
             detail_state
                 .map(|state| state.local_repository_loading)
                 .unwrap_or(false),
             detail_state.and_then(|state| state.local_repository_error.clone()),
-            tour_state.map(|state| state.loading).unwrap_or(false),
-            tour_state.map(|state| state.generating).unwrap_or(false),
-            tour_state.and_then(|state| state.progress_summary.clone()),
-            tour_state.and_then(|state| state.progress_detail.clone()),
-            tour_state.and_then(|state| state.error.clone()),
-            tour_state.and_then(|state| state.message.clone()),
-            tour_state.map(|state| state.success).unwrap_or(false),
-            tour_state.and_then(|state| state.document.clone()),
-            app_state.ai_tour_section_list_state.clone(),
+            guided_review_state
+                .map(|state| state.loading)
+                .unwrap_or(false),
+            guided_review_state
+                .map(|state| state.generating)
+                .unwrap_or(false),
+            guided_review_state.and_then(|state| state.progress_summary.clone()),
+            guided_review_state.and_then(|state| state.progress_detail.clone()),
+            guided_review_state.and_then(|state| state.error.clone()),
+            guided_review_state.and_then(|state| state.message.clone()),
+            guided_review_state
+                .map(|state| state.success)
+                .unwrap_or(false),
+            guided_review_state.and_then(|state| state.document.clone()),
+            app_state.guided_review_section_list_state.clone(),
         )
     };
 
     let state_for_generate = state.clone();
-    let generate_label = ai_tour_generate_label(provider, generated_tour.as_ref(), tour_generating);
+    let generate_label =
+        guided_review_generate_label(provider, generated_tour.as_ref(), tour_generating);
     let has_status_messages = provider_error.is_some()
         || local_repo_error.is_some()
         || tour_error.is_some()
@@ -57,57 +64,57 @@ pub(super) fn render_ai_tour_view(
     let shell = div().flex_grow().min_h_0().flex().flex_col().bg(bg_inset());
 
     match generated_tour {
-        Some(tour) => {
-            let section_count = tour.sections.len();
+        Some(guided_review) => {
+            let section_count = guided_review.sections.len();
             let mut items = Vec::new();
             if section_count > 0 {
-                items.push(AiTourContentItem::SemanticOverview);
+                items.push(GuidedReviewContentItem::SemanticOverview);
             }
             if tour_generating || tour_loading || provider_loading {
-                items.push(AiTourContentItem::Progress);
+                items.push(GuidedReviewContentItem::Progress);
             }
             if has_status_messages {
-                items.push(AiTourContentItem::StatusMessages);
+                items.push(GuidedReviewContentItem::StatusMessages);
             }
             if section_count == 0 {
-                items.push(AiTourContentItem::Empty);
+                items.push(GuidedReviewContentItem::Empty);
             } else {
-                items.extend((0..section_count).map(AiTourContentItem::Section));
+                items.extend((0..section_count).map(GuidedReviewContentItem::Section));
             }
-            items.push(AiTourContentItem::Spacer);
+            items.push(GuidedReviewContentItem::Spacer);
 
-            if ai_tour_section_list_state.item_count() != items.len() {
-                ai_tour_section_list_state.reset(items.len());
+            if guided_review_section_list_state.item_count() != items.len() {
+                guided_review_section_list_state.reset(items.len());
             }
             let section_targets = items
                 .iter()
                 .enumerate()
                 .filter_map(|(item_ix, item)| match item {
-                    AiTourContentItem::Section(section_ix) => Some((*section_ix, item_ix)),
+                    GuidedReviewContentItem::Section(section_ix) => Some((*section_ix, item_ix)),
                     _ => None,
                 })
                 .collect::<Vec<_>>();
 
-            let tour = Arc::new(tour);
+            let guided_review = Arc::new(guided_review);
             let detail = Arc::new(detail.clone());
             let state_for_sections = state.clone();
-            let tour_for_sections = tour.clone();
+            let tour_for_sections = guided_review.clone();
             let detail_for_sections = detail.clone();
-            let list_state_for_overview = ai_tour_section_list_state.clone();
-            let tour_for_overview = tour.clone();
+            let list_state_for_overview = guided_review_section_list_state.clone();
+            let tour_for_overview = guided_review.clone();
             let section_targets_for_overview = Arc::new(section_targets);
             let items = Arc::new(items);
 
             shell
                 .child(
                     list(
-                        ai_tour_section_list_state.clone(),
+                        guided_review_section_list_state.clone(),
                         move |ix, _window, cx| match items[ix] {
-                            AiTourContentItem::SemanticOverview => div()
+                            GuidedReviewContentItem::SemanticOverview => div()
                                 .when(ix == 0, |el| el.pt(px(18.0)))
                                 .px(px(18.0))
                                 .pb(px(14.0))
-                                .child(render_ai_tour_semantic_overview(
+                                .child(render_guided_review_semantic_overview(
                                     tour_for_overview.as_ref(),
                                     provider,
                                     provider_status.as_ref(),
@@ -118,17 +125,17 @@ pub(super) fn render_ai_tour_view(
                                     {
                                         let state = state_for_generate.clone();
                                         move |_, window, cx| {
-                                            trigger_generate_tour(&state, window, cx, false)
+                                            trigger_generate_guided_review(&state, window, cx, false)
                                         }
                                     },
                                 ))
                                 .into_any_element(),
-                            AiTourContentItem::Pending => div().into_any_element(),
-                            AiTourContentItem::Progress => div()
+                            GuidedReviewContentItem::Pending => div().into_any_element(),
+                            GuidedReviewContentItem::Progress => div()
                                 .when(ix == 0, |el| el.pt(px(18.0)))
                                 .px(px(18.0))
                                 .pb(px(14.0))
-                                .child(render_ai_tour_progress_panel(
+                                .child(render_guided_review_progress_panel(
                                     provider,
                                     provider_loading,
                                     tour_loading,
@@ -137,11 +144,11 @@ pub(super) fn render_ai_tour_view(
                                     tour_progress_detail.as_deref(),
                                 ))
                                 .into_any_element(),
-                            AiTourContentItem::StatusMessages => div()
+                            GuidedReviewContentItem::StatusMessages => div()
                                 .when(ix == 0, |el| el.pt(px(18.0)))
                                 .px(px(18.0))
                                 .pb(px(14.0))
-                                .child(render_ai_tour_status_messages(
+                                .child(render_guided_review_status_messages(
                                     provider_error.as_deref(),
                                     local_repo_error.as_deref(),
                                     tour_error.as_deref(),
@@ -149,7 +156,7 @@ pub(super) fn render_ai_tour_view(
                                     tour_success,
                                 ))
                                 .into_any_element(),
-                            AiTourContentItem::Empty => div()
+                            GuidedReviewContentItem::Empty => div()
                                 .when(ix == 0, |el| el.pt(px(18.0)))
                                 .px(px(18.0))
                                 .pb(px(14.0))
@@ -157,12 +164,12 @@ pub(super) fn render_ai_tour_view(
                                     "No Guided Review sections were returned for this pull request.",
                                 )))
                                 .into_any_element(),
-                            AiTourContentItem::Section(section_ix) => {
+                            GuidedReviewContentItem::Section(section_ix) => {
                                 let section = &tour_for_sections.sections[section_ix];
                                 div()
                                     .px(px(18.0))
                                     .pb(px(14.0))
-                                    .child(render_ai_tour_section(
+                                    .child(render_guided_review_section(
                                         &state_for_sections,
                                         detail_for_sections.as_ref(),
                                         tour_for_sections.as_ref(),
@@ -171,7 +178,7 @@ pub(super) fn render_ai_tour_view(
                                     ))
                                     .into_any_element()
                             }
-                            AiTourContentItem::Spacer => {
+                            GuidedReviewContentItem::Spacer => {
                                 div().h(px(18.0)).w_full().into_any_element()
                             }
                         },
@@ -183,14 +190,14 @@ pub(super) fn render_ai_tour_view(
                 .into_any_element()
         }
         None => {
-            let mut items = vec![AiTourContentItem::Pending];
+            let mut items = vec![GuidedReviewContentItem::Pending];
             if has_status_messages {
-                items.push(AiTourContentItem::StatusMessages);
+                items.push(GuidedReviewContentItem::StatusMessages);
             }
-            items.push(AiTourContentItem::Spacer);
+            items.push(GuidedReviewContentItem::Spacer);
 
-            if ai_tour_section_list_state.item_count() != items.len() {
-                ai_tour_section_list_state.reset(items.len());
+            if guided_review_section_list_state.item_count() != items.len() {
+                guided_review_section_list_state.reset(items.len());
             }
 
             let items = Arc::new(items);
@@ -198,13 +205,13 @@ pub(super) fn render_ai_tour_view(
             shell
                 .child(
                     list(
-                        ai_tour_section_list_state.clone(),
+                        guided_review_section_list_state.clone(),
                         move |ix, _window, _cx| match items[ix] {
-                            AiTourContentItem::Pending => div()
+                            GuidedReviewContentItem::Pending => div()
                                 .pt(px(18.0))
                                 .px(px(18.0))
                                 .pb(px(14.0))
-                                .child(render_ai_tour_pending_panel(
+                                .child(render_guided_review_pending_panel(
                                     provider,
                                     provider_status.as_ref(),
                                     provider_loading,
@@ -217,15 +224,17 @@ pub(super) fn render_ai_tour_view(
                                     {
                                         let state = state_for_generate.clone();
                                         move |_, window, cx| {
-                                            trigger_generate_tour(&state, window, cx, false)
+                                            trigger_generate_guided_review(
+                                                &state, window, cx, false,
+                                            )
                                         }
                                     },
                                 ))
                                 .into_any_element(),
-                            AiTourContentItem::StatusMessages => div()
+                            GuidedReviewContentItem::StatusMessages => div()
                                 .px(px(18.0))
                                 .pb(px(14.0))
-                                .child(render_ai_tour_status_messages(
+                                .child(render_guided_review_status_messages(
                                     provider_error.as_deref(),
                                     local_repo_error.as_deref(),
                                     tour_error.as_deref(),
@@ -233,7 +242,7 @@ pub(super) fn render_ai_tour_view(
                                     tour_success,
                                 ))
                                 .into_any_element(),
-                            AiTourContentItem::Spacer => {
+                            GuidedReviewContentItem::Spacer => {
                                 div().h(px(18.0)).w_full().into_any_element()
                             }
                             _ => div().into_any_element(),
@@ -249,7 +258,7 @@ pub(super) fn render_ai_tour_view(
 }
 
 #[derive(Clone, Copy)]
-enum AiTourContentItem {
+enum GuidedReviewContentItem {
     SemanticOverview,
     Pending,
     Progress,
@@ -259,15 +268,15 @@ enum AiTourContentItem {
     Spacer,
 }
 
-fn ai_tour_generate_label(
-    provider: CodeTourProvider,
-    generated_tour: Option<&GeneratedCodeTour>,
+fn guided_review_generate_label(
+    provider: ReviewAiProvider,
+    generated_tour: Option<&GeneratedGuidedReview>,
     generating: bool,
 ) -> String {
     if generating {
         format!("Generating with {}...", provider.label())
     } else if generated_tour
-        .map(|tour| tour.provider == provider)
+        .map(|guided_review| guided_review.provider == provider)
         .unwrap_or(false)
     {
         format!("Regenerate with {}", provider.label())
@@ -276,7 +285,7 @@ fn ai_tour_generate_label(
     }
 }
 
-fn ai_tour_provider_status_label(status: &CodeTourProviderStatus) -> &'static str {
+fn guided_review_provider_status_label(status: &ReviewAiProviderStatus) -> &'static str {
     if status.available && status.authenticated {
         "ready"
     } else if status.available {
@@ -286,9 +295,9 @@ fn ai_tour_provider_status_label(status: &CodeTourProviderStatus) -> &'static st
     }
 }
 
-fn render_ai_tour_pending_panel(
-    provider: CodeTourProvider,
-    provider_status: Option<&CodeTourProviderStatus>,
+fn render_guided_review_pending_panel(
+    provider: ReviewAiProvider,
+    provider_status: Option<&ReviewAiProviderStatus>,
     provider_loading: bool,
     local_repo_loading: bool,
     tour_loading: bool,
@@ -309,7 +318,7 @@ fn render_ai_tour_pending_panel(
                 .map(str::to_string)
                 .unwrap_or_else(|| "Looking for cached Guided Review".to_string()),
             progress_detail.map(str::to_string).unwrap_or_else(|| {
-                "The app is checking whether this pull request head already has a stored tour."
+                "The app is checking whether this pull request head already has a stored Guided Review."
                     .to_string()
             }),
         )
@@ -379,7 +388,7 @@ fn render_ai_tour_pending_panel(
                     .flex_wrap()
                     .child(badge(provider.label()))
                     .when_some(provider_status, |el, status| {
-                        el.child(badge(ai_tour_provider_status_label(status)))
+                        el.child(badge(guided_review_provider_status_label(status)))
                     })
                     .when(provider_loading, |el| el.child(badge("Checking provider")))
                     .when(local_repo_loading, |el| {
@@ -390,8 +399,8 @@ fn render_ai_tour_pending_panel(
     )
 }
 
-fn render_ai_tour_progress_panel(
-    provider: CodeTourProvider,
+fn render_guided_review_progress_panel(
+    provider: ReviewAiProvider,
     provider_loading: bool,
     tour_loading: bool,
     tour_generating: bool,
@@ -403,11 +412,11 @@ fn render_ai_tour_progress_panel(
     } else if tour_loading {
         progress_summary
             .map(str::to_string)
-            .unwrap_or_else(|| "Loading cached tour".to_string())
+            .unwrap_or_else(|| "Loading cached Guided Review".to_string())
     } else if tour_generating {
         progress_summary
             .map(str::to_string)
-            .unwrap_or_else(|| format!("{} is updating the tour", provider.label()))
+            .unwrap_or_else(|| format!("{} is updating Guided Review", provider.label()))
     } else {
         "Preparing Guided Review".to_string()
     };
@@ -433,7 +442,7 @@ fn render_ai_tour_progress_panel(
         )
 }
 
-fn render_ai_tour_status_messages(
+fn render_guided_review_status_messages(
     provider_error: Option<&str>,
     local_repo_error: Option<&str>,
     tour_error: Option<&str>,
@@ -456,10 +465,10 @@ fn render_ai_tour_status_messages(
         })
 }
 
-fn render_ai_tour_semantic_overview(
-    tour: &GeneratedCodeTour,
-    provider: CodeTourProvider,
-    provider_status: Option<&CodeTourProviderStatus>,
+fn render_guided_review_semantic_overview(
+    guided_review: &GeneratedGuidedReview,
+    provider: ReviewAiProvider,
+    provider_status: Option<&ReviewAiProviderStatus>,
     local_repo_loading: bool,
     generate_label: &str,
     list_state: ListState,
@@ -501,47 +510,58 @@ fn render_ai_tour_semantic_overview(
                         .justify_end()
                         .gap(px(8.0))
                         .flex_wrap()
-                        .child(ai_tour_metric_text(&format!(
+                        .child(guided_review_metric_text(&format!(
                             "{} group{}",
-                            tour.sections.len(),
-                            if tour.sections.len() == 1 { "" } else { "s" }
+                            guided_review.sections.len(),
+                            if guided_review.sections.len() == 1 {
+                                ""
+                            } else {
+                                "s"
+                            }
                         )))
-                        .when(!tour.open_questions.is_empty(), |el| {
-                            el.child(ai_tour_metric_text(&format!(
+                        .when(!guided_review.open_questions.is_empty(), |el| {
+                            el.child(guided_review_metric_text(&format!(
                                 "{} open question{}",
-                                tour.open_questions.len(),
-                                if tour.open_questions.len() == 1 {
+                                guided_review.open_questions.len(),
+                                if guided_review.open_questions.len() == 1 {
                                     ""
                                 } else {
                                     "s"
                                 }
                             )))
                         })
-                        .when(!tour.warnings.is_empty(), |el| {
-                            el.child(ai_tour_metric_text(&format!(
+                        .when(!guided_review.warnings.is_empty(), |el| {
+                            el.child(guided_review_metric_text(&format!(
                                 "{} warning{}",
-                                tour.warnings.len(),
-                                if tour.warnings.len() == 1 { "" } else { "s" }
+                                guided_review.warnings.len(),
+                                if guided_review.warnings.len() == 1 {
+                                    ""
+                                } else {
+                                    "s"
+                                }
                             )))
                         })
-                        .child(ai_tour_metric_text(provider.label()))
+                        .child(guided_review_metric_text(provider.label()))
                         .when_some(provider_status, |el, status| {
-                            el.child(ai_tour_metric_text(ai_tour_provider_status_label(status)))
+                            el.child(guided_review_metric_text(
+                                guided_review_provider_status_label(status),
+                            ))
                         })
                         .when(local_repo_loading, |el| {
-                            el.child(ai_tour_metric_text("Preparing checkout"))
+                            el.child(guided_review_metric_text("Preparing checkout"))
                         })
                         .child(review_button(generate_label, on_generate)),
                 ),
         )
         .child(
             div().p(px(14.0)).flex().flex_col().gap(px(8.0)).children(
-                tour.sections
+                guided_review
+                    .sections
                     .iter()
                     .enumerate()
                     .map(|(section_ix, section)| {
-                        render_ai_tour_semantic_overview_row(
-                            tour,
+                        render_guided_review_semantic_overview_row(
+                            guided_review,
                             section,
                             section_ix,
                             section_ix > 0,
@@ -553,15 +573,15 @@ fn render_ai_tour_semantic_overview(
         )
 }
 
-fn render_ai_tour_semantic_overview_row(
-    tour: &GeneratedCodeTour,
-    section: &TourSection,
+fn render_guided_review_semantic_overview_row(
+    guided_review: &GeneratedGuidedReview,
+    section: &GuidedReviewSection,
     section_ix: usize,
     _show_divider: bool,
     list_state: ListState,
     section_targets: Arc<Vec<(usize, usize)>>,
 ) -> impl IntoElement {
-    let metrics = ai_tour_section_metrics(tour, section);
+    let metrics = guided_review_section_metrics(guided_review, section);
     let target_index = section_targets
         .iter()
         .find(|(candidate_ix, _)| *candidate_ix == section_ix)
@@ -588,7 +608,11 @@ fn render_ai_tour_semantic_overview_row(
                 .min_w_0()
                 .flex_grow()
                 .p(px(12.0))
-                .child(render_ai_tour_category_icon(section.category, 34.0, 17.0))
+                .child(render_guided_review_category_icon(
+                    section.category,
+                    34.0,
+                    17.0,
+                ))
                 .child(
                     div()
                         .flex()
@@ -613,7 +637,7 @@ fn render_ai_tour_semantic_overview_row(
                                         .overflow_x_hidden()
                                         .child(section.title.clone()),
                                 )
-                                .child(render_ai_tour_priority_chip(section.priority)),
+                                .child(render_guided_review_priority_chip(section.priority)),
                         )
                         .child(
                             div()
@@ -623,11 +647,13 @@ fn render_ai_tour_semantic_overview_row(
                                 .child(section.summary.clone()),
                         ),
                 )
-                .child(render_ai_tour_section_metrics(metrics)),
+                .child(render_guided_review_section_metrics(metrics)),
         )
 }
 
-pub(super) fn render_ai_tour_section_metrics(metrics: AiTourSectionMetrics) -> impl IntoElement {
+pub(super) fn render_guided_review_section_metrics(
+    metrics: AiGuidedReviewSectionMetrics,
+) -> impl IntoElement {
     div()
         .flex()
         .items_center()
@@ -635,12 +661,12 @@ pub(super) fn render_ai_tour_section_metrics(metrics: AiTourSectionMetrics) -> i
         .gap(px(6.0))
         .flex_wrap()
         .max_w(px(280.0))
-        .child(ai_tour_metric_text(&format!(
+        .child(guided_review_metric_text(&format!(
             "{} file{}",
             metrics.file_count,
             if metrics.file_count == 1 { "" } else { "s" }
         )))
-        .child(ai_tour_metric_text(&format!(
+        .child(guided_review_metric_text(&format!(
             "{} thread{}",
             metrics.unresolved_thread_count,
             if metrics.unresolved_thread_count == 1 {
@@ -649,11 +675,14 @@ pub(super) fn render_ai_tour_section_metrics(metrics: AiTourSectionMetrics) -> i
                 "s"
             }
         )))
-        .child(ai_tour_delta_metric(metrics.additions, metrics.deletions))
+        .child(guided_review_delta_metric(
+            metrics.additions,
+            metrics.deletions,
+        ))
 }
 
-pub(super) fn render_ai_tour_category_icon(
-    category: TourSectionCategory,
+pub(super) fn render_guided_review_category_icon(
+    category: GuidedReviewSectionCategory,
     tile_size: f32,
     icon_size: f32,
 ) -> impl IntoElement {
@@ -663,35 +692,37 @@ pub(super) fn render_ai_tour_category_icon(
         .rounded(radius_sm())
         .border_1()
         .border_color(transparent())
-        .bg(ai_tour_category_bg(category))
+        .bg(guided_review_category_bg(category))
         .flex()
         .items_center()
         .justify_center()
         .flex_shrink_0()
         .child(lucide_icon(
-            ai_tour_category_lucide_icon(category),
+            guided_review_category_lucide_icon(category),
             icon_size,
-            ai_tour_category_fg(category),
+            guided_review_category_fg(category),
         ))
 }
 
-pub(super) fn render_ai_tour_priority_chip(priority: TourSectionPriority) -> impl IntoElement {
+pub(super) fn render_guided_review_priority_chip(
+    priority: GuidedReviewSectionPriority,
+) -> impl IntoElement {
     div()
         .px(px(7.0))
         .py(px(2.0))
         .rounded(px(999.0))
-        .bg(ai_tour_priority_bg(priority))
+        .bg(guided_review_priority_bg(priority))
         .border_1()
         .border_color(transparent())
         .flex_shrink_0()
         .text_size(px(10.0))
         .font_weight(FontWeight::SEMIBOLD)
         .font_family(mono_font_family())
-        .text_color(ai_tour_priority_fg(priority))
+        .text_color(guided_review_priority_fg(priority))
         .child(priority.label())
 }
 
-pub(super) fn ai_tour_metric_text(text: &str) -> impl IntoElement {
+pub(super) fn guided_review_metric_text(text: &str) -> impl IntoElement {
     div()
         .text_size(px(11.0))
         .font_family(mono_font_family())
@@ -700,7 +731,7 @@ pub(super) fn ai_tour_metric_text(text: &str) -> impl IntoElement {
         .child(text.to_string())
 }
 
-pub(super) fn ai_tour_delta_metric(additions: i64, deletions: i64) -> impl IntoElement {
+pub(super) fn guided_review_delta_metric(additions: i64, deletions: i64) -> impl IntoElement {
     div()
         .flex()
         .items_center()
@@ -714,21 +745,21 @@ pub(super) fn ai_tour_delta_metric(additions: i64, deletions: i64) -> impl IntoE
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) struct AiTourSectionMetrics {
+pub(super) struct AiGuidedReviewSectionMetrics {
     pub(super) file_count: usize,
     pub(super) additions: i64,
     pub(super) deletions: i64,
     pub(super) unresolved_thread_count: i64,
 }
 
-pub(super) fn ai_tour_section_metrics(
-    tour: &GeneratedCodeTour,
-    section: &TourSection,
-) -> AiTourSectionMetrics {
-    let mut metrics = AiTourSectionMetrics::default();
+pub(super) fn guided_review_section_metrics(
+    guided_review: &GeneratedGuidedReview,
+    section: &GuidedReviewSection,
+) -> AiGuidedReviewSectionMetrics {
+    let mut metrics = AiGuidedReviewSectionMetrics::default();
 
     for step_id in &section.step_ids {
-        if let Some(step) = tour.steps.iter().find(|step| step.id == *step_id) {
+        if let Some(step) = guided_review.steps.iter().find(|step| step.id == *step_id) {
             metrics.file_count += 1;
             metrics.additions += step.additions;
             metrics.deletions += step.deletions;
@@ -739,78 +770,78 @@ pub(super) fn ai_tour_section_metrics(
     metrics
 }
 
-fn ai_tour_category_lucide_icon(category: TourSectionCategory) -> LucideIcon {
+fn guided_review_category_lucide_icon(category: GuidedReviewSectionCategory) -> LucideIcon {
     match category {
-        TourSectionCategory::AuthSecurity => LucideIcon::ShieldCheck,
-        TourSectionCategory::DataState => LucideIcon::Database,
-        TourSectionCategory::ApiIo => LucideIcon::Plug,
-        TourSectionCategory::UiUx => LucideIcon::Palette,
-        TourSectionCategory::Tests => LucideIcon::FlaskConical,
-        TourSectionCategory::Docs => LucideIcon::BookOpenText,
-        TourSectionCategory::Config => LucideIcon::SlidersHorizontal,
-        TourSectionCategory::Infra => LucideIcon::ServerCog,
-        TourSectionCategory::Refactor => LucideIcon::GitCompareArrows,
-        TourSectionCategory::Performance => LucideIcon::Gauge,
-        TourSectionCategory::Reliability => LucideIcon::BadgeCheck,
-        TourSectionCategory::Other => LucideIcon::CircleHelp,
+        GuidedReviewSectionCategory::AuthSecurity => LucideIcon::ShieldCheck,
+        GuidedReviewSectionCategory::DataState => LucideIcon::Database,
+        GuidedReviewSectionCategory::ApiIo => LucideIcon::Plug,
+        GuidedReviewSectionCategory::UiUx => LucideIcon::Palette,
+        GuidedReviewSectionCategory::Tests => LucideIcon::FlaskConical,
+        GuidedReviewSectionCategory::Docs => LucideIcon::BookOpenText,
+        GuidedReviewSectionCategory::Config => LucideIcon::SlidersHorizontal,
+        GuidedReviewSectionCategory::Infra => LucideIcon::ServerCog,
+        GuidedReviewSectionCategory::Refactor => LucideIcon::GitCompareArrows,
+        GuidedReviewSectionCategory::Performance => LucideIcon::Gauge,
+        GuidedReviewSectionCategory::Reliability => LucideIcon::BadgeCheck,
+        GuidedReviewSectionCategory::Other => LucideIcon::CircleHelp,
     }
 }
 
-fn ai_tour_category_fg(category: TourSectionCategory) -> Rgba {
+fn guided_review_category_fg(category: GuidedReviewSectionCategory) -> Rgba {
     match category {
-        TourSectionCategory::AuthSecurity => danger(),
-        TourSectionCategory::DataState => accent(),
-        TourSectionCategory::ApiIo => warning(),
-        TourSectionCategory::UiUx => fg_emphasis(),
-        TourSectionCategory::Tests => success(),
-        TourSectionCategory::Docs => fg_muted(),
-        TourSectionCategory::Config => warning(),
-        TourSectionCategory::Infra => accent(),
-        TourSectionCategory::Refactor => fg_default(),
-        TourSectionCategory::Performance => warning(),
-        TourSectionCategory::Reliability => success(),
-        TourSectionCategory::Other => fg_muted(),
+        GuidedReviewSectionCategory::AuthSecurity => danger(),
+        GuidedReviewSectionCategory::DataState => accent(),
+        GuidedReviewSectionCategory::ApiIo => warning(),
+        GuidedReviewSectionCategory::UiUx => fg_emphasis(),
+        GuidedReviewSectionCategory::Tests => success(),
+        GuidedReviewSectionCategory::Docs => fg_muted(),
+        GuidedReviewSectionCategory::Config => warning(),
+        GuidedReviewSectionCategory::Infra => accent(),
+        GuidedReviewSectionCategory::Refactor => fg_default(),
+        GuidedReviewSectionCategory::Performance => warning(),
+        GuidedReviewSectionCategory::Reliability => success(),
+        GuidedReviewSectionCategory::Other => fg_muted(),
     }
 }
 
-fn ai_tour_category_bg(category: TourSectionCategory) -> Rgba {
+fn guided_review_category_bg(category: GuidedReviewSectionCategory) -> Rgba {
     match category {
-        TourSectionCategory::AuthSecurity => danger_muted(),
-        TourSectionCategory::DataState => accent_muted(),
-        TourSectionCategory::ApiIo => warning_muted(),
-        TourSectionCategory::UiUx => bg_emphasis(),
-        TourSectionCategory::Tests => success_muted(),
-        TourSectionCategory::Docs => bg_subtle(),
-        TourSectionCategory::Config => warning_muted(),
-        TourSectionCategory::Infra => accent_muted(),
-        TourSectionCategory::Refactor => bg_subtle(),
-        TourSectionCategory::Performance => warning_muted(),
-        TourSectionCategory::Reliability => success_muted(),
-        TourSectionCategory::Other => bg_subtle(),
+        GuidedReviewSectionCategory::AuthSecurity => danger_muted(),
+        GuidedReviewSectionCategory::DataState => accent_muted(),
+        GuidedReviewSectionCategory::ApiIo => warning_muted(),
+        GuidedReviewSectionCategory::UiUx => bg_emphasis(),
+        GuidedReviewSectionCategory::Tests => success_muted(),
+        GuidedReviewSectionCategory::Docs => bg_subtle(),
+        GuidedReviewSectionCategory::Config => warning_muted(),
+        GuidedReviewSectionCategory::Infra => accent_muted(),
+        GuidedReviewSectionCategory::Refactor => bg_subtle(),
+        GuidedReviewSectionCategory::Performance => warning_muted(),
+        GuidedReviewSectionCategory::Reliability => success_muted(),
+        GuidedReviewSectionCategory::Other => bg_subtle(),
     }
 }
 
-fn ai_tour_priority_fg(priority: TourSectionPriority) -> Rgba {
+fn guided_review_priority_fg(priority: GuidedReviewSectionPriority) -> Rgba {
     match priority {
-        TourSectionPriority::Low => success(),
-        TourSectionPriority::Medium => warning(),
-        TourSectionPriority::High => danger(),
+        GuidedReviewSectionPriority::Low => success(),
+        GuidedReviewSectionPriority::Medium => warning(),
+        GuidedReviewSectionPriority::High => danger(),
     }
 }
 
-fn ai_tour_priority_bg(priority: TourSectionPriority) -> Rgba {
+fn guided_review_priority_bg(priority: GuidedReviewSectionPriority) -> Rgba {
     match priority {
-        TourSectionPriority::Low => success_muted(),
-        TourSectionPriority::Medium => warning_muted(),
-        TourSectionPriority::High => danger_muted(),
+        GuidedReviewSectionPriority::Low => success_muted(),
+        GuidedReviewSectionPriority::Medium => warning_muted(),
+        GuidedReviewSectionPriority::High => danger_muted(),
     }
 }
 
-fn render_ai_tour_section(
+fn render_guided_review_section(
     state: &Entity<AppState>,
     detail: &PullRequestDetail,
-    generated_tour: &GeneratedCodeTour,
-    section: &TourSection,
+    generated_tour: &GeneratedGuidedReview,
+    section: &GuidedReviewSection,
     cx: &App,
 ) -> impl IntoElement {
     let section_steps = section
@@ -823,7 +854,7 @@ fn render_ai_tour_section(
                 .find(|step| step.id.as_str() == step_id.as_str())
         })
         .collect::<Vec<_>>();
-    let metrics = ai_tour_section_metrics(generated_tour, section);
+    let metrics = guided_review_section_metrics(generated_tour, section);
 
     nested_panel()
         .child(
@@ -846,7 +877,11 @@ fn render_ai_tour_section(
                                 .items_center()
                                 .gap(px(12.0))
                                 .min_w_0()
-                                .child(render_ai_tour_category_icon(section.category, 34.0, 17.0))
+                                .child(render_guided_review_category_icon(
+                                    section.category,
+                                    34.0,
+                                    17.0,
+                                ))
                                 .child(
                                     div()
                                         .text_size(px(18.0))
@@ -865,13 +900,16 @@ fn render_ai_tour_section(
                         .justify_end()
                         .gap(px(8.0))
                         .flex_wrap()
-                        .child(render_ai_tour_priority_chip(section.priority))
-                        .child(ai_tour_metric_text(&format!(
+                        .child(render_guided_review_priority_chip(section.priority))
+                        .child(guided_review_metric_text(&format!(
                             "{} file{}",
                             metrics.file_count,
                             if metrics.file_count == 1 { "" } else { "s" }
                         )))
-                        .child(ai_tour_delta_metric(metrics.additions, metrics.deletions)),
+                        .child(guided_review_delta_metric(
+                            metrics.additions,
+                            metrics.deletions,
+                        )),
                 ),
         )
         .child(
@@ -880,7 +918,7 @@ fn render_ai_tour_section(
                 .text_color(fg_default())
                 .mt(px(10.0))
                 .child(SelectableText::new(
-                    format!("ai-tour-section-summary-{}", section.id),
+                    format!("guided-review-section-summary-{}", section.id),
                     section.summary.clone(),
                 )),
         )
@@ -891,13 +929,13 @@ fn render_ai_tour_section(
                     .text_color(fg_muted())
                     .mt(px(8.0))
                     .child(SelectableText::new(
-                        format!("ai-tour-section-detail-{}", section.id),
+                        format!("guided-review-section-detail-{}", section.id),
                         section.detail.clone(),
                     )),
             )
         })
         .when(!section.review_points.is_empty(), |el| {
-            el.child(render_ai_tour_review_points(
+            el.child(render_guided_review_points(
                 &section.id,
                 &section.review_points,
             ))
@@ -912,33 +950,34 @@ fn render_ai_tour_section(
                 .flex_col()
                 .gap(px(14.0))
                 .children(section_steps.into_iter().map(|step| {
-                    render_ai_tour_step_diff(state, detail, section, step, cx).into_any_element()
+                    render_guided_review_step_diff(state, detail, section, step, cx)
+                        .into_any_element()
                 })),
         )
 }
 
-fn render_ai_tour_review_points(section_id: &str, review_points: &[String]) -> impl IntoElement {
+fn render_guided_review_points(section_id: &str, review_points: &[String]) -> impl IntoElement {
     div().mt(px(12.0)).flex().flex_col().gap(px(8.0)).children(
         review_points.iter().enumerate().map(|(point_ix, point)| {
             div()
                 .text_size(px(12.0))
                 .text_color(fg_muted())
                 .child(SelectableText::new(
-                    format!("ai-tour-review-point-{section_id}-{point_ix}"),
+                    format!("guided-review-point-{section_id}-{point_ix}"),
                     point.clone(),
                 ))
         }),
     )
 }
 
-fn render_ai_tour_step_diff(
+fn render_guided_review_step_diff(
     state: &Entity<AppState>,
     detail: &PullRequestDetail,
-    section: &TourSection,
-    step: &TourStep,
+    section: &GuidedReviewSection,
+    step: &GuidedReviewStep,
     cx: &App,
 ) -> impl IntoElement {
-    let preview_key = format!("ai-tour:{}:{}", section.id, step.id);
+    let preview_key = format!("guided-review:{}:{}", section.id, step.id);
 
     div()
         .flex()
@@ -971,7 +1010,7 @@ fn render_ai_tour_step_diff(
                         .when(!step.summary.trim().is_empty(), |el| {
                             el.child(div().text_size(px(12.0)).text_color(fg_muted()).child(
                                 SelectableText::new(
-                                    format!("ai-tour-step-summary-{}", step.id),
+                                    format!("guided-review-step-summary-{}", step.id),
                                     step.summary.clone(),
                                 ),
                             ))
@@ -983,9 +1022,9 @@ fn render_ai_tour_step_diff(
                         .items_center()
                         .gap(px(8.0))
                         .flex_wrap()
-                        .child(ai_tour_delta_metric(step.additions, step.deletions))
+                        .child(guided_review_delta_metric(step.additions, step.deletions))
                         .when(step.unresolved_thread_count > 0, |el| {
-                            el.child(ai_tour_metric_text(&format!(
+                            el.child(guided_review_metric_text(&format!(
                                 "{} thread{}",
                                 step.unresolved_thread_count,
                                 if step.unresolved_thread_count == 1 {

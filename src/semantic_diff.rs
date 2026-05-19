@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
 use crate::{
-    code_tour::DiffAnchor,
     diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk},
     github::{PullRequestFile, PullRequestReviewThread},
+    guided_review::DiffAnchor,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

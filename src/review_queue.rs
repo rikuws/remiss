@@ -1,6 +1,6 @@
 use crate::{
-    code_tour::DiffAnchor,
     github::{PullRequestDetail, PullRequestFile},
+    guided_review::DiffAnchor,
     semantic_diff::{build_semantic_diff_file, SemanticChangeKind},
 };
 

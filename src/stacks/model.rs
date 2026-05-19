@@ -440,7 +440,7 @@ pub struct StackDiscoveryOptions {
     pub enable_sem_virtual: bool,
     pub enable_virtual_commits: bool,
     pub enable_virtual_semantic: bool,
-    pub ai_provider: Option<crate::code_tour::CodeTourProvider>,
+    pub ai_provider: Option<crate::review_ai::ReviewAiProvider>,
     pub sizing: VirtualStackSizing,
 }
 

@@ -96,7 +96,7 @@ fn render_tour_diff_file_with_options(
         let diff_body = if parsed_file.hunks.is_empty() {
             panel_state_text("No textual hunks available for this file.").into_any_element()
         } else if let (Some(file), Some(diff_view_state)) = (file, diff_view_state) {
-            render_tour_diff_preview(
+            render_guided_review_diff_preview(
                 state,
                 file,
                 parsed_file,
@@ -109,7 +109,7 @@ fn render_tour_diff_file_with_options(
             )
             .into_any_element()
         } else {
-            render_full_tour_diff_preview(
+            render_full_guided_review_diff_preview(
                 parsed_file,
                 anchor,
                 file_lsp_context.as_ref(),
@@ -165,7 +165,7 @@ fn render_tour_diff_file_header(
     div().mb(px(12.0)).child(render_review_file_header(props))
 }
 
-fn render_tour_diff_preview(
+fn render_guided_review_diff_preview(
     state: &Entity<AppState>,
     file: &PullRequestFile,
     parsed_file: &ParsedDiffFile,
@@ -182,7 +182,7 @@ fn render_tour_diff_preview(
     let gutter_layout = diff_gutter_layout(file, Some(parsed_file), false);
     let preview_items = {
         let app_state = state.read(cx);
-        build_tour_diff_preview_items(
+        build_guided_review_diff_preview_items(
             app_state.active_detail(),
             file,
             parsed_file,
@@ -256,7 +256,7 @@ fn render_tour_diff_preview(
         ))
 }
 
-fn render_full_tour_diff_preview(
+fn render_full_guided_review_diff_preview(
     parsed_file: &ParsedDiffFile,
     anchor: Option<&DiffAnchor>,
     file_lsp_context: Option<&DiffFileLspContext>,
@@ -292,6 +292,8 @@ fn render_full_tour_diff_preview(
                     false,
                     false,
                     false,
+                    None,
+                    None,
                     wrap_diff_lines,
                 )
                 .into_any_element(),
@@ -327,7 +329,7 @@ fn render_tour_diff_rows_container(
     } else {
         restrict_diff_scroll_to_axis(div().flex().flex_col().bg(diff_editor_bg()))
             .id(ElementId::Name(
-                format!("tour-diff-horizontal-scroll-{id_key}").into(),
+                format!("guided-review-diff-horizontal-scroll-{id_key}").into(),
             ))
             .overflow_x_scroll()
             .scrollbar_width(px(DIFF_SCROLLBAR_WIDTH))
@@ -344,7 +346,7 @@ struct TourDiffPreviewItems {
     focused_excerpt: bool,
 }
 
-fn build_tour_diff_preview_items(
+fn build_guided_review_diff_preview_items(
     detail: Option<&PullRequestDetail>,
     file: &PullRequestFile,
     parsed_file: &ParsedDiffFile,

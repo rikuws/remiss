@@ -13,17 +13,17 @@ use tokio::time::{Instant as TokioInstant, MissedTickBehavior};
 
 use crate::{
     app_storage,
-    code_tour::{
-        CodeTourProgressUpdate, CodeTourProvider, CodeTourProviderStatus, GenerateCodeTourInput,
-        GeneratedCodeTour,
-    },
+    guided_review::{GenerateGuidedReviewInput, GeneratedGuidedReview},
+    review_ai::{ReviewAiProgressUpdate, ReviewAiProvider, ReviewAiProviderStatus},
 };
 
 use super::errors::{generation_abort_message, AbortKind, AbortReason};
 use super::jsonrepair::parse_tolerant;
-use super::merge::{build_copilot_fallback_tour, merge_tour, TourResponse};
+use super::merge::{
+    build_copilot_fallback_guided_review, merge_guided_review, GuidedReviewResponse,
+};
 use super::progress::{limit_text, make_progress};
-use super::prompt::build_tour_prompt;
+use super::prompt::build_guided_review_prompt;
 use super::runtime;
 use super::{AgentJsonPromptOptions, AgentTextResponse, CodingAgentBackend};
 
@@ -76,16 +76,16 @@ struct CopilotRun {
 }
 
 impl CodingAgentBackend for CopilotBackend {
-    fn provider(&self) -> CodeTourProvider {
-        CodeTourProvider::Copilot
+    fn provider(&self) -> ReviewAiProvider {
+        ReviewAiProvider::Copilot
     }
 
-    fn status(&self) -> Result<CodeTourProviderStatus, String> {
+    fn status(&self) -> Result<ReviewAiProviderStatus, String> {
         match copilot_binary_with_source() {
             Ok((binary, source)) => {
                 let version = probe_version(&binary).unwrap_or_else(|| "installed".to_string());
-                Ok(CodeTourProviderStatus {
-                    provider: CodeTourProvider::Copilot,
+                Ok(ReviewAiProviderStatus {
+                    provider: ReviewAiProvider::Copilot,
                     label: "Copilot".to_string(),
                     available: true,
                     authenticated: true,
@@ -98,8 +98,8 @@ impl CodingAgentBackend for CopilotBackend {
                     default_model: None,
                 })
             }
-            Err(error) => Ok(CodeTourProviderStatus {
-                provider: CodeTourProvider::Copilot,
+            Err(error) => Ok(ReviewAiProviderStatus {
+                provider: ReviewAiProvider::Copilot,
                 label: "Copilot".to_string(),
                 available: false,
                 authenticated: false,
@@ -114,9 +114,9 @@ impl CodingAgentBackend for CopilotBackend {
 
     fn generate(
         &self,
-        input: &GenerateCodeTourInput,
-        on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
-    ) -> Result<GeneratedCodeTour, String> {
+        input: &GenerateGuidedReviewInput,
+        on_progress: &mut dyn FnMut(ReviewAiProgressUpdate),
+    ) -> Result<GeneratedGuidedReview, String> {
         if !Path::new(&input.working_directory).is_dir() {
             return Err(format!(
                 "The local checkout '{}' does not exist.",
@@ -134,7 +134,7 @@ impl CodingAgentBackend for CopilotBackend {
             Some("Starting Copilot SDK session".to_string()),
         ));
 
-        let mut prompt = build_tour_prompt(input);
+        let mut prompt = build_guided_review_prompt(input);
         if prompt.len() > MAX_PROMPT_BYTES {
             truncate_to_byte_limit(&mut prompt, MAX_PROMPT_BYTES);
         }
@@ -147,7 +147,7 @@ impl CodingAgentBackend for CopilotBackend {
             &prompt,
             OVERALL_TIMEOUT_MS,
             INACTIVITY_TIMEOUT_MS,
-            "the code tour",
+            "the Guided Review walkthrough",
             true,
             on_progress,
         )?;
@@ -155,7 +155,11 @@ impl CodingAgentBackend for CopilotBackend {
         if let Some(abort) = &outcome.abort {
             if !has_usable_final_text(&outcome) {
                 let summary = append_diagnostic_log_suffix(
-                    generation_abort_message("GitHub Copilot", "the code tour", abort),
+                    generation_abort_message(
+                        "GitHub Copilot",
+                        "the Guided Review walkthrough",
+                        abort,
+                    ),
                     diagnostic_log_path.as_deref(),
                 );
                 on_progress(make_progress(
@@ -182,14 +186,14 @@ impl CodingAgentBackend for CopilotBackend {
             "finalizing",
             "GitHub Copilot finished the draft",
             Some(
-                "Parsing the structured response and merging it into the final code tour."
+                "Parsing the structured response and merging it into the final Guided Review walkthrough."
                     .to_string(),
             ),
             Some("Finalizing Copilot output".to_string()),
         ));
 
         let Some(final_text) = outcome.final_text.as_deref() else {
-            return Ok(build_copilot_fallback_tour(
+            return Ok(build_copilot_fallback_guided_review(
                 input,
                 outcome.model.clone(),
                 append_diagnostic_log_suffix(
@@ -201,7 +205,7 @@ impl CodingAgentBackend for CopilotBackend {
 
         let trimmed = final_text.trim();
         if trimmed.is_empty() {
-            return Ok(build_copilot_fallback_tour(
+            return Ok(build_copilot_fallback_guided_review(
                 input,
                 outcome.model.clone(),
                 append_diagnostic_log_suffix(
@@ -211,14 +215,14 @@ impl CodingAgentBackend for CopilotBackend {
             ));
         }
 
-        match parse_tolerant::<TourResponse>(trimmed) {
-            Ok(response) => Ok(merge_tour(response, input, outcome.model)),
-            Err(error) => Ok(build_copilot_fallback_tour(
+        match parse_tolerant::<GuidedReviewResponse>(trimmed) {
+            Ok(response) => Ok(merge_guided_review(response, input, outcome.model)),
+            Err(error) => Ok(build_copilot_fallback_guided_review(
                 input,
                 outcome.model,
                 append_diagnostic_log_suffix(
                     format!(
-                        "GitHub Copilot did not return a usable JSON code tour: {}",
+                        "GitHub Copilot did not return a usable JSON Guided Review walkthrough: {}",
                         error.message
                     ),
                     diagnostic_log_path.as_deref(),
@@ -240,7 +244,7 @@ pub fn run_json_prompt_with_progress(
     working_directory: &str,
     mut prompt: String,
     options: AgentJsonPromptOptions,
-    on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
+    on_progress: &mut dyn FnMut(ReviewAiProgressUpdate),
 ) -> Result<AgentTextResponse, String> {
     if !Path::new(working_directory).is_dir() {
         return Err(format!(
@@ -312,7 +316,7 @@ fn run_copilot_with_tool_allowlist_retries(
     inactivity_timeout_ms: u64,
     task_label: &str,
     emit_progress: bool,
-    on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
+    on_progress: &mut dyn FnMut(ReviewAiProgressUpdate),
 ) -> Result<CopilotRun, String> {
     let mut last_tool_error: Option<String> = None;
 
@@ -377,7 +381,7 @@ async fn run_copilot_sdk_session(
     inactivity_timeout_ms: u64,
     task_label: &str,
     emit_progress: bool,
-    on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
+    on_progress: &mut dyn FnMut(ReviewAiProgressUpdate),
     attempt: usize,
     max_attempts: usize,
 ) -> Result<CopilotRun, String> {
@@ -610,7 +614,7 @@ fn handle_sdk_event(
     event: SessionEvent,
     outcome: &mut CopilotOutcome,
     emit_progress: bool,
-    on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
+    on_progress: &mut dyn FnMut(ReviewAiProgressUpdate),
 ) {
     match event.event_type.as_str() {
         "session.tools_updated" => {
@@ -822,7 +826,7 @@ fn handle_terminal_sdk_event(
     event: SessionEvent,
     outcome: &mut CopilotOutcome,
     emit_progress: bool,
-    on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
+    on_progress: &mut dyn FnMut(ReviewAiProgressUpdate),
 ) {
     match event.event_type.as_str() {
         "assistant.message" | "session.task_complete" => {
@@ -836,7 +840,7 @@ fn record_reasoning_progress(
     text: String,
     outcome: &mut CopilotOutcome,
     emit_progress: bool,
-    on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
+    on_progress: &mut dyn FnMut(ReviewAiProgressUpdate),
 ) {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -1022,7 +1026,7 @@ fn fallback_reason(outcome: &CopilotOutcome) -> String {
         return error.clone();
     }
     if let Some(abort) = &outcome.abort {
-        return generation_abort_message("GitHub Copilot", "the code tour", abort);
+        return generation_abort_message("GitHub Copilot", "the Guided Review walkthrough", abort);
     }
     if !outcome.saw_meaningful_progress {
         return "GitHub Copilot did not emit any streamed SDK progress before ending.".to_string();

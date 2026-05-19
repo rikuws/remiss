@@ -1,6 +1,6 @@
-pub(crate) mod ai_tour;
 pub(crate) mod diff_view;
 mod file_tree;
+pub(crate) mod guided_review;
 mod palette;
 mod pr_detail;
 mod root;

@@ -12,12 +12,10 @@ use once_cell::sync::Lazy;
 
 use crate::{
     cache::CacheStore,
-    code_tour::{
-        self, build_tour_request_key, tour_code_version_key, CodeTourProgressUpdate,
-        CodeTourProvider,
-    },
     github::PullRequestDetail,
+    guided_review::{self, build_guided_review_request_key},
     local_repo, local_review,
+    review_ai::{self, review_code_version_key, ReviewAiProgressUpdate, ReviewAiProvider},
     review_brief::{self, build_review_brief_request_key},
     review_memory,
     review_partner::{self, build_review_partner_request_key},
@@ -334,10 +332,10 @@ pub(crate) async fn refresh_active_review_brief_flow(
                 state.cache.clone(),
                 detail_key,
                 detail,
-                state.code_tour_settings.loaded,
-                state.code_tour_settings.settings.clone(),
-                state.code_tour_provider_statuses_loaded,
-                state.code_tour_provider_statuses.clone(),
+                state.review_ai_settings.loaded,
+                state.review_ai_settings.settings.clone(),
+                state.review_ai_provider_statuses_loaded,
+                state.review_ai_provider_statuses.clone(),
             ))
         })
         .ok()
@@ -359,8 +357,8 @@ pub(crate) async fn refresh_active_review_brief_flow(
     if !settings_loaded {
         model
             .update(cx, |state, cx| {
-                state.code_tour_settings.loading = true;
-                state.code_tour_settings.error = None;
+                state.review_ai_settings.loading = true;
+                state.review_ai_settings.error = None;
                 cx.notify();
             })
             .ok();
@@ -369,8 +367,8 @@ pub(crate) async fn refresh_active_review_brief_flow(
     if !statuses_loaded {
         model
             .update(cx, |state, cx| {
-                state.code_tour_provider_loading = true;
-                state.code_tour_provider_error = None;
+                state.review_ai_provider_loading = true;
+                state.review_ai_provider_error = None;
                 cx.notify();
             })
             .ok();
@@ -382,7 +380,7 @@ pub(crate) async fn refresh_active_review_brief_flow(
         cx.background_executor()
             .spawn({
                 let cache = cache.clone();
-                async move { code_tour::load_code_tour_settings(&cache) }
+                async move { review_ai::load_review_ai_settings(&cache) }
             })
             .await
     };
@@ -391,7 +389,7 @@ pub(crate) async fn refresh_active_review_brief_flow(
         Ok(existing_statuses)
     } else {
         cx.background_executor()
-            .spawn(async { code_tour::load_code_tour_provider_statuses() })
+            .spawn(async { review_ai::load_review_ai_provider_statuses() })
             .await
     };
 
@@ -404,22 +402,22 @@ pub(crate) async fn refresh_active_review_brief_flow(
 
     model
         .update(cx, |state, cx| {
-            state.code_tour_settings.loading = false;
+            state.review_ai_settings.loading = false;
             if let Ok(settings) = &settings_result {
-                state.code_tour_settings.settings = settings.clone();
-                state.code_tour_settings.loaded = true;
-                state.code_tour_settings.error = None;
+                state.review_ai_settings.settings = settings.clone();
+                state.review_ai_settings.loaded = true;
+                state.review_ai_settings.error = None;
             } else if let Err(error) = &settings_result {
-                state.code_tour_settings.error = Some(error.clone());
+                state.review_ai_settings.error = Some(error.clone());
             }
 
-            state.code_tour_provider_loading = false;
-            state.code_tour_provider_statuses_loaded = true;
+            state.review_ai_provider_loading = false;
+            state.review_ai_provider_statuses_loaded = true;
             if let Ok(statuses) = &provider_statuses_result {
-                state.code_tour_provider_statuses = statuses.clone();
-                state.code_tour_provider_error = None;
+                state.review_ai_provider_statuses = statuses.clone();
+                state.review_ai_provider_error = None;
             } else if let Err(error) = &provider_statuses_result {
-                state.code_tour_provider_error = Some(error.clone());
+                state.review_ai_provider_error = Some(error.clone());
             }
 
             if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
@@ -536,10 +534,10 @@ pub(crate) async fn refresh_active_review_partner_flow(
                 detail_key,
                 detail,
                 state.cache.clone(),
-                state.code_tour_settings.loaded,
-                state.code_tour_settings.settings.clone(),
-                state.code_tour_provider_statuses_loaded,
-                state.code_tour_provider_statuses.clone(),
+                state.review_ai_settings.loaded,
+                state.review_ai_settings.settings.clone(),
+                state.review_ai_provider_statuses_loaded,
+                state.review_ai_provider_statuses.clone(),
             ))
         })
         .ok()
@@ -561,8 +559,8 @@ pub(crate) async fn refresh_active_review_partner_flow(
     if !settings_loaded {
         model
             .update(cx, |state, cx| {
-                state.code_tour_settings.loading = true;
-                state.code_tour_settings.error = None;
+                state.review_ai_settings.loading = true;
+                state.review_ai_settings.error = None;
                 cx.notify();
             })
             .ok();
@@ -571,8 +569,8 @@ pub(crate) async fn refresh_active_review_partner_flow(
     if !statuses_loaded {
         model
             .update(cx, |state, cx| {
-                state.code_tour_provider_loading = true;
-                state.code_tour_provider_error = None;
+                state.review_ai_provider_loading = true;
+                state.review_ai_provider_error = None;
                 cx.notify();
             })
             .ok();
@@ -584,7 +582,7 @@ pub(crate) async fn refresh_active_review_partner_flow(
         cx.background_executor()
             .spawn({
                 let cache = cache.clone();
-                async move { code_tour::load_code_tour_settings(&cache) }
+                async move { review_ai::load_review_ai_settings(&cache) }
             })
             .await
     };
@@ -593,7 +591,7 @@ pub(crate) async fn refresh_active_review_partner_flow(
         Ok(existing_statuses)
     } else {
         cx.background_executor()
-            .spawn(async { code_tour::load_code_tour_provider_statuses() })
+            .spawn(async { review_ai::load_review_ai_provider_statuses() })
             .await
     };
 
@@ -621,22 +619,22 @@ pub(crate) async fn refresh_active_review_partner_flow(
 
     model
         .update(cx, |state, cx| {
-            state.code_tour_settings.loading = false;
+            state.review_ai_settings.loading = false;
             if let Ok(settings) = &settings_result {
-                state.code_tour_settings.settings = settings.clone();
-                state.code_tour_settings.loaded = true;
-                state.code_tour_settings.error = None;
+                state.review_ai_settings.settings = settings.clone();
+                state.review_ai_settings.loaded = true;
+                state.review_ai_settings.error = None;
             } else if let Err(error) = &settings_result {
-                state.code_tour_settings.error = Some(error.clone());
+                state.review_ai_settings.error = Some(error.clone());
             }
 
-            state.code_tour_provider_loading = false;
-            state.code_tour_provider_statuses_loaded = true;
+            state.review_ai_provider_loading = false;
+            state.review_ai_provider_statuses_loaded = true;
             if let Ok(statuses) = &provider_statuses_result {
-                state.code_tour_provider_statuses = statuses.clone();
-                state.code_tour_provider_error = None;
+                state.review_ai_provider_statuses = statuses.clone();
+                state.review_ai_provider_error = None;
             } else if let Err(error) = &provider_statuses_result {
-                state.code_tour_provider_error = Some(error.clone());
+                state.review_ai_provider_error = Some(error.clone());
             }
 
             cx.notify();
@@ -665,7 +663,7 @@ pub(crate) async fn run_review_intelligence_flow(
         .read_with(cx, |state, _| {
             let detail = state.active_detail()?.clone();
             let detail_key = state.active_pr_key.clone()?;
-            let provider = state.selected_tour_provider();
+            let provider = state.selected_review_ai_provider();
             let open_pull_requests = state
                 .active_detail_state()
                 .and_then(|detail_state| detail_state.stack_open_pull_requests.clone())
@@ -679,7 +677,7 @@ pub(crate) async fn run_review_intelligence_flow(
                 detail,
                 provider,
                 state.lsp_session_manager.clone(),
-                state.code_tour_provider_statuses_loaded,
+                state.review_ai_provider_statuses_loaded,
                 open_pull_requests,
                 existing_local_repository_status,
             ))
@@ -701,7 +699,7 @@ pub(crate) async fn run_review_intelligence_flow(
         existing_local_repository_status,
     ) = initial;
     let request_key = review_intelligence_request_key(&detail, provider);
-    let code_version_key = tour_code_version_key(&detail);
+    let code_version_key = review_code_version_key(&detail);
     let stack_code_version_key = format!(
         "{}:{}:{}:{}",
         code_version_key,
@@ -711,7 +709,7 @@ pub(crate) async fn run_review_intelligence_flow(
     );
     let brief_request_key = build_review_brief_request_key(&detail, provider);
     let partner_request_key = build_review_partner_request_key(&detail, provider);
-    let tour_request_key = build_tour_request_key(&detail, provider);
+    let guided_review_request_key = build_guided_review_request_key(&detail, provider);
     let local_review_repository_status =
         local_review::reusable_local_repository_status(&detail, existing_local_repository_status);
     let local_repository_already_ready = matches!(&local_review_repository_status, Ok(Some(_)));
@@ -760,10 +758,10 @@ pub(crate) async fn run_review_intelligence_flow(
                     }
 
                     if scope.includes_tour() {
-                        set_tour_pipeline_progress(
+                        set_guided_review_pipeline_progress(
                             detail_state,
                             provider,
-                            &tour_request_key,
+                            &guided_review_request_key,
                             false,
                             true,
                             "Generation already in progress",
@@ -788,8 +786,8 @@ pub(crate) async fn run_review_intelligence_flow(
             }
 
             if !statuses_loaded {
-                state.code_tour_provider_loading = true;
-                state.code_tour_provider_error = None;
+                state.review_ai_provider_loading = true;
+                state.review_ai_provider_error = None;
             }
 
             if scope.includes_stack() {
@@ -843,25 +841,25 @@ pub(crate) async fn run_review_intelligence_flow(
             }
 
             if scope.includes_tour() {
-                let tour_state = detail_state.tour_states.entry(provider).or_default();
-                let tour_request_changed =
-                    tour_state.request_key.as_deref() != Some(&tour_request_key);
-                tour_state.request_key = Some(tour_request_key.clone());
-                if force || tour_request_changed {
-                    tour_state.document = None;
+                let guided_review_state = detail_state.guided_review_states.entry(provider).or_default();
+                let guided_review_request_changed =
+                    guided_review_state.request_key.as_deref() != Some(&guided_review_request_key);
+                guided_review_state.request_key = Some(guided_review_request_key.clone());
+                if force || guided_review_request_changed {
+                    guided_review_state.document = None;
                 }
-                tour_state.loading = !force;
-                tour_state.generating = force;
-                tour_state.progress_summary = Some("Preparing Guided Review".to_string());
-                tour_state.progress_detail = Some(
+                guided_review_state.loading = !force;
+                guided_review_state.generating = force;
+                guided_review_state.progress_summary = Some("Preparing Guided Review".to_string());
+                guided_review_state.progress_detail = Some(
                     "Preparing the local checkout and checking cached intelligence for this pull request."
                         .to_string(),
                 );
-                tour_state.progress_log.clear();
-                tour_state.progress_log_file_path = None;
-                tour_state.error = None;
-                tour_state.message = None;
-                tour_state.success = false;
+                guided_review_state.progress_log.clear();
+                guided_review_state.progress_log_file_path = None;
+                guided_review_state.error = None;
+                guided_review_state.message = None;
+                guided_review_state.success = false;
             }
 
             cx.notify();
@@ -897,19 +895,19 @@ pub(crate) async fn run_review_intelligence_flow(
     if !statuses_loaded {
         let statuses_result = cx
             .background_executor()
-            .spawn(async { code_tour::load_code_tour_provider_statuses() })
+            .spawn(async { review_ai::load_review_ai_provider_statuses() })
             .await;
         model
             .update(cx, |state, cx| {
-                state.code_tour_provider_loading = false;
-                state.code_tour_provider_statuses_loaded = true;
+                state.review_ai_provider_loading = false;
+                state.review_ai_provider_statuses_loaded = true;
                 match statuses_result {
                     Ok(statuses) => {
-                        state.code_tour_provider_statuses = statuses;
-                        state.code_tour_provider_error = None;
+                        state.review_ai_provider_statuses = statuses;
+                        state.review_ai_provider_error = None;
                     }
                     Err(error) => {
-                        state.code_tour_provider_error = Some(error);
+                        state.review_ai_provider_error = Some(error);
                     }
                 }
                 cx.notify();
@@ -983,7 +981,7 @@ pub(crate) async fn run_review_intelligence_flow(
             open_pull_requests,
             force,
             scope.includes_tour(),
-            &tour_request_key,
+            &guided_review_request_key,
             cx,
         )
         .await
@@ -1044,7 +1042,7 @@ pub(crate) async fn run_review_intelligence_flow(
             &detail_key,
             detail.clone(),
             provider,
-            tour_request_key,
+            guided_review_request_key,
             &local_repo_status,
             force,
             automatic,
@@ -1061,14 +1059,14 @@ async fn generate_or_load_stack(
     cache: &CacheStore,
     detail_key: &str,
     detail: &PullRequestDetail,
-    provider: CodeTourProvider,
+    provider: ReviewAiProvider,
     request_key: &str,
     code_version_key: &str,
     local_repo_status: &local_repo::LocalRepositoryStatus,
     open_pull_requests: Vec<crate::stacks::model::StackPullRequestRef>,
     force: bool,
-    reflect_tour_progress: bool,
-    tour_request_key: &str,
+    reflect_guided_review_progress: bool,
+    guided_review_request_key: &str,
     cx: &mut AsyncWindowContext,
 ) -> Option<GeneratedReviewStack> {
     if !force {
@@ -1128,14 +1126,14 @@ async fn generate_or_load_stack(
                 cx,
             )
             .await;
-            if reflect_tour_progress {
+            if reflect_guided_review_progress {
                 model
                     .update(cx, |state, cx| {
                         if let Some(detail_state) = state.detail_states.get_mut(detail_key) {
-                            set_tour_pipeline_progress(
+                            set_guided_review_pipeline_progress(
                                 detail_state,
                                 provider,
-                                tour_request_key,
+                                guided_review_request_key,
                                 true,
                                 false,
                                 "Loaded cached Guided Review layers",
@@ -1176,11 +1174,11 @@ async fn generate_or_load_stack(
                         Some("Planning AI Guided Review layers.".to_string());
                 }
 
-                if reflect_tour_progress {
-                    set_tour_pipeline_progress(
+                if reflect_guided_review_progress {
+                    set_guided_review_pipeline_progress(
                         detail_state,
                         provider,
-                        tour_request_key,
+                        guided_review_request_key,
                         false,
                         true,
                         "Generating Guided Review layers",
@@ -1192,7 +1190,7 @@ async fn generate_or_load_stack(
         })
         .ok();
 
-    let (progress_tx, progress_rx) = mpsc::channel::<CodeTourProgressUpdate>();
+    let (progress_tx, progress_rx) = mpsc::channel::<ReviewAiProgressUpdate>();
     let (result_tx, result_rx) = mpsc::channel::<
         Result<(ReviewStack, Option<semantic_review::RemissSemanticReview>), String>,
     >();
@@ -1273,11 +1271,11 @@ async fn generate_or_load_stack(
                                 Some(progress_status_text(&progress));
                         }
 
-                        if reflect_tour_progress {
-                            set_tour_pipeline_progress(
+                        if reflect_guided_review_progress {
+                            set_guided_review_pipeline_progress(
                                 detail_state,
                                 provider,
-                                tour_request_key,
+                                guided_review_request_key,
                                 false,
                                 true,
                                 &progress.summary,
@@ -1303,11 +1301,11 @@ async fn generate_or_load_stack(
                                         Some(progress_status_text(&progress));
                                 }
 
-                                if reflect_tour_progress {
-                                    set_tour_pipeline_progress(
+                                if reflect_guided_review_progress {
+                                    set_guided_review_pipeline_progress(
                                         detail_state,
                                         provider,
-                                        tour_request_key,
+                                        guided_review_request_key,
                                         false,
                                         true,
                                         &progress.summary,
@@ -1377,7 +1375,7 @@ async fn generate_or_load_stack(
     }
 }
 
-fn guided_review_stack_discovery_options(provider: CodeTourProvider) -> StackDiscoveryOptions {
+fn guided_review_stack_discovery_options(provider: ReviewAiProvider) -> StackDiscoveryOptions {
     StackDiscoveryOptions {
         enable_github_native: false,
         enable_branch_topology: false,
@@ -1396,7 +1394,7 @@ async fn generate_or_load_partner(
     cache: &CacheStore,
     detail_key: &str,
     detail: &PullRequestDetail,
-    provider: CodeTourProvider,
+    provider: ReviewAiProvider,
     partner_request_key: &str,
     local_repo_status: &local_repo::LocalRepositoryStatus,
     stack: ReviewStack,
@@ -1469,7 +1467,7 @@ async fn generate_or_load_partner(
         })
         .ok();
 
-    let (progress_tx, progress_rx) = mpsc::channel::<CodeTourProgressUpdate>();
+    let (progress_tx, progress_rx) = mpsc::channel::<ReviewAiProgressUpdate>();
     let (result_tx, result_rx) =
         mpsc::channel::<Result<review_partner::GeneratedReviewPartnerContext, String>>();
     std::thread::spawn({
@@ -1636,7 +1634,7 @@ async fn generate_or_load_partner(
 fn spawn_review_memory_candidate_extraction(
     cache: CacheStore,
     detail: PullRequestDetail,
-    provider: CodeTourProvider,
+    provider: ReviewAiProvider,
     working_directory: String,
     force: bool,
 ) {
@@ -1658,7 +1656,7 @@ async fn generate_or_load_brief(
     cache: &CacheStore,
     detail_key: &str,
     detail: &PullRequestDetail,
-    provider: CodeTourProvider,
+    provider: ReviewAiProvider,
     request_key: &str,
     local_repo_status: &local_repo::LocalRepositoryStatus,
     force: bool,
@@ -1692,7 +1690,7 @@ async fn generate_or_load_brief(
     let provider_status = model
         .read_with(cx, |state, _| {
             state
-                .code_tour_provider_statuses
+                .review_ai_provider_statuses
                 .iter()
                 .find(|status| status.provider == provider)
                 .cloned()
@@ -1746,7 +1744,7 @@ async fn generate_or_load_brief(
         })
         .ok();
 
-    let (progress_tx, progress_rx) = mpsc::channel::<CodeTourProgressUpdate>();
+    let (progress_tx, progress_rx) = mpsc::channel::<ReviewAiProgressUpdate>();
     let (result_tx, result_rx) = mpsc::channel::<Result<review_brief::ReviewBrief, String>>();
     std::thread::spawn({
         let cache = CacheStore::clone(cache);
@@ -1833,8 +1831,8 @@ async fn generate_or_load_tour(
     cache: &CacheStore,
     detail_key: &str,
     detail: PullRequestDetail,
-    provider: CodeTourProvider,
-    tour_request_key: String,
+    provider: ReviewAiProvider,
+    guided_review_request_key: String,
     local_repo_status: &local_repo::LocalRepositoryStatus,
     force: bool,
     automatic: bool,
@@ -1846,22 +1844,28 @@ async fn generate_or_load_tour(
             .spawn({
                 let cache = CacheStore::clone(cache);
                 let detail = detail.clone();
-                async move { code_tour::load_code_tour(&cache, &detail, provider) }
+                async move { guided_review::load_guided_review(&cache, &detail, provider) }
             })
             .await;
 
-        if let Ok(Some(tour)) = cached {
+        if let Ok(Some(guided_review)) = cached {
             model
                 .update(cx, |state, cx| {
                     if let Some(detail_state) = state.detail_states.get_mut(detail_key) {
-                        let tour_state = detail_state.tour_states.entry(provider).or_default();
-                        if tour_state.request_key.as_deref() == Some(&tour_request_key) {
-                            tour_state.loading = false;
-                            tour_state.generating = false;
-                            tour_state.document = Some(tour);
-                            tour_state.error = None;
-                            tour_state.message = Some("Loaded cached Guided Review.".to_string());
-                            tour_state.success = true;
+                        let guided_review_state = detail_state
+                            .guided_review_states
+                            .entry(provider)
+                            .or_default();
+                        if guided_review_state.request_key.as_deref()
+                            == Some(&guided_review_request_key)
+                        {
+                            guided_review_state.loading = false;
+                            guided_review_state.generating = false;
+                            guided_review_state.document = Some(guided_review);
+                            guided_review_state.error = None;
+                            guided_review_state.message =
+                                Some("Loaded cached Guided Review.".to_string());
+                            guided_review_state.success = true;
                         }
                     }
                     cx.notify();
@@ -1871,9 +1875,14 @@ async fn generate_or_load_tour(
         }
     }
 
-    crate::views::ai_tour::generate_tour_flow(
+    crate::views::guided_review::generate_guided_review_flow(
         model.clone(),
-        Some((detail_key.to_string(), detail, provider, tour_request_key)),
+        Some((
+            detail_key.to_string(),
+            detail,
+            provider,
+            guided_review_request_key,
+        )),
         Some(local_repo_status.clone()),
         automatic,
         cx,
@@ -1885,7 +1894,7 @@ async fn fail_checkout(
     model: &Entity<AppState>,
     detail_key: &str,
     scope: ReviewIntelligenceScope,
-    provider: CodeTourProvider,
+    provider: ReviewAiProvider,
     request_key: &str,
     error: &str,
     cx: &mut AsyncWindowContext,
@@ -1927,12 +1936,15 @@ async fn fail_checkout(
                 }
 
                 if scope.includes_tour() {
-                    let tour_state = detail_state.tour_states.entry(provider).or_default();
-                    tour_state.loading = false;
-                    tour_state.generating = false;
-                    tour_state.error = Some(error.to_string());
-                    tour_state.message = None;
-                    tour_state.success = false;
+                    let guided_review_state = detail_state
+                        .guided_review_states
+                        .entry(provider)
+                        .or_default();
+                    guided_review_state.loading = false;
+                    guided_review_state.generating = false;
+                    guided_review_state.error = Some(error.to_string());
+                    guided_review_state.message = None;
+                    guided_review_state.success = false;
                 }
             }
             cx.notify();
@@ -2145,35 +2157,38 @@ async fn finish_request(
         .ok();
 }
 
-fn set_tour_pipeline_progress(
+fn set_guided_review_pipeline_progress(
     detail_state: &mut DetailState,
-    provider: CodeTourProvider,
-    tour_request_key: &str,
+    provider: ReviewAiProvider,
+    guided_review_request_key: &str,
     loading: bool,
     generating: bool,
     summary: &str,
     detail: &str,
 ) {
-    let tour_state = detail_state.tour_states.entry(provider).or_default();
-    if tour_state
+    let guided_review_state = detail_state
+        .guided_review_states
+        .entry(provider)
+        .or_default();
+    if guided_review_state
         .request_key
         .as_deref()
-        .is_some_and(|current| current != tour_request_key)
+        .is_some_and(|current| current != guided_review_request_key)
     {
         return;
     }
 
-    tour_state.request_key = Some(tour_request_key.to_string());
-    tour_state.loading = loading;
-    tour_state.generating = generating;
-    tour_state.progress_summary = Some(summary.to_string());
-    tour_state.progress_detail = Some(detail.to_string());
-    tour_state.error = None;
-    tour_state.message = None;
-    tour_state.success = false;
+    guided_review_state.request_key = Some(guided_review_request_key.to_string());
+    guided_review_state.loading = loading;
+    guided_review_state.generating = generating;
+    guided_review_state.progress_summary = Some(summary.to_string());
+    guided_review_state.progress_detail = Some(detail.to_string());
+    guided_review_state.error = None;
+    guided_review_state.message = None;
+    guided_review_state.success = false;
 }
 
-fn progress_status_text(progress: &CodeTourProgressUpdate) -> String {
+fn progress_status_text(progress: &ReviewAiProgressUpdate) -> String {
     progress
         .detail
         .as_deref()
@@ -2182,7 +2197,7 @@ fn progress_status_text(progress: &CodeTourProgressUpdate) -> String {
         .to_string()
 }
 
-fn progress_detail_text(progress: &CodeTourProgressUpdate) -> String {
+fn progress_detail_text(progress: &ReviewAiProgressUpdate) -> String {
     progress
         .detail
         .as_deref()
@@ -2231,21 +2246,21 @@ fn set_review_brief_error(detail_state: &mut DetailState, request_key: &str, err
 
 pub fn review_intelligence_request_key(
     detail: &PullRequestDetail,
-    provider: CodeTourProvider,
+    provider: ReviewAiProvider,
 ) -> String {
     format!(
         "{}:{}#{}:{}",
         provider.slug(),
         detail.repository,
         detail.number,
-        tour_code_version_key(detail)
+        review_code_version_key(detail)
     )
 }
 
 fn detail_brief_request_matches(
     state: &AppState,
     detail_key: &str,
-    provider: CodeTourProvider,
+    provider: ReviewAiProvider,
     request_key: &str,
 ) -> bool {
     state
@@ -2260,7 +2275,7 @@ fn detail_brief_request_matches(
 fn detail_partner_request_matches(
     state: &AppState,
     detail_key: &str,
-    provider: CodeTourProvider,
+    provider: ReviewAiProvider,
     request_key: &str,
 ) -> bool {
     state
@@ -2311,9 +2326,9 @@ fn ai_stack_for_error(detail: &PullRequestDetail, message: &str) -> ReviewStack 
 mod tests {
     use super::{
         guided_review_stack_discovery_options, review_intelligence_request_key,
-        set_review_brief_error, set_review_brief_progress, set_tour_pipeline_progress,
+        set_guided_review_pipeline_progress, set_review_brief_error, set_review_brief_progress,
     };
-    use crate::{code_tour::CodeTourProvider, github::PullRequestDetail, state::DetailState};
+    use crate::{github::PullRequestDetail, review_ai::ReviewAiProvider, state::DetailState};
 
     #[test]
     fn review_intelligence_request_key_ignores_metadata_updates_when_head_matches() {
@@ -2321,8 +2336,8 @@ mod tests {
         let second = detail("2026-04-17T11:00:00Z", Some("head123"), "diff-two");
 
         assert_eq!(
-            review_intelligence_request_key(&first, CodeTourProvider::Codex),
-            review_intelligence_request_key(&second, CodeTourProvider::Codex)
+            review_intelligence_request_key(&first, ReviewAiProvider::Codex),
+            review_intelligence_request_key(&second, ReviewAiProvider::Codex)
         );
     }
 
@@ -2331,79 +2346,85 @@ mod tests {
         let detail = detail("2026-04-17T10:00:00Z", Some("head123"), "diff-one");
 
         assert_ne!(
-            review_intelligence_request_key(&detail, CodeTourProvider::Codex),
-            review_intelligence_request_key(&detail, CodeTourProvider::Copilot)
+            review_intelligence_request_key(&detail, ReviewAiProvider::Codex),
+            review_intelligence_request_key(&detail, ReviewAiProvider::Copilot)
         );
     }
 
     #[test]
     fn guided_review_stack_generation_uses_ai_provider_not_sem_stack() {
-        let options = guided_review_stack_discovery_options(CodeTourProvider::Copilot);
+        let options = guided_review_stack_discovery_options(ReviewAiProvider::Copilot);
 
         assert!(options.enable_ai_virtual);
         assert!(!options.enable_sem_virtual);
         assert!(!options.enable_virtual_commits);
         assert!(!options.enable_virtual_semantic);
-        assert_eq!(options.ai_provider, Some(CodeTourProvider::Copilot));
+        assert_eq!(options.ai_provider, Some(ReviewAiProvider::Copilot));
     }
 
     #[test]
-    fn tour_pipeline_progress_marks_visible_generation_state() {
+    fn guided_review_pipeline_progress_marks_visible_generation_state() {
         let mut detail_state = DetailState::default();
 
-        set_tour_pipeline_progress(
+        set_guided_review_pipeline_progress(
             &mut detail_state,
-            CodeTourProvider::Copilot,
-            "tour-key",
+            ReviewAiProvider::Copilot,
+            "guided-review-key",
             false,
             true,
             "Generating Guided Review layers",
             "Copilot is planning review layers first.",
         );
 
-        let tour_state = detail_state
-            .tour_states
-            .get(&CodeTourProvider::Copilot)
-            .expect("tour state should be created");
-        assert_eq!(tour_state.request_key.as_deref(), Some("tour-key"));
-        assert!(!tour_state.loading);
-        assert!(tour_state.generating);
+        let guided_review_state = detail_state
+            .guided_review_states
+            .get(&ReviewAiProvider::Copilot)
+            .expect("guided review state should be created");
         assert_eq!(
-            tour_state.progress_summary.as_deref(),
+            guided_review_state.request_key.as_deref(),
+            Some("guided-review-key")
+        );
+        assert!(!guided_review_state.loading);
+        assert!(guided_review_state.generating);
+        assert_eq!(
+            guided_review_state.progress_summary.as_deref(),
             Some("Generating Guided Review layers")
         );
         assert_eq!(
-            tour_state.progress_detail.as_deref(),
+            guided_review_state.progress_detail.as_deref(),
             Some("Copilot is planning review layers first.")
         );
     }
 
     #[test]
-    fn tour_pipeline_progress_ignores_stale_tour_request() {
+    fn guided_review_pipeline_progress_ignores_stale_guided_review_request() {
         let mut detail_state = DetailState::default();
         detail_state
-            .tour_states
-            .entry(CodeTourProvider::Copilot)
+            .guided_review_states
+            .entry(ReviewAiProvider::Copilot)
             .or_default()
-            .request_key = Some("newer-tour-key".to_string());
+            .request_key = Some("newer-guided-review-key".to_string());
 
-        set_tour_pipeline_progress(
+        set_guided_review_pipeline_progress(
             &mut detail_state,
-            CodeTourProvider::Copilot,
-            "older-tour-key",
+            ReviewAiProvider::Copilot,
+            "older-guided-review-key",
             false,
             true,
             "Generating Guided Review layers",
             "Copilot is planning review layers first.",
         );
 
-        let tour_state = detail_state
-            .tour_states
-            .get(&CodeTourProvider::Copilot)
-            .expect("tour state should exist");
-        assert_eq!(tour_state.request_key.as_deref(), Some("newer-tour-key"));
-        assert!(!tour_state.generating);
-        assert!(tour_state.progress_summary.is_none());
+        let guided_review_state = detail_state
+            .guided_review_states
+            .get(&ReviewAiProvider::Copilot)
+            .expect("guided review state should exist");
+        assert_eq!(
+            guided_review_state.request_key.as_deref(),
+            Some("newer-guided-review-key")
+        );
+        assert!(!guided_review_state.generating);
+        assert!(guided_review_state.progress_summary.is_none());
     }
 
     #[test]

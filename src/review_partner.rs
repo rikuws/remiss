@@ -14,14 +14,15 @@ use tree_sitter::{Node, Parser};
 use crate::{
     agents::{self, jsonrepair::parse_tolerant, AgentJsonPromptOptions},
     cache::CacheStore,
-    code_tour::{
-        find_parsed_diff_file, tour_code_version_key, CodeTourProgressUpdate, CodeTourProvider,
-        CodeTourPullRequestCommentContext, CodeTourReviewCommentContext, CodeTourReviewContext,
-        CodeTourReviewThreadContext,
-    },
     diff::{DiffLineKind, ParsedDiffFile},
     github::{PullRequestComment, PullRequestDetail, PullRequestReview, PullRequestReviewThread},
+    guided_review::{
+        find_parsed_diff_file, GuidedReviewPullRequestCommentContext,
+        GuidedReviewReviewCommentContext, GuidedReviewReviewContext,
+        GuidedReviewReviewThreadContext,
+    },
     lsp::{LspSessionManager, LspTextDocumentRequest},
+    review_ai::{review_code_version_key, ReviewAiProgressUpdate, ReviewAiProvider},
     review_memory::{ReviewMemoryPromptContext, ReviewMemorySignal, ReviewMemoryStatus},
     semantic_review::{
         summarize_semantic_review, RemissSemanticFocusSummary, RemissSemanticLayerSummary,
@@ -74,7 +75,7 @@ const MAX_EVIDENCE_CHANGES: usize = 80;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GeneratedReviewPartnerContext {
-    pub provider: CodeTourProvider,
+    pub provider: ReviewAiProvider,
     #[serde(default)]
     pub model: Option<String>,
     pub generated_at_ms: i64,
@@ -387,7 +388,7 @@ pub struct ReviewPartnerLocation {
 
 #[derive(Clone, Debug)]
 pub struct GenerateReviewPartnerInput {
-    pub provider: CodeTourProvider,
+    pub provider: ReviewAiProvider,
     pub working_directory: String,
     pub repository: String,
     pub number: i64,
@@ -397,9 +398,9 @@ pub struct GenerateReviewPartnerInput {
     pub url: String,
     pub base_ref_name: String,
     pub head_ref_name: String,
-    pub comments: Vec<CodeTourPullRequestCommentContext>,
-    pub latest_reviews: Vec<CodeTourReviewContext>,
-    pub review_threads: Vec<CodeTourReviewThreadContext>,
+    pub comments: Vec<GuidedReviewPullRequestCommentContext>,
+    pub latest_reviews: Vec<GuidedReviewReviewContext>,
+    pub review_threads: Vec<GuidedReviewReviewThreadContext>,
     pub stack: ReviewStack,
     pub structural_evidence: StructuralEvidencePack,
     pub semantic_review: Option<RemissSemanticReviewSummary>,
@@ -434,8 +435,6 @@ struct ReviewPartnerLayerResponse {
     #[serde(default)]
     removed_items: Vec<ReviewPartnerItemResponse>,
     #[serde(default)]
-    usage_context: Vec<ReviewPartnerItemResponse>,
-    #[serde(default)]
     similar_code: Vec<ReviewPartnerItemResponse>,
     #[serde(default)]
     codebase_fit: Vec<ReviewPartnerItemResponse>,
@@ -458,15 +457,6 @@ struct ReviewPartnerItemResponse {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ReviewPartnerUsageGroupResponse {
-    symbol: String,
-    summary: String,
-    #[serde(default)]
-    usages: Vec<ReviewPartnerItemResponse>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct ReviewPartnerCodebaseFitResponse {
     follows: bool,
     summary: String,
@@ -483,8 +473,6 @@ struct ReviewPartnerFocusRecordResponse {
     subtitle: Option<String>,
     #[serde(default)]
     summary: Option<String>,
-    #[serde(default)]
-    usage_context: Vec<ReviewPartnerUsageGroupResponse>,
     #[serde(default)]
     codebase_fit: Option<ReviewPartnerCodebaseFitResponse>,
     #[serde(default)]
@@ -516,7 +504,7 @@ struct ReviewPartnerSingleFocusResponse {
 pub fn load_review_partner_context(
     cache: &CacheStore,
     detail: &PullRequestDetail,
-    provider: CodeTourProvider,
+    provider: ReviewAiProvider,
 ) -> Result<Option<GeneratedReviewPartnerContext>, String> {
     let cache_key = review_partner_cache_key(detail, provider);
     Ok(cache
@@ -549,7 +537,7 @@ pub fn save_review_partner_context(
 fn review_partner_document_matches_current(
     document: &GeneratedReviewPartnerContext,
     detail: &PullRequestDetail,
-    provider: CodeTourProvider,
+    provider: ReviewAiProvider,
 ) -> bool {
     document.generator_version == REVIEW_PARTNER_GENERATOR_VERSION
         && document.context_version == REVIEW_PARTNER_CONTEXT_VERSION
@@ -557,7 +545,7 @@ fn review_partner_document_matches_current(
         && document.provider.slug() == provider.slug()
         && document.stack.repository == detail.repository
         && document.stack.selected_pr_number == detail.number
-        && document.code_version_key == tour_code_version_key(detail)
+        && document.code_version_key == review_code_version_key(detail)
 }
 
 pub fn generate_review_partner_context(
@@ -570,7 +558,7 @@ pub fn generate_review_partner_context(
 pub fn generate_review_partner_context_with_progress(
     cache: &CacheStore,
     input: GenerateReviewPartnerInput,
-    on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
+    on_progress: &mut dyn FnMut(ReviewAiProgressUpdate),
 ) -> Result<GeneratedReviewPartnerContext, String> {
     if input.working_directory.trim().is_empty() {
         return Err("Review Partner generation requires a local checkout path.".to_string());
@@ -643,7 +631,7 @@ pub fn fallback_review_partner_context(
 
 pub fn build_review_partner_generation_input(
     detail: &PullRequestDetail,
-    provider: CodeTourProvider,
+    provider: ReviewAiProvider,
     working_directory: &str,
     stack: ReviewStack,
     structural_evidence: StructuralEvidencePack,
@@ -669,7 +657,7 @@ pub fn build_review_partner_generation_input(
         working_directory: working_directory.to_string(),
         repository: detail.repository.clone(),
         number: detail.number,
-        code_version_key: tour_code_version_key(detail),
+        code_version_key: review_code_version_key(detail),
         title: detail.title.clone(),
         body: trim_text(&detail.body, 2_500),
         url: detail.url.clone(),
@@ -703,30 +691,30 @@ pub fn build_review_partner_generation_input(
 
 pub fn build_review_partner_request_key(
     detail: &PullRequestDetail,
-    provider: CodeTourProvider,
+    provider: ReviewAiProvider,
 ) -> String {
     format!(
         "{}:{}#{}:{}:{}:{}:{}",
         provider.slug(),
         detail.repository,
         detail.number,
-        tour_code_version_key(detail),
+        review_code_version_key(detail),
         REVIEW_PARTNER_GENERATOR_VERSION,
         STACK_GENERATOR_VERSION,
         REVIEW_PARTNER_CONTEXT_VERSION,
     )
 }
 
-fn map_comment_context(comment: &PullRequestComment) -> CodeTourPullRequestCommentContext {
-    CodeTourPullRequestCommentContext {
+fn map_comment_context(comment: &PullRequestComment) -> GuidedReviewPullRequestCommentContext {
+    GuidedReviewPullRequestCommentContext {
         author_login: comment.author_login.clone(),
         body: trim_text(&comment.body, MAX_PROMPT_SNIPPET_CHARS),
         created_at: comment.created_at.clone(),
     }
 }
 
-fn map_review_context(review: &PullRequestReview) -> CodeTourReviewContext {
-    CodeTourReviewContext {
+fn map_review_context(review: &PullRequestReview) -> GuidedReviewReviewContext {
+    GuidedReviewReviewContext {
         author_login: review.author_login.clone(),
         state: review.state.clone(),
         body: trim_text(&review.body, MAX_PROMPT_SNIPPET_CHARS),
@@ -734,8 +722,8 @@ fn map_review_context(review: &PullRequestReview) -> CodeTourReviewContext {
     }
 }
 
-fn map_thread_context(thread: &PullRequestReviewThread) -> CodeTourReviewThreadContext {
-    CodeTourReviewThreadContext {
+fn map_thread_context(thread: &PullRequestReviewThread) -> GuidedReviewReviewThreadContext {
+    GuidedReviewReviewThreadContext {
         path: thread.path.clone(),
         line: thread.line.or(thread.original_line),
         diff_side: if thread.diff_side.trim().is_empty() {
@@ -749,7 +737,7 @@ fn map_thread_context(thread: &PullRequestReviewThread) -> CodeTourReviewThreadC
             .comments
             .iter()
             .take(MAX_COMMENTS_PER_THREAD)
-            .map(|comment| CodeTourReviewCommentContext {
+            .map(|comment| GuidedReviewReviewCommentContext {
                 author_login: comment.author_login.clone(),
                 body: trim_text(&comment.body, MAX_PROMPT_SNIPPET_CHARS),
             })
@@ -763,12 +751,12 @@ fn prioritize_review_threads(threads: &[PullRequestReviewThread]) -> Vec<PullReq
     prioritized
 }
 
-pub fn review_partner_cache_key(detail: &PullRequestDetail, provider: CodeTourProvider) -> String {
+pub fn review_partner_cache_key(detail: &PullRequestDetail, provider: ReviewAiProvider) -> String {
     review_partner_cache_key_from_parts(
         &detail.repository,
         detail.number,
         provider,
-        &tour_code_version_key(detail),
+        &review_code_version_key(detail),
         STACK_GENERATOR_VERSION,
         REVIEW_PARTNER_CONTEXT_VERSION,
     )
@@ -777,7 +765,7 @@ pub fn review_partner_cache_key(detail: &PullRequestDetail, provider: CodeTourPr
 pub fn review_partner_cache_key_from_parts(
     repository: &str,
     number: i64,
-    provider: CodeTourProvider,
+    provider: ReviewAiProvider,
     code_version: &str,
     stack_version: &str,
     context_version: &str,
@@ -1002,7 +990,6 @@ fn merge_layer(
     input: &GenerateReviewPartnerInput,
 ) -> ReviewPartnerLayer {
     let fallback = fallback_layer(layer, input);
-    let _legacy_usage_context = response.usage_context;
     let brief = normalize_layer_brief(layer, response.brief, &fallback.brief);
     ReviewPartnerLayer {
         layer_id: layer.id.clone(),
@@ -1356,13 +1343,12 @@ fn merge_focus_record(
     stack: &ReviewStack,
     review_memory: &ReviewMemoryPromptContext,
 ) -> ReviewPartnerFocusRecord {
-    let _legacy_usage_context = normalize_usage_groups(response.usage_context);
-    let (sections, legacy_codebase_fit_items) = normalize_focus_sections(response.sections);
+    let sections = normalize_focus_sections(response.sections);
     let usage_context = usage_groups_for_target(target, context);
     let codebase_fit = response
         .codebase_fit
         .map(normalize_codebase_fit)
-        .unwrap_or_else(|| codebase_fit_from_items(legacy_codebase_fit_items));
+        .unwrap_or_default();
     let fallback_summary = fallback_focus_summary_from_stack(target, stack, context);
     let summary = response
         .summary
@@ -1584,7 +1570,7 @@ pub fn fallback_focus_record(
     let usage_context = usage_groups_for_target(target, &input.context);
     let codebase_fit = fallback_layer
         .as_ref()
-        .map(|layer| codebase_fit_from_items(focus_items_for_target(target, &layer.codebase_fit)))
+        .map(|_| ReviewPartnerCodebaseFit::default())
         .unwrap_or_default();
     let summary = fallback_focus_summary(target, fallback_layer.as_ref());
 
@@ -1827,7 +1813,7 @@ pub fn generate_review_partner_focus_record_with_progress(
     document: &GeneratedReviewPartnerContext,
     target: ReviewPartnerFocusTarget,
     working_directory: &str,
-    on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
+    on_progress: &mut dyn FnMut(ReviewAiProgressUpdate),
 ) -> Result<ReviewPartnerFocusRecord, String> {
     if working_directory.trim().is_empty() {
         return Err("Review Partner focus generation requires a local checkout path.".to_string());
@@ -2781,9 +2767,8 @@ fn build_focus_record_prompt(
 
 fn normalize_focus_sections(
     values: Vec<ReviewPartnerFocusSectionResponse>,
-) -> (Vec<ReviewPartnerFocusSection>, Vec<ReviewPartnerItem>) {
+) -> Vec<ReviewPartnerFocusSection> {
     let mut sections = Vec::new();
-    let mut codebase_fit_items = Vec::new();
 
     for section in values {
         let title = limit_text(section.title, MAX_FOCUS_TITLE_CHARS);
@@ -2794,7 +2779,7 @@ fn normalize_focus_sections(
 
         match title.trim().to_ascii_lowercase().as_str() {
             "usage context" => {}
-            "codebase fit" => codebase_fit_items.extend(items),
+            "codebase fit" => {}
             "changed items" | "changed symbols" => {}
             _ if sections.len() < MAX_FOCUS_SECTIONS => {
                 sections.push(ReviewPartnerFocusSection { title, items })
@@ -2803,38 +2788,7 @@ fn normalize_focus_sections(
         }
     }
 
-    (sections, codebase_fit_items)
-}
-
-fn normalize_usage_groups(
-    values: Vec<ReviewPartnerUsageGroupResponse>,
-) -> Vec<ReviewPartnerUsageGroup> {
-    values
-        .into_iter()
-        .filter_map(|group| {
-            let symbol = group.symbol.trim();
-            let summary = group.summary.trim();
-            let usages = normalize_items(group.usages);
-            if (symbol.is_empty() && summary.is_empty()) || usages.is_empty() {
-                return None;
-            }
-
-            Some(ReviewPartnerUsageGroup::new(
-                if symbol.is_empty() { summary } else { symbol },
-                if summary.is_empty() {
-                    format!(
-                        "{} usage{} surfaced.",
-                        usages.len(),
-                        if usages.len() == 1 { "" } else { "s" }
-                    )
-                } else {
-                    summary.to_string()
-                },
-                usages,
-            ))
-        })
-        .take(MAX_SECTION_ITEMS)
-        .collect()
+    sections
 }
 
 fn normalize_codebase_fit(response: ReviewPartnerCodebaseFitResponse) -> ReviewPartnerCodebaseFit {
@@ -2852,10 +2806,6 @@ fn normalize_codebase_fit(response: ReviewPartnerCodebaseFitResponse) -> ReviewP
         summary: default_if_empty(response.summary, "does not fully follow codebase style"),
         evidence,
     }
-}
-
-fn codebase_fit_from_items(_items: Vec<ReviewPartnerItem>) -> ReviewPartnerCodebaseFit {
-    ReviewPartnerCodebaseFit::default()
 }
 
 fn usage_groups_for_target(

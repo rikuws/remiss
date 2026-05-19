@@ -699,9 +699,30 @@ pub(super) fn open_review_line_action(
     position: Point<Pixels>,
     cx: &mut App,
 ) {
+    open_review_line_action_with_navigation(state, target, position, true, cx);
+}
+
+fn open_review_line_action_preserving_view(
+    state: &Entity<AppState>,
+    target: ReviewLineActionTarget,
+    position: Point<Pixels>,
+    cx: &mut App,
+) {
+    open_review_line_action_with_navigation(state, target, position, false, cx);
+}
+
+fn open_review_line_action_with_navigation(
+    state: &Entity<AppState>,
+    target: ReviewLineActionTarget,
+    position: Point<Pixels>,
+    navigate: bool,
+    cx: &mut App,
+) {
     state.update(cx, |state, cx| {
         state.active_surface = PullRequestSurface::Files;
-        state.navigate_to_review_location(target.review_location(), true);
+        if navigate {
+            state.navigate_to_review_location(target.review_location(), true);
+        }
         state.active_review_line_action = Some(target);
         state.active_review_line_action_position = Some(position);
         state.review_line_action_mode = ReviewLineActionMode::Comment;
@@ -791,7 +812,6 @@ pub(super) fn begin_review_line_drag(
         state.active_review_line_action_position = None;
         state.review_line_action_mode = ReviewLineActionMode::Menu;
         state.inline_comment_error = None;
-        state.navigate_to_review_location(target.review_location(), true);
         cx.notify();
     });
 }
@@ -805,8 +825,7 @@ pub(super) fn update_review_line_drag(
         if state.active_review_line_drag_origin.is_none() {
             return;
         }
-        state.active_review_line_drag_current = Some(target.clone());
-        state.navigate_to_review_location(target.review_location(), false);
+        state.active_review_line_drag_current = Some(target);
         cx.notify();
     });
 }
@@ -828,7 +847,7 @@ pub(super) fn finish_review_line_drag(
         cx.notify();
     });
 
-    open_review_line_action(state, target, position, cx);
+    open_review_line_action_preserving_view(state, target, position, cx);
 }
 
 fn line_target_in_review_range(
@@ -934,14 +953,25 @@ pub(super) fn render_reviewable_diff_line(
     selected_anchor: Option<&DiffAnchor>,
     lsp_context: Option<&DiffLineLspContext>,
     temp_source_target: Option<TempSourceTarget>,
+    text_selection: Option<DiffTextSelectionContext>,
     cx: &App,
 ) -> impl IntoElement {
     let line_action_target = build_review_line_action_target(file_path, hunk_header, line);
-    let (active_line_action, drag_origin, drag_current, waypoint, wrap_diff_lines) = {
+    let (
+        active_line_action,
+        drag_origin,
+        drag_current,
+        hovered_gutter_action_key,
+        waypoint,
+        wrap_diff_lines,
+    ) = {
         let app_state = state.read(cx);
         let active_line_action = app_state.active_review_line_action.clone();
         let drag_origin = app_state.active_review_line_drag_origin.clone();
         let drag_current = app_state.active_review_line_drag_current.clone();
+        let hovered_gutter_action_key = (!app_state.diff_gutter_hover_suppressed())
+            .then(|| app_state.hovered_diff_gutter_action_key.clone())
+            .flatten();
         let waypoint = line_action_target
             .as_ref()
             .and_then(|target| {
@@ -958,6 +988,7 @@ pub(super) fn render_reviewable_diff_line(
             active_line_action,
             drag_origin,
             drag_current,
+            hovered_gutter_action_key,
             waypoint,
             wrap_diff_lines,
         )
@@ -997,42 +1028,58 @@ pub(super) fn render_reviewable_diff_line(
         has_waypoint,
         popup_open,
         range_selected,
+        hovered_gutter_action_key.as_deref(),
+        text_selection,
         wrap_diff_lines,
     )
 }
 
 pub(super) fn render_diff_waypoint_icon() -> impl IntoElement {
     div()
-        .relative()
-        .w(px(12.0))
-        .h(px(12.0))
-        .rounded(px(4.0))
+        .w(px(17.0))
+        .h(px(17.0))
+        .rounded(px(6.0))
         .border_1()
-        .border_color(transparent())
+        .border_color(waypoint_icon_border())
         .bg(waypoint_icon_bg())
-        .child(
-            div()
-                .absolute()
-                .left(px(3.0))
-                .top(px(3.0))
-                .w(px(4.0))
-                .h(px(4.0))
-                .rounded(px(999.0))
-                .bg(waypoint_icon_core()),
-        )
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(lucide_icon(
+            LucideIcon::Waypoints,
+            12.0,
+            waypoint_icon_core(),
+        ))
 }
 
-pub(super) fn render_diff_open_source_icon() -> impl IntoElement {
+pub(super) fn render_diff_comment_icon(visible: bool) -> impl IntoElement {
+    render_diff_action_icon(LucideIcon::Plus, visible)
+}
+
+pub(super) fn render_diff_open_source_icon(visible: bool) -> impl IntoElement {
+    render_diff_action_icon(LucideIcon::ExternalLink, visible)
+}
+
+fn render_diff_action_icon(icon: LucideIcon, visible: bool) -> impl IntoElement {
+    const DIFF_ACTION_ICON_BASE_SIZE: f32 = 12.0;
+    const DIFF_ACTION_ICON_HOVER_SIZE: f32 = 15.0;
+
+    let progress = if visible { 1.0 } else { 0.0 };
+    let size = DIFF_ACTION_ICON_BASE_SIZE
+        + (DIFF_ACTION_ICON_HOVER_SIZE - DIFF_ACTION_ICON_BASE_SIZE) * progress;
+
     div()
-        .w(px(12.0))
-        .h(px(12.0))
+        .w(px(18.0))
+        .h(px(18.0))
         .flex()
         .items_center()
         .justify_center()
         .font_family("lucide")
-        .text_size(px(12.0))
-        .line_height(px(12.0))
-        .child(LucideIcon::ExternalLink.unicode().to_string())
+        .text_size(px(size))
+        .line_height(px(18.0))
+        .text_color(fg_muted())
+        .opacity(progress)
+        .child(icon.unicode().to_string())
 }
 
 pub(super) fn render_waypoint_pill(label: &str, active: bool) -> impl IntoElement {

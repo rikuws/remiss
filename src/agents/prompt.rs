@@ -1,10 +1,10 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::code_tour::{
-    CodeTourCandidateGroup, CodeTourFileContext, CodeTourReviewCommentContext,
-    CodeTourReviewContext, CodeTourReviewThreadContext, DiffAnchor, GenerateCodeTourInput,
-    TourSectionCategory, TourSectionPriority, TourStep,
+use crate::guided_review::{
+    DiffAnchor, GenerateGuidedReviewInput, GuidedReviewCandidateGroup, GuidedReviewFileContext,
+    GuidedReviewReviewCommentContext, GuidedReviewReviewContext, GuidedReviewReviewThreadContext,
+    GuidedReviewSectionCategory, GuidedReviewSectionPriority, GuidedReviewStep,
 };
 
 use super::schema::TOUR_OUTPUT_SCHEMA_JSON;
@@ -19,7 +19,7 @@ pub const MAX_COMMENTS_PER_THREAD: usize = 3;
 pub const MAX_SNIPPET_CHARS: usize = 500;
 
 pub const BASE_INSTRUCTIONS: &[&str] = &[
-    "You are generating a guided code tour for a GitHub pull request.",
+    "You are generating a Guided Review walkthrough for a GitHub pull request.",
     "Act like a senior pair programmer walking a reviewer through the change.",
     "Assume the reviewer knows the product and engineering context, but does not yet have this change loaded into their working memory.",
     "Optimize for rebuilding the reviewer's mental model, not for summarizing the diff.",
@@ -38,11 +38,11 @@ pub const BASE_INSTRUCTIONS: &[&str] = &[
     "If a candidate file is missing from the checkout, treat it as deleted, renamed, or out-of-sync and continue with the provided pull-request context, snippets, and remaining files.",
     "If a supporting callsite cannot be verified quickly, omit it instead of continuing to search.",
     "If a search returns no direct hit, do not keep widening it. Continue with the verified pull-request context you already have.",
-    "A complete best-effort tour is better than an exhaustive investigation.",
+    "A complete best-effort guided review is better than an exhaustive investigation.",
     "Return JSON only with no markdown fences or extra commentary.",
     "Always use the provided candidate step ids. Never invent ids.",
     "Explain the whole pull request first, then organize the changed files into related sections.",
-    "Structure the tour around code reading, not diff summarization.",
+    "Structure the guided review around code reading, not diff summarization.",
     "For each important section, cover the deepest applicable reading levels:",
     "- mechanics: what changed syntactically or structurally",
     "- behavior: what state, data flow, control flow, invariants, or error handling changed",
@@ -71,7 +71,7 @@ pub const BASE_INSTRUCTIONS: &[&str] = &[
     "Surface unresolved review concerns in openQuestions when appropriate.",
 ];
 
-pub fn build_tour_prompt(input: &GenerateCodeTourInput) -> String {
+pub fn build_guided_review_prompt(input: &GenerateGuidedReviewInput) -> String {
     let context = build_prompt_context(input);
     let schema_pretty = serde_json::to_string_pretty(
         &serde_json::from_str::<Value>(TOUR_OUTPUT_SCHEMA_JSON).expect("schema must parse"),
@@ -308,9 +308,9 @@ fn leading_digits(value: &str) -> &str {
     &value[..end]
 }
 
-fn build_prompt_context(input: &GenerateCodeTourInput) -> Value {
+fn build_prompt_context(input: &GenerateGuidedReviewInput) -> Value {
     let overview_step = input.candidate_steps.first();
-    let file_steps: Vec<&TourStep> = input.candidate_steps.iter().skip(1).collect();
+    let file_steps: Vec<&GuidedReviewStep> = input.candidate_steps.iter().skip(1).collect();
 
     let mut prioritized = input.review_threads.clone();
     prioritized.sort_by_key(|thread| thread.is_resolved);
@@ -422,14 +422,14 @@ fn build_prompt_context(input: &GenerateCodeTourInput) -> Value {
             }))
             .collect::<Vec<_>>(),
         "overviewStep": overview_step.map(summarize_step),
-        "sectionCategoryCatalog": TourSectionCategory::all()
+        "sectionCategoryCatalog": GuidedReviewSectionCategory::all()
             .iter()
             .map(|category| json!({
                 "value": category.slug(),
                 "label": category.label(),
             }))
             .collect::<Vec<_>>(),
-        "sectionPriorityCatalog": TourSectionPriority::all()
+        "sectionPriorityCatalog": GuidedReviewSectionPriority::all()
             .iter()
             .map(|priority| json!({
                 "value": priority.slug(),
@@ -465,7 +465,7 @@ struct CandidateStepSummary<'a> {
     snippet: Option<String>,
 }
 
-fn summarize_step(step: &TourStep) -> Value {
+fn summarize_step(step: &GuidedReviewStep) -> Value {
     let summary = CandidateStepSummary {
         id: &step.id,
         kind: &step.kind,
@@ -486,7 +486,7 @@ fn summarize_step(step: &TourStep) -> Value {
     serde_json::to_value(summary).expect("summary must serialize")
 }
 
-fn summarize_group(group: &CodeTourCandidateGroup) -> Value {
+fn summarize_group(group: &GuidedReviewCandidateGroup) -> Value {
     json!({
         "id": group.id,
         "title": group.title,
@@ -499,21 +499,21 @@ fn summarize_group(group: &CodeTourCandidateGroup) -> Value {
 // Keep unused imports used
 #[allow(dead_code)]
 fn _references_types(
-    _: &CodeTourFileContext,
-    _: &CodeTourReviewContext,
-    _: &CodeTourReviewCommentContext,
-    _: &CodeTourReviewThreadContext,
+    _: &GuidedReviewFileContext,
+    _: &GuidedReviewReviewContext,
+    _: &GuidedReviewReviewCommentContext,
+    _: &GuidedReviewReviewThreadContext,
 ) {
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_tour::{CodeTourProvider, GenerateCodeTourInput, TourStep};
+    use crate::guided_review::{GenerateGuidedReviewInput, GuidedReviewStep, ReviewAiProvider};
 
-    fn sample_input() -> GenerateCodeTourInput {
-        GenerateCodeTourInput {
-            provider: CodeTourProvider::Codex,
+    fn sample_input() -> GenerateGuidedReviewInput {
+        GenerateGuidedReviewInput {
+            provider: ReviewAiProvider::Codex,
             working_directory: "/tmp/repo".to_string(),
             repository: "owner/name".to_string(),
             number: 42,
@@ -536,7 +536,7 @@ mod tests {
             latest_reviews: vec![],
             review_threads: vec![],
             review_memory: crate::review_memory::ReviewMemoryPromptContext::default(),
-            candidate_steps: vec![TourStep {
+            candidate_steps: vec![GuidedReviewStep {
                 id: "overview".to_string(),
                 kind: "overview".to_string(),
                 title: "3 files, 2 commits".to_string(),
@@ -556,11 +556,11 @@ mod tests {
 
     #[test]
     fn builds_prompt_with_schema_and_context() {
-        let prompt = build_tour_prompt(&sample_input());
+        let prompt = build_guided_review_prompt(&sample_input());
         assert!(prompt.contains("JSON schema:"));
         assert!(prompt.contains("Pull-request context:"));
         assert!(prompt.contains("\"repository\": \"owner/name\""));
-        assert!(prompt.contains("You are generating a guided code tour"));
+        assert!(prompt.contains("You are generating a Guided Review walkthrough"));
         assert!(prompt.contains("sectionCategoryCatalog"));
         assert!(prompt.contains("\"value\": \"auth-security\""));
         assert!(prompt.contains("sectionPriorityCatalog"));

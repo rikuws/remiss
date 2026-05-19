@@ -2,9 +2,10 @@ use std::collections::{HashMap, HashSet};
 
 use serde::Deserialize;
 
-use crate::code_tour::{
-    CodeTourCandidateGroup, GenerateCodeTourInput, GeneratedCodeTour, TourCallsite, TourSection,
-    TourSectionCategory, TourSectionPriority, TourStep,
+use crate::guided_review::{
+    GenerateGuidedReviewInput, GeneratedGuidedReview, GuidedReviewCallsite,
+    GuidedReviewCandidateGroup, GuidedReviewSection, GuidedReviewSectionCategory,
+    GuidedReviewSectionPriority, GuidedReviewStep,
 };
 
 use super::prompt::trim_text;
@@ -15,7 +16,7 @@ pub const MAX_CALLSITES_PER_SECTION: usize = 3;
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct TourResponse {
+pub struct GuidedReviewResponse {
     #[serde(default)]
     pub summary: Option<String>,
     #[serde(default)]
@@ -25,16 +26,16 @@ pub struct TourResponse {
     #[serde(default)]
     pub warnings: Vec<String>,
     #[serde(default)]
-    pub overview: Option<TourResponseOverview>,
+    pub overview: Option<GuidedReviewResponseOverview>,
     #[serde(default)]
-    pub steps: Vec<TourResponseStep>,
+    pub steps: Vec<GuidedReviewResponseStep>,
     #[serde(default)]
-    pub sections: Vec<TourResponseSection>,
+    pub sections: Vec<GuidedReviewResponseSection>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct TourResponseOverview {
+pub struct GuidedReviewResponseOverview {
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
@@ -47,7 +48,7 @@ pub struct TourResponseOverview {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct TourResponseStep {
+pub struct GuidedReviewResponseStep {
     #[serde(default)]
     pub source_step_id: Option<String>,
     #[serde(default)]
@@ -62,7 +63,7 @@ pub struct TourResponseStep {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct TourResponseSection {
+pub struct GuidedReviewResponseSection {
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
@@ -80,12 +81,12 @@ pub struct TourResponseSection {
     #[serde(default)]
     pub review_points: Vec<String>,
     #[serde(default)]
-    pub callsites: Vec<TourResponseCallsite>,
+    pub callsites: Vec<GuidedReviewResponseCallsite>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct TourResponseCallsite {
+pub struct GuidedReviewResponseCallsite {
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
@@ -98,12 +99,12 @@ pub struct TourResponseCallsite {
     pub snippet: Option<String>,
 }
 
-pub fn merge_tour(
-    response: TourResponse,
-    input: &GenerateCodeTourInput,
+pub fn merge_guided_review(
+    response: GuidedReviewResponse,
+    input: &GenerateGuidedReviewInput,
     model: Option<String>,
-) -> GeneratedCodeTour {
-    let mut candidate_steps_by_id: HashMap<String, TourStep> = HashMap::new();
+) -> GeneratedGuidedReview {
+    let mut candidate_steps_by_id: HashMap<String, GuidedReviewStep> = HashMap::new();
     for step in &input.candidate_steps {
         candidate_steps_by_id.insert(step.id.clone(), step.clone());
     }
@@ -113,8 +114,8 @@ pub fn merge_tour(
         .cloned()
         .or_else(|| input.candidate_steps.first().cloned());
 
-    let mut merged_steps_by_id: HashMap<String, TourStep> = HashMap::new();
-    let mut overview_step: Option<TourStep> = None;
+    let mut merged_steps_by_id: HashMap<String, GuidedReviewStep> = HashMap::new();
+    let mut overview_step: Option<GuidedReviewStep> = None;
 
     if let Some(candidate) = overview_candidate {
         let overview = response.overview.clone().unwrap_or_default();
@@ -150,7 +151,7 @@ pub fn merge_tour(
     }
 
     let mut used_step_ids: HashSet<String> = HashSet::new();
-    let mut merged_sections: Vec<TourSection> = Vec::new();
+    let mut merged_sections: Vec<GuidedReviewSection> = Vec::new();
 
     for item in response.sections.iter().take(MAX_SECTIONS) {
         let step_ids: Vec<String> = unique_step_ids(&item.step_ids)
@@ -168,7 +169,7 @@ pub fn merge_tour(
             continue;
         }
 
-        let section_steps: Vec<&TourStep> = step_ids
+        let section_steps: Vec<&GuidedReviewStep> = step_ids
             .iter()
             .filter_map(|step_id| merged_steps_by_id.get(step_id))
             .collect();
@@ -176,7 +177,7 @@ pub fn merge_tour(
         let priority = response_section_priority(item.priority.as_deref(), &section_steps);
 
         let next_id = format!("section:{}", merged_sections.len() + 1);
-        merged_sections.push(TourSection {
+        merged_sections.push(GuidedReviewSection {
             id: next_id,
             title: fallback_text(
                 item.title.as_deref(),
@@ -212,13 +213,13 @@ pub fn merge_tour(
         &mut used_step_ids,
     ) {
         let next_id = format!("section:{}", merged_sections.len() + 1);
-        merged_sections.push(TourSection {
+        merged_sections.push(GuidedReviewSection {
             id: next_id,
             ..section
         });
     }
 
-    let mut merged_steps: Vec<TourStep> = Vec::new();
+    let mut merged_steps: Vec<GuidedReviewStep> = Vec::new();
     if let Some(step) = overview_step {
         merged_steps.push(step);
     }
@@ -231,13 +232,13 @@ pub fn merge_tour(
         }
     }
 
-    GeneratedCodeTour {
+    GeneratedGuidedReview {
         provider: input.provider,
         model,
         generated_at: iso_now(),
         summary: fallback_text(
             response.summary.as_deref(),
-            "AI-generated tour focused on the most reviewable parts of this pull request.",
+            "AI-generated guided review focused on the most reviewable parts of this pull request.",
         ),
         review_focus: fallback_text(
             response.review_focus.as_deref(),
@@ -250,15 +251,15 @@ pub fn merge_tour(
     }
 }
 
-pub fn build_copilot_fallback_tour(
-    input: &GenerateCodeTourInput,
+pub fn build_copilot_fallback_guided_review(
+    input: &GenerateGuidedReviewInput,
     model: Option<String>,
     reason: String,
-) -> GeneratedCodeTour {
+) -> GeneratedGuidedReview {
     let warning = trim_text(&reason, 240);
-    let response = TourResponse {
+    let response = GuidedReviewResponse {
         summary: Some(
-            "Fallback code tour assembled from the verified pull-request context and grouped changed files."
+            "Fallback Guided Review walkthrough assembled from the verified pull-request context and grouped changed files."
                 .to_string(),
         ),
         review_focus: Some(
@@ -276,17 +277,17 @@ pub fn build_copilot_fallback_tour(
         sections: Vec::new(),
     };
 
-    merge_tour(response, input, model)
+    merge_guided_review(response, input, model)
 }
 
 fn merge_step(
-    candidate: &TourStep,
+    candidate: &GuidedReviewStep,
     title: Option<&str>,
     summary: Option<&str>,
     detail: Option<&str>,
     badge: Option<&str>,
-) -> TourStep {
-    TourStep {
+) -> GuidedReviewStep {
+    GuidedReviewStep {
         id: candidate.id.clone(),
         kind: candidate.kind.clone(),
         title: fallback_text(title, &candidate.title),
@@ -326,18 +327,24 @@ fn unique_step_ids(values: &[String]) -> Vec<String> {
     ordered
 }
 
-fn response_section_category(value: Option<&str>, steps: &[&TourStep]) -> TourSectionCategory {
+fn response_section_category(
+    value: Option<&str>,
+    steps: &[&GuidedReviewStep],
+) -> GuidedReviewSectionCategory {
     match value.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(raw) => TourSectionCategory::from_slug(raw).unwrap_or(TourSectionCategory::Other),
+        Some(raw) => GuidedReviewSectionCategory::from_slug(raw)
+            .unwrap_or(GuidedReviewSectionCategory::Other),
         None => fallback_section_category(steps),
     }
 }
 
-fn response_section_priority(value: Option<&str>, steps: &[&TourStep]) -> TourSectionPriority {
+fn response_section_priority(
+    value: Option<&str>,
+    steps: &[&GuidedReviewStep],
+) -> GuidedReviewSectionPriority {
     match value.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(raw) => {
-            TourSectionPriority::from_slug(raw).unwrap_or_else(|| fallback_section_priority(steps))
-        }
+        Some(raw) => GuidedReviewSectionPriority::from_slug(raw)
+            .unwrap_or_else(|| fallback_section_priority(steps)),
         None => fallback_section_priority(steps),
     }
 }
@@ -361,9 +368,12 @@ fn sanitize_string_array(values: &[String], limit: usize) -> Vec<String> {
     items
 }
 
-fn sanitize_callsites(values: &[TourResponseCallsite], limit: usize) -> Vec<TourCallsite> {
+fn sanitize_callsites(
+    values: &[GuidedReviewResponseCallsite],
+    limit: usize,
+) -> Vec<GuidedReviewCallsite> {
     let mut seen: HashSet<String> = HashSet::new();
-    let mut items: Vec<TourCallsite> = Vec::new();
+    let mut items: Vec<GuidedReviewCallsite> = Vec::new();
 
     for entry in values {
         let path = entry
@@ -415,7 +425,7 @@ fn sanitize_callsites(values: &[TourResponseCallsite], limit: usize) -> Vec<Tour
         }
         seen.insert(key);
 
-        items.push(TourCallsite {
+        items.push(GuidedReviewCallsite {
             title,
             path: path.to_string(),
             line,
@@ -432,11 +442,11 @@ fn sanitize_callsites(values: &[TourResponseCallsite], limit: usize) -> Vec<Tour
 }
 
 fn build_fallback_sections(
-    candidate_groups: &[CodeTourCandidateGroup],
-    merged_steps_by_id: &HashMap<String, TourStep>,
+    candidate_groups: &[GuidedReviewCandidateGroup],
+    merged_steps_by_id: &HashMap<String, GuidedReviewStep>,
     used_step_ids: &mut HashSet<String>,
-) -> Vec<TourSection> {
-    let mut sections: Vec<TourSection> = Vec::new();
+) -> Vec<GuidedReviewSection> {
+    let mut sections: Vec<GuidedReviewSection> = Vec::new();
 
     for group in candidate_groups {
         let step_ids: Vec<String> = unique_step_ids(&group.step_ids)
@@ -454,12 +464,12 @@ fn build_fallback_sections(
             continue;
         }
 
-        let section_steps: Vec<&TourStep> = step_ids
+        let section_steps: Vec<&GuidedReviewStep> = step_ids
             .iter()
             .filter_map(|step_id| merged_steps_by_id.get(step_id))
             .collect();
 
-        sections.push(TourSection {
+        sections.push(GuidedReviewSection {
             id: String::new(),
             title: fallback_text(Some(&group.title), &fallback_section_title(&section_steps)),
             summary: fallback_text(
@@ -488,12 +498,12 @@ fn build_fallback_sections(
     remaining_step_ids.sort();
 
     if !remaining_step_ids.is_empty() {
-        let section_steps: Vec<&TourStep> = remaining_step_ids
+        let section_steps: Vec<&GuidedReviewStep> = remaining_step_ids
             .iter()
             .filter_map(|step_id| merged_steps_by_id.get(step_id))
             .collect();
 
-        sections.push(TourSection {
+        sections.push(GuidedReviewSection {
             id: String::new(),
             title: "Remaining changed files".to_string(),
             summary: fallback_section_summary(&section_steps),
@@ -514,7 +524,7 @@ fn build_fallback_sections(
     sections
 }
 
-fn fallback_section_title(steps: &[&TourStep]) -> String {
+fn fallback_section_title(steps: &[&GuidedReviewStep]) -> String {
     if steps.is_empty() {
         return "Related changes".to_string();
     }
@@ -524,7 +534,7 @@ fn fallback_section_title(steps: &[&TourStep]) -> String {
     format!("Related changes across {} files", steps.len())
 }
 
-fn fallback_section_summary(steps: &[&TourStep]) -> String {
+fn fallback_section_summary(steps: &[&GuidedReviewStep]) -> String {
     if steps.is_empty() {
         return "Grouped changes from the pull request.".to_string();
     }
@@ -544,14 +554,14 @@ fn fallback_section_summary(steps: &[&TourStep]) -> String {
     }
 }
 
-fn fallback_section_detail(steps: &[&TourStep]) -> String {
+fn fallback_section_detail(steps: &[&GuidedReviewStep]) -> String {
     if steps.iter().any(|step| step.unresolved_thread_count > 0) {
         return "Review these files together and carry the open review discussion across the whole slice of the change.".to_string();
     }
     "Review these files together to trace how the behavior moves through this part of the repository before dropping into the raw diff.".to_string()
 }
 
-fn fallback_section_badge(steps: &[&TourStep]) -> String {
+fn fallback_section_badge(steps: &[&GuidedReviewStep]) -> String {
     if steps.iter().any(|step| step.unresolved_thread_count > 0) {
         return "discussion".to_string();
     }
@@ -567,7 +577,7 @@ fn fallback_section_badge(steps: &[&TourStep]) -> String {
         .unwrap_or_else(|| "focus".to_string())
 }
 
-fn fallback_section_category(steps: &[&TourStep]) -> TourSectionCategory {
+fn fallback_section_category(steps: &[&GuidedReviewStep]) -> GuidedReviewSectionCategory {
     let haystack = steps
         .iter()
         .map(|step| {
@@ -598,7 +608,7 @@ fn fallback_section_category(steps: &[&TourStep]) -> TourSectionCategory {
             "security",
         ],
     ) {
-        return TourSectionCategory::AuthSecurity;
+        return GuidedReviewSectionCategory::AuthSecurity;
     }
     if contains_any(
         &haystack,
@@ -606,13 +616,13 @@ fn fallback_section_category(steps: &[&TourStep]) -> TourSectionCategory {
             "test", "tests/", "spec", "fixture", "mock", "snapshot", "assert",
         ],
     ) {
-        return TourSectionCategory::Tests;
+        return GuidedReviewSectionCategory::Tests;
     }
     if contains_any(
         &haystack,
         &["docs/", ".md", "readme", "guide", "documentation"],
     ) {
-        return TourSectionCategory::Docs;
+        return GuidedReviewSectionCategory::Docs;
     }
     if contains_any(
         &haystack,
@@ -620,7 +630,7 @@ fn fallback_section_category(steps: &[&TourStep]) -> TourSectionCategory {
             ".toml", ".json", ".yaml", ".yml", ".lock", "config", "settings",
         ],
     ) {
-        return TourSectionCategory::Config;
+        return GuidedReviewSectionCategory::Config;
     }
     if contains_any(
         &haystack,
@@ -635,7 +645,7 @@ fn fallback_section_category(steps: &[&TourStep]) -> TourSectionCategory {
             "kubernetes",
         ],
     ) {
-        return TourSectionCategory::Infra;
+        return GuidedReviewSectionCategory::Infra;
     }
     if contains_any(
         &haystack,
@@ -651,7 +661,7 @@ fn fallback_section_category(steps: &[&TourStep]) -> TourSectionCategory {
             "style",
         ],
     ) {
-        return TourSectionCategory::UiUx;
+        return GuidedReviewSectionCategory::UiUx;
     }
     if contains_any(
         &haystack,
@@ -660,7 +670,7 @@ fn fallback_section_category(steps: &[&TourStep]) -> TourSectionCategory {
             "webhook",
         ],
     ) {
-        return TourSectionCategory::ApiIo;
+        return GuidedReviewSectionCategory::ApiIo;
     }
     if contains_any(
         &haystack,
@@ -676,13 +686,13 @@ fn fallback_section_category(steps: &[&TourStep]) -> TourSectionCategory {
             "serde",
         ],
     ) {
-        return TourSectionCategory::DataState;
+        return GuidedReviewSectionCategory::DataState;
     }
     if contains_any(
         &haystack,
         &["performance", "perf", "latency", "throughput", "allocation"],
     ) {
-        return TourSectionCategory::Performance;
+        return GuidedReviewSectionCategory::Performance;
     }
     if contains_any(
         &haystack,
@@ -695,19 +705,19 @@ fn fallback_section_category(steps: &[&TourStep]) -> TourSectionCategory {
             "timeout",
         ],
     ) {
-        return TourSectionCategory::Reliability;
+        return GuidedReviewSectionCategory::Reliability;
     }
     if contains_any(
         &haystack,
         &["refactor", "rename", "extract", "inline", "move", "cleanup"],
     ) {
-        return TourSectionCategory::Refactor;
+        return GuidedReviewSectionCategory::Refactor;
     }
 
-    TourSectionCategory::Other
+    GuidedReviewSectionCategory::Other
 }
 
-fn fallback_section_priority(steps: &[&TourStep]) -> TourSectionPriority {
+fn fallback_section_priority(steps: &[&GuidedReviewStep]) -> GuidedReviewSectionPriority {
     let file_count = steps.len();
     let total_delta: i64 = steps
         .iter()
@@ -716,16 +726,16 @@ fn fallback_section_priority(steps: &[&TourStep]) -> TourSectionPriority {
     let unresolved_thread_count: i64 = steps.iter().map(|step| step.unresolved_thread_count).sum();
 
     if unresolved_thread_count > 0 || total_delta >= 220 || file_count >= 8 {
-        TourSectionPriority::High
+        GuidedReviewSectionPriority::High
     } else if total_delta >= 60
         || file_count >= 3
         || steps
             .iter()
             .any(|step| matches!(step.badge.as_str(), "added" | "deleted" | "renamed"))
     {
-        TourSectionPriority::Medium
+        GuidedReviewSectionPriority::Medium
     } else {
-        TourSectionPriority::Low
+        GuidedReviewSectionPriority::Low
     }
 }
 
@@ -733,7 +743,7 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
 }
 
-fn fallback_section_review_points(steps: &[&TourStep]) -> Vec<String> {
+fn fallback_section_review_points(steps: &[&GuidedReviewStep]) -> Vec<String> {
     let mut points: Vec<String> = Vec::new();
 
     if steps.len() > 1 {
@@ -845,14 +855,15 @@ const _: () = ();
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_tour::{
-        CodeTourCandidateGroup, CodeTourProvider, DiffAnchor, GenerateCodeTourInput,
-        TourSectionCategory, TourSectionPriority, TourStep,
+    use crate::guided_review::{
+        DiffAnchor, GenerateGuidedReviewInput, GuidedReviewCandidateGroup,
+        GuidedReviewSectionCategory, GuidedReviewSectionPriority, GuidedReviewStep,
+        ReviewAiProvider,
     };
 
-    fn sample_input() -> GenerateCodeTourInput {
-        GenerateCodeTourInput {
-            provider: CodeTourProvider::Codex,
+    fn sample_input() -> GenerateGuidedReviewInput {
+        GenerateGuidedReviewInput {
+            provider: ReviewAiProvider::Codex,
             working_directory: "/tmp/repo".to_string(),
             repository: "owner/name".to_string(),
             number: 1,
@@ -876,7 +887,7 @@ mod tests {
             review_threads: Vec::new(),
             review_memory: crate::review_memory::ReviewMemoryPromptContext::default(),
             candidate_steps: vec![
-                TourStep {
+                GuidedReviewStep {
                     id: "overview".into(),
                     kind: "overview".into(),
                     title: "Overview".into(),
@@ -890,7 +901,7 @@ mod tests {
                     snippet: None,
                     badge: "ready".into(),
                 },
-                TourStep {
+                GuidedReviewStep {
                     id: "file:a".into(),
                     kind: "file".into(),
                     title: "a".into(),
@@ -910,7 +921,7 @@ mod tests {
                     snippet: None,
                     badge: "modified".into(),
                 },
-                TourStep {
+                GuidedReviewStep {
                     id: "file:b".into(),
                     kind: "file".into(),
                     title: "b".into(),
@@ -925,7 +936,7 @@ mod tests {
                     badge: "modified".into(),
                 },
             ],
-            candidate_groups: vec![CodeTourCandidateGroup {
+            candidate_groups: vec![GuidedReviewCandidateGroup {
                 id: "group:1".into(),
                 title: "Group".into(),
                 summary: "grouped".into(),
@@ -936,9 +947,9 @@ mod tests {
     }
 
     #[test]
-    fn merge_tour_uses_fallback_sections_when_response_has_none() {
+    fn merge_guided_review_uses_fallback_sections_when_response_has_none() {
         let input = sample_input();
-        let tour = merge_tour(TourResponse::default(), &input, None);
+        let tour = merge_guided_review(GuidedReviewResponse::default(), &input, None);
         assert_eq!(tour.sections.len(), 1);
         assert_eq!(tour.sections[0].step_ids, vec!["file:a", "file:b"]);
         // overview + 2 file steps
@@ -947,25 +958,25 @@ mod tests {
     }
 
     #[test]
-    fn merge_tour_honors_response_overrides() {
+    fn merge_guided_review_honors_response_overrides() {
         let input = sample_input();
-        let response = TourResponse {
+        let response = GuidedReviewResponse {
             summary: Some("Custom summary".into()),
             review_focus: Some("Custom focus".into()),
-            overview: Some(TourResponseOverview {
+            overview: Some(GuidedReviewResponseOverview {
                 title: Some("Custom overview".into()),
                 summary: Some("Overview summary".into()),
                 detail: Some("Overview detail".into()),
                 badge: Some("custom".into()),
             }),
-            steps: vec![TourResponseStep {
+            steps: vec![GuidedReviewResponseStep {
                 source_step_id: Some("file:a".into()),
                 title: Some("Inspected A".into()),
                 summary: Some("A summary".into()),
                 detail: Some("A detail".into()),
                 badge: Some("focus".into()),
             }],
-            sections: vec![TourResponseSection {
+            sections: vec![GuidedReviewResponseSection {
                 title: Some("Section 1".into()),
                 summary: Some("Section summary".into()),
                 detail: Some("Section detail".into()),
@@ -974,7 +985,7 @@ mod tests {
                 priority: Some("high".into()),
                 step_ids: vec!["file:a".into(), "file:a".into(), "file:b".into()],
                 review_points: vec!["point".into()],
-                callsites: vec![TourResponseCallsite {
+                callsites: vec![GuidedReviewResponseCallsite {
                     title: None,
                     path: Some("a".into()),
                     line: Some(10),
@@ -985,14 +996,17 @@ mod tests {
             ..Default::default()
         };
 
-        let tour = merge_tour(response, &input, Some("gpt-5".into()));
+        let tour = merge_guided_review(response, &input, Some("gpt-5".into()));
         assert_eq!(tour.summary, "Custom summary");
         assert_eq!(tour.review_focus, "Custom focus");
         assert_eq!(tour.sections.len(), 1);
         assert_eq!(tour.sections[0].step_ids, vec!["file:a", "file:b"]);
         assert_eq!(tour.sections[0].title, "Section 1");
-        assert_eq!(tour.sections[0].category, TourSectionCategory::AuthSecurity);
-        assert_eq!(tour.sections[0].priority, TourSectionPriority::High);
+        assert_eq!(
+            tour.sections[0].category,
+            GuidedReviewSectionCategory::AuthSecurity
+        );
+        assert_eq!(tour.sections[0].priority, GuidedReviewSectionPriority::High);
         assert_eq!(tour.sections[0].review_points, vec!["point"]);
         assert_eq!(tour.sections[0].callsites.len(), 1);
         assert_eq!(tour.sections[0].callsites[0].title, "Callsite in a:10");
@@ -1005,7 +1019,7 @@ mod tests {
     #[test]
     fn fallback_tour_includes_reason_as_warning() {
         let input = sample_input();
-        let tour = build_copilot_fallback_tour(
+        let tour = build_copilot_fallback_guided_review(
             &input,
             Some("gpt-5".into()),
             "Copilot failed to return structured output.".into(),
@@ -1015,9 +1029,9 @@ mod tests {
     }
 
     #[test]
-    fn merge_tour_validates_group_metadata_and_preserves_file_coverage() {
+    fn merge_guided_review_validates_group_metadata_and_preserves_file_coverage() {
         let mut input = sample_input();
-        input.candidate_steps.push(TourStep {
+        input.candidate_steps.push(GuidedReviewStep {
             id: "file:c".into(),
             kind: "file".into(),
             title: "c".into(),
@@ -1032,9 +1046,9 @@ mod tests {
             badge: "modified".into(),
         });
 
-        let response = TourResponse {
+        let response = GuidedReviewResponse {
             sections: vec![
-                TourResponseSection {
+                GuidedReviewResponseSection {
                     title: Some("Security path".into()),
                     summary: Some("Security summary".into()),
                     detail: Some("Security detail".into()),
@@ -1045,7 +1059,7 @@ mod tests {
                     review_points: Vec::new(),
                     callsites: Vec::new(),
                 },
-                TourResponseSection {
+                GuidedReviewResponseSection {
                     title: Some("Invalid metadata".into()),
                     summary: Some("Invalid summary".into()),
                     detail: Some("Invalid detail".into()),
@@ -1060,14 +1074,20 @@ mod tests {
             ..Default::default()
         };
 
-        let tour = merge_tour(response, &input, None);
+        let tour = merge_guided_review(response, &input, None);
         assert_eq!(tour.sections.len(), 3);
         assert_eq!(tour.sections[0].step_ids, vec!["file:a"]);
-        assert_eq!(tour.sections[0].category, TourSectionCategory::AuthSecurity);
-        assert_eq!(tour.sections[0].priority, TourSectionPriority::High);
+        assert_eq!(
+            tour.sections[0].category,
+            GuidedReviewSectionCategory::AuthSecurity
+        );
+        assert_eq!(tour.sections[0].priority, GuidedReviewSectionPriority::High);
         assert_eq!(tour.sections[1].step_ids, vec!["file:b"]);
-        assert_eq!(tour.sections[1].category, TourSectionCategory::Other);
-        assert_eq!(tour.sections[1].priority, TourSectionPriority::Low);
+        assert_eq!(
+            tour.sections[1].category,
+            GuidedReviewSectionCategory::Other
+        );
+        assert_eq!(tour.sections[1].priority, GuidedReviewSectionPriority::Low);
         assert_eq!(tour.sections[2].step_ids, vec!["file:c"]);
 
         let covered_step_ids = tour
@@ -1087,6 +1107,6 @@ mod tests {
 
     #[test]
     fn _provider_types_compile() {
-        let _ = CodeTourProvider::Codex;
+        let _ = ReviewAiProvider::Codex;
     }
 }

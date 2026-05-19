@@ -1,15 +1,15 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use crate::code_tour::{
-    tour_code_version_key, CodeTourProvider, DiffAnchor, GeneratedCodeTour, TourSection,
-    TourSectionCategory, TourSectionPriority, TourStep,
-};
 use crate::diff::parse_unified_diff;
 use crate::github::{
     AuthState, PendingPullRequestReview, PullRequestDataCompleteness, PullRequestDetail,
     PullRequestDetailSnapshot, PullRequestFile, PullRequestReviewComment, PullRequestReviewThread,
     PullRequestSummary,
+};
+use crate::guided_review::{
+    guided_review_code_version_key, DiffAnchor, GeneratedGuidedReview, GuidedReviewSection,
+    GuidedReviewSectionCategory, GuidedReviewSectionPriority, GuidedReviewStep, ReviewAiProvider,
 };
 use crate::review_brief::{ReviewBrief, ReviewBriefConfidence};
 use crate::review_partner::{
@@ -132,9 +132,9 @@ pub fn detail() -> PullRequestDetail {
 
 pub fn review_brief(detail: &PullRequestDetail) -> ReviewBrief {
     ReviewBrief {
-        provider: CodeTourProvider::Codex,
+        provider: ReviewAiProvider::Codex,
         generated_at_ms: GENERATED_AT,
-        code_version_key: tour_code_version_key(detail),
+        code_version_key: guided_review_code_version_key(detail),
         confidence: ReviewBriefConfidence::High,
         reading_mode: crate::review_brief::ReviewBriefReadingMode::Scan,
         brief_paragraph: "This tutorial PR adds a compact review feedback toolbar path and a regression test for preserving draft context.".to_string(),
@@ -160,7 +160,7 @@ pub fn review_brief(detail: &PullRequestDetail) -> ReviewBrief {
     }
 }
 
-pub fn generated_tour() -> GeneratedCodeTour {
+pub fn generated_tour() -> GeneratedGuidedReview {
     let first_anchor = DiffAnchor {
         file_path: "src/review_toolbar.rs".to_string(),
         hunk_header: Some("@@ -1,18 +1,28 @@".to_string()),
@@ -176,8 +176,8 @@ pub fn generated_tour() -> GeneratedCodeTour {
         thread_id: None,
     };
 
-    GeneratedCodeTour {
-        provider: CodeTourProvider::Codex,
+    GeneratedGuidedReview {
+        provider: ReviewAiProvider::Codex,
         model: Some("tutorial-fixture".to_string()),
         generated_at: UPDATED_AT.to_string(),
         summary:
@@ -189,15 +189,15 @@ pub fn generated_tour() -> GeneratedCodeTour {
                 .to_string(),
         ],
         warnings: Vec::new(),
-        sections: vec![TourSection {
+        sections: vec![GuidedReviewSection {
             id: "feedback-flow".to_string(),
             title: "Feedback flow".to_string(),
             summary: "The toolbar now keeps waypoints and pending review state together."
                 .to_string(),
             detail: "Review the UI state calculation before reading the test.".to_string(),
             badge: "Review".to_string(),
-            category: TourSectionCategory::UiUx,
-            priority: TourSectionPriority::High,
+            category: GuidedReviewSectionCategory::UiUx,
+            priority: GuidedReviewSectionPriority::High,
             step_ids: vec!["toolbar-state".to_string(), "toolbar-test".to_string()],
             review_points: vec![
                 "Confirm the button state matches pending comments.".to_string(),
@@ -206,7 +206,7 @@ pub fn generated_tour() -> GeneratedCodeTour {
             callsites: Vec::new(),
         }],
         steps: vec![
-            TourStep {
+            GuidedReviewStep {
                 id: "toolbar-state".to_string(),
                 kind: "diff".to_string(),
                 title: "Toolbar state".to_string(),
@@ -221,7 +221,7 @@ pub fn generated_tour() -> GeneratedCodeTour {
                 snippet: Some("ReviewToolbarState { pending_comments, waypoints }".to_string()),
                 badge: "UI".to_string(),
             },
-            TourStep {
+            GuidedReviewStep {
                 id: "toolbar-test".to_string(),
                 kind: "test".to_string(),
                 title: "Regression test".to_string(),
@@ -426,10 +426,10 @@ pub fn review_partner(
         generated_at_ms: GENERATED_AT,
     };
     GeneratedReviewPartnerContext {
-        provider: CodeTourProvider::Codex,
+        provider: ReviewAiProvider::Codex,
         model: Some("tutorial-fixture".to_string()),
         generated_at_ms: GENERATED_AT,
-        code_version_key: tour_code_version_key(detail),
+        code_version_key: guided_review_code_version_key(detail),
         generator_version: REVIEW_PARTNER_GENERATOR_VERSION.to_string(),
         context_version: REVIEW_PARTNER_CONTEXT_VERSION.to_string(),
         structural_evidence_version: STRUCTURAL_EVIDENCE_VERSION.to_string(),
@@ -551,7 +551,7 @@ pub fn review_session() -> ReviewSessionDocument {
             title: "Feedback flow".to_string(),
             summary: "Review the toolbar state, then verify the regression test.".to_string(),
             stops: vec![
-                ReviewLocation::from_ai_tour(
+                ReviewLocation::from_guided_review(
                     "src/review_toolbar.rs",
                     Some(DiffAnchor {
                         file_path: "src/review_toolbar.rs".to_string(),
@@ -561,7 +561,7 @@ pub fn review_session() -> ReviewSessionDocument {
                         thread_id: None,
                     }),
                 ),
-                ReviewLocation::from_ai_tour(
+                ReviewLocation::from_guided_review(
                     "tests/review_toolbar_test.rs",
                     Some(DiffAnchor {
                         file_path: "tests/review_toolbar_test.rs".to_string(),
@@ -598,11 +598,11 @@ pub fn request_key(detail: &PullRequestDetail) -> String {
     )
 }
 
-pub fn tour_states() -> HashMap<CodeTourProvider, crate::state::CodeTourState> {
+pub fn guided_review_states() -> HashMap<ReviewAiProvider, crate::state::GuidedReviewState> {
     let mut states = HashMap::new();
     states.insert(
-        CodeTourProvider::Codex,
-        crate::state::CodeTourState {
+        ReviewAiProvider::Codex,
+        crate::state::GuidedReviewState {
             request_key: Some(TUTORIAL_PR_KEY.to_string()),
             document: Some(generated_tour()),
             loading: false,
@@ -805,7 +805,7 @@ pub fn apply_fixture_to_detail_state(detail_state: &mut crate::state::DetailStat
         message: Some("Tutorial review stack loaded locally.".to_string()),
         success: true,
     };
-    detail_state.tour_states = tour_states();
+    detail_state.guided_review_states = guided_review_states();
     detail_state.review_session =
         crate::review_session::ReviewSessionState::from_document(review_session());
     detail_state.stack_open_pull_requests = Some(Vec::new());

@@ -19,10 +19,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     cache::CacheStore,
-    code_tour::tour_code_version_key,
     diff::{ParsedDiffFile, ParsedDiffHunk},
     github::{PullRequestDetail, PullRequestFile},
     local_documents,
+    review_ai::review_code_version_key,
     stacks::model::{ChangeAtom, LineRange},
     structural_diff::{build_structural_diff_request, StructuralDiffSideRequest},
 };
@@ -218,7 +218,7 @@ fn build_semantic_review_from_changes(
     RemissSemanticReview {
         version: REMISS_SEMANTIC_REVIEW_VERSION.to_string(),
         sem_api_version: SEM_EMBEDDED_API_VERSION.to_string(),
-        code_version_key: tour_code_version_key(detail),
+        code_version_key: review_code_version_key(detail),
         analysis,
         layers,
         layer_atom_mappings,
@@ -240,7 +240,7 @@ pub fn semantic_review_cache_key(
         "{SEMANTIC_REVIEW_CACHE_PREFIX}:{}#{}:{}:{}:{}",
         detail.repository,
         detail.number,
-        tour_code_version_key(detail),
+        review_code_version_key(detail),
         semantic_review_version_key(),
         head_identity,
     ))
@@ -330,7 +330,7 @@ pub fn load_semantic_file_contents(
     let mut warnings = Vec::new();
 
     for file in &detail.files {
-        let parsed = crate::code_tour::find_parsed_diff_file(&detail.parsed_diff, &file.path);
+        let parsed = crate::guided_review::find_parsed_diff_file(&detail.parsed_diff, &file.path);
         if parsed.map(|parsed| parsed.is_binary).unwrap_or(false) {
             warnings.push(format!(
                 "Semantic evidence is unavailable for binary file {}.",
@@ -1001,7 +1001,7 @@ fn unavailable_semantic_review(
     RemissSemanticReview {
         version: REMISS_SEMANTIC_REVIEW_VERSION.to_string(),
         sem_api_version: SEM_EMBEDDED_API_VERSION.to_string(),
-        code_version_key: tour_code_version_key(detail),
+        code_version_key: review_code_version_key(detail),
         analysis: analyze_file_changes(&changes, &options),
         layers: generate_review_layers(&changes, &SemLayerGenerationOptions::default(), &options),
         layer_atom_mappings: Vec::new(),
@@ -1016,7 +1016,7 @@ fn semantic_review_matches_current(
 ) -> bool {
     review.version == REMISS_SEMANTIC_REVIEW_VERSION
         && review.sem_api_version == SEM_EMBEDDED_API_VERSION
-        && review.code_version_key == tour_code_version_key(detail)
+        && review.code_version_key == review_code_version_key(detail)
 }
 
 fn semantic_review_head_identity(
@@ -1529,7 +1529,7 @@ mod tests {
         assert_ne!(key_a, key_b);
         assert!(key_a.contains(REMISS_SEMANTIC_REVIEW_VERSION));
         assert!(key_a.contains(SEM_EMBEDDED_API_VERSION));
-        assert!(key_a.contains(&tour_code_version_key(&pr_detail)));
+        assert!(key_a.contains(&review_code_version_key(&pr_detail)));
 
         let local_detail = detail(
             "local:acme/widgets:dirty",

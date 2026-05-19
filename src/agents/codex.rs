@@ -17,17 +17,17 @@ use codex_codes::{CommandExecutionStatus, McpToolCallStatus, ThreadItem};
 use serde_json::{json, Value};
 use tokio::time::timeout as tokio_timeout;
 
-use crate::code_tour::{
-    CodeTourProgressUpdate, CodeTourProvider, CodeTourProviderStatus, GenerateCodeTourInput,
-    GeneratedCodeTour,
+use crate::{
+    guided_review::{GenerateGuidedReviewInput, GeneratedGuidedReview},
+    review_ai::{ReviewAiProgressUpdate, ReviewAiProvider, ReviewAiProviderStatus},
 };
 
 use super::binary::find_codex_binary;
 use super::errors::{generation_abort_message, AbortKind, AbortReason};
 use super::jsonrepair::parse_tolerant;
-use super::merge::{merge_tour, TourResponse};
+use super::merge::{merge_guided_review, GuidedReviewResponse};
 use super::progress::make_progress;
-use super::prompt::build_tour_prompt;
+use super::prompt::build_guided_review_prompt;
 use super::runtime;
 use super::{AgentJsonPromptOptions, AgentTextResponse, CodingAgentBackend};
 
@@ -51,25 +51,25 @@ impl Default for CodexBackend {
 }
 
 impl CodingAgentBackend for CodexBackend {
-    fn provider(&self) -> CodeTourProvider {
-        CodeTourProvider::Codex
+    fn provider(&self) -> ReviewAiProvider {
+        ReviewAiProvider::Codex
     }
 
-    fn status(&self) -> Result<CodeTourProviderStatus, String> {
+    fn status(&self) -> Result<ReviewAiProviderStatus, String> {
         let Some(_binary) = find_codex_binary() else {
-            return Ok(CodeTourProviderStatus {
-                provider: CodeTourProvider::Codex,
+            return Ok(ReviewAiProviderStatus {
+                provider: ReviewAiProvider::Codex,
                 label: "Codex".to_string(),
                 available: false,
                 authenticated: false,
                 message: "Codex CLI is not installed on PATH.".to_string(),
-                detail: "Install the Codex CLI (https://platform.openai.com/docs/codex) and sign in with `codex login` to enable AI code tours.".to_string(),
+                detail: "Install the Codex CLI (https://platform.openai.com/docs/codex) and sign in with `codex login` to enable AI review intelligence.".to_string(),
                 default_model: None,
             });
         };
 
-        Ok(CodeTourProviderStatus {
-            provider: CodeTourProvider::Codex,
+        Ok(ReviewAiProviderStatus {
+            provider: ReviewAiProvider::Codex,
             label: "Codex".to_string(),
             available: true,
             authenticated: true,
@@ -81,9 +81,9 @@ impl CodingAgentBackend for CodexBackend {
 
     fn generate(
         &self,
-        input: &GenerateCodeTourInput,
-        on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
-    ) -> Result<GeneratedCodeTour, String> {
+        input: &GenerateGuidedReviewInput,
+        on_progress: &mut dyn FnMut(ReviewAiProgressUpdate),
+    ) -> Result<GeneratedGuidedReview, String> {
         let Some(binary) = find_codex_binary() else {
             return Err("Codex CLI is not installed on PATH.".to_string());
         };
@@ -102,11 +102,11 @@ impl CodingAgentBackend for CodexBackend {
             Some("Starting Codex app-server".to_string()),
         ));
 
-        let prompt = build_tour_prompt(input);
+        let prompt = build_guided_review_prompt(input);
         let working_directory = PathBuf::from(&input.working_directory);
         let input_clone = input.clone();
 
-        let (progress_tx, progress_rx) = mpsc::channel::<CodeTourProgressUpdate>();
+        let (progress_tx, progress_rx) = mpsc::channel::<ReviewAiProgressUpdate>();
         let (result_tx, result_rx) = mpsc::channel::<Result<CodexTurnOutcome, String>>();
 
         let worker = thread::spawn(move || {
@@ -158,7 +158,7 @@ pub fn run_json_prompt_with_progress(
     working_directory: &str,
     prompt: String,
     options: AgentJsonPromptOptions,
-    on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
+    on_progress: &mut dyn FnMut(ReviewAiProgressUpdate),
 ) -> Result<AgentTextResponse, String> {
     let Some(binary) = find_codex_binary() else {
         return Err("Codex CLI is not installed on PATH.".to_string());
@@ -171,7 +171,7 @@ pub fn run_json_prompt_with_progress(
     }
 
     let working_directory = PathBuf::from(working_directory);
-    let (progress_tx, progress_rx) = mpsc::channel::<CodeTourProgressUpdate>();
+    let (progress_tx, progress_rx) = mpsc::channel::<ReviewAiProgressUpdate>();
     let (result_tx, result_rx) = mpsc::channel::<Result<CodexTurnOutcome, String>>();
 
     let worker = thread::spawn(move || {
@@ -250,13 +250,13 @@ fn finalize_text_turn(
 
 fn finalize_turn(
     outcome: Result<CodexTurnOutcome, String>,
-    input: &GenerateCodeTourInput,
-    on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
-) -> Result<GeneratedCodeTour, String> {
+    input: &GenerateGuidedReviewInput,
+    on_progress: &mut dyn FnMut(ReviewAiProgressUpdate),
+) -> Result<GeneratedGuidedReview, String> {
     let outcome = outcome?;
 
     if let Some(abort) = &outcome.abort {
-        let summary = generation_abort_message("Codex", "the code tour", abort);
+        let summary = generation_abort_message("Codex", "the Guided Review walkthrough", abort);
         on_progress(make_progress(
             "timeout",
             summary.clone(),
@@ -277,7 +277,7 @@ fn finalize_turn(
         "finalizing",
         "Codex finished the draft",
         Some(
-            "Parsing the structured response and merging it into the final code tour.".to_string(),
+            "Parsing the structured response and merging it into the final Guided Review walkthrough.".to_string(),
         ),
         Some("Finalizing Codex output".to_string()),
     ));
@@ -291,13 +291,13 @@ fn finalize_turn(
 
     let trimmed = final_text.trim();
     if trimmed.is_empty() {
-        return Err("Codex returned an empty code tour response.".to_string());
+        return Err("Codex returned an empty Guided Review walkthrough response.".to_string());
     }
 
-    match parse_tolerant::<TourResponse>(trimmed) {
-        Ok(response) => Ok(merge_tour(response, input, outcome.model)),
+    match parse_tolerant::<GuidedReviewResponse>(trimmed) {
+        Ok(response) => Ok(merge_guided_review(response, input, outcome.model)),
         Err(error) => Err(format!(
-            "Codex did not return a usable JSON code tour: {}",
+            "Codex did not return a usable JSON Guided Review walkthrough: {}",
             error.message
         )),
     }
@@ -307,7 +307,7 @@ async fn run_codex_turn(
     binary: String,
     working_directory: PathBuf,
     prompt: String,
-    progress_tx: mpsc::Sender<CodeTourProgressUpdate>,
+    progress_tx: mpsc::Sender<ReviewAiProgressUpdate>,
     overall_timeout_ms: u64,
     inactivity_timeout_ms: u64,
 ) -> Result<CodexTurnOutcome, String> {
@@ -421,7 +421,7 @@ async fn run_codex_turn(
 fn handle_notification(
     method: &str,
     params: Option<Value>,
-    progress_tx: &mpsc::Sender<CodeTourProgressUpdate>,
+    progress_tx: &mpsc::Sender<ReviewAiProgressUpdate>,
     outcome: &mut CodexTurnOutcome,
     streaming_message: &mut String,
 ) -> bool {
@@ -517,7 +517,7 @@ fn handle_notification(
             let _ = progress_tx.send(make_progress(
                 "finalizing",
                 "Codex finished gathering context",
-                Some("Formatting the structured code tour response.".to_string()),
+                Some("Formatting the structured Guided Review walkthrough response.".to_string()),
                 Some("Codex finished its turn".to_string()),
             ));
             return true;
@@ -544,7 +544,7 @@ enum ItemLifecycle {
 fn progress_for_item(
     item: &ThreadItem,
     lifecycle: ItemLifecycle,
-    progress_tx: &mpsc::Sender<CodeTourProgressUpdate>,
+    progress_tx: &mpsc::Sender<ReviewAiProgressUpdate>,
     outcome: &mut CodexTurnOutcome,
 ) {
     match item {
@@ -605,7 +605,9 @@ fn progress_for_item(
                 .iter()
                 .find(|entry| !entry.completed)
                 .map(|entry| short_text(&entry.text, 240))
-                .unwrap_or_else(|| "Updating the current plan for the code tour run.".to_string());
+                .unwrap_or_else(|| {
+                    "Updating the current plan for the Guided Review walkthrough run.".to_string()
+                });
             let _ = progress_tx.send(make_progress(
                 "planning",
                 "Codex is updating its review plan",
@@ -637,7 +639,7 @@ fn progress_for_item(
         ThreadItem::AgentMessage(_) if lifecycle == ItemLifecycle::Completed => {
             let _ = progress_tx.send(make_progress(
                 "drafting",
-                "Codex drafted the code tour response",
+                "Codex drafted the Guided Review walkthrough response",
                 Some("Finalizing the structured output for the app.".to_string()),
                 Some("Codex drafted the final response".to_string()),
             ));
@@ -663,7 +665,7 @@ async fn handle_request(
     id: RequestId,
     method: &str,
     _params: Option<Value>,
-    progress_tx: &mpsc::Sender<CodeTourProgressUpdate>,
+    progress_tx: &mpsc::Sender<ReviewAiProgressUpdate>,
 ) {
     match method {
         methods::CMD_EXEC_APPROVAL => {

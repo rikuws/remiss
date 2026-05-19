@@ -59,7 +59,7 @@ mod tests {
             timeout_ms: 240_000,
             last_visible_activity: Some("Reading foo.rs".to_string()),
         };
-        let msg = generation_abort_message("Codex", "the code tour", &reason);
+        let msg = generation_abort_message("Codex", "the Guided Review walkthrough", &reason);
         assert!(msg.contains("4 minutes"));
         assert!(msg.contains("Last visible activity: Reading foo.rs."));
     }
@@ -71,7 +71,8 @@ mod tests {
             timeout_ms: 60_000,
             last_visible_activity: None,
         };
-        let msg = generation_abort_message("GitHub Copilot", "the code tour", &reason);
+        let msg =
+            generation_abort_message("GitHub Copilot", "the Guided Review walkthrough", &reason);
         assert!(msg.contains("stopped reporting progress"));
         assert!(msg.contains("1 minute"));
     }

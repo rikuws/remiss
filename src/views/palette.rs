@@ -563,7 +563,7 @@ enum CommandAction {
     EnterCodeReview,
     EnterCodeLens(ReviewCenterMode),
     JumpToNextReviewComment,
-    EnterAiTour,
+    EnterGuidedReview,
     EnterStack,
     SyncWorkspace,
     CheckForUpdates,
@@ -715,7 +715,6 @@ fn push_review_navigation_items(items: &mut Vec<CommandItem>, state: &AppState) 
         CommandAction::EnterStack,
         &[
             "ai",
-            "tour",
             "guide",
             "generated review",
             "ai stack",
@@ -938,7 +937,7 @@ fn apply_command_action(
                 ensure_active_review_focus_loaded(state, window, cx);
             }
         }
-        CommandAction::EnterAiTour => {
+        CommandAction::EnterGuidedReview => {
             close_palette(state, cx);
             enter_stack_review_mode(state, window, cx);
         }
@@ -1280,7 +1279,9 @@ mod tests {
             &fuzzy_query_chars("str")
         )
         .is_some());
-        assert!(fuzzy_match_score("switch to ai tour guide", &fuzzy_query_chars("ai")).is_some());
+        assert!(
+            fuzzy_match_score("switch to guided review guide", &fuzzy_query_chars("ai")).is_some()
+        );
         assert!(
             fuzzy_match_score("switch to source source browser", &fuzzy_query_chars("src"))
                 .is_some()

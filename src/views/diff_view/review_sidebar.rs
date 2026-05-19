@@ -337,7 +337,7 @@ pub(super) fn render_review_sidebar_pane(
         ReviewCenterMode::SourceBrowser => {
             render_source_file_tree(state, detail, selected_path, cx).into_any_element()
         }
-        ReviewCenterMode::GuidedReview | ReviewCenterMode::AiTour | ReviewCenterMode::Stack => {
+        ReviewCenterMode::GuidedReview => {
             render_stack_navigation_pane(state, detail, review_stack, cx).into_any_element()
         }
     }
@@ -470,7 +470,7 @@ fn handle_file_tree_row_open(
     }
 }
 
-fn render_ai_tour_navigation_pane(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
+fn render_guided_review_navigation_pane(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let (
         generated_tour,
         provider_loading,
@@ -481,22 +481,28 @@ fn render_ai_tour_navigation_pane(state: &Entity<AppState>, cx: &App) -> impl In
     ) = {
         let app_state = state.read(cx);
         let detail_state = app_state.active_detail_state();
-        let tour_state = app_state.active_tour_state();
+        let guided_review_state = app_state.active_guided_review_state();
 
         (
-            tour_state.and_then(|state| state.document.clone()),
-            app_state.code_tour_provider_loading,
-            tour_state.map(|state| state.loading).unwrap_or(false),
-            tour_state.map(|state| state.generating).unwrap_or(false),
-            app_state.code_tour_provider_error.is_some()
+            guided_review_state.and_then(|state| state.document.clone()),
+            app_state.review_ai_provider_loading,
+            guided_review_state
+                .map(|state| state.loading)
+                .unwrap_or(false),
+            guided_review_state
+                .map(|state| state.generating)
+                .unwrap_or(false),
+            app_state.review_ai_provider_error.is_some()
                 || detail_state
                     .and_then(|state| state.local_repository_error.as_ref())
                     .is_some()
-                || tour_state.and_then(|state| state.error.as_ref()).is_some()
-                || tour_state
+                || guided_review_state
+                    .and_then(|state| state.error.as_ref())
+                    .is_some()
+                || guided_review_state
                     .and_then(|state| state.message.as_ref())
                     .is_some(),
-            app_state.ai_tour_section_list_state.clone(),
+            app_state.guided_review_section_list_state.clone(),
         )
     };
     let nav_list_state = {
@@ -530,7 +536,7 @@ fn render_ai_tour_navigation_pane(state: &Entity<AppState>, cx: &App) -> impl In
                 ))
                 .child(
                     div()
-                        .id("ai-tour-nav-scroll")
+                        .id("guided-review-nav-scroll")
                         .flex_grow()
                         .min_h_0()
                         .flex()
@@ -543,13 +549,13 @@ fn render_ai_tour_navigation_pane(state: &Entity<AppState>, cx: &App) -> impl In
                                 let center_list_state = center_list_state.clone();
                                 move |ix, _window, _cx| {
                                     let section = &tour.sections[ix];
-                                    let target_index = ai_tour_section_content_index(
+                                    let target_index = guided_review_section_content_index(
                                         section_count,
                                         has_progress,
                                         has_status_messages,
                                         ix,
                                     );
-                                    render_ai_tour_nav_row(
+                                    render_guided_review_nav_row(
                                         tour.as_ref(),
                                         section,
                                         ix,
@@ -591,7 +597,7 @@ fn render_ai_tour_navigation_pane(state: &Entity<AppState>, cx: &App) -> impl In
     }
 }
 
-fn ai_tour_section_content_index(
+fn guided_review_section_content_index(
     section_count: usize,
     has_progress: bool,
     has_status_messages: bool,
@@ -610,14 +616,14 @@ fn ai_tour_section_content_index(
     item_ix + section_ix
 }
 
-fn render_ai_tour_nav_row(
-    tour: &GeneratedCodeTour,
-    section: &TourSection,
+fn render_guided_review_nav_row(
+    tour: &GeneratedGuidedReview,
+    section: &GuidedReviewSection,
     section_ix: usize,
     target_index: usize,
     list_state: ListState,
 ) -> impl IntoElement {
-    let metrics = ai_tour_section_metrics(tour, section);
+    let metrics = guided_review_section_metrics(tour, section);
 
     div().pb(px(10.0)).child(
         div()
@@ -638,7 +644,11 @@ fn render_ai_tour_nav_row(
             .items_start()
             .gap(px(8.0))
             .min_w_0()
-            .child(render_ai_tour_category_icon(section.category, 24.0, 13.0))
+            .child(render_guided_review_category_icon(
+                section.category,
+                24.0,
+                13.0,
+            ))
             .child(
                 div()
                     .min_w_0()
@@ -685,13 +695,16 @@ fn render_ai_tour_nav_row(
                             .items_center()
                             .gap(px(8.0))
                             .flex_wrap()
-                            .child(ai_tour_metric_text(&format!(
+                            .child(guided_review_metric_text(&format!(
                                 "{} file{}",
                                 metrics.file_count,
                                 if metrics.file_count == 1 { "" } else { "s" }
                             )))
-                            .child(ai_tour_delta_metric(metrics.additions, metrics.deletions))
-                            .child(render_ai_tour_priority_chip(section.priority)),
+                            .child(guided_review_delta_metric(
+                                metrics.additions,
+                                metrics.deletions,
+                            ))
+                            .child(render_guided_review_priority_chip(section.priority)),
                     ),
             ),
     )
@@ -1207,7 +1220,7 @@ fn render_sidebar_header(title: &str, subtitle: &str, count: String) -> impl Int
         )
 }
 
-fn render_legacy_review_navigation_pane(
+fn render_review_navigation_pane(
     state: &Entity<AppState>,
     detail: &PullRequestDetail,
     review_queue: &ReviewQueue,
@@ -1986,7 +1999,7 @@ pub(super) fn open_review_location_card(
             });
             ensure_active_review_focus_loaded(state, window, cx);
         }
-        ReviewCenterMode::AiTour | ReviewCenterMode::Stack | ReviewCenterMode::GuidedReview => {
+        ReviewCenterMode::GuidedReview => {
             let mut location = location.clone();
             location.mode = ReviewCenterMode::GuidedReview;
             state.update(cx, |state, cx| {

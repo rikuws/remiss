@@ -1,11 +1,11 @@
 use std::env;
 
-use crate::code_tour::CodeTourProgressUpdate;
+use crate::review_ai::ReviewAiProgressUpdate;
 
-const CODE_TOUR_LOG_DIR_ENV: &str = "GH_UI_CODE_TOUR_LOG_DIR";
+const REVIEW_AI_LOG_DIR_ENV: &str = "GH_UI_REVIEW_AI_LOG_DIR";
 
 fn current_log_file_path() -> Option<String> {
-    if let Ok(value) = env::var(CODE_TOUR_LOG_DIR_ENV) {
+    if let Ok(value) = env::var(REVIEW_AI_LOG_DIR_ENV) {
         let trimmed = value.trim();
         if !trimmed.is_empty() {
             return Some(trimmed.to_string());
@@ -19,8 +19,8 @@ pub fn make_progress(
     summary: impl Into<String>,
     detail: Option<String>,
     log: Option<String>,
-) -> CodeTourProgressUpdate {
-    CodeTourProgressUpdate {
+) -> ReviewAiProgressUpdate {
+    ReviewAiProgressUpdate {
         stage: stage.into(),
         summary: limit_text(&summary.into(), 160),
         detail: detail.map(|value| limit_text(&value, 240)),

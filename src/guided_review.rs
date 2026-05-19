@@ -1,96 +1,27 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use sha1::{Digest, Sha1};
 
 use crate::{
     agents,
     cache::CacheStore,
     diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk, ParsedDiffLine},
     github::{PullRequestComment, PullRequestDetail, PullRequestFile, PullRequestReviewThread},
+    review_ai::now_ms,
     review_memory::ReviewMemoryPromptContext,
 };
 
-const CODE_TOUR_CACHE_KEY_PREFIX: &str = "code-tour-v6";
-const CODE_TOUR_SETTINGS_CACHE_KEY: &str = "code-tour-settings-v1";
+const GUIDED_REVIEW_CACHE_KEY_PREFIX: &str = "guided-review-v1";
 
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum CodeTourProvider {
-    #[default]
-    Codex,
-    Copilot,
-}
-
-impl CodeTourProvider {
-    pub fn slug(&self) -> &'static str {
-        match self {
-            Self::Codex => "codex",
-            Self::Copilot => "copilot",
-        }
-    }
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Codex => "Codex",
-            Self::Copilot => "Copilot",
-        }
-    }
-
-    pub fn all() -> &'static [CodeTourProvider] {
-        &[CodeTourProvider::Codex, CodeTourProvider::Copilot]
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct CodeTourSettings {
-    #[serde(default)]
-    pub provider: CodeTourProvider,
-    #[serde(default)]
-    pub automatic_repositories: BTreeSet<String>,
-}
-
-impl CodeTourSettings {
-    pub fn automatically_generates_for(&self, repository: &str) -> bool {
-        self.automatic_repositories.contains(repository)
-    }
-
-    pub fn set_automatic_generation_for(&mut self, repository: &str, enabled: bool) {
-        if enabled {
-            self.automatic_repositories.insert(repository.to_string());
-        } else {
-            self.automatic_repositories.remove(repository);
-        }
-    }
-}
+pub use crate::review_ai::{
+    review_code_version_key as guided_review_code_version_key, DiffAnchor, ReviewAiProgressUpdate,
+    ReviewAiProvider, ReviewAiProviderStatus, ReviewAiSettings,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CodeTourProviderStatus {
-    pub provider: CodeTourProvider,
-    pub label: String,
-    pub available: bool,
-    pub authenticated: bool,
-    pub message: String,
-    pub detail: String,
-    pub default_model: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct DiffAnchor {
-    pub file_path: String,
-    pub hunk_header: Option<String>,
-    pub line: Option<i64>,
-    pub side: Option<String>,
-    pub thread_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TourStep {
+pub struct GuidedReviewStep {
     pub id: String,
     pub kind: String,
     pub title: String,
@@ -107,7 +38,7 @@ pub struct TourStep {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TourCallsite {
+pub struct GuidedReviewCallsite {
     pub title: String,
     pub path: String,
     pub line: Option<i64>,
@@ -117,7 +48,7 @@ pub struct TourCallsite {
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum TourSectionCategory {
+pub enum GuidedReviewSectionCategory {
     AuthSecurity,
     DataState,
     ApiIo,
@@ -133,21 +64,21 @@ pub enum TourSectionCategory {
     Other,
 }
 
-impl TourSectionCategory {
-    pub fn all() -> &'static [TourSectionCategory] {
+impl GuidedReviewSectionCategory {
+    pub fn all() -> &'static [GuidedReviewSectionCategory] {
         &[
-            TourSectionCategory::AuthSecurity,
-            TourSectionCategory::DataState,
-            TourSectionCategory::ApiIo,
-            TourSectionCategory::UiUx,
-            TourSectionCategory::Tests,
-            TourSectionCategory::Docs,
-            TourSectionCategory::Config,
-            TourSectionCategory::Infra,
-            TourSectionCategory::Refactor,
-            TourSectionCategory::Performance,
-            TourSectionCategory::Reliability,
-            TourSectionCategory::Other,
+            GuidedReviewSectionCategory::AuthSecurity,
+            GuidedReviewSectionCategory::DataState,
+            GuidedReviewSectionCategory::ApiIo,
+            GuidedReviewSectionCategory::UiUx,
+            GuidedReviewSectionCategory::Tests,
+            GuidedReviewSectionCategory::Docs,
+            GuidedReviewSectionCategory::Config,
+            GuidedReviewSectionCategory::Infra,
+            GuidedReviewSectionCategory::Refactor,
+            GuidedReviewSectionCategory::Performance,
+            GuidedReviewSectionCategory::Reliability,
+            GuidedReviewSectionCategory::Other,
         ]
     }
 
@@ -206,19 +137,19 @@ impl TourSectionCategory {
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum TourSectionPriority {
+pub enum GuidedReviewSectionPriority {
     Low,
     #[default]
     Medium,
     High,
 }
 
-impl TourSectionPriority {
-    pub fn all() -> &'static [TourSectionPriority] {
+impl GuidedReviewSectionPriority {
+    pub fn all() -> &'static [GuidedReviewSectionPriority] {
         &[
-            TourSectionPriority::Low,
-            TourSectionPriority::Medium,
-            TourSectionPriority::High,
+            GuidedReviewSectionPriority::Low,
+            GuidedReviewSectionPriority::Medium,
+            GuidedReviewSectionPriority::High,
         ]
     }
 
@@ -250,49 +181,36 @@ impl TourSectionPriority {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TourSection {
+pub struct GuidedReviewSection {
     pub id: String,
     pub title: String,
     pub summary: String,
     pub detail: String,
     pub badge: String,
-    pub category: TourSectionCategory,
-    pub priority: TourSectionPriority,
+    pub category: GuidedReviewSectionCategory,
+    pub priority: GuidedReviewSectionPriority,
     pub step_ids: Vec<String>,
     pub review_points: Vec<String>,
-    pub callsites: Vec<TourCallsite>,
+    pub callsites: Vec<GuidedReviewCallsite>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GeneratedCodeTour {
-    pub provider: CodeTourProvider,
+pub struct GeneratedGuidedReview {
+    pub provider: ReviewAiProvider,
     pub model: Option<String>,
     pub generated_at: String,
     pub summary: String,
     pub review_focus: String,
     pub open_questions: Vec<String>,
     pub warnings: Vec<String>,
-    pub sections: Vec<TourSection>,
-    pub steps: Vec<TourStep>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CodeTourProgressUpdate {
-    pub stage: String,
-    pub summary: String,
-    #[serde(default)]
-    pub detail: Option<String>,
-    #[serde(default)]
-    pub log: Option<String>,
-    #[serde(default)]
-    pub log_file_path: Option<String>,
+    pub sections: Vec<GuidedReviewSection>,
+    pub steps: Vec<GuidedReviewStep>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CodeTourFileContext {
+pub struct GuidedReviewFileContext {
     pub path: String,
     pub additions: i64,
     pub deletions: i64,
@@ -301,7 +219,7 @@ pub struct CodeTourFileContext {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CodeTourReviewContext {
+pub struct GuidedReviewReviewContext {
     pub author_login: String,
     pub state: String,
     pub body: String,
@@ -310,14 +228,14 @@ pub struct CodeTourReviewContext {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CodeTourReviewCommentContext {
+pub struct GuidedReviewReviewCommentContext {
     pub author_login: String,
     pub body: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CodeTourPullRequestCommentContext {
+pub struct GuidedReviewPullRequestCommentContext {
     pub author_login: String,
     pub body: String,
     pub created_at: String,
@@ -325,18 +243,18 @@ pub struct CodeTourPullRequestCommentContext {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CodeTourReviewThreadContext {
+pub struct GuidedReviewReviewThreadContext {
     pub path: String,
     pub line: Option<i64>,
     pub diff_side: Option<String>,
     pub is_resolved: bool,
     pub subject_type: String,
-    pub comments: Vec<CodeTourReviewCommentContext>,
+    pub comments: Vec<GuidedReviewReviewCommentContext>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CodeTourCandidateGroup {
+pub struct GuidedReviewCandidateGroup {
     pub id: String,
     pub title: String,
     pub summary: String,
@@ -346,8 +264,8 @@ pub struct CodeTourCandidateGroup {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GenerateCodeTourInput {
-    pub provider: CodeTourProvider,
+pub struct GenerateGuidedReviewInput {
+    pub provider: ReviewAiProvider,
     pub working_directory: String,
     pub repository: String,
     pub number: i64,
@@ -365,56 +283,38 @@ pub struct GenerateCodeTourInput {
     pub deletions: i64,
     pub changed_files: i64,
     pub commits_count: i64,
-    pub files: Vec<CodeTourFileContext>,
-    pub comments: Vec<CodeTourPullRequestCommentContext>,
-    pub latest_reviews: Vec<CodeTourReviewContext>,
-    pub review_threads: Vec<CodeTourReviewThreadContext>,
+    pub files: Vec<GuidedReviewFileContext>,
+    pub comments: Vec<GuidedReviewPullRequestCommentContext>,
+    pub latest_reviews: Vec<GuidedReviewReviewContext>,
+    pub review_threads: Vec<GuidedReviewReviewThreadContext>,
     #[serde(default)]
     pub review_memory: ReviewMemoryPromptContext,
-    pub candidate_steps: Vec<TourStep>,
-    pub candidate_groups: Vec<CodeTourCandidateGroup>,
+    pub candidate_steps: Vec<GuidedReviewStep>,
+    pub candidate_groups: Vec<GuidedReviewCandidateGroup>,
 }
 
-pub fn load_code_tour_provider_statuses() -> Result<Vec<CodeTourProviderStatus>, String> {
-    Ok(agents::load_all_statuses())
-}
-
-pub fn load_code_tour_settings(cache: &CacheStore) -> Result<CodeTourSettings, String> {
-    Ok(cache
-        .get::<CodeTourSettings>(CODE_TOUR_SETTINGS_CACHE_KEY)?
-        .map(|document| document.value)
-        .unwrap_or_default())
-}
-
-pub fn save_code_tour_settings(
-    cache: &CacheStore,
-    settings: &CodeTourSettings,
-) -> Result<(), String> {
-    cache.put(CODE_TOUR_SETTINGS_CACHE_KEY, settings, now_ms())
-}
-
-pub fn load_code_tour(
+pub fn load_guided_review(
     cache: &CacheStore,
     detail: &PullRequestDetail,
-    provider: CodeTourProvider,
-) -> Result<Option<GeneratedCodeTour>, String> {
-    let cache_key = code_tour_cache_key(detail, provider);
+    provider: ReviewAiProvider,
+) -> Result<Option<GeneratedGuidedReview>, String> {
+    let cache_key = guided_review_cache_key(detail, provider);
 
     Ok(cache
-        .get::<GeneratedCodeTour>(&cache_key)?
+        .get::<GeneratedGuidedReview>(&cache_key)?
         .map(|document| document.value))
 }
 
-pub fn generate_code_tour_with_progress<F>(
+pub fn generate_guided_review_with_progress<F>(
     cache: &CacheStore,
-    input: GenerateCodeTourInput,
+    input: GenerateGuidedReviewInput,
     on_progress: F,
-) -> Result<GeneratedCodeTour, String>
+) -> Result<GeneratedGuidedReview, String>
 where
-    F: FnMut(CodeTourProgressUpdate),
+    F: FnMut(ReviewAiProgressUpdate),
 {
     if input.working_directory.trim().is_empty() {
-        return Err("Code tours require a local checkout path.".to_string());
+        return Err("Guided Review walkthroughs require a local checkout path.".to_string());
     }
 
     if !Path::new(&input.working_directory).exists() {
@@ -425,41 +325,43 @@ where
     }
 
     if input.candidate_steps.is_empty() {
-        return Err("Code tour generation needs at least one candidate step.".to_string());
+        return Err(
+            "Guided Review walkthrough generation needs at least one candidate step.".to_string(),
+        );
     }
 
     let backend = agents::backend_for(input.provider);
-    let mut progress_sink: Box<dyn FnMut(CodeTourProgressUpdate)> = Box::new(on_progress);
-    let tour = backend.generate(&input, progress_sink.as_mut())?;
+    let mut progress_sink: Box<dyn FnMut(ReviewAiProgressUpdate)> = Box::new(on_progress);
+    let guided_review = backend.generate(&input, progress_sink.as_mut())?;
 
-    let cache_key = code_tour_cache_key_from_parts(
+    let cache_key = guided_review_cache_key_from_parts(
         &input.repository,
         input.number,
         input.provider,
         &input.code_version_key,
     );
 
-    cache.put(&cache_key, &tour, now_ms())?;
+    cache.put(&cache_key, &guided_review, now_ms())?;
 
-    Ok(tour)
+    Ok(guided_review)
 }
 
-pub fn build_code_tour_generation_input(
+pub fn build_guided_review_generation_input(
     detail: &PullRequestDetail,
-    provider: CodeTourProvider,
+    provider: ReviewAiProvider,
     working_directory: &str,
-) -> GenerateCodeTourInput {
+) -> GenerateGuidedReviewInput {
     let candidate_steps = build_tour_steps(detail);
     let overview_step = candidate_steps.first().cloned();
     let file_steps = candidate_steps.iter().skip(1).cloned().collect::<Vec<_>>();
     let candidate_groups = build_candidate_groups(&file_steps);
 
-    GenerateCodeTourInput {
+    GenerateGuidedReviewInput {
         provider,
         working_directory: working_directory.to_string(),
         repository: detail.repository.clone(),
         number: detail.number,
-        code_version_key: tour_code_version_key(detail),
+        code_version_key: guided_review_code_version_key(detail),
         title: detail.title.clone(),
         body: trim_text(&detail.body, 2_500),
         url: detail.url.clone(),
@@ -476,24 +378,24 @@ pub fn build_code_tour_generation_input(
         files: detail
             .files
             .iter()
-            .map(map_code_tour_file_context)
+            .map(map_guided_review_file_context)
             .collect(),
         comments: detail
             .comments
             .iter()
             .take(12)
-            .map(map_code_tour_comment_context)
+            .map(map_guided_review_comment_context)
             .collect(),
         latest_reviews: detail
             .latest_reviews
             .iter()
             .take(5)
-            .map(map_code_tour_review_context)
+            .map(map_guided_review_review_context)
             .collect(),
         review_threads: prioritize_review_threads(&detail.review_threads)
             .into_iter()
             .take(12)
-            .map(|thread| map_code_tour_review_thread_context(&thread))
+            .map(|thread| map_guided_review_review_thread_context(&thread))
             .collect(),
         review_memory: ReviewMemoryPromptContext::default(),
         candidate_steps: if let Some(overview) = overview_step {
@@ -507,33 +409,17 @@ pub fn build_code_tour_generation_input(
     }
 }
 
-pub fn build_tour_request_key(detail: &PullRequestDetail, provider: CodeTourProvider) -> String {
-    let code_version = tour_code_version_key(detail);
+pub fn build_guided_review_request_key(
+    detail: &PullRequestDetail,
+    provider: ReviewAiProvider,
+) -> String {
+    let code_version = guided_review_code_version_key(detail);
     format!(
         "{}:{}:{}:{code_version}",
         provider.slug(),
         detail.repository,
         detail.number,
     )
-}
-
-pub fn tour_code_version_key(detail: &PullRequestDetail) -> String {
-    if crate::local_review::is_local_review_detail(detail) {
-        return format!(
-            "local-base-{}-head-{}-diff-{}",
-            detail.base_ref_oid.as_deref().unwrap_or_default(),
-            detail.head_ref_oid.as_deref().unwrap_or_default(),
-            hash_text(&detail.raw_diff)
-        );
-    }
-
-    detail
-        .head_ref_oid
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| format!("head-{value}"))
-        .unwrap_or_else(|| format!("diff-{}", hash_text(&detail.raw_diff)))
 }
 
 pub fn line_matches_diff_anchor(line: &ParsedDiffLine, anchor: Option<&DiffAnchor>) -> bool {
@@ -578,14 +464,14 @@ pub fn find_parsed_diff_file<'a>(
         })
 }
 
-fn build_tour_steps(detail: &PullRequestDetail) -> Vec<TourStep> {
+fn build_tour_steps(detail: &PullRequestDetail) -> Vec<GuidedReviewStep> {
     let unresolved_thread_count = detail
         .review_threads
         .iter()
         .filter(|thread| !thread.is_resolved)
         .count() as i64;
 
-    let mut steps = vec![TourStep {
+    let mut steps = vec![GuidedReviewStep {
         id: "overview".to_string(),
         kind: "overview".to_string(),
         title: format!(
@@ -620,7 +506,7 @@ fn build_tour_steps(detail: &PullRequestDetail) -> Vec<TourStep> {
     steps
 }
 
-fn build_file_step(detail: &PullRequestDetail, file: &PullRequestFile) -> Option<TourStep> {
+fn build_file_step(detail: &PullRequestDetail, file: &PullRequestFile) -> Option<GuidedReviewStep> {
     let parsed_file = find_parsed_diff_file(&detail.parsed_diff, &file.path);
     let file_threads = detail
         .review_threads
@@ -652,7 +538,7 @@ fn build_file_step(detail: &PullRequestDetail, file: &PullRequestFile) -> Option
             })
         });
 
-    Some(TourStep {
+    Some(GuidedReviewStep {
         id: format!("file:{}", file.path),
         kind: "file".to_string(),
         title: file.path.clone(),
@@ -717,7 +603,7 @@ fn build_file_detail(file: &PullRequestFile, unresolved_thread_count: i64) -> St
     }
 }
 
-fn build_candidate_groups(file_steps: &[TourStep]) -> Vec<CodeTourCandidateGroup> {
+fn build_candidate_groups(file_steps: &[GuidedReviewStep]) -> Vec<GuidedReviewCandidateGroup> {
     #[derive(Default)]
     struct Bucket {
         order: usize,
@@ -751,7 +637,7 @@ fn build_candidate_groups(file_steps: &[TourStep]) -> Vec<CodeTourCandidateGroup
     grouped
         .into_iter()
         .enumerate()
-        .map(|(index, (key, bucket))| CodeTourCandidateGroup {
+        .map(|(index, (key, bucket))| GuidedReviewCandidateGroup {
             id: format!("group:{}", index + 1),
             title: title_for_group_key(&key),
             summary: build_candidate_group_summary(
@@ -1181,12 +1067,12 @@ fn looks_like_behavior_line(content: &str) -> bool {
         || trimmed.starts_with("throw ")
 }
 
-fn file_step_score(step: &TourStep) -> i64 {
+fn file_step_score(step: &GuidedReviewStep) -> i64 {
     step.additions + step.deletions + step.unresolved_thread_count * 25
 }
 
-fn map_code_tour_file_context(file: &PullRequestFile) -> CodeTourFileContext {
-    CodeTourFileContext {
+fn map_guided_review_file_context(file: &PullRequestFile) -> GuidedReviewFileContext {
+    GuidedReviewFileContext {
         path: file.path.clone(),
         additions: file.additions,
         deletions: file.deletions,
@@ -1194,20 +1080,20 @@ fn map_code_tour_file_context(file: &PullRequestFile) -> CodeTourFileContext {
     }
 }
 
-fn map_code_tour_comment_context(
+fn map_guided_review_comment_context(
     comment: &PullRequestComment,
-) -> CodeTourPullRequestCommentContext {
-    CodeTourPullRequestCommentContext {
+) -> GuidedReviewPullRequestCommentContext {
+    GuidedReviewPullRequestCommentContext {
         author_login: comment.author_login.clone(),
         body: trim_text(&comment.body, 500),
         created_at: comment.created_at.clone(),
     }
 }
 
-fn map_code_tour_review_context(
+fn map_guided_review_review_context(
     review: &crate::github::PullRequestReview,
-) -> CodeTourReviewContext {
-    CodeTourReviewContext {
+) -> GuidedReviewReviewContext {
+    GuidedReviewReviewContext {
         author_login: review.author_login.clone(),
         state: review.state.clone(),
         body: trim_text(&review.body, 900),
@@ -1215,16 +1101,16 @@ fn map_code_tour_review_context(
     }
 }
 
-fn map_code_tour_review_thread_context(
+fn map_guided_review_review_thread_context(
     thread: &PullRequestReviewThread,
-) -> CodeTourReviewThreadContext {
+) -> GuidedReviewReviewThreadContext {
     let diff_side = if !thread.diff_side.trim().is_empty() {
         Some(thread.diff_side.clone())
     } else {
         thread.start_diff_side.clone()
     };
 
-    CodeTourReviewThreadContext {
+    GuidedReviewReviewThreadContext {
         path: thread.path.clone(),
         line: thread.line.or(thread.original_line),
         diff_side,
@@ -1234,7 +1120,7 @@ fn map_code_tour_review_thread_context(
             .comments
             .iter()
             .take(3)
-            .map(|comment| CodeTourReviewCommentContext {
+            .map(|comment| GuidedReviewReviewCommentContext {
                 author_login: comment.author_login.clone(),
                 body: trim_text(&comment.body, 500),
             })
@@ -1347,42 +1233,29 @@ fn trim_text(value: &str, max_length: usize) -> String {
     format!("{}…", truncated.trim_end())
 }
 
-fn code_tour_cache_key(detail: &PullRequestDetail, provider: CodeTourProvider) -> String {
-    code_tour_cache_key_from_parts(
+fn guided_review_cache_key(detail: &PullRequestDetail, provider: ReviewAiProvider) -> String {
+    guided_review_cache_key_from_parts(
         &detail.repository,
         detail.number,
         provider,
-        &tour_code_version_key(detail),
+        &guided_review_code_version_key(detail),
     )
 }
 
-fn code_tour_cache_key_from_parts(
+fn guided_review_cache_key_from_parts(
     repository: &str,
     number: i64,
-    provider: CodeTourProvider,
+    provider: ReviewAiProvider,
     code_version: &str,
 ) -> String {
     format!(
         "{}:{}:{}:{}:{}",
-        CODE_TOUR_CACHE_KEY_PREFIX,
+        GUIDED_REVIEW_CACHE_KEY_PREFIX,
         provider.slug(),
         repository,
         number,
         code_version,
     )
-}
-
-fn hash_text(value: &str) -> String {
-    let mut hasher = Sha1::new();
-    hasher.update(value.as_bytes());
-    format!("{:x}", hasher.finalize())
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as i64)
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1433,7 +1306,7 @@ mod tests {
     }
 
     #[test]
-    fn build_tour_request_key_ignores_metadata_only_updates_when_head_matches() {
+    fn build_guided_review_request_key_ignores_metadata_only_updates_when_head_matches() {
         let first = detail(
             "2026-04-17T10:00:00Z",
             Some("head123"),
@@ -1446,51 +1319,51 @@ mod tests {
         );
 
         assert_eq!(
-            build_tour_request_key(&first, CodeTourProvider::Copilot),
-            build_tour_request_key(&second, CodeTourProvider::Copilot),
+            build_guided_review_request_key(&first, ReviewAiProvider::Copilot),
+            build_guided_review_request_key(&second, ReviewAiProvider::Copilot),
         );
     }
 
     #[test]
-    fn build_tour_request_key_falls_back_to_diff_hash_without_head_oid() {
+    fn build_guided_review_request_key_falls_back_to_diff_hash_without_head_oid() {
         let first = detail("2026-04-17T10:00:00Z", None, "diff --git a/a b/a\n+one\n");
         let second = detail("2026-04-17T11:00:00Z", None, "diff --git a/a b/a\n+one\n");
         let changed = detail("2026-04-17T11:00:00Z", None, "diff --git a/a b/a\n+two\n");
 
         assert_eq!(
-            build_tour_request_key(&first, CodeTourProvider::Codex),
-            build_tour_request_key(&second, CodeTourProvider::Codex),
+            build_guided_review_request_key(&first, ReviewAiProvider::Codex),
+            build_guided_review_request_key(&second, ReviewAiProvider::Codex),
         );
         assert_ne!(
-            build_tour_request_key(&first, CodeTourProvider::Codex),
-            build_tour_request_key(&changed, CodeTourProvider::Codex),
+            build_guided_review_request_key(&first, ReviewAiProvider::Codex),
+            build_guided_review_request_key(&changed, ReviewAiProvider::Codex),
         );
     }
 
     #[test]
-    fn build_tour_request_key_hashes_local_review_diff_even_when_head_matches() {
+    fn build_guided_review_request_key_hashes_local_review_diff_even_when_head_matches() {
         let mut first = detail("local-one", Some("head123"), "diff --git a/a b/a\n+one\n");
         first.id = "local:acme/api:feature:base123:head123:worktree-one".to_string();
         let mut second = detail("local-two", Some("head123"), "diff --git a/a b/a\n+two\n");
         second.id = "local:acme/api:feature:base123:head123:worktree-two".to_string();
 
         assert_ne!(
-            build_tour_request_key(&first, CodeTourProvider::Codex),
-            build_tour_request_key(&second, CodeTourProvider::Codex),
+            build_guided_review_request_key(&first, ReviewAiProvider::Codex),
+            build_guided_review_request_key(&second, ReviewAiProvider::Codex),
         );
     }
 
     #[test]
-    fn code_tour_settings_default_to_disabled_repositories() {
-        let settings = CodeTourSettings::default();
+    fn review_ai_settings_default_to_disabled_repositories() {
+        let settings = ReviewAiSettings::default();
 
-        assert_eq!(settings.provider, CodeTourProvider::Codex);
+        assert_eq!(settings.provider, ReviewAiProvider::Codex);
         assert!(settings.automatic_repositories.is_empty());
         assert!(!settings.automatically_generates_for("acme/api"));
     }
 
     #[test]
-    fn tour_step_anchor_prefers_code_hunk_over_import_hunk() {
+    fn guided_review_step_anchor_prefers_code_hunk_over_import_hunk() {
         let raw_diff = r#"diff --git a/src/service.rs b/src/service.rs
 --- a/src/service.rs
 +++ b/src/service.rs
@@ -1524,7 +1397,7 @@ mod tests {
     }
 
     #[test]
-    fn build_code_tour_generation_input_uses_representative_file_snippet() {
+    fn build_guided_review_generation_input_uses_representative_file_snippet() {
         let raw_diff = r#"diff --git a/src/service.rs b/src/service.rs
 --- a/src/service.rs
 +++ b/src/service.rs
@@ -1550,7 +1423,8 @@ mod tests {
         }];
         detail.parsed_diff = parse_unified_diff(raw_diff);
 
-        let input = build_code_tour_generation_input(&detail, CodeTourProvider::Codex, "/tmp/repo");
+        let input =
+            build_guided_review_generation_input(&detail, ReviewAiProvider::Codex, "/tmp/repo");
         let step = input
             .candidate_steps
             .iter()

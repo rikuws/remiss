@@ -3,7 +3,7 @@ use std::time::Duration;
 use gpui::*;
 
 use crate::{
-    code_tour, code_tour_background, notifications,
+    notifications, review_ai, review_intelligence_background,
     state::{pr_key, AppState},
 };
 
@@ -75,16 +75,16 @@ pub async fn sync_workspace_flow(model: Entity<AppState>, cx: &mut AsyncWindowCo
             warm_structural_diffs_flow(model.clone(), cx).await;
 
             let should_sync_background_tours = model
-                .read_with(cx, |state, _| !state.code_tour_settings.background_syncing)
+                .read_with(cx, |state, _| !state.review_ai_settings.background_syncing)
                 .ok()
                 .unwrap_or(false);
 
             if should_sync_background_tours {
                 model
                     .update(cx, |state, cx| {
-                        state.code_tour_settings.background_syncing = true;
-                        state.code_tour_settings.background_error = None;
-                        state.code_tour_settings.background_message =
+                        state.review_ai_settings.background_syncing = true;
+                        state.review_ai_settings.background_error = None;
+                        state.review_ai_settings.background_message =
                             Some("Refreshing automatic review intelligence...".to_string());
                         cx.notify();
                     })
@@ -94,7 +94,7 @@ pub async fn sync_workspace_flow(model: Entity<AppState>, cx: &mut AsyncWindowCo
                     .background_executor()
                     .spawn({
                         let cache = cache.clone();
-                        async move { code_tour::load_code_tour_settings(&cache) }
+                        async move { review_ai::load_review_ai_settings(&cache) }
                     })
                     .await;
 
@@ -102,10 +102,10 @@ pub async fn sync_workspace_flow(model: Entity<AppState>, cx: &mut AsyncWindowCo
                     Ok(settings) => {
                         model
                             .update(cx, |state, cx| {
-                                state.code_tour_settings.settings = settings.clone();
-                                state.code_tour_settings.loaded = true;
-                                state.code_tour_settings.loading = false;
-                                state.code_tour_settings.error = None;
+                                state.review_ai_settings.settings = settings.clone();
+                                state.review_ai_settings.loaded = true;
+                                state.review_ai_settings.loading = false;
+                                state.review_ai_settings.error = None;
                                 cx.notify();
                             })
                             .ok();
@@ -117,7 +117,7 @@ pub async fn sync_workspace_flow(model: Entity<AppState>, cx: &mut AsyncWindowCo
                                 let workspace = workspace.clone();
                                 let settings = settings.clone();
                                 async move {
-                                    code_tour_background::sync_workspace_code_tours(
+                                    review_intelligence_background::sync_workspace_review_intelligence(
                                         &cache, &workspace, &settings,
                                     )
                                 }
@@ -126,16 +126,16 @@ pub async fn sync_workspace_flow(model: Entity<AppState>, cx: &mut AsyncWindowCo
 
                         model
                             .update(cx, |state, cx| {
-                                state.code_tour_settings.background_syncing = false;
+                                state.review_ai_settings.background_syncing = false;
                                 match sync_result {
                                     Ok(outcome) => {
-                                        state.code_tour_settings.background_message =
+                                        state.review_ai_settings.background_message =
                                             Some(outcome.summary());
-                                        state.code_tour_settings.background_error = None;
+                                        state.review_ai_settings.background_error = None;
                                     }
                                     Err(error) => {
-                                        state.code_tour_settings.background_message = None;
-                                        state.code_tour_settings.background_error = Some(error);
+                                        state.review_ai_settings.background_message = None;
+                                        state.review_ai_settings.background_error = Some(error);
                                     }
                                 }
                                 cx.notify();
@@ -145,10 +145,10 @@ pub async fn sync_workspace_flow(model: Entity<AppState>, cx: &mut AsyncWindowCo
                     Err(error) => {
                         model
                             .update(cx, |state, cx| {
-                                state.code_tour_settings.background_syncing = false;
-                                state.code_tour_settings.background_message = None;
-                                state.code_tour_settings.background_error = Some(error.clone());
-                                state.code_tour_settings.error = Some(error);
+                                state.review_ai_settings.background_syncing = false;
+                                state.review_ai_settings.background_message = None;
+                                state.review_ai_settings.background_error = Some(error.clone());
+                                state.review_ai_settings.error = Some(error);
                                 cx.notify();
                             })
                             .ok();

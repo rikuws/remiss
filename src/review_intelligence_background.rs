@@ -2,14 +2,15 @@ use std::collections::BTreeMap;
 
 use crate::{
     cache::CacheStore,
-    code_tour::{self, CodeTourSettings},
     github::{self, PullRequestDetail, PullRequestSummary, WorkspaceSnapshot},
-    local_repo, review_brief, review_intelligence,
+    guided_review, local_repo,
+    review_ai::{self, ReviewAiProvider, ReviewAiSettings},
+    review_brief, review_intelligence,
     state::pr_key,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct BackgroundCodeTourSyncOutcome {
+pub struct ReviewIntelligenceSyncOutcome {
     pub enabled_repositories: usize,
     pub pull_requests_considered: usize,
     pub generated_tours: usize,
@@ -19,7 +20,7 @@ pub struct BackgroundCodeTourSyncOutcome {
     pub skipped_pull_requests: usize,
 }
 
-impl BackgroundCodeTourSyncOutcome {
+impl ReviewIntelligenceSyncOutcome {
     pub fn summary(&self) -> String {
         if self.enabled_repositories == 0 {
             return "Automatic background review intelligence is disabled for every repository."
@@ -36,7 +37,7 @@ impl BackgroundCodeTourSyncOutcome {
 
         if self.generated_tours == 0 && self.generated_briefs == 0 {
             return format!(
-                "Checked {} pull request{} and reused {} cached guide{} and {} cached brief{}{}.",
+                "Checked {} pull request{} and reused {} cached Guided Review walkthrough{} and {} cached Review Brief{}{}.",
                 self.pull_requests_considered,
                 if self.pull_requests_considered == 1 {
                     ""
@@ -60,7 +61,7 @@ impl BackgroundCodeTourSyncOutcome {
         }
 
         format!(
-            "Checked {} pull request{}, generated {} guide{} and {} brief{}, and reused {} cached guide{} and {} cached brief{}{}.",
+            "Checked {} pull request{}, generated {} Guided Review walkthrough{} and {} Review Brief{}, and reused {} cached Guided Review walkthrough{} and {} cached Review Brief{}{}.",
             self.pull_requests_considered,
             if self.pull_requests_considered == 1 {
                 ""
@@ -120,23 +121,23 @@ struct PullRequestIntelligenceState {
     brief: PullRequestBriefState,
 }
 
-pub fn sync_workspace_code_tours(
+pub fn sync_workspace_review_intelligence(
     cache: &CacheStore,
     workspace: &WorkspaceSnapshot,
-    settings: &CodeTourSettings,
-) -> Result<BackgroundCodeTourSyncOutcome, String> {
+    settings: &ReviewAiSettings,
+) -> Result<ReviewIntelligenceSyncOutcome, String> {
     let pull_requests = enabled_pull_requests(workspace, settings);
-    let mut outcome = BackgroundCodeTourSyncOutcome {
+    let mut outcome = ReviewIntelligenceSyncOutcome {
         enabled_repositories: settings.automatic_repositories.len(),
         pull_requests_considered: pull_requests.len(),
-        ..BackgroundCodeTourSyncOutcome::default()
+        ..ReviewIntelligenceSyncOutcome::default()
     };
 
     if pull_requests.is_empty() {
         return Ok(outcome);
     }
 
-    let provider_statuses = code_tour::load_code_tour_provider_statuses()?;
+    let provider_statuses = review_ai::load_review_ai_provider_statuses()?;
     let Some(provider_status) = provider_statuses
         .iter()
         .find(|status| status.provider == settings.provider)
@@ -190,7 +191,7 @@ pub fn sync_workspace_code_tours(
 
 fn enabled_pull_requests(
     workspace: &WorkspaceSnapshot,
-    settings: &CodeTourSettings,
+    settings: &ReviewAiSettings,
 ) -> Vec<PullRequestSummary> {
     let mut unique_pull_requests = BTreeMap::<String, PullRequestSummary>::new();
 
@@ -216,10 +217,10 @@ fn enabled_pull_requests(
 fn ensure_pull_request_review_intelligence(
     cache: &CacheStore,
     summary: &PullRequestSummary,
-    provider: code_tour::CodeTourProvider,
+    provider: ReviewAiProvider,
 ) -> Result<PullRequestIntelligenceState, String> {
     let detail = load_or_sync_pull_request_detail(cache, summary)?;
-    let cached_tour = code_tour::load_code_tour(cache, &detail, provider)?.is_some();
+    let cached_tour = guided_review::load_guided_review(cache, &detail, provider)?.is_some();
     let cached_brief = review_brief::load_review_brief(cache, &detail, provider)?.is_some();
 
     if cached_tour && cached_brief {
@@ -258,9 +259,12 @@ fn ensure_pull_request_review_intelligence(
     let tour = if cached_tour {
         PullRequestTourState::Cached
     } else {
-        let generation_input =
-            code_tour::build_code_tour_generation_input(&detail, provider, &working_directory);
-        code_tour::generate_code_tour_with_progress(cache, generation_input, |_| {})?;
+        let generation_input = guided_review::build_guided_review_generation_input(
+            &detail,
+            provider,
+            &working_directory,
+        );
+        guided_review::generate_guided_review_with_progress(cache, generation_input, |_| {})?;
         PullRequestTourState::Generated
     };
 
@@ -302,8 +306,8 @@ fn load_or_sync_pull_request_detail(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_tour::CodeTourProvider;
     use crate::github::{AuthState, PullRequestQueue, Viewer};
+    use crate::review_ai::ReviewAiProvider;
     use std::collections::BTreeSet;
 
     fn summary(repository: &str, number: i64, updated_at: &str) -> PullRequestSummary {
@@ -348,8 +352,8 @@ mod tests {
     fn enabled_pull_requests_deduplicates_matching_repositories() {
         let mut automatic_repositories = BTreeSet::new();
         automatic_repositories.insert("acme/api".to_string());
-        let settings = CodeTourSettings {
-            provider: CodeTourProvider::Copilot,
+        let settings = ReviewAiSettings {
+            provider: ReviewAiProvider::Copilot,
             automatic_repositories,
         };
 
@@ -385,7 +389,7 @@ mod tests {
 
     #[test]
     fn background_sync_summary_handles_disabled_repositories() {
-        let outcome = BackgroundCodeTourSyncOutcome::default();
+        let outcome = ReviewIntelligenceSyncOutcome::default();
 
         assert_eq!(
             outcome.summary(),
@@ -395,7 +399,7 @@ mod tests {
 
     #[test]
     fn background_sync_summary_includes_review_briefs() {
-        let outcome = BackgroundCodeTourSyncOutcome {
+        let outcome = ReviewIntelligenceSyncOutcome {
             enabled_repositories: 1,
             pull_requests_considered: 2,
             generated_tours: 1,
@@ -407,13 +411,13 @@ mod tests {
 
         assert_eq!(
             outcome.summary(),
-            "Checked 2 pull requests, generated 1 guide and 2 briefs, and reused 1 cached guide and 0 cached briefs."
+            "Checked 2 pull requests, generated 1 Guided Review walkthrough and 2 Review Briefs, and reused 1 cached Guided Review walkthrough and 0 cached Review Briefs."
         );
     }
 
     #[test]
     fn background_sync_summary_includes_diff_unavailable_skips() {
-        let outcome = BackgroundCodeTourSyncOutcome {
+        let outcome = ReviewIntelligenceSyncOutcome {
             enabled_repositories: 1,
             pull_requests_considered: 2,
             generated_tours: 0,
@@ -425,7 +429,7 @@ mod tests {
 
         assert_eq!(
             outcome.summary(),
-            "Checked 2 pull requests and reused 1 cached guide and 1 cached brief, and skipped 1 pull request whose diff GitHub did not return."
+            "Checked 2 pull requests and reused 1 cached Guided Review walkthrough and 1 cached Review Brief, and skipped 1 pull request whose diff GitHub did not return."
         );
     }
 }

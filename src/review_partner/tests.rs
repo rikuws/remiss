@@ -18,7 +18,7 @@ fn partner_cache_key_includes_versions() {
     let key = review_partner_cache_key_from_parts(
         "acme/widgets",
         42,
-        CodeTourProvider::Codex,
+        ReviewAiProvider::Codex,
         "head-a",
         "stack-x",
         "context-y",
@@ -134,7 +134,7 @@ fn review_partner_prompt_and_focus_records_include_semantic_context() {
     let checkout_root = checkout_root.to_string_lossy();
     let input = build_review_partner_generation_input(
         &detail_with_deleted_symbol(),
-        CodeTourProvider::Codex,
+        ReviewAiProvider::Codex,
         checkout_root.as_ref(),
         stack,
         StructuralEvidencePack::empty(),
@@ -191,9 +191,9 @@ fn review_partner_prompt_and_focus_records_include_semantic_context() {
 #[test]
 fn partner_request_key_includes_generator_and_context_versions() {
     let detail = detail_with_deleted_symbol();
-    let key = build_review_partner_request_key(&detail, CodeTourProvider::Codex);
+    let key = build_review_partner_request_key(&detail, ReviewAiProvider::Codex);
 
-    assert!(key.contains(CodeTourProvider::Codex.slug()));
+    assert!(key.contains(ReviewAiProvider::Codex.slug()));
     assert!(key.contains(&detail.repository));
     assert!(key.contains(detail.head_ref_oid.as_deref().unwrap_or_default()));
     assert!(key.contains(REVIEW_PARTNER_GENERATOR_VERSION));
@@ -272,7 +272,7 @@ fn generation_input_caps_upfront_focus_records() {
 
     let input = build_review_partner_generation_input(
         &detail_with_deleted_symbol(),
-        CodeTourProvider::Codex,
+        ReviewAiProvider::Codex,
         "/tmp/remiss-review-partner-missing-checkout",
         stack,
         StructuralEvidencePack::empty(),
@@ -423,7 +423,6 @@ fn merge_rejects_unknown_layer_ids() {
             brief: "changed".to_string(),
             changed_items: Vec::new(),
             removed_items: Vec::new(),
-            usage_context: Vec::new(),
             similar_code: Vec::new(),
             codebase_fit: Vec::new(),
             concerns: Vec::new(),
@@ -477,7 +476,6 @@ fn merge_preserves_stack_order_and_clips_items() {
             brief: "partner brief".to_string(),
             changed_items: many_items,
             removed_items: Vec::new(),
-            usage_context: Vec::new(),
             similar_code: Vec::new(),
             codebase_fit: Vec::new(),
             concerns: Vec::new(),
@@ -488,16 +486,6 @@ fn merge_preserves_stack_order_and_clips_items() {
             title: "Focus record".to_string(),
             subtitle: None,
             summary: Some("Review the focused usage contract.".to_string()),
-            usage_context: vec![ReviewPartnerUsageGroupResponse {
-                symbol: "usage".to_string(),
-                summary: "One usage surfaced.".to_string(),
-                usages: vec![ReviewPartnerItemResponse {
-                    title: "usage".to_string(),
-                    detail: "detail".to_string(),
-                    path: None,
-                    line: None,
-                }],
-            }],
             codebase_fit: Some(ReviewPartnerCodebaseFitResponse {
                 follows: true,
                 summary: "follows codebase style".to_string(),
@@ -551,7 +539,6 @@ fn merge_accepts_layer_id_focus_record_key_alias() {
             title: "Layer focus".to_string(),
             subtitle: None,
             summary: Some("Generated layer-level behavior explanation.".to_string()),
-            usage_context: Vec::new(),
             codebase_fit: Some(ReviewPartnerCodebaseFitResponse {
                 follows: true,
                 summary: "follows codebase style".to_string(),
@@ -628,16 +615,6 @@ fn merge_uses_collected_tree_sitter_usages_instead_of_llm_usages() {
             title: "Focus record".to_string(),
             subtitle: None,
             summary: Some("Grouped usage summary.".to_string()),
-            usage_context: vec![ReviewPartnerUsageGroupResponse {
-                symbol: "llm_usage".to_string(),
-                summary: "LLM usage should be ignored.".to_string(),
-                usages: vec![ReviewPartnerItemResponse {
-                    title: "llm_usage".to_string(),
-                    detail: "call".to_string(),
-                    path: Some("src/other.rs".to_string()),
-                    line: Some(20),
-                }],
-            }],
             codebase_fit: Some(ReviewPartnerCodebaseFitResponse {
                 follows: true,
                 summary: "follows codebase style".to_string(),
@@ -681,7 +658,6 @@ fn focus_summary_preserves_complete_explanation_above_item_limit() {
             title: "Focus record".to_string(),
             subtitle: None,
             summary: Some(summary),
-            usage_context: Vec::new(),
             codebase_fit: Some(ReviewPartnerCodebaseFitResponse {
                 follows: true,
                 summary: "follows codebase style".to_string(),
@@ -718,7 +694,6 @@ fn question_led_focus_summary_keeps_concrete_remainder() {
                 "Does the public API now match CLI behavior? Normalizes text before diffing."
                     .to_string(),
             ),
-            usage_context: Vec::new(),
             codebase_fit: Some(ReviewPartnerCodebaseFitResponse {
                 follows: true,
                 summary: "follows codebase style".to_string(),
@@ -757,7 +732,6 @@ fn do_led_focus_summary_keeps_concrete_remainder() {
                 "Do the helpers define the platform contract? Adds portable asset lookup."
                     .to_string(),
             ),
-            usage_context: Vec::new(),
             codebase_fit: Some(ReviewPartnerCodebaseFitResponse {
                 follows: true,
                 summary: "follows codebase style".to_string(),
@@ -837,7 +811,6 @@ fn file_inventory_focus_summary_uses_behavior_fallback() {
             title: "Focus record".to_string(),
             subtitle: None,
             summary: Some("This layer covers ApiClient, ApiClientTest, CachedJwt, plus 7 others in backend/common/src/main/kotlin/fi/fintraffic/common/integration/ApiClient.kt, backend/common/src/test/kotlin/fi/fintraffic/common/integration/ApiClientTest.kt. The useful meaning is the behavior these symbols now express: what state changes.".to_string()),
-            usage_context: Vec::new(),
             codebase_fit: Some(ReviewPartnerCodebaseFitResponse {
                 follows: true,
                 summary: "follows codebase style".to_string(),
@@ -920,7 +893,6 @@ fn ungrounded_codebase_fit_mismatch_becomes_follows() {
             title: "Focus record".to_string(),
             subtitle: None,
             summary: Some("Style verdict summary.".to_string()),
-            usage_context: Vec::new(),
             codebase_fit: Some(ReviewPartnerCodebaseFitResponse {
                 follows: false,
                 summary: "This does not match local style.".to_string(),
@@ -961,7 +933,6 @@ fn grounded_codebase_fit_mismatch_keeps_evidence() {
             title: "Focus record".to_string(),
             subtitle: None,
             summary: Some("Style verdict summary.".to_string()),
-            usage_context: Vec::new(),
             codebase_fit: Some(ReviewPartnerCodebaseFitResponse {
                 follows: false,
                 summary: "This uses a different row structure than nearby panels.".to_string(),
@@ -1005,7 +976,6 @@ fn merge_preserves_complete_review_briefs() {
             brief: long_brief,
             changed_items: Vec::new(),
             removed_items: Vec::new(),
-            usage_context: Vec::new(),
             similar_code: Vec::new(),
             codebase_fit: Vec::new(),
             concerns: Vec::new(),
@@ -1204,7 +1174,7 @@ fn input(context: ReviewPartnerContextPack) -> GenerateReviewPartnerInput {
     let focus_targets = build_review_partner_focus_targets(&stack, &structural_evidence);
 
     GenerateReviewPartnerInput {
-        provider: CodeTourProvider::Codex,
+        provider: ReviewAiProvider::Codex,
         working_directory: "/tmp".to_string(),
         repository: "acme/widgets".to_string(),
         number: 42,
@@ -1282,7 +1252,7 @@ fn partner_document(
 ) -> GeneratedReviewPartnerContext {
     let focus_targets = build_review_partner_focus_targets(&stack, &structural_evidence);
     GeneratedReviewPartnerContext {
-        provider: CodeTourProvider::Codex,
+        provider: ReviewAiProvider::Codex,
         model: None,
         generated_at_ms: 1,
         code_version_key: "head-a".to_string(),
