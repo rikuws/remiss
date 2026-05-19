@@ -43,10 +43,10 @@ mod tests;
 use self::context::*;
 use self::util::*;
 
-pub const REVIEW_PARTNER_GENERATOR_VERSION: &str = "review-partner-v21";
+pub const REVIEW_PARTNER_GENERATOR_VERSION: &str = "review-partner-v22";
 pub const REVIEW_PARTNER_CONTEXT_VERSION: &str = "review-partner-context-v5";
 
-const REVIEW_PARTNER_CACHE_KEY_PREFIX: &str = "review-partner-v21";
+const REVIEW_PARTNER_CACHE_KEY_PREFIX: &str = "review-partner-v22";
 const MAX_PARTNER_LAYERS: usize = 24;
 const MAX_LAYER_ATOMS: usize = 32;
 pub const MAX_FOCUS_RECORDS: usize = 160;
@@ -809,6 +809,8 @@ pub fn build_review_partner_prompt(input: &GenerateReviewPartnerInput) -> String
         "Use historyContext.signals only as evidence-backed review memory. Do not treat prior signals as current truth when the current code contradicts them.",
         "When historyContext conflicts with current code, surface the conflict in assumptions, historySignals, or limitations instead of resolving it silently.",
         "Generate focusRecords for the supplied focusTargets. Each focus record explains one stack layer, not one diff hunk.",
+        "The supplied focusTargets live at Pull-request context.focusTargets.",
+        "Set each focusRecords[].key to the exact matching focusTargets[].key string. Do not use layerId, atom id, title, file path, or a generated key in that field.",
         "Each focus record must include one complete natural-language summary paragraph that synthesizes what changed, how the code behaves, the invariant/state change/error handling it affects, the supported intent or trade-off, and any relevant history signal.",
         "The summary must not be a file inventory, line list, stack-generator explanation, or statement about how Remiss grouped the change.",
         "Do not name changed files in the summary unless one specific file is itself the behavior being explained. Prefer the subsystem, flow, symbol contract, state, or invariant.",
@@ -898,8 +900,7 @@ fn merge_review_partner(
         .focus_targets
         .iter()
         .map(|target| {
-            response_focus_records
-                .remove(&target.key)
+            take_response_focus_record_for_target(&mut response_focus_records, target)
                 .map(|record| {
                     merge_focus_record(
                         target,
@@ -935,6 +936,45 @@ fn merge_review_partner(
         focus_targets: input.focus_targets.clone(),
         focus_records,
     })
+}
+
+fn take_response_focus_record_for_target(
+    records: &mut BTreeMap<String, ReviewPartnerFocusRecordResponse>,
+    target: &ReviewPartnerFocusTarget,
+) -> Option<ReviewPartnerFocusRecordResponse> {
+    for key in response_focus_record_key_candidates(target) {
+        if let Some(record) = records.remove(&key) {
+            return Some(record);
+        }
+    }
+    None
+}
+
+fn response_focus_record_key_candidates(target: &ReviewPartnerFocusTarget) -> Vec<String> {
+    let mut keys = Vec::new();
+    push_unique_key(&mut keys, target.key.clone());
+
+    if target.match_kind == ReviewPartnerFocusMatchKind::Layer {
+        if let Some(layer_id) = target.layer_id.as_deref() {
+            push_unique_key(&mut keys, layer_id.to_string());
+            push_unique_key(&mut keys, format!("layer:{layer_id}"));
+        }
+    }
+
+    if target.atom_ids.len() == 1 {
+        if let Some(atom_id) = target.atom_ids.first() {
+            push_unique_key(&mut keys, atom_id.clone());
+            push_unique_key(&mut keys, format!("atom:{atom_id}"));
+        }
+    }
+
+    keys
+}
+
+fn push_unique_key(keys: &mut Vec<String>, key: String) {
+    if !key.trim().is_empty() && !keys.iter().any(|existing| existing == &key) {
+        keys.push(key);
+    }
 }
 
 fn merge_layer(
@@ -2684,6 +2724,7 @@ fn build_focus_record_prompt(
         "Return only context the reader cannot infer from the visible diff alone.",
         "Use historyContext.signals only as evidence-backed review memory. Do not treat prior signals as current truth when the current code contradicts them.",
         "When historyContext conflicts with current code, surface the conflict in assumptions, historySignals, or limitations instead of resolving it silently.",
+        "Set record.key to the exact supplied target.key string. Do not use layerId, atom id, title, file path, or a generated key in that field.",
         "Avoid emoji, markdown headings, decorative labels, code fences, and code sketches.",
         "Include one complete natural-language summary paragraph that synthesizes what changed, how the code behaves, the invariant/state change/error handling it affects, the supported intent or trade-off, and any relevant history signal.",
         "The summary must not be a file inventory, line list, stack-generator explanation, or statement about how Remiss grouped the change.",

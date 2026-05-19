@@ -24,7 +24,7 @@ fn partner_cache_key_includes_versions() {
         "context-y",
     );
 
-    assert!(key.starts_with("review-partner-v21:"));
+    assert!(key.starts_with("review-partner-v22:"));
     assert!(key.contains("stack-x"));
     assert!(key.contains("context-y"));
 }
@@ -46,6 +46,7 @@ fn review_partner_prompt_requires_concrete_summary_copy() {
     assert!(prompt.contains("understandingCheckpoints"));
     assert!(prompt.contains("historySignals"));
     assert!(prompt.contains("\"signals\": []"));
+    assert!(prompt.contains("exact matching focusTargets[].key"));
     assert!(prompt.contains("human verification surface"));
     assert!(!prompt.contains("Act like a strong reviewer"));
     assert!(!prompt.contains("Request changes if"));
@@ -164,6 +165,7 @@ fn review_partner_prompt_and_focus_records_include_semantic_context() {
     assert!(focus_prompt.contains("semanticEvidence"));
     assert!(focus_prompt.contains("understandingCheckpoints"));
     assert!(focus_prompt.contains("historySignals"));
+    assert!(focus_prompt.contains("exact supplied target.key"));
 }
 
 #[test]
@@ -491,6 +493,53 @@ fn merge_preserves_stack_order_and_clips_items() {
     assert_eq!(partner.focus_records.len(), 1);
     assert_eq!(partner.focus_records[0].understanding_checkpoints.len(), 1);
     assert_eq!(partner.model.as_deref(), Some("model"));
+}
+
+#[test]
+fn merge_accepts_layer_id_focus_record_key_alias() {
+    let input = input(ReviewPartnerContextPack::empty());
+    assert_eq!(input.focus_targets[0].key, "layer:layer-1");
+
+    let response = ReviewPartnerResponse {
+        stack_brief: "brief".to_string(),
+        stack_concerns: Vec::new(),
+        limitations: Vec::new(),
+        warnings: Vec::new(),
+        layers: Vec::new(),
+        focus_records: vec![ReviewPartnerFocusRecordResponse {
+            key: "layer-1".to_string(),
+            title: "Layer focus".to_string(),
+            subtitle: None,
+            summary: Some("Generated layer-level behavior explanation.".to_string()),
+            usage_context: Vec::new(),
+            codebase_fit: Some(ReviewPartnerCodebaseFitResponse {
+                follows: true,
+                summary: "follows codebase style".to_string(),
+                evidence: Vec::new(),
+            }),
+            sections: Vec::new(),
+            understanding_checkpoints: vec![ReviewPartnerItemResponse {
+                title: "Invariant".to_string(),
+                detail: "Keep the generated focus record attached to the layer target.".to_string(),
+                path: None,
+                line: None,
+            }],
+            assumptions: Vec::new(),
+            history_signals: Vec::new(),
+            limitations: Vec::new(),
+        }],
+    };
+
+    let partner = merge_review_partner(response, &input, None).expect("partner context");
+    let record = &partner.focus_records[0];
+
+    assert_eq!(record.key, "layer:layer-1");
+    assert_eq!(record.title, "Layer focus");
+    assert_eq!(
+        record.summary,
+        "Generated layer-level behavior explanation."
+    );
+    assert_eq!(record.understanding_checkpoints.len(), 1);
 }
 
 #[test]
