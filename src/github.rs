@@ -13,6 +13,7 @@ const WORKSPACE_CACHE_KEY: &str = "workspace-snapshot-v3";
 const AUTH_STATE_CACHE_KEY: &str = "auth-state-v1";
 const GITHUB_GRAPHQL_PAGE_SIZE: i64 = 100;
 const GITHUB_SEARCH_RESULT_LIMIT: usize = 1_000;
+const OVERSIZED_DIFF_UNAVAILABLE_REASON: &str = "GitHub did not return the unified diff because this pull request is too large; automatic review intelligence will wait until the pull request changes.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthState {
@@ -226,6 +227,8 @@ pub struct PullRequestDataCompleteness {
     pub review_thread_comments: ConnectionCompleteness,
     pub files: ConnectionCompleteness,
     #[serde(default)]
+    pub diff: ConnectionCompleteness,
+    #[serde(default)]
     pub commits: ConnectionCompleteness,
 }
 
@@ -238,6 +241,7 @@ impl PullRequestDataCompleteness {
             && self.review_threads.is_complete
             && self.review_thread_comments.is_complete
             && self.files.is_complete
+            && self.diff.is_complete
             && self.commits.is_complete
     }
 
@@ -250,6 +254,7 @@ impl PullRequestDataCompleteness {
             ("review threads", &self.review_threads),
             ("thread comments", &self.review_thread_comments),
             ("files", &self.files),
+            ("diff files", &self.diff),
             ("commits", &self.commits),
         ]
         .into_iter()
@@ -283,6 +288,7 @@ impl Default for PullRequestDataCompleteness {
             review_threads: ConnectionCompleteness::default(),
             review_thread_comments: ConnectionCompleteness::default(),
             files: ConnectionCompleteness::default(),
+            diff: ConnectionCompleteness::default(),
             commits: ConnectionCompleteness::default(),
         }
     }
@@ -1369,23 +1375,10 @@ fn fetch_pull_request_detail(repository: &str, number: i64) -> Result<PullReques
         .and_then(|v| v.get("pullRequest"))
         .ok_or_else(|| format!("Pull request {repository}#{number} was not found."))?;
 
-    let diff_output = gh::run_owned(vec![
-        "pr".to_string(),
-        "diff".to_string(),
-        number.to_string(),
-        "--repo".to_string(),
-        repository.to_string(),
-    ])?;
-
-    if diff_output.exit_code != Some(0) {
-        return Err(combine_process_error(
-            diff_output,
-            &format!("Failed to fetch diff for {repository}#{number}"),
-        ));
-    }
-
-    let parsed_diff = crate::diff::parse_unified_diff(&diff_output.stdout);
-    let raw_diff = diff_output.stdout;
+    let diff_fetch = fetch_pull_request_diff(repository, number, i64_field(pr, "changedFiles"))?;
+    let raw_diff = diff_fetch.raw_diff;
+    let parsed_diff = diff_fetch.parsed_diff;
+    let diff_completeness = diff_fetch.completeness;
 
     let author = pr.get("author");
     let null = Value::Null;
@@ -1508,6 +1501,7 @@ fn fetch_pull_request_detail(repository: &str, number: i64) -> Result<PullReques
         review_threads: review_threads_completeness,
         review_thread_comments: review_thread_comments_completeness,
         files: files_completeness,
+        diff: diff_completeness,
         commits: commits_completeness,
     };
 
@@ -1564,6 +1558,74 @@ fn fetch_pull_request_detail(repository: &str, number: i64) -> Result<PullReques
         parsed_diff,
         data_completeness,
     })
+}
+
+#[derive(Debug, Clone)]
+struct PullRequestDiffFetch {
+    raw_diff: String,
+    parsed_diff: Vec<ParsedDiffFile>,
+    completeness: ConnectionCompleteness,
+}
+
+fn fetch_pull_request_diff(
+    repository: &str,
+    number: i64,
+    changed_files: i64,
+) -> Result<PullRequestDiffFetch, String> {
+    let diff_output = gh::run_owned(vec![
+        "pr".to_string(),
+        "diff".to_string(),
+        number.to_string(),
+        "--repo".to_string(),
+        repository.to_string(),
+    ])?;
+
+    if diff_output.exit_code == Some(0) {
+        let parsed_diff = crate::diff::parse_unified_diff(&diff_output.stdout);
+        return Ok(PullRequestDiffFetch {
+            raw_diff: diff_output.stdout,
+            parsed_diff,
+            completeness: complete_connection_for_count(changed_files),
+        });
+    }
+
+    let message = combine_process_error(
+        diff_output,
+        &format!("Failed to fetch diff for {repository}#{number}"),
+    );
+    if is_non_retryable_diff_unavailable_error(&message) {
+        return Ok(PullRequestDiffFetch {
+            raw_diff: String::new(),
+            parsed_diff: Vec::new(),
+            completeness: ConnectionCompleteness::from_counts(
+                0,
+                changed_files.max(0),
+                Some(OVERSIZED_DIFF_UNAVAILABLE_REASON.to_string()),
+            ),
+        });
+    }
+
+    Err(message)
+}
+
+fn complete_connection_for_count(total_count: i64) -> ConnectionCompleteness {
+    ConnectionCompleteness::from_counts(
+        usize::try_from(total_count.max(0)).unwrap_or(usize::MAX),
+        total_count.max(0),
+        None,
+    )
+}
+
+fn is_non_retryable_diff_unavailable_error(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    let mentions_diff = normalized.contains("diff");
+    let mentions_pull_request = normalized.contains("pull request");
+
+    (mentions_diff || mentions_pull_request)
+        && (normalized.contains("too large")
+            || normalized.contains("too many files")
+            || normalized.contains("taking too long to generate")
+            || normalized.contains("took too long to generate"))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2715,6 +2777,19 @@ mod tests {
         });
 
         assert_eq!(review_thread_reply_comment_id(&response), None);
+    }
+
+    #[test]
+    fn classifies_oversized_diff_fetch_errors_as_non_retryable() {
+        assert!(is_non_retryable_diff_unavailable_error(
+            "Failed to fetch diff for acme/repo#7: GraphQL: This diff is too large to display."
+        ));
+        assert!(is_non_retryable_diff_unavailable_error(
+            "Failed to fetch diff for acme/repo#7: pull request contains too many files"
+        ));
+        assert!(!is_non_retryable_diff_unavailable_error(
+            "Failed to fetch diff for acme/repo#7: HTTP 502: gateway timeout"
+        ));
     }
 
     fn pull_request_review(

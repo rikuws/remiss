@@ -16,6 +16,7 @@ pub struct BackgroundCodeTourSyncOutcome {
     pub reused_cached_tours: usize,
     pub generated_briefs: usize,
     pub reused_cached_briefs: usize,
+    pub skipped_pull_requests: usize,
 }
 
 impl BackgroundCodeTourSyncOutcome {
@@ -35,7 +36,7 @@ impl BackgroundCodeTourSyncOutcome {
 
         if self.generated_tours == 0 && self.generated_briefs == 0 {
             return format!(
-                "Checked {} pull request{} and reused {} cached guide{} and {} cached brief{}.",
+                "Checked {} pull request{} and reused {} cached guide{} and {} cached brief{}{}.",
                 self.pull_requests_considered,
                 if self.pull_requests_considered == 1 {
                     ""
@@ -53,12 +54,13 @@ impl BackgroundCodeTourSyncOutcome {
                     ""
                 } else {
                     "s"
-                }
+                },
+                self.skipped_summary_clause(),
             );
         }
 
         format!(
-            "Checked {} pull request{}, generated {} guide{} and {} brief{}, and reused {} cached guide{} and {} cached brief{}.",
+            "Checked {} pull request{}, generated {} guide{} and {} brief{}, and reused {} cached guide{} and {} cached brief{}{}.",
             self.pull_requests_considered,
             if self.pull_requests_considered == 1 {
                 ""
@@ -76,7 +78,24 @@ impl BackgroundCodeTourSyncOutcome {
                 "s"
             },
             self.reused_cached_briefs,
-            if self.reused_cached_briefs == 1 { "" } else { "s" }
+            if self.reused_cached_briefs == 1 { "" } else { "s" },
+            self.skipped_summary_clause(),
+        )
+    }
+
+    fn skipped_summary_clause(&self) -> String {
+        if self.skipped_pull_requests == 0 {
+            return String::new();
+        }
+
+        format!(
+            ", and skipped {} pull request{} whose diff GitHub did not return",
+            self.skipped_pull_requests,
+            if self.skipped_pull_requests == 1 {
+                ""
+            } else {
+                "s"
+            }
         )
     }
 }
@@ -85,12 +104,14 @@ impl BackgroundCodeTourSyncOutcome {
 enum PullRequestTourState {
     Generated,
     Cached,
+    Skipped,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PullRequestBriefState {
     Generated,
     Cached,
+    Skipped,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,10 +163,17 @@ pub fn sync_workspace_code_tours(
                 match state.tour {
                     PullRequestTourState::Generated => outcome.generated_tours += 1,
                     PullRequestTourState::Cached => outcome.reused_cached_tours += 1,
+                    PullRequestTourState::Skipped => {}
                 }
                 match state.brief {
                     PullRequestBriefState::Generated => outcome.generated_briefs += 1,
                     PullRequestBriefState::Cached => outcome.reused_cached_briefs += 1,
+                    PullRequestBriefState::Skipped => {}
+                }
+                if matches!(state.tour, PullRequestTourState::Skipped)
+                    || matches!(state.brief, PullRequestBriefState::Skipped)
+                {
+                    outcome.skipped_pull_requests += 1;
                 }
             }
             Err(error) => {
@@ -198,6 +226,21 @@ fn ensure_pull_request_review_intelligence(
         return Ok(PullRequestIntelligenceState {
             tour: PullRequestTourState::Cached,
             brief: PullRequestBriefState::Cached,
+        });
+    }
+
+    if !detail.data_completeness.diff.is_complete {
+        return Ok(PullRequestIntelligenceState {
+            tour: if cached_tour {
+                PullRequestTourState::Cached
+            } else {
+                PullRequestTourState::Skipped
+            },
+            brief: if cached_brief {
+                PullRequestBriefState::Cached
+            } else {
+                PullRequestBriefState::Skipped
+            },
         });
     }
 
@@ -359,11 +402,30 @@ mod tests {
             reused_cached_tours: 1,
             generated_briefs: 2,
             reused_cached_briefs: 0,
+            skipped_pull_requests: 0,
         };
 
         assert_eq!(
             outcome.summary(),
             "Checked 2 pull requests, generated 1 guide and 2 briefs, and reused 1 cached guide and 0 cached briefs."
+        );
+    }
+
+    #[test]
+    fn background_sync_summary_includes_diff_unavailable_skips() {
+        let outcome = BackgroundCodeTourSyncOutcome {
+            enabled_repositories: 1,
+            pull_requests_considered: 2,
+            generated_tours: 0,
+            reused_cached_tours: 1,
+            generated_briefs: 0,
+            reused_cached_briefs: 1,
+            skipped_pull_requests: 1,
+        };
+
+        assert_eq!(
+            outcome.summary(),
+            "Checked 2 pull requests and reused 1 cached guide and 1 cached brief, and skipped 1 pull request whose diff GitHub did not return."
         );
     }
 }
