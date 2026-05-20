@@ -22,6 +22,7 @@ use crate::state::*;
 use crate::theme::*;
 
 use super::diff_view::{enter_files_surface, render_files_view, warm_structural_diffs_flow};
+use super::motion::{lerp_px, lerp_rgba};
 use super::sections::{
     badge, error_text, eyebrow, format_relative_time, ghost_button, panel_state_text,
     review_button, success_text, user_avatar,
@@ -682,19 +683,6 @@ fn header_animation_progress(compact: bool, delta: f32) -> f32 {
         delta
     } else {
         1.0 - delta
-    }
-}
-
-fn lerp_px(expanded: f32, compact: f32, progress: f32) -> Pixels {
-    px(expanded + (compact - expanded) * progress)
-}
-
-fn lerp_rgba(expanded: Rgba, compact: Rgba, progress: f32) -> Rgba {
-    Rgba {
-        r: expanded.r + (compact.r - expanded.r) * progress,
-        g: expanded.g + (compact.g - expanded.g) * progress,
-        b: expanded.b + (compact.b - expanded.b) * progress,
-        a: expanded.a + (compact.a - expanded.a) * progress,
     }
 }
 

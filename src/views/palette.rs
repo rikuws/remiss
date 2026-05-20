@@ -20,6 +20,7 @@ use super::diff_view::{
     ensure_active_review_focus_loaded, enter_files_surface, enter_stack_review_mode,
     switch_review_code_mode,
 };
+use super::motion::{lerp_f32, lerp_px};
 use super::sections::{badge, open_pull_request, panel_state_text};
 use super::settings::{
     decrease_code_font_size_preference, increase_code_font_size_preference, prepare_settings_view,
@@ -1121,10 +1122,6 @@ fn palette_reveal_progress(open: bool, delta: f32) -> f32 {
     }
 }
 
-fn lerp_px(from: f32, to: f32, progress: f32) -> Pixels {
-    px(from + (to - from) * progress)
-}
-
 struct PaletteScrollAnimation {
     generation: u64,
     start: Point<Pixels>,
@@ -1256,10 +1253,6 @@ fn animate_palette_scroll(
         }
     })
     .detach();
-}
-
-fn lerp_f32(from: f32, to: f32, progress: f32) -> f32 {
-    from + (to - from) * progress
 }
 
 fn ease_out_sine(progress: f32) -> f32 {
