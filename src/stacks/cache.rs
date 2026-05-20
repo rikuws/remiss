@@ -2,21 +2,18 @@ use crate::{cache::CacheStore, review_ai::ReviewAiProvider};
 
 use super::model::{stack_now_ms, ChangeAtom, ReviewStack, StackReviewProgress};
 
-const AI_REVIEW_STACK_CACHE_PREFIX: &str = "ai-review-stack-v2";
+const AI_REVIEW_STACK_CACHE_PREFIX: &str = "review-stack-v3";
 const STACK_PROGRESS_CACHE_PREFIX: &str = "stack-review-progress-v1";
 
 pub fn ai_review_stack_cache_key(
     repository: &str,
     pr_number: i64,
-    provider: ReviewAiProvider,
+    _provider: ReviewAiProvider,
     code_version_key: &str,
 ) -> String {
     format!(
-        "{AI_REVIEW_STACK_CACHE_PREFIX}:{}#{}:{}:{}",
-        repository,
-        pr_number,
-        provider.slug(),
-        code_version_key
+        "{AI_REVIEW_STACK_CACHE_PREFIX}:{}#{}:{}",
+        repository, pr_number, code_version_key
     )
 }
 
@@ -142,7 +139,7 @@ mod tests {
     };
 
     #[test]
-    fn ai_review_stack_cache_key_varies_by_provider_and_code_version() {
+    fn guided_review_stack_cache_key_ignores_provider_and_varies_by_code_version() {
         let codex_head =
             ai_review_stack_cache_key("acme/repo", 42, ReviewAiProvider::Codex, "head-abc");
         let copilot_head =
@@ -154,12 +151,12 @@ mod tests {
             codex_head,
             ai_review_stack_cache_key("acme/repo", 42, ReviewAiProvider::Codex, "head-abc",)
         );
-        assert_ne!(codex_head, copilot_head);
+        assert_eq!(codex_head, copilot_head);
         assert_ne!(codex_head, codex_next);
     }
 
     #[test]
-    fn save_and_load_ai_review_stack_persists_success_by_provider_and_head() {
+    fn save_and_load_ai_review_stack_persists_success_by_head() {
         let cache = CacheStore::new(std::env::temp_dir().join(format!(
                 "remiss-stack-cache-test-{}.sqlite3",
                 std::time::SystemTime::now()
@@ -173,16 +170,21 @@ mod tests {
         save_ai_review_stack(&cache, &stack, ReviewAiProvider::Codex, "head-abc")
             .expect("save stack");
 
-        let loaded =
-            load_ai_review_stack(&cache, "acme/repo", 1, ReviewAiProvider::Codex, "head-abc")
-                .expect("load stack")
-                .expect("stored stack");
-        let missing = load_ai_review_stack(
+        let loaded = load_ai_review_stack(
             &cache,
             "acme/repo",
             1,
             ReviewAiProvider::Copilot,
             "head-abc",
+        )
+        .expect("load stack")
+        .expect("stored stack");
+        let missing = load_ai_review_stack(
+            &cache,
+            "acme/repo",
+            1,
+            ReviewAiProvider::Copilot,
+            "head-def",
         )
         .expect("load missing");
 

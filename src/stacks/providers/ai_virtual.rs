@@ -35,6 +35,7 @@ use super::virtual_commits::{self, CommitContext, CommitSuitability, CommitSumma
 
 const MAX_AI_STACK_ATOMS: usize = 180;
 const MAX_AI_STACK_ATTEMPTS: usize = 5;
+const MAX_AI_STACK_PROMPT_BYTES: usize = 140_000;
 
 pub struct AiVirtualStackProvider;
 
@@ -130,6 +131,33 @@ pub fn discover_with_progress(
         repo_context.semantic_review.as_ref(),
     );
     let initial_prompt = build_stack_planning_prompt(&input_json);
+    on_progress(agents::progress::make_progress(
+        "prompt_budget",
+        "Guided Review stack prompt budget",
+        Some(format!(
+            "{} of {} bytes reserved for atom metadata, structural summaries, and provider checkout reads.",
+            initial_prompt.len(),
+            MAX_AI_STACK_PROMPT_BYTES
+        )),
+        Some(format!(
+            "Stack prompt: {}/{} bytes",
+            initial_prompt.len(),
+            MAX_AI_STACK_PROMPT_BYTES
+        )),
+    ));
+    if initial_prompt.len() > MAX_AI_STACK_PROMPT_BYTES {
+        return ai_unavailable_stack(
+            selected_pr,
+            "AI stack planning was unavailable because the prompt exceeded the explicit budget. Remiss did not tail-truncate stack context.",
+            Some(json!({
+                "provider": provider.slug(),
+                "promptBytes": initial_prompt.len(),
+                "maxPromptBytes": MAX_AI_STACK_PROMPT_BYTES,
+                "commitSuitability": commit_context.suitability,
+            })),
+        )
+        .map(Some);
+    }
 
     let mut prompt = initial_prompt.clone();
     let mut attempt: usize = 0;
@@ -161,6 +189,7 @@ pub fn discover_with_progress(
                         extracted_plan_value: None,
                         normalized_plan_value: None,
                         provider_error: Some(&error),
+                        agent_response: None,
                         attempt,
                         max_attempts: MAX_AI_STACK_ATTEMPTS,
                         prior_failures: &prior_failures,
@@ -219,6 +248,7 @@ pub fn discover_with_progress(
                         extracted_plan_value: error.extracted_plan_value.as_ref(),
                         normalized_plan_value: error.normalized_plan_value.as_ref(),
                         provider_error: None,
+                        agent_response: Some(&response),
                         attempt,
                         max_attempts: MAX_AI_STACK_ATTEMPTS,
                         prior_failures: &prior_failures,
@@ -251,9 +281,10 @@ pub fn discover_with_progress(
                     selected_pr,
                     atoms,
                     validated,
-                    response.model,
+                    response.model.clone(),
                     provider,
                     commit_context,
+                    Some(agent_response_metadata(&response)),
                 )));
             }
             Err(error) => {
@@ -290,6 +321,7 @@ pub fn discover_with_progress(
                         extracted_plan_value: Some(&parse_result.extracted_plan_value),
                         normalized_plan_value: Some(&parse_result.normalized_plan_value),
                         provider_error: None,
+                        agent_response: Some(&response),
                         attempt,
                         max_attempts: MAX_AI_STACK_ATTEMPTS,
                         prior_failures: &prior_failures,
@@ -620,6 +652,7 @@ struct AiStackDiagnosticLogInput<'a> {
     extracted_plan_value: Option<&'a Value>,
     normalized_plan_value: Option<&'a Value>,
     provider_error: Option<&'a str>,
+    agent_response: Option<&'a agents::AgentTextResponse>,
     attempt: usize,
     max_attempts: usize,
     prior_failures: &'a [Value],
@@ -661,6 +694,9 @@ fn write_ai_stack_diagnostic_log(input: AiStackDiagnosticLogInput<'_>) -> Option
         "workingDirectory": input.working_directory,
         "modelOrAgent": input.model,
         "providerError": input.provider_error,
+        "usedCheckoutContext": input.agent_response.map(|response| response.used_checkout_context),
+        "checkoutCommandCount": input.agent_response.map(|response| response.checkout_command_count),
+        "inspectedPathHints": input.agent_response.map(|response| &response.inspected_path_hints),
         "parseError": parse_error,
         "validationError": input.validation_error,
         "attempt": input.attempt,
@@ -728,6 +764,7 @@ pub fn build_stack_from_validated_plan(
     model_or_agent: Option<String>,
     provider: ReviewAiProvider,
     commit_context: CommitContext,
+    agent_metadata: Option<Value>,
 ) -> ReviewStack {
     let plan = validated.plan;
     let stack_id = virtual_stack_id(selected_pr);
@@ -873,11 +910,21 @@ pub fn build_stack_from_validated_plan(
                 "commitSuitability": commit_context.suitability,
                 "commits": commit_context.commits,
                 "aiOnly": true,
+                "agent": agent_metadata.unwrap_or(Value::Null),
             })),
         }),
         generated_at_ms: stack_now_ms(),
         generator_version: STACK_GENERATOR_VERSION.to_string(),
     }
+}
+
+fn agent_response_metadata(response: &agents::AgentTextResponse) -> Value {
+    json!({
+        "usedCheckoutContext": response.used_checkout_context,
+        "checkoutCommandCount": response.checkout_command_count,
+        "inspectedPathHints": response.inspected_path_hints,
+        "promptBytes": response.prompt_bytes,
+    })
 }
 
 pub fn ai_unavailable_stack(
@@ -1675,6 +1722,7 @@ mod tests {
                     reasons: vec!["No commits.".to_string()],
                 },
             },
+            None,
         );
 
         assert_eq!(stack.source, StackSource::VirtualAi);
@@ -1779,6 +1827,7 @@ mod tests {
                 previous_path: None,
                 status: StructuralEvidenceStatus::Full,
                 message: None,
+                operations: Vec::new(),
                 matched_atom_ids: vec!["atom_1".to_string()],
                 unmatched_hunk_count: 0,
                 changes: vec![StructuralEvidenceChange {

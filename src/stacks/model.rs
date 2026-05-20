@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{semantic_review::RemissSemanticReview, structural_evidence::StructuralEvidencePack};
 
-pub const STACK_GENERATOR_VERSION: &str = "virtual-stacks-v5";
+pub const STACK_GENERATOR_VERSION: &str = "virtual-stacks-v6";
 pub const STACK_LAYER_TITLE_MAX_CHARS: usize = 56;
 pub const STACK_LAYER_TITLE_MAX_WORDS: usize = 10;
 

@@ -1382,7 +1382,7 @@ dependencies = [
 [[package]]
 name = "difftastic"
 version = "0.70.0"
-source = "git+https://github.com/rikuws/difftastic?rev=007b1a2dbc8a997d1a9b4b9a773aafb3f032cdc0#007b1a2dbc8a997d1a9b4b9a773aafb3f032cdc0"
+source = "git+https://github.com/rikuws/difftastic?rev=663819c98d27c4987ffb3f3575ea8be8df78452f#663819c98d27c4987ffb3f3575ea8be8df78452f"
 dependencies = [
  "bumpalo",
  "cc",
@@ -5361,7 +5361,7 @@ checksum = "b12e76d157a900eb52e81bc6e9f3069344290341720e9178cde2407113ac8d89"
 [[package]]
 name = "sem-core"
 version = "0.5.4"
-source = "git+https://github.com/rikuws/sem?rev=bbfba575f772dcda82f91fdc9a3865f1e511de9e#bbfba575f772dcda82f91fdc9a3865f1e511de9e"
+source = "git+https://github.com/rikuws/sem?rev=fa605d2ace4ee579c69b589920edd61cece92042#fa605d2ace4ee579c69b589920edd61cece92042"
 dependencies = [
  "git2",
  "rayon",

@@ -6,7 +6,10 @@ use crate::review_memory::{
     ReviewMemoryConfidence, ReviewMemoryKind, ReviewMemoryOrigin, ReviewMemoryReadingLevel,
     ReviewMemoryScope, ReviewMemorySignal, ReviewMemoryStatus,
 };
-use crate::semantic_review::{build_semantic_review_from_contents, RemissSemFileContents};
+use crate::semantic_review::{
+    build_semantic_review_from_contents, RemissSemFileContents, RemissSemanticContextEntrySummary,
+    RemissSemanticFocusSummary, RemissSemanticImpactSummary, RemissSemanticReviewSummary,
+};
 use crate::stacks::model::{
     stack_now_ms, ChangeAtomSource, ChangeRole, Confidence, LayerMetrics, LayerReviewStatus,
     StackKind, StackSource,
@@ -24,14 +27,15 @@ fn partner_cache_key_includes_versions() {
         "context-y",
     );
 
-    assert!(key.starts_with("review-partner-v22:"));
+    assert!(key.starts_with("review-partner-v24:"));
     assert!(key.contains("stack-x"));
     assert!(key.contains("context-y"));
 }
 
 #[test]
 fn review_partner_prompt_requires_concrete_summary_copy() {
-    let prompt = build_review_partner_prompt(&input(ReviewPartnerContextPack::empty()));
+    let input = input(ReviewPartnerContextPack::empty());
+    let prompt = prompt_for_input(&input);
 
     assert!(prompt.contains("The goal is explaining the scoped code"));
     assert!(prompt.contains("factual code explanation"));
@@ -45,7 +49,7 @@ fn review_partner_prompt_requires_concrete_summary_copy() {
     assert!(prompt.contains("understanding checkpoints"));
     assert!(prompt.contains("understandingCheckpoints"));
     assert!(prompt.contains("historySignals"));
-    assert!(prompt.contains("\"signals\": []"));
+    assert!(prompt.contains("\"reviewMemory\": \"review-memory.json\""));
     assert!(prompt.contains("exact matching focusTargets[].key"));
     assert!(prompt.contains("human verification surface"));
     assert!(!prompt.contains("Act like a strong reviewer"));
@@ -54,22 +58,202 @@ fn review_partner_prompt_requires_concrete_summary_copy() {
 
 #[test]
 fn review_partner_prompt_puts_focus_targets_before_large_context() {
-    let prompt = build_review_partner_prompt(&input(ReviewPartnerContextPack::empty()));
-    let context = prompt
-        .split_once("Pull-request context:")
-        .map(|(_, context)| context)
-        .expect("prompt includes context");
+    let input = input(ReviewPartnerContextPack::empty());
+    let bundle = bundle_for_input(&input);
+    let prompt = build_review_partner_prompt(&bundle);
 
-    let focus_position = context.find("\"focusTargets\"").expect("focus targets");
-    let history_position = context.find("\"historyContext\"").expect("history context");
-    let stack_position = context.find("\"stack\"").expect("stack context");
-    let collected_position = context
-        .find("\"collectedContext\"")
-        .expect("collected context");
+    assert!(prompt.contains("Context manifest:"));
+    assert!(prompt.contains("\"focusTargets\": \"focus-targets.json\""));
+    assert!(prompt.contains("\"collectedContext\": \"collected-context.json\""));
+    assert!(!prompt.contains("\"stack\": {"));
+    assert!(bundle.workspace_root.join("focus-targets.json").is_file());
+    assert!(bundle
+        .workspace_root
+        .join("collected-context.json")
+        .is_file());
+}
 
-    assert!(focus_position < history_position);
-    assert!(focus_position < stack_position);
-    assert!(focus_position < collected_position);
+#[test]
+fn review_partner_prompt_excludes_removed_generated_tour_schema() {
+    let input = input(ReviewPartnerContextPack::empty());
+    let prompt = prompt_for_input(&input);
+
+    assert!(!prompt.contains("GeneratedGuidedReview"));
+    assert!(!prompt.contains("Guided Review walkthrough"));
+    assert!(!prompt.contains("reviewFocus"));
+    assert!(!prompt.contains("candidateSteps"));
+    assert!(!prompt.contains("sectionCategoryCatalog"));
+    assert!(!prompt.contains("stepIds"));
+}
+
+#[test]
+fn review_partner_prompt_budget_fails_without_tail_truncation() {
+    let error = ensure_prompt_budget(
+        "Review Partner context",
+        MAX_REVIEW_PARTNER_PROMPT_BYTES + 1,
+        MAX_REVIEW_PARTNER_PROMPT_BYTES,
+    )
+    .expect_err("over-budget prompts should fail explicitly");
+
+    assert!(error.contains("exceeded the explicit budget"));
+    assert!(error.contains("will not tail-truncate"));
+    assert!(error.contains("deterministic context to files"));
+}
+
+#[test]
+fn review_partner_bundle_writes_context_files_outside_checkout() {
+    let checkout = unique_test_directory("review-partner-checkout");
+    fs::write(checkout.join("sentinel.txt"), "checkout data").expect("sentinel");
+    let checkout_entries_before = fs::read_dir(&checkout).expect("checkout read").count();
+    let mut input = input(ReviewPartnerContextPack::empty());
+    input.working_directory = checkout.to_string_lossy().to_string();
+
+    let bundle = write_review_partner_context_bundle_at(
+        &input,
+        &unique_test_directory("review-partner-bundle-root"),
+    )
+    .expect("bundle");
+    let manifest_text =
+        fs::read_to_string(bundle.workspace_root.join("manifest.json")).expect("manifest");
+    let manifest: serde_json::Value = serde_json::from_str(&manifest_text).expect("manifest json");
+
+    assert_eq!(
+        manifest["bundleVersion"],
+        REVIEW_PARTNER_CONTEXT_BUNDLE_VERSION
+    );
+    assert_eq!(manifest["files"]["stack"], "stack.json");
+    assert_eq!(manifest["files"]["focusTargets"], "focus-targets.json");
+    assert!(bundle.workspace_root.join("stack.json").is_file());
+    assert!(bundle.workspace_root.join("focus-targets.json").is_file());
+    assert!(bundle.workspace_root.join("layers").is_dir());
+    assert!(bundle.workspace_root.join("checkout-path.txt").is_file());
+    assert!(!checkout.join("manifest.json").exists());
+    assert!(checkout.join("sentinel.txt").is_file());
+    assert_eq!(
+        fs::read_dir(&checkout).expect("checkout reread").count(),
+        checkout_entries_before
+    );
+}
+
+#[test]
+fn review_partner_manifest_prompt_excludes_oversized_semantic_context() {
+    let marker = "OVERSIZED_SEMANTIC_CONTEXT_MARKER";
+    let large_context = marker.repeat(8_000);
+    let semantic_focus = RemissSemanticFocusSummary {
+        atom_id: "atom-1".to_string(),
+        cache_key: "focus-cache".to_string(),
+        target_entity: None,
+        overlapping_entities: Vec::new(),
+        matching_changes: Vec::new(),
+        impact: Some(RemissSemanticImpactSummary {
+            cache_key: "impact-cache".to_string(),
+            dependencies: Vec::new(),
+            dependents: Vec::new(),
+            impact: Vec::new(),
+            tests: Vec::new(),
+            context: vec![RemissSemanticContextEntrySummary {
+                entity_name: "render_review".to_string(),
+                entity_type: "function".to_string(),
+                file_path: "src/lib.rs".to_string(),
+                role: "context".to_string(),
+                content: large_context,
+                estimated_tokens: 32_000,
+            }],
+        }),
+        warnings: Vec::new(),
+    };
+    let semantic_review = RemissSemanticReviewSummary {
+        version: "semantic-review-test".to_string(),
+        sem_api_version: "sem-test".to_string(),
+        code_version_key: "head-a".to_string(),
+        analysis_cache_key: "analysis-cache".to_string(),
+        layer_cache_key: "layer-cache".to_string(),
+        file_count: 1,
+        added_count: 0,
+        modified_count: 1,
+        deleted_count: 0,
+        moved_count: 0,
+        renamed_count: 0,
+        reordered_count: 0,
+        orphan_count: 0,
+        change_count: 1,
+        layer_count: 1,
+        layers: Vec::new(),
+        focus_summaries: vec![semantic_focus.clone()],
+        warnings: Vec::new(),
+    };
+    let mut input = input(ReviewPartnerContextPack {
+        version: REVIEW_PARTNER_CONTEXT_VERSION.to_string(),
+        layers: vec![ReviewPartnerCollectedLayer {
+            layer_id: "layer-1".to_string(),
+            semantic_layers: Vec::new(),
+            semantic_focus: vec![semantic_focus],
+            changed_symbols: Vec::new(),
+            removed_symbols: Vec::new(),
+            similar_locations: Vec::new(),
+            style_notes: Vec::new(),
+            limitations: Vec::new(),
+        }],
+        warnings: Vec::new(),
+    });
+    input.semantic_review = Some(semantic_review);
+
+    let bundle = bundle_for_input(&input);
+    let prompt = build_review_partner_prompt(&bundle);
+
+    assert!(prompt.len() < MAX_REVIEW_PARTNER_PROMPT_BYTES);
+    assert!(prompt.contains("semantic-evidence.json"));
+    assert!(!prompt.contains(marker));
+    assert!(
+        fs::read_to_string(bundle.workspace_root.join("semantic-evidence.json"))
+            .expect("semantic evidence")
+            .contains(marker)
+    );
+    assert!(
+        fs::read_to_string(bundle.workspace_root.join("collected-context.json"))
+            .expect("collected context")
+            .contains(marker)
+    );
+}
+
+#[test]
+fn review_partner_agent_cwd_is_bundle_workspace_not_checkout() {
+    let checkout = unique_test_directory("review-partner-agent-checkout");
+    let mut input = input(ReviewPartnerContextPack::empty());
+    input.working_directory = checkout.to_string_lossy().to_string();
+
+    let bundle = bundle_for_input(&input);
+
+    assert_eq!(
+        bundle.agent_working_directory(),
+        bundle.workspace_root.as_path()
+    );
+    assert_ne!(bundle.agent_working_directory(), checkout.as_path());
+    assert_eq!(
+        fs::read_to_string(bundle.workspace_root.join("checkout-path.txt")).expect("checkout path"),
+        checkout.to_string_lossy()
+    );
+}
+
+#[test]
+fn review_partner_cache_requires_checkout_inspection_metadata() {
+    let detail = detail_with_deleted_symbol();
+    let mut document = partner_document(stack(), StructuralEvidencePack::empty());
+    document.code_version_key = review_code_version_key(&detail);
+    document.used_checkout_context = true;
+
+    assert!(review_partner_document_matches_current(
+        &document,
+        &detail,
+        ReviewAiProvider::Codex
+    ));
+
+    document.used_checkout_context = false;
+    assert!(!review_partner_document_matches_current(
+        &document,
+        &detail,
+        ReviewAiProvider::Codex
+    ));
 }
 
 #[test]
@@ -154,10 +338,19 @@ fn review_partner_prompt_and_focus_records_include_semantic_context() {
         .map(|layer| !layer.semantic_focus.is_empty())
         .unwrap_or(false));
 
-    let prompt = build_review_partner_prompt(&input);
+    let bundle = bundle_for_input(&input);
+    let prompt = build_review_partner_prompt(&bundle);
     assert!(prompt.contains("semanticEvidence"));
-    assert!(prompt.contains("semanticLayers"));
-    assert!(prompt.contains("semanticFocus"));
+    assert!(prompt.contains("semantic-evidence.json"));
+    assert!(prompt.contains("collected-context.json"));
+    assert!(bundle
+        .workspace_root
+        .join("semantic-evidence.json")
+        .is_file());
+    assert!(bundle
+        .workspace_root
+        .join("collected-context.json")
+        .is_file());
 
     let partner = fallback_review_partner_context(&input, Some("Codex timed out".to_string()));
     assert_eq!(partner.fallback_reason.as_deref(), Some("Codex timed out"));
@@ -181,7 +374,14 @@ fn review_partner_prompt_and_focus_records_include_semantic_context() {
     assert!(!layer_brief.contains("src/lib.rs"));
     assert!(layer_brief.contains("removed_helper"));
 
-    let focus_prompt = build_focus_record_prompt(&partner, &partner.focus_targets[0]);
+    let focus_bundle = write_review_partner_focus_context_bundle_at(
+        &partner,
+        &partner.focus_targets[0],
+        "/tmp",
+        &unique_test_directory("review-partner-focus-bundle-root"),
+    )
+    .expect("focus bundle");
+    let focus_prompt = build_focus_record_prompt(&focus_bundle, &partner.focus_targets[0]);
     assert!(focus_prompt.contains("semanticEvidence"));
     assert!(focus_prompt.contains("understandingCheckpoints"));
     assert!(focus_prompt.contains("historySignals"));
@@ -1168,6 +1368,19 @@ fn similar_locations_skip_comment_only_matches() {
         .all(|location| location.path != "src/comment.rs"));
 }
 
+fn prompt_for_input(input: &GenerateReviewPartnerInput) -> String {
+    let bundle = bundle_for_input(input);
+    build_review_partner_prompt(&bundle)
+}
+
+fn bundle_for_input(input: &GenerateReviewPartnerInput) -> ReviewPartnerContextBundle {
+    write_review_partner_context_bundle_at(
+        input,
+        &unique_test_directory("review-partner-bundle-root"),
+    )
+    .expect("bundle")
+}
+
 fn input(context: ReviewPartnerContextPack) -> GenerateReviewPartnerInput {
     let stack = stack();
     let structural_evidence = StructuralEvidencePack::empty();
@@ -1264,6 +1477,10 @@ fn partner_document(
         limitations: Vec::new(),
         warnings: Vec::new(),
         fallback_reason: None,
+        used_checkout_context: true,
+        checkout_command_count: 1,
+        inspected_path_hints: vec!["src/lib.rs".to_string()],
+        prompt_bytes: 0,
         stack,
         structural_evidence,
         semantic_review: None,
@@ -1289,6 +1506,7 @@ fn structural_evidence_with_hunk(
             previous_path: None,
             status: StructuralEvidenceStatus::Full,
             message: None,
+            operations: Vec::new(),
             changes: vec![StructuralEvidenceChange {
                 hunk_index,
                 hunk_header: hunk_header.to_string(),
@@ -1393,7 +1611,13 @@ fn detail_with_deleted_symbol() -> PullRequestDetail {
 }
 
 fn unique_test_directory(prefix: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!("{prefix}-{}-{}", std::process::id(), now_ms()));
+    static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let sequence = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "{prefix}-{}-{}-{sequence}",
+        std::process::id(),
+        now_ms()
+    ));
     let _ = fs::remove_dir_all(&path);
     fs::create_dir_all(&path).expect("create temp dir");
     path

@@ -8,11 +8,11 @@ use crate::github::{
     self, PullRequestComment, PullRequestCommit, PullRequestReview, PullRequestReviewComment,
     PullRequestReviewThread, ReviewAction,
 };
-use crate::guided_review::review_thread_anchor;
 use crate::icons::{lucide_icon, LucideIcon};
 use crate::markdown::render_markdown;
 use crate::notifications;
 use crate::review_ai::{ReviewAiProvider, ReviewAiProviderStatus};
+use crate::review_anchors::review_thread_anchor;
 use crate::review_brief::ReviewBrief;
 use crate::review_intelligence::{self, ReviewIntelligenceScope};
 use crate::review_session::ReviewCenterMode;
@@ -65,7 +65,7 @@ impl ReviewStatusSummary {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct OwnPrFeedbackItem {
-    anchor: crate::guided_review::DiffAnchor,
+    anchor: crate::review_ai::DiffAnchor,
     file_path: String,
     location_label: String,
     author_login: String,
@@ -82,7 +82,7 @@ struct OwnPrFeedbackItem {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ThreadDigestItem {
-    anchor: crate::guided_review::DiffAnchor,
+    anchor: crate::review_ai::DiffAnchor,
     file_path: String,
     location_label: String,
     latest_author: String,
@@ -129,7 +129,7 @@ struct ActivityItem {
     status_code: Option<String>,
     location_label: Option<String>,
     file_path: Option<String>,
-    anchor: Option<crate::guided_review::DiffAnchor>,
+    anchor: Option<crate::review_ai::DiffAnchor>,
     thread_comments: Vec<ActivityThreadComment>,
 }
 
@@ -283,7 +283,7 @@ fn own_pr_feedback_item(
 
 fn feedback_location_label(
     thread: &PullRequestReviewThread,
-    anchor: &crate::guided_review::DiffAnchor,
+    anchor: &crate::review_ai::DiffAnchor,
 ) -> String {
     match anchor.line.or(thread.line).or(thread.original_line) {
         Some(line) => format!("{}:{}", thread.path, line),

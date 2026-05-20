@@ -13,7 +13,7 @@ use gpui::*;
 
 use crate::code_display::{
     build_interactive_code_tokens, build_lsp_hover_tooltip_view, code_text_runs, mono_code_font,
-    render_highlighted_code_block, render_highlighted_code_content, InteractiveCodeToken,
+    render_highlighted_code_content, InteractiveCodeToken,
 };
 use crate::diff::{
     build_diff_render_rows, build_diff_render_rows_for_parsed_file, find_parsed_diff_file,
@@ -26,11 +26,6 @@ use crate::github::{
     PullRequestDetail, PullRequestFile, PullRequestReviewComment, PullRequestReviewThread,
     RepositoryFileContent, ReviewAction, REPOSITORY_FILE_SOURCE_LOCAL_CHECKOUT,
 };
-use crate::guided_review::{
-    line_matches_diff_anchor, thread_matches_diff_anchor, DiffAnchor, GeneratedGuidedReview,
-    GuidedReviewSection, GuidedReviewSectionCategory, GuidedReviewSectionPriority,
-    GuidedReviewStep, ReviewAiProvider, ReviewAiProviderStatus,
-};
 use crate::icons::{lucide_icon, LucideIcon};
 use crate::inline_diff::{build_hunk_inline_emphasis, normalize_inline_emphasis_ranges};
 use crate::local_documents;
@@ -38,9 +33,9 @@ use crate::local_repo;
 use crate::lsp;
 use crate::markdown::render_markdown;
 use crate::onboarding::WizardStepTarget;
-use crate::review_file_header::{
-    render_review_file_header, render_review_file_header_with_controls, ReviewFileHeaderProps,
-};
+use crate::review_ai::DiffAnchor;
+use crate::review_anchors::line_matches_diff_anchor;
+use crate::review_file_header::{render_review_file_header_with_controls, ReviewFileHeaderProps};
 use crate::review_file_tree::{
     build_repository_file_tree_rows, build_review_file_tree_rows,
     ordered_review_files_from_tree_rows, review_file_tree_cache_scope, review_file_tree_totals,
@@ -84,7 +79,6 @@ use super::file_tree::{
     render_file_tree_state_message, render_structural_warmup_status, ReviewFileRowOpenHandler,
     ReviewFileRowOpenMode, REVIEW_FILE_TREE_ROW_HEIGHT,
 };
-use super::guided_review::trigger_generate_guided_review;
 use super::motion::{lerp_px, lerp_rgba};
 use super::root::refresh_active_local_review;
 use super::sections::{
@@ -97,8 +91,6 @@ mod combined_diff;
 mod diff_metrics;
 mod file_content;
 mod guided_review;
-mod guided_review_diff_preview;
-mod guided_review_panel;
 mod review_comments;
 mod review_sidebar;
 mod side_by_side;
@@ -116,8 +108,6 @@ pub use self::review_comments::{
 use self::combined_diff::*;
 use self::diff_metrics::*;
 use self::guided_review::*;
-use self::guided_review_diff_preview::render_tour_diff_file_compact;
-use self::guided_review_panel::*;
 use self::review_comments::{
     begin_review_line_drag, build_review_line_action_target, finish_review_line_drag,
     open_review_line_action, pending_review_comment_count, render_diff_comment_icon,
@@ -1705,7 +1695,7 @@ mod tests {
 
     #[test]
     fn waypoint_spotlight_rebuilds_primary_location_label() {
-        let anchor = crate::guided_review::DiffAnchor {
+        let anchor = crate::review_ai::DiffAnchor {
             file_path: "src/views/diff_view.rs".to_string(),
             hunk_header: None,
             line: Some(842),

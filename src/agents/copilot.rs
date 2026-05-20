@@ -13,25 +13,16 @@ use tokio::time::{Instant as TokioInstant, MissedTickBehavior};
 
 use crate::{
     app_storage,
-    guided_review::{GenerateGuidedReviewInput, GeneratedGuidedReview},
     review_ai::{ReviewAiProgressUpdate, ReviewAiProvider, ReviewAiProviderStatus},
 };
 
 use super::errors::{generation_abort_message, AbortKind, AbortReason};
 use super::jsonrepair::parse_tolerant;
-use super::merge::{
-    build_copilot_fallback_guided_review, merge_guided_review, GuidedReviewResponse,
-};
 use super::progress::{limit_text, make_progress};
-use super::prompt::build_guided_review_prompt;
 use super::runtime;
 use super::{AgentJsonPromptOptions, AgentTextResponse, CodingAgentBackend};
 
-const OVERALL_TIMEOUT_MS: u64 = 480_000;
-const INACTIVITY_TIMEOUT_MS: u64 = 120_000;
 const RUNNING_TICKER_MS: u64 = 10_000;
-const MAX_PROMPT_BYTES: usize = 120_000;
-const MAX_STACK_PLAN_PROMPT_BYTES: usize = 140_000;
 const COPILOT_DIAGNOSTICS_INCLUDE_PROMPT_ENV: &str = "REMISS_COPILOT_DIAGNOSTICS_INCLUDE_PROMPT";
 const COPILOT_DIAGNOSTIC_LOG_DIR: &str = "copilot-diagnostics";
 const MAX_DIAGNOSTIC_EVENTS: usize = 240;
@@ -68,6 +59,8 @@ struct CopilotOutcome {
     saw_tool_request_message: bool,
     current_turn_stream: String,
     tool_names: HashMap<String, String>,
+    checkout_command_count: usize,
+    inspected_path_hints: Vec<String>,
 }
 
 struct CopilotRun {
@@ -111,125 +104,6 @@ impl CodingAgentBackend for CopilotBackend {
             }),
         }
     }
-
-    fn generate(
-        &self,
-        input: &GenerateGuidedReviewInput,
-        on_progress: &mut dyn FnMut(ReviewAiProgressUpdate),
-    ) -> Result<GeneratedGuidedReview, String> {
-        if !Path::new(&input.working_directory).is_dir() {
-            return Err(format!(
-                "The local checkout '{}' does not exist.",
-                input.working_directory
-            ));
-        }
-
-        on_progress(make_progress(
-            "startup",
-            "Starting GitHub Copilot",
-            Some(
-                "Opening a Copilot SDK session with streamed progress in the prepared local checkout."
-                    .to_string(),
-            ),
-            Some("Starting Copilot SDK session".to_string()),
-        ));
-
-        let mut prompt = build_guided_review_prompt(input);
-        if prompt.len() > MAX_PROMPT_BYTES {
-            truncate_to_byte_limit(&mut prompt, MAX_PROMPT_BYTES);
-        }
-
-        let CopilotRun {
-            outcome,
-            diagnostic_log_path,
-        } = run_copilot_with_tool_allowlist_retries(
-            &input.working_directory,
-            &prompt,
-            OVERALL_TIMEOUT_MS,
-            INACTIVITY_TIMEOUT_MS,
-            "the Guided Review walkthrough",
-            true,
-            on_progress,
-        )?;
-
-        if let Some(abort) = &outcome.abort {
-            if !has_usable_final_text(&outcome) {
-                let summary = append_diagnostic_log_suffix(
-                    generation_abort_message(
-                        "GitHub Copilot",
-                        "the Guided Review walkthrough",
-                        abort,
-                    ),
-                    diagnostic_log_path.as_deref(),
-                );
-                on_progress(make_progress(
-                    "timeout",
-                    summary.clone(),
-                    Some(
-                        "Aborting the Copilot SDK session so the app can surface the failure without waiting."
-                            .to_string(),
-                    ),
-                    Some(summary.clone()),
-                ));
-                return Err(summary);
-            }
-        }
-
-        if let Some(error) = &outcome.error {
-            return Err(append_diagnostic_log_suffix(
-                error.clone(),
-                diagnostic_log_path.as_deref(),
-            ));
-        }
-
-        on_progress(make_progress(
-            "finalizing",
-            "GitHub Copilot finished the draft",
-            Some(
-                "Parsing the structured response and merging it into the final Guided Review walkthrough."
-                    .to_string(),
-            ),
-            Some("Finalizing Copilot output".to_string()),
-        ));
-
-        let Some(final_text) = outcome.final_text.as_deref() else {
-            return Ok(build_copilot_fallback_guided_review(
-                input,
-                outcome.model.clone(),
-                append_diagnostic_log_suffix(
-                    fallback_reason(&outcome),
-                    diagnostic_log_path.as_deref(),
-                ),
-            ));
-        };
-
-        let trimmed = final_text.trim();
-        if trimmed.is_empty() {
-            return Ok(build_copilot_fallback_guided_review(
-                input,
-                outcome.model.clone(),
-                append_diagnostic_log_suffix(
-                    fallback_reason(&outcome),
-                    diagnostic_log_path.as_deref(),
-                ),
-            ));
-        }
-
-        match parse_tolerant::<GuidedReviewResponse>(trimmed) {
-            Ok(response) => Ok(merge_guided_review(response, input, outcome.model)),
-            Err(error) => Ok(build_copilot_fallback_guided_review(
-                input,
-                outcome.model,
-                append_diagnostic_log_suffix(
-                    format!(
-                        "GitHub Copilot did not return a usable JSON Guided Review walkthrough: {}",
-                        error.message
-                    ),
-                    diagnostic_log_path.as_deref(),
-                ),
-            )),
-        }
-    }
 }
 
 pub fn run_json_prompt(
@@ -242,7 +116,7 @@ pub fn run_json_prompt(
 
 pub fn run_json_prompt_with_progress(
     working_directory: &str,
-    mut prompt: String,
+    prompt: String,
     options: AgentJsonPromptOptions,
     on_progress: &mut dyn FnMut(ReviewAiProgressUpdate),
 ) -> Result<AgentTextResponse, String> {
@@ -252,25 +126,28 @@ pub fn run_json_prompt_with_progress(
         ));
     }
 
-    if prompt.len() > MAX_STACK_PLAN_PROMPT_BYTES {
-        truncate_to_byte_limit(&mut prompt, MAX_STACK_PLAN_PROMPT_BYTES);
+    if prompt.len() > options.max_prompt_bytes {
+        return Err(format!(
+            "{} prompt exceeded the explicit provider budget ({}/{} bytes). Remiss did not tail-truncate context.",
+            options.task_label,
+            prompt.len(),
+            options.max_prompt_bytes
+        ));
     }
+    let prompt_bytes = prompt.len();
 
     let CopilotRun {
         outcome,
         diagnostic_log_path,
-    } = runtime::shared().block_on(run_copilot_sdk_session(
+    } = run_copilot_with_tool_allowlist_retries(
         working_directory,
         &prompt,
-        &[],
         options.copilot_overall_timeout_ms,
         options.copilot_inactivity_timeout_ms,
         options.task_label,
         true,
         on_progress,
-        1,
-        1,
-    ))?;
+    )?;
 
     if let Some(abort) = &outcome.abort {
         if !has_usable_final_text(&outcome) {
@@ -306,6 +183,10 @@ pub fn run_json_prompt_with_progress(
     Ok(AgentTextResponse {
         text: trimmed.to_string(),
         model: outcome.model,
+        used_checkout_context: outcome.checkout_command_count > 0,
+        checkout_command_count: outcome.checkout_command_count,
+        inspected_path_hints: outcome.inspected_path_hints,
+        prompt_bytes,
     })
 }
 
@@ -732,6 +613,8 @@ fn handle_sdk_event(
             if let Some(tool_call_id) = first_string(&event.data, &["toolCallId", "tool_call_id"]) {
                 outcome.tool_names.insert(tool_call_id, tool_name.clone());
             }
+            outcome.checkout_command_count += 1;
+            record_inspected_path_hints(outcome, &event.data);
             outcome.saw_meaningful_progress = true;
             outcome.last_visible_activity = Some(format!("Tool: {tool_name}"));
             if emit_progress {
@@ -947,6 +830,76 @@ fn tool_detail(tool_name: &str, data: &Value) -> String {
     format!("{tool_name}: {}", limit_text(&argument_text, 240))
 }
 
+fn record_inspected_path_hints(outcome: &mut CopilotOutcome, data: &Value) {
+    let mut existing = outcome
+        .inspected_path_hints
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    for hint in path_hints_from_value(data) {
+        if existing.insert(hint.clone()) {
+            outcome.inspected_path_hints.push(hint);
+            if outcome.inspected_path_hints.len() >= 8 {
+                break;
+            }
+        }
+    }
+}
+
+fn path_hints_from_value(value: &Value) -> Vec<String> {
+    let mut hints = Vec::new();
+    collect_path_hints(value, &mut hints);
+    hints
+}
+
+fn collect_path_hints(value: &Value, hints: &mut Vec<String>) {
+    if hints.len() >= 8 {
+        return;
+    }
+    match value {
+        Value::String(text) => {
+            for token in text.split_whitespace() {
+                let trimmed = token.trim_matches(|ch: char| {
+                    matches!(ch, '"' | '\'' | ',' | ':' | '[' | ']' | '{' | '}')
+                });
+                let looks_like_path = trimmed.contains('/')
+                    || trimmed.ends_with(".rs")
+                    || trimmed.ends_with(".toml")
+                    || trimmed.ends_with(".json")
+                    || trimmed.ends_with(".md")
+                    || trimmed.ends_with(".yml")
+                    || trimmed.ends_with(".yaml");
+                if looks_like_path {
+                    let hint = limit_text(trimmed, 120);
+                    if !hints.iter().any(|existing| existing == &hint) {
+                        hints.push(hint);
+                        if hints.len() >= 8 {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_path_hints(item, hints);
+                if hints.len() >= 8 {
+                    return;
+                }
+            }
+        }
+        Value::Object(object) => {
+            for value in object.values() {
+                collect_path_hints(value, hints);
+                if hints.len() >= 8 {
+                    return;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn event_has_tool_requests(data: &Value) -> bool {
     ["toolRequests", "tool_requests"].iter().any(|key| {
         data.get(*key)
@@ -1138,6 +1091,9 @@ fn write_copilot_diagnostic_log(input: CopilotDiagnosticLogInput<'_>) -> Option<
         "error": input.outcome.error,
         "lastVisibleActivity": input.outcome.last_visible_activity,
         "sawMeaningfulProgress": input.outcome.saw_meaningful_progress,
+        "usedCheckoutContext": input.outcome.checkout_command_count > 0,
+        "checkoutCommandCount": input.outcome.checkout_command_count,
+        "inspectedPathHints": &input.outcome.inspected_path_hints,
         "stderr": "",
         "finalTextBytes": input.outcome.final_text.as_deref().map(str::len),
         "currentTurnStreamBytes": response_text.map(str::len).unwrap_or(0),
@@ -1287,21 +1243,6 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0)
-}
-
-fn truncate_to_byte_limit(text: &mut String, max_bytes: usize) {
-    if text.len() <= max_bytes {
-        return;
-    }
-
-    let mut cutoff = max_bytes;
-    while !text.is_char_boundary(cutoff) {
-        cutoff -= 1;
-    }
-    text.truncate(cutoff);
-    text.push_str(
-        "\n\n[Remiss truncated the prompt to fit the GitHub Copilot SDK request budget.]",
-    );
 }
 
 fn probe_version(binary: &Path) -> Option<String> {

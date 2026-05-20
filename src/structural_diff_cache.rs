@@ -8,7 +8,7 @@ use crate::{
     github::{PullRequestDetail, PullRequestFile},
 };
 
-const STRUCTURAL_DIFF_CACHE_KEY_PREFIX: &str = "structural-diff-v1";
+const STRUCTURAL_DIFF_CACHE_KEY_PREFIX: &str = "structural-diff-v2";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "status")]
@@ -163,6 +163,7 @@ mod tests {
                 }],
                 is_binary: false,
             },
+            operations: Vec::new(),
             emphasis_hunks: vec![vec![Vec::new()]],
             side_by_side_hunks: vec![AdaptedDifftasticSideBySideHunk { rows: Vec::new() }],
             side_by_side_line_map: vec![vec![Some(AdaptedDifftasticSideBySideLineMap {
