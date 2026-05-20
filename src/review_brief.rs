@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{
-    agents::{self, jsonrepair::parse_tolerant},
+    agents::{self, jsonrepair::parse_tolerant, AgentJsonPromptOptions},
     cache::CacheStore,
     diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk, ParsedDiffLine},
     github::{
@@ -232,10 +232,11 @@ fn request_review_brief_response(
     on_progress: &mut dyn FnMut(ReviewAiProgressUpdate),
 ) -> Result<(ReviewBriefResponse, Option<String>), String> {
     let prompt = build_review_brief_prompt_for_attempt(input, compact_retry);
-    let response = agents::run_json_prompt_with_progress(
+    let response = agents::run_json_prompt_with_options_and_progress(
         input.provider,
         &input.working_directory,
         prompt,
+        AgentJsonPromptOptions::review_brief(),
         on_progress,
     )?;
     let parsed = parse_tolerant::<ReviewBriefResponse>(&response.text)

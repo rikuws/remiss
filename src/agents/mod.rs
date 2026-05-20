@@ -81,6 +81,17 @@ impl AgentJsonPromptOptions {
         }
     }
 
+    pub const fn review_brief() -> Self {
+        Self {
+            task_label: "Review Brief generation",
+            codex_overall_timeout_ms: 90_000,
+            codex_inactivity_timeout_ms: 35_000,
+            copilot_overall_timeout_ms: 420_000,
+            copilot_inactivity_timeout_ms: 300_000,
+            max_prompt_bytes: 200_000,
+        }
+    }
+
     pub const fn review_memory() -> Self {
         Self {
             task_label: "Review Memory candidate extraction",
@@ -191,5 +202,15 @@ mod tests {
 
         assert_eq!(options.copilot_overall_timeout_ms, 420_000);
         assert_eq!(options.copilot_inactivity_timeout_ms, 300_000);
+    }
+
+    #[test]
+    fn review_brief_options_do_not_reuse_stack_planning_label_or_budget() {
+        let options = AgentJsonPromptOptions::review_brief();
+
+        assert_eq!(options.task_label, "Review Brief generation");
+        assert!(
+            options.max_prompt_bytes > AgentJsonPromptOptions::stack_planning().max_prompt_bytes
+        );
     }
 }
