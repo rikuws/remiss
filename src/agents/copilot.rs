@@ -675,6 +675,21 @@ fn handle_sdk_event(
                 }
             }
         }
+        "permission.completed" => {
+            if let Some(message) = permission_denial_message(outcome, &event.data) {
+                outcome.saw_meaningful_progress = true;
+                outcome.error = Some(message.clone());
+                outcome.last_visible_activity = Some(message.clone());
+                if emit_progress {
+                    on_progress(make_progress(
+                        "error",
+                        "GitHub Copilot repository access was denied",
+                        Some(limit_text(&message, 240)),
+                        Some(limit_text(&message, 180)),
+                    ));
+                }
+            }
+        }
         "session.error" => {
             let message = first_string(&event.data, &["message", "error"])
                 .unwrap_or_else(|| "GitHub Copilot reported an error.".to_string());
@@ -800,7 +815,54 @@ fn format_copilot_error_message(message: &str) -> String {
 }
 
 fn is_read_permission_request(data: &PermissionRequestData) -> bool {
-    matches!(data.kind, Some(PermissionRequestKind::Read))
+    if matches!(data.kind, Some(PermissionRequestKind::Read)) {
+        return true;
+    }
+    if data.kind.is_some() {
+        return false;
+    }
+    nested_permission_request_kinds_are_read(&data.extra)
+}
+
+fn nested_permission_request_kinds_are_read(value: &Value) -> bool {
+    let mut saw_permission_kind = false;
+    for key in [
+        "permissionRequest",
+        "permission_request",
+        "promptRequest",
+        "prompt_request",
+    ] {
+        if let Some(kind) = value
+            .get(key)
+            .and_then(|nested| first_string(nested, &["kind"]))
+        {
+            saw_permission_kind = true;
+            if !kind.eq_ignore_ascii_case("read") {
+                return false;
+            }
+        }
+    }
+    saw_permission_kind
+}
+
+fn permission_denial_message(outcome: &CopilotOutcome, data: &Value) -> Option<String> {
+    let kind = data
+        .get("result")
+        .and_then(|result| first_string(result, &["kind"]))
+        .or_else(|| first_string(data, &["kind"]))?;
+    let normalized = kind.trim().to_ascii_lowercase();
+    let denied = normalized == "reject"
+        || normalized == "user-not-available"
+        || normalized.contains("denied")
+        || normalized.contains("reject");
+    if !denied {
+        return None;
+    }
+
+    let tool_name = tool_name_for_event(outcome, data);
+    Some(format!(
+        "GitHub Copilot repository tool permission was denied for {tool_name} ({kind})."
+    ))
 }
 
 fn first_string(value: &Value, keys: &[&str]) -> Option<String> {
@@ -1481,6 +1543,36 @@ mod tests {
     }
 
     #[test]
+    fn maps_permission_denials_to_visible_provider_errors() {
+        let mut outcome = CopilotOutcome::default();
+        outcome
+            .tool_names
+            .insert("tool-1".to_string(), "view".to_string());
+        let mut progress = Vec::new();
+
+        handle_sdk_event(
+            event(
+                "permission.completed",
+                json!({
+                    "toolCallId": "tool-1",
+                    "result": { "kind": "denied-interactively-by-user" }
+                }),
+            ),
+            &mut outcome,
+            true,
+            &mut |update| progress.push(update),
+        );
+
+        let error = outcome.error.as_deref().unwrap();
+        assert!(error.contains("permission was denied"));
+        assert!(error.contains("view"));
+        assert_eq!(
+            progress.last().map(|update| update.stage.as_str()),
+            Some("error")
+        );
+    }
+
+    #[test]
     fn read_only_permission_policy_allows_only_read_requests() {
         let read = PermissionRequestData {
             kind: Some(PermissionRequestKind::Read),
@@ -1507,6 +1599,47 @@ mod tests {
         assert!(!is_read_permission_request(&write));
         assert!(!is_read_permission_request(&shell));
         assert!(!is_read_permission_request(&unknown));
+    }
+
+    #[test]
+    fn read_only_permission_policy_allows_nested_notification_reads() {
+        let read = PermissionRequestData {
+            kind: None,
+            tool_call_id: None,
+            extra: json!({
+                "requestId": "request-1",
+                "permissionRequest": {
+                    "kind": "read",
+                    "toolCallId": "tool-1",
+                    "path": "/Users/example/Library/Application Support/remiss/manifest.json"
+                },
+                "promptRequest": {
+                    "kind": "read",
+                    "toolCallId": "tool-1",
+                    "path": "/Users/example/Library/Application Support/remiss/manifest.json"
+                }
+            }),
+        };
+        let write = PermissionRequestData {
+            kind: None,
+            tool_call_id: None,
+            extra: json!({
+                "requestId": "request-2",
+                "permissionRequest": {
+                    "kind": "write",
+                    "toolCallId": "tool-2",
+                    "path": "/Users/example/Library/Application Support/remiss/manifest.json"
+                },
+                "promptRequest": {
+                    "kind": "write",
+                    "toolCallId": "tool-2",
+                    "path": "/Users/example/Library/Application Support/remiss/manifest.json"
+                }
+            }),
+        };
+
+        assert!(is_read_permission_request(&read));
+        assert!(!is_read_permission_request(&write));
     }
 
     #[test]
