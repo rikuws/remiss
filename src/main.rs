@@ -76,6 +76,7 @@ mod review_session;
 mod selectable_text;
 mod semantic_diff;
 mod semantic_review;
+mod sentry_diagnostics;
 mod shader_surface;
 mod shortcuts;
 mod source_browser;
@@ -120,12 +121,13 @@ use views::{
 
 fn main() {
     cli_binary::repair_process_path_for_cli_tools();
+    let _sentry_guard = sentry_diagnostics::init();
 
     let deep_link_dispatcher = deep_link::DeepLinkDispatcher::new();
     if let Err(error) =
         platform_macos::install_deep_link_url_event_handler(deep_link_dispatcher.clone())
     {
-        eprintln!("{APP_NAME} URL event handler disabled: {error}");
+        report_sentry_error(format!("{APP_NAME} URL event handler disabled: {error}"));
     }
     deep_link_dispatcher.receive_urls(deep_link::remiss_urls_from_args(std::env::args().skip(1)));
 
@@ -138,9 +140,14 @@ fn main() {
     });
     application.run(move |cx: &mut App| {
         if let Err(error) = start_app(cx, deep_link_dispatcher.clone()) {
-            eprintln!("{APP_NAME} failed to start: {error}");
+            report_sentry_error(format!("{APP_NAME} failed to start: {error}"));
         }
     });
+}
+
+fn report_sentry_error(message: String) {
+    sentry_diagnostics::capture_error(&message);
+    eprintln!("{message}");
 }
 
 fn start_app(
@@ -193,16 +200,16 @@ fn start_app(
                 views::open_deep_link_request(&app_state, request, window, cx);
             });
             if let Err(error) = result {
-                eprintln!("Failed to route Remiss URL: {error}");
+                report_sentry_error(format!("Failed to route Remiss URL: {error}"));
             }
         }
     });
 
     if let Err(error) = platform_macos::updates::start_updater() {
-        eprintln!("{APP_NAME} updater disabled: {error}");
+        report_sentry_error(format!("{APP_NAME} updater disabled: {error}"));
     }
     if let Err(error) = platform_macos::prepare_system_notifications() {
-        eprintln!("{APP_NAME} notifications disabled: {error}");
+        report_sentry_error(format!("{APP_NAME} notifications disabled: {error}"));
     }
 
     let app_state_for_keys = app_state.clone();

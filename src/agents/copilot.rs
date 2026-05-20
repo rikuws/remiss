@@ -14,6 +14,7 @@ use tokio::time::{Instant as TokioInstant, MissedTickBehavior};
 use crate::{
     app_storage,
     review_ai::{ReviewAiProgressUpdate, ReviewAiProvider, ReviewAiProviderStatus},
+    sentry_diagnostics,
 };
 
 use super::errors::{generation_abort_message, AbortKind, AbortReason};
@@ -1210,8 +1211,84 @@ fn write_copilot_diagnostic_log(input: CopilotDiagnosticLogInput<'_>) -> Option<
     }
 
     let path = path.display().to_string();
+    report_copilot_problem_to_sentry(&input, Some(path.as_str()));
     eprintln!("Copilot diagnostic log written: {path}");
     Some(path)
+}
+
+fn report_copilot_problem_to_sentry(
+    input: &CopilotDiagnosticLogInput<'_>,
+    diagnostic_log_path: Option<&str>,
+) {
+    if !diagnostic_log_has_problem(input.outcome) {
+        return;
+    }
+
+    let reason = fallback_reason(input.outcome);
+    sentry_diagnostics::capture_ai_failure(
+        "copilot_sdk",
+        Some(ReviewAiProvider::Copilot.slug()),
+        &reason,
+        |scope| {
+            scope.set_tag("ai.task", input.task_label);
+            scope.set_tag(
+                "ai.used_checkout_context",
+                input.outcome.checkout_command_count > 0,
+            );
+            scope.set_tag("ai.has_abort", input.outcome.abort.is_some());
+            if let Some(model) = input.outcome.model.as_deref() {
+                scope.set_tag("ai.model", model);
+            }
+            scope.set_extra("taskLabel", json!(input.task_label));
+            scope.set_extra("workingDirectory", json!(input.working_directory));
+            scope.set_extra("diagnosticLogPath", json!(diagnostic_log_path));
+            scope.set_extra("attempt", json!(input.attempt));
+            scope.set_extra("maxAttempts", json!(input.max_attempts));
+            scope.set_extra("durationMs", json!(input.duration_ms));
+            scope.set_extra("overallTimeoutMs", json!(input.overall_timeout_ms));
+            scope.set_extra("inactivityTimeoutMs", json!(input.inactivity_timeout_ms));
+            scope.set_extra("model", json!(&input.outcome.model));
+            scope.set_extra(
+                "abortKind",
+                json!(input
+                    .outcome
+                    .abort
+                    .as_ref()
+                    .map(|abort| abort_kind_label(abort.kind))),
+            );
+            scope.set_extra(
+                "abortTimeoutMs",
+                json!(input.outcome.abort.as_ref().map(|abort| abort.timeout_ms)),
+            );
+            scope.set_extra(
+                "lastVisibleActivity",
+                json!(&input.outcome.last_visible_activity),
+            );
+            scope.set_extra(
+                "sawMeaningfulProgress",
+                json!(input.outcome.saw_meaningful_progress),
+            );
+            scope.set_extra(
+                "checkoutCommandCount",
+                json!(input.outcome.checkout_command_count),
+            );
+            scope.set_extra(
+                "inspectedPathHints",
+                json!(&input.outcome.inspected_path_hints),
+            );
+            scope.set_extra("availableTools", json!(input.available_tools));
+            scope.set_extra(
+                "finalTextBytes",
+                json!(input.outcome.final_text.as_deref().map(str::len)),
+            );
+            scope.set_extra(
+                "currentTurnStreamBytes",
+                json!(diagnostic_response_text(input.outcome)
+                    .map(str::len)
+                    .unwrap_or(0)),
+            );
+        },
+    );
 }
 
 fn write_copilot_diagnostic_alias(path: &Path, serialized: &str, label: &str) {

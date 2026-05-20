@@ -9,6 +9,7 @@ use std::{
 
 use gpui::{App, AsyncWindowContext, Entity, Window};
 use once_cell::sync::Lazy;
+use serde_json::json;
 
 use crate::{
     cache::CacheStore,
@@ -18,7 +19,7 @@ use crate::{
     review_brief::{self, build_review_brief_request_key},
     review_memory,
     review_partner::{self, build_review_partner_request_key},
-    semantic_review,
+    semantic_review, sentry_diagnostics,
     stacks::{
         atoms::extract_change_atoms,
         cache::{load_ai_review_stack, save_ai_review_stack},
@@ -258,6 +259,37 @@ pub fn request_active_review_partner_focus(
                             if let Some(current) =
                                 detail_state.review_partner_state.document.as_ref()
                             {
+                                let error_for_sentry = error.clone();
+                                sentry_diagnostics::capture_ai_failure(
+                                    "review_partner_focus",
+                                    Some(current.provider.slug()),
+                                    &error_for_sentry,
+                                    |scope| {
+                                        scope.set_tag("ai.phase", "focus_generation");
+                                        scope.set_tag("ai.fallback", true);
+                                        scope.set_tag("pr.repository", &current.stack.repository);
+                                        scope.set_extra(
+                                            "repository",
+                                            json!(&current.stack.repository),
+                                        );
+                                        scope.set_extra(
+                                            "pullRequestNumber",
+                                            json!(current.stack.selected_pr_number),
+                                        );
+                                        scope.set_extra("requestKey", json!(&request_key));
+                                        scope.set_extra(
+                                            "codeVersionKey",
+                                            json!(&current.code_version_key),
+                                        );
+                                        scope.set_extra("focusKey", json!(&focus_key));
+                                        scope.set_extra("focusTitle", json!(&target.title));
+                                        scope.set_extra("focusSubtitle", json!(&target.subtitle));
+                                        scope.set_extra(
+                                            "workingDirectory",
+                                            json!(&working_directory),
+                                        );
+                                    },
+                                );
                                 let input = review_partner::GenerateReviewPartnerInput {
                                     provider: current.provider,
                                     working_directory: working_directory.clone(),
@@ -1233,6 +1265,16 @@ async fn generate_or_load_stack(
             })
         }
         Err(error) => {
+            capture_review_intelligence_failure(
+                detail,
+                provider,
+                "guided_review_stack",
+                "stack_generation",
+                request_key,
+                Some(code_version_key),
+                true,
+                &error,
+            );
             set_stack_error(model, detail_key, request_key, detail, error, cx).await;
             None
         }
@@ -1251,6 +1293,34 @@ fn guided_review_stack_discovery_options() -> StackDiscoveryOptions {
         ai_provider: None,
         ..StackDiscoveryOptions::default()
     }
+}
+
+fn capture_review_intelligence_failure(
+    detail: &PullRequestDetail,
+    provider: ReviewAiProvider,
+    feature: &str,
+    phase: &str,
+    request_key: &str,
+    code_version_key: Option<&str>,
+    fallback: bool,
+    error: &str,
+) {
+    sentry_diagnostics::capture_ai_failure(feature, Some(provider.slug()), error, |scope| {
+        scope.set_tag("ai.phase", phase);
+        scope.set_tag("ai.fallback", fallback);
+        scope.set_tag("pr.local", local_review::is_local_review_detail(detail));
+        scope.set_tag("pr.repository", &detail.repository);
+        scope.set_extra("repository", json!(&detail.repository));
+        scope.set_extra("pullRequestNumber", json!(detail.number));
+        scope.set_extra("requestKey", json!(request_key));
+        scope.set_extra("codeVersionKey", json!(code_version_key));
+        scope.set_extra("baseRefName", json!(&detail.base_ref_name));
+        scope.set_extra("headRefName", json!(&detail.head_ref_name));
+        scope.set_extra("headRefOid", json!(&detail.head_ref_oid));
+        scope.set_extra("changedFiles", json!(detail.changed_files));
+        scope.set_extra("additions", json!(detail.additions));
+        scope.set_extra("deletions", json!(detail.deletions));
+    });
 }
 
 async fn generate_or_load_partner(
@@ -1342,6 +1412,7 @@ async fn generate_or_load_partner(
         let working_directory = PathBuf::from(working_directory);
         let head_oid = checkout_head_oid(local_repo_status);
         let lsp_session_manager = lsp_session_manager.clone();
+        let partner_request_key = partner_request_key.to_string();
         move || {
             let result = run_foreground_blocking(|| {
                 let semantic_review = semantic_review.or_else(|| {
@@ -1415,10 +1486,22 @@ async fn generate_or_load_partner(
                     },
                 ) {
                     Ok(partner) => partner,
-                    Err(error) => review_partner::fallback_review_partner_context(
-                        &input,
-                        Some(format!("AI Review Partner context unavailable: {error}")),
-                    ),
+                    Err(error) => {
+                        capture_review_intelligence_failure(
+                            &detail,
+                            provider,
+                            "review_partner",
+                            "context_generation",
+                            &partner_request_key,
+                            Some(&input.code_version_key),
+                            true,
+                            &error,
+                        );
+                        review_partner::fallback_review_partner_context(
+                            &input,
+                            Some(format!("AI Review Partner context unavailable: {error}")),
+                        )
+                    }
                 };
                 Ok(partner)
             });
@@ -1446,15 +1529,38 @@ async fn generate_or_load_partner(
         match result_rx.try_recv() {
             Ok(Ok(partner)) => break partner,
             Ok(Err(error)) => {
+                let code_version_key = review_code_version_key(detail);
+                capture_review_intelligence_failure(
+                    detail,
+                    provider,
+                    "review_partner",
+                    "context_result",
+                    partner_request_key,
+                    Some(&code_version_key),
+                    false,
+                    &error,
+                );
                 set_partner_error(model, detail_key, partner_request_key, error, cx).await;
                 return;
             }
             Err(mpsc::TryRecvError::Disconnected) => {
+                let error = "Review Partner generation stopped before returning a result.";
+                let code_version_key = review_code_version_key(detail);
+                capture_review_intelligence_failure(
+                    detail,
+                    provider,
+                    "review_partner",
+                    "context_result",
+                    partner_request_key,
+                    Some(&code_version_key),
+                    false,
+                    error,
+                );
                 set_partner_error(
                     model,
                     detail_key,
                     partner_request_key,
-                    "Review Partner generation stopped before returning a result.".to_string(),
+                    error.to_string(),
                     cx,
                 )
                 .await;
@@ -1685,6 +1791,17 @@ async fn generate_or_load_brief(
             .await;
         }
         Err(error) => {
+            let code_version_key = review_code_version_key(detail);
+            capture_review_intelligence_failure(
+                detail,
+                provider,
+                "review_brief",
+                "brief_generation",
+                request_key,
+                Some(&code_version_key),
+                false,
+                &error,
+            );
             set_brief_error(model, detail_key, request_key, error, cx).await;
         }
     }
