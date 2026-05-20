@@ -1,14 +1,10 @@
-use crate::{
-    guided_review::{GenerateGuidedReviewInput, GeneratedGuidedReview},
-    review_ai::{ReviewAiProgressUpdate, ReviewAiProvider, ReviewAiProviderStatus},
-};
+use crate::review_ai::{ReviewAiProgressUpdate, ReviewAiProvider, ReviewAiProviderStatus};
 
 pub mod binary;
 pub mod codex;
 pub mod copilot;
 pub mod errors;
 pub mod jsonrepair;
-pub mod merge;
 pub mod progress;
 pub mod prompt;
 pub mod runtime;
@@ -18,17 +14,16 @@ pub trait CodingAgentBackend: Send + Sync {
     #[allow(dead_code)]
     fn provider(&self) -> ReviewAiProvider;
     fn status(&self) -> Result<ReviewAiProviderStatus, String>;
-    fn generate(
-        &self,
-        input: &GenerateGuidedReviewInput,
-        on_progress: &mut dyn FnMut(ReviewAiProgressUpdate),
-    ) -> Result<GeneratedGuidedReview, String>;
 }
 
 #[derive(Clone, Debug)]
 pub struct AgentTextResponse {
     pub text: String,
     pub model: Option<String>,
+    pub used_checkout_context: bool,
+    pub checkout_command_count: usize,
+    pub inspected_path_hints: Vec<String>,
+    pub prompt_bytes: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -38,6 +33,7 @@ pub struct AgentJsonPromptOptions {
     pub codex_inactivity_timeout_ms: u64,
     pub copilot_overall_timeout_ms: u64,
     pub copilot_inactivity_timeout_ms: u64,
+    pub max_prompt_bytes: usize,
 }
 
 impl AgentJsonPromptOptions {
@@ -48,6 +44,18 @@ impl AgentJsonPromptOptions {
             codex_inactivity_timeout_ms: 35_000,
             copilot_overall_timeout_ms: 420_000,
             copilot_inactivity_timeout_ms: 300_000,
+            max_prompt_bytes: 140_000,
+        }
+    }
+
+    pub const fn stack_title_polish() -> Self {
+        Self {
+            task_label: "Guided Review stack title polish",
+            codex_overall_timeout_ms: 20_000,
+            codex_inactivity_timeout_ms: 10_000,
+            copilot_overall_timeout_ms: 35_000,
+            copilot_inactivity_timeout_ms: 14_000,
+            max_prompt_bytes: 40_000,
         }
     }
 
@@ -58,6 +66,7 @@ impl AgentJsonPromptOptions {
             codex_inactivity_timeout_ms: 600_000,
             copilot_overall_timeout_ms: 720_000,
             copilot_inactivity_timeout_ms: 240_000,
+            max_prompt_bytes: 220_000,
         }
     }
 
@@ -68,6 +77,7 @@ impl AgentJsonPromptOptions {
             codex_inactivity_timeout_ms: 360_000,
             copilot_overall_timeout_ms: 480_000,
             copilot_inactivity_timeout_ms: 180_000,
+            max_prompt_bytes: 160_000,
         }
     }
 
@@ -78,6 +88,7 @@ impl AgentJsonPromptOptions {
             codex_inactivity_timeout_ms: 180_000,
             copilot_overall_timeout_ms: 600_000,
             copilot_inactivity_timeout_ms: 180_000,
+            max_prompt_bytes: 120_000,
         }
     }
 }

@@ -720,7 +720,7 @@ async fn inspect_and_open_local_review(
             warm_structural_diffs_flow(model.clone(), cx).await;
             crate::review_intelligence::run_review_intelligence_flow(
                 model.clone(),
-                crate::review_intelligence::ReviewIntelligenceScope::TourOnly,
+                crate::review_intelligence::ReviewIntelligenceScope::StackOnly,
                 false,
                 false,
                 cx,

@@ -1,6 +1,6 @@
 use crate::{
     github::{PullRequestDetail, PullRequestFile},
-    guided_review::DiffAnchor,
+    review_ai::DiffAnchor,
     semantic_diff::{build_semantic_diff_file, SemanticChangeKind},
 };
 

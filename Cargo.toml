@@ -8,9 +8,9 @@ edition = "2021"
 [dependencies]
 codex-codes = { version = "0.101", default-features = false, features = ["async-client"] }
 dirs = "6"
-difftastic = { git = "https://github.com/rikuws/difftastic", rev = "007b1a2dbc8a997d1a9b4b9a773aafb3f032cdc0" }
+difftastic = { git = "https://github.com/rikuws/difftastic", rev = "663819c98d27c4987ffb3f3575ea8be8df78452f" }
 github-copilot-sdk = "1.0.0-beta.4"
-sem-core = { git = "https://github.com/rikuws/sem", rev = "bbfba575f772dcda82f91fdc9a3865f1e511de9e" }
+sem-core = { git = "https://github.com/rikuws/sem", rev = "fa605d2ace4ee579c69b589920edd61cece92042" }
 flate2 = "1"
 gpui = "0.2"
 emojis = "0.8.2"

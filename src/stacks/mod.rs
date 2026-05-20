@@ -4,6 +4,7 @@ pub mod dependencies;
 pub mod discovery;
 pub mod model;
 pub mod providers;
+pub mod title_polish;
 pub mod validation;
 
 pub use discovery::discover_review_stack;

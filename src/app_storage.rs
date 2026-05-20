@@ -2,6 +2,7 @@ use std::{fs, path::PathBuf};
 
 const APP_DATA_DIR: &str = "remiss";
 const LEGACY_APP_DATA_DIR: &str = "gh-ui-tool";
+const AGENT_WORKSPACES_DIR: &str = "agent-workspaces";
 const MANAGED_LSP_DIR: &str = "lsp-servers";
 const MANAGED_REPOSITORIES_DIR: &str = "managed-repositories";
 
@@ -32,6 +33,10 @@ pub fn data_dir_root() -> PathBuf {
 
 pub fn cache_path() -> PathBuf {
     data_dir_root().join("cache.sqlite3")
+}
+
+pub fn agent_workspaces_root() -> PathBuf {
+    data_dir_root().join(AGENT_WORKSPACES_DIR)
 }
 
 pub fn managed_servers_root() -> PathBuf {

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::{
     diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk},
     github::{PullRequestFile, PullRequestReviewThread},
-    guided_review::DiffAnchor,
+    review_ai::DiffAnchor,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

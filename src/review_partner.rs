@@ -14,15 +14,13 @@ use tree_sitter::{Node, Parser};
 use crate::{
     agents::{self, jsonrepair::parse_tolerant, AgentJsonPromptOptions},
     cache::CacheStore,
-    diff::{DiffLineKind, ParsedDiffFile},
+    diff::{find_parsed_diff_file, DiffLineKind, ParsedDiffFile},
     github::{PullRequestComment, PullRequestDetail, PullRequestReview, PullRequestReviewThread},
-    guided_review::{
-        find_parsed_diff_file, GuidedReviewPullRequestCommentContext,
-        GuidedReviewReviewCommentContext, GuidedReviewReviewContext,
-        GuidedReviewReviewThreadContext,
-    },
     lsp::{LspSessionManager, LspTextDocumentRequest},
     review_ai::{review_code_version_key, ReviewAiProgressUpdate, ReviewAiProvider},
+    review_context::{
+        ReviewCommentContext, ReviewContext, ReviewPullRequestCommentContext, ReviewThreadContext,
+    },
     review_memory::{ReviewMemoryPromptContext, ReviewMemorySignal, ReviewMemoryStatus},
     semantic_review::{
         summarize_semantic_review, RemissSemanticFocusSummary, RemissSemanticLayerSummary,
@@ -35,19 +33,21 @@ use crate::{
     structural_evidence::{StructuralEvidencePack, StructuralEvidenceStatus},
 };
 
+mod bundle;
 mod context;
 mod util;
 
 #[cfg(test)]
 mod tests;
 
+use self::bundle::*;
 use self::context::*;
 use self::util::*;
 
-pub const REVIEW_PARTNER_GENERATOR_VERSION: &str = "review-partner-v22";
-pub const REVIEW_PARTNER_CONTEXT_VERSION: &str = "review-partner-context-v5";
+pub const REVIEW_PARTNER_GENERATOR_VERSION: &str = "review-partner-v24";
+pub const REVIEW_PARTNER_CONTEXT_VERSION: &str = "review-partner-context-v7";
 
-const REVIEW_PARTNER_CACHE_KEY_PREFIX: &str = "review-partner-v22";
+const REVIEW_PARTNER_CACHE_KEY_PREFIX: &str = "review-partner-v24";
 const MAX_PARTNER_LAYERS: usize = 24;
 const MAX_LAYER_ATOMS: usize = 32;
 pub const MAX_FOCUS_RECORDS: usize = 160;
@@ -69,8 +69,8 @@ const MAX_RG_LOCATIONS: usize = 18;
 const MAX_SCAN_FILES: usize = 450;
 const MAX_SCAN_FILE_BYTES: u64 = 280_000;
 const MAX_SCAN_DEPTH: usize = 7;
-const MAX_EVIDENCE_FILES: usize = 40;
-const MAX_EVIDENCE_CHANGES: usize = 80;
+const MAX_REVIEW_PARTNER_PROMPT_BYTES: usize = 220_000;
+const MAX_FOCUS_RECORD_PROMPT_BYTES: usize = 160_000;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -92,6 +92,14 @@ pub struct GeneratedReviewPartnerContext {
     pub warnings: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_reason: Option<String>,
+    #[serde(default)]
+    pub used_checkout_context: bool,
+    #[serde(default)]
+    pub checkout_command_count: usize,
+    #[serde(default)]
+    pub inspected_path_hints: Vec<String>,
+    #[serde(default)]
+    pub prompt_bytes: usize,
     pub stack: ReviewStack,
     pub structural_evidence: StructuralEvidencePack,
     #[serde(default)]
@@ -398,9 +406,9 @@ pub struct GenerateReviewPartnerInput {
     pub url: String,
     pub base_ref_name: String,
     pub head_ref_name: String,
-    pub comments: Vec<GuidedReviewPullRequestCommentContext>,
-    pub latest_reviews: Vec<GuidedReviewReviewContext>,
-    pub review_threads: Vec<GuidedReviewReviewThreadContext>,
+    pub comments: Vec<ReviewPullRequestCommentContext>,
+    pub latest_reviews: Vec<ReviewContext>,
+    pub review_threads: Vec<ReviewThreadContext>,
     pub stack: ReviewStack,
     pub structural_evidence: StructuralEvidencePack,
     pub semantic_review: Option<RemissSemanticReviewSummary>,
@@ -519,6 +527,7 @@ pub fn save_review_partner_context(
 ) -> Result<(), String> {
     if document.generator_version != REVIEW_PARTNER_GENERATOR_VERSION
         || document.context_version != REVIEW_PARTNER_CONTEXT_VERSION
+        || !document.used_checkout_context
     {
         return Ok(());
     }
@@ -546,6 +555,7 @@ fn review_partner_document_matches_current(
         && document.stack.repository == detail.repository
         && document.stack.selected_pr_number == detail.number
         && document.code_version_key == review_code_version_key(detail)
+        && document.used_checkout_context
 }
 
 pub fn generate_review_partner_context(
@@ -571,17 +581,37 @@ pub fn generate_review_partner_context_with_progress(
         ));
     }
 
-    let prompt = build_review_partner_prompt(&input);
+    let bundle = write_review_partner_context_bundle(&input)?;
+    let prompt = build_review_partner_prompt(&bundle);
+    emit_prompt_budget_progress(
+        on_progress,
+        "Review Partner manifest",
+        prompt.len(),
+        MAX_REVIEW_PARTNER_PROMPT_BYTES,
+    );
+    ensure_prompt_budget(
+        "Review Partner manifest",
+        prompt.len(),
+        MAX_REVIEW_PARTNER_PROMPT_BYTES,
+    )?;
+    let agent_working_directory = bundle
+        .agent_working_directory()
+        .to_string_lossy()
+        .to_string();
     let response = agents::run_json_prompt_with_options_and_progress(
         input.provider,
-        &input.working_directory,
+        &agent_working_directory,
         prompt,
         AgentJsonPromptOptions::review_partner(),
         on_progress,
     )?;
     let parsed = parse_tolerant::<ReviewPartnerResponse>(&response.text)
         .map_err(|error| format!("Failed to parse Review Partner JSON: {}", error.message))?;
-    let partner = merge_review_partner(parsed, &input, response.model)?;
+    let mut partner = merge_review_partner(parsed, &input, response.model)?;
+    partner.used_checkout_context = true;
+    partner.checkout_command_count = response.checkout_command_count;
+    partner.inspected_path_hints = response.inspected_path_hints;
+    partner.prompt_bytes = response.prompt_bytes;
     save_review_partner_context(cache, &partner)?;
     Ok(partner)
 }
@@ -609,6 +639,10 @@ pub fn fallback_review_partner_context(
         limitations: input.context.warnings.clone(),
         warnings,
         fallback_reason,
+        used_checkout_context: false,
+        checkout_command_count: 0,
+        inspected_path_hints: Vec::new(),
+        prompt_bytes: 0,
         stack: input.stack.clone(),
         structural_evidence: input.structural_evidence.clone(),
         semantic_review: input.semantic_review.clone(),
@@ -627,6 +661,36 @@ pub fn fallback_review_partner_context(
             .map(|target| fallback_focus_record(input, target, None))
             .collect(),
     }
+}
+
+fn emit_prompt_budget_progress(
+    on_progress: &mut dyn FnMut(ReviewAiProgressUpdate),
+    task: &str,
+    prompt_bytes: usize,
+    max_prompt_bytes: usize,
+) {
+    on_progress(agents::progress::make_progress(
+        "prompt_budget",
+        &format!("{task} prompt budget"),
+        Some(format!(
+            "{prompt_bytes} of {max_prompt_bytes} bytes reserved for instructions, schema, and the context file manifest."
+        )),
+        Some(format!("{task} prompt: {prompt_bytes}/{max_prompt_bytes} bytes")),
+    ));
+}
+
+fn ensure_prompt_budget(
+    task: &str,
+    prompt_bytes: usize,
+    max_prompt_bytes: usize,
+) -> Result<(), String> {
+    if prompt_bytes <= max_prompt_bytes {
+        return Ok(());
+    }
+
+    Err(format!(
+        "{task} prompt exceeded the explicit budget ({prompt_bytes}/{max_prompt_bytes} bytes). Remiss writes deterministic context to files and will retry only after reducing the manifest prompt; it will not tail-truncate context."
+    ))
 }
 
 pub fn build_review_partner_generation_input(
@@ -705,16 +769,16 @@ pub fn build_review_partner_request_key(
     )
 }
 
-fn map_comment_context(comment: &PullRequestComment) -> GuidedReviewPullRequestCommentContext {
-    GuidedReviewPullRequestCommentContext {
+fn map_comment_context(comment: &PullRequestComment) -> ReviewPullRequestCommentContext {
+    ReviewPullRequestCommentContext {
         author_login: comment.author_login.clone(),
         body: trim_text(&comment.body, MAX_PROMPT_SNIPPET_CHARS),
         created_at: comment.created_at.clone(),
     }
 }
 
-fn map_review_context(review: &PullRequestReview) -> GuidedReviewReviewContext {
-    GuidedReviewReviewContext {
+fn map_review_context(review: &PullRequestReview) -> ReviewContext {
+    ReviewContext {
         author_login: review.author_login.clone(),
         state: review.state.clone(),
         body: trim_text(&review.body, MAX_PROMPT_SNIPPET_CHARS),
@@ -722,8 +786,8 @@ fn map_review_context(review: &PullRequestReview) -> GuidedReviewReviewContext {
     }
 }
 
-fn map_thread_context(thread: &PullRequestReviewThread) -> GuidedReviewReviewThreadContext {
-    GuidedReviewReviewThreadContext {
+fn map_thread_context(thread: &PullRequestReviewThread) -> ReviewThreadContext {
+    ReviewThreadContext {
         path: thread.path.clone(),
         line: thread.line.or(thread.original_line),
         diff_side: if thread.diff_side.trim().is_empty() {
@@ -737,7 +801,7 @@ fn map_thread_context(thread: &PullRequestReviewThread) -> GuidedReviewReviewThr
             .comments
             .iter()
             .take(MAX_COMMENTS_PER_THREAD)
-            .map(|comment| GuidedReviewReviewCommentContext {
+            .map(|comment| ReviewCommentContext {
                 author_login: comment.author_login.clone(),
                 body: trim_text(&comment.body, MAX_PROMPT_SNIPPET_CHARS),
             })
@@ -781,9 +845,7 @@ pub fn review_partner_cache_key_from_parts(
     )
 }
 
-pub fn build_review_partner_prompt(input: &GenerateReviewPartnerInput) -> String {
-    let context =
-        serde_json::to_string_pretty(&build_prompt_context(input)).expect("context must serialize");
+fn build_review_partner_prompt(bundle: &ReviewPartnerContextBundle) -> String {
     let schema = serde_json::to_string_pretty(&review_partner_output_schema())
         .expect("schema must serialize");
 
@@ -791,13 +853,16 @@ pub fn build_review_partner_prompt(input: &GenerateReviewPartnerInput) -> String
         "You are generating compact code explanation context for Remiss, a read-only pull request review IDE.",
         "The goal is explaining the scoped code. Produce code explanations and understanding checkpoints, not review prompts or assignments.",
         "The virtual stack layers are already validated. Preserve layer order, layer IDs, and atom coverage.",
+        "You are running from a generated Review Partner agent workspace, not directly from the checkout.",
+        "Read manifest.json first. It indexes deterministic context files plus the checkout/ symlink to the prepared source checkout.",
+        "Inspect the referenced context files with read-only tools before answering. Use checkout/ paths when source inspection is needed.",
         "Avoid checklists, verdict tables, evidence ledgers, pass/fail reports, tutorials, walkthroughs, and generic guides.",
         "Avoid emoji, markdown headings, decorative labels, code fences, and code sketches.",
         "Return compact right-rail explanation the reader cannot infer from the visible diff alone: concrete behavior summary, removed-code impact, similar existing code, grounded codebase-fit mismatch, and concrete implementation concerns when supported.",
         "Use historyContext.signals only as evidence-backed review memory. Do not treat prior signals as current truth when the current code contradicts them.",
         "When historyContext conflicts with current code, surface the conflict in assumptions, historySignals, or limitations instead of resolving it silently.",
         "Generate focusRecords for the supplied focusTargets. Each focus record explains one stack layer, not one diff hunk.",
-        "The supplied focusTargets live at Pull-request context.focusTargets.",
+        "The supplied focusTargets live in focus-targets.json.",
         "Set each focusRecords[].key to the exact matching focusTargets[].key string. Do not use layerId, atom id, title, file path, or a generated key in that field.",
         "Each focus record must include one complete natural-language summary paragraph that synthesizes what changed, how the code behaves, the invariant/state change/error handling it affects, the supported intent or trade-off, and any relevant history signal.",
         "The summary must not be a file inventory, line list, stack-generator explanation, or statement about how Remiss grouped the change.",
@@ -813,15 +878,15 @@ pub fn build_review_partner_prompt(input: &GenerateReviewPartnerInput) -> String
         "Rewrite any question-shaped draft into a declarative explanation before returning JSON.",
         "Never end a summary with an ellipsis.",
         "Match the supplied focus scope exactly. Ground intent in the code, diff, or collected context.",
-        "Use semanticEvidence and collectedContext.semanticFocus as internal evidence for entity-level behavior when it directly overlaps this focus scope.",
+        "Use semantic-evidence.json and collected-context.json semanticFocus as internal evidence for entity-level behavior when it directly overlaps this focus scope.",
         "Usage rows are generated by Remiss from tree-sitter syntax context. Leave usage lists out of the JSON.",
         "Use codebaseFit only for grounded mismatch evidence and only the 2-3 strongest non-empty secondary sections.",
         "Use compact prose rows, not checklist or bullet phrasing.",
         "Keep Usage context and Codebase fit out of sections.",
         "For codebaseFit, set follows=true when the collected context does not support a concrete mismatch. If follows=false, every evidence item must link to the existing code location that shows the mismatch.",
         "Keep stack-wide prose out of focus records. Repeat the layer brief only when it is the only useful context.",
-        "Use the collectedContext as bounded read-only investigation. Treat partial context as partial.",
-        "Use semanticEvidence as internal code-structure evidence for entity-level grouping, moved or reordered code, layer-to-atom mappings, focus entities, and impact context when it is present.",
+        "Use collected-context.json as bounded read-only investigation. Treat partial context as partial.",
+        "Use semantic-evidence.json as internal code-structure evidence for entity-level grouping, moved or reordered code, layer-to-atom mappings, focus entities, and impact context when it is present.",
         "Never mention Sem, semanticEvidence, internal tooling, atom IDs, layer IDs, semantic targets, loose file buckets, or grouping mechanics in user-facing fields.",
         "If intent or history is not supported by the supplied context, put the gap in assumptions or historySignals instead of inventing it in the summary.",
         "Only call out duplication, style mismatch, or overly defensive code when the supplied context supports it.",
@@ -832,8 +897,8 @@ pub fn build_review_partner_prompt(input: &GenerateReviewPartnerInput) -> String
         "JSON schema:",
         &schema,
         "",
-        "Pull-request context:",
-        &context,
+        "Context manifest:",
+        &bundle.manifest_json,
     ]
     .join("\n")
 }
@@ -922,6 +987,10 @@ fn merge_review_partner(
         limitations: normalize_text_items(response.limitations),
         warnings: normalize_text_items(response.warnings),
         fallback_reason: None,
+        used_checkout_context: false,
+        checkout_command_count: 0,
+        inspected_path_hints: Vec::new(),
+        prompt_bytes: 0,
         stack: input.stack.clone(),
         structural_evidence: input.structural_evidence.clone(),
         semantic_review: input.semantic_review.clone(),
@@ -1826,10 +1895,26 @@ pub fn generate_review_partner_focus_record_with_progress(
         ));
     }
 
-    let prompt = build_focus_record_prompt(document, &target);
+    let bundle = write_review_partner_focus_context_bundle(document, &target, working_directory)?;
+    let prompt = build_focus_record_prompt(&bundle, &target);
+    emit_prompt_budget_progress(
+        on_progress,
+        "Review Partner focus manifest",
+        prompt.len(),
+        MAX_FOCUS_RECORD_PROMPT_BYTES,
+    );
+    ensure_prompt_budget(
+        "Review Partner focus manifest",
+        prompt.len(),
+        MAX_FOCUS_RECORD_PROMPT_BYTES,
+    )?;
+    let agent_working_directory = bundle
+        .agent_working_directory()
+        .to_string_lossy()
+        .to_string();
     let response = agents::run_json_prompt_with_options_and_progress(
         document.provider,
-        working_directory,
+        &agent_working_directory,
         prompt,
         AgentJsonPromptOptions::review_partner_focus(),
         on_progress,
@@ -1848,6 +1933,35 @@ pub fn generate_review_partner_focus_record_with_progress(
         &document.stack,
         &document.review_memory,
     ))
+}
+
+fn fallback_focus_record_from_document(
+    document: &GeneratedReviewPartnerContext,
+    target: &ReviewPartnerFocusTarget,
+    warning: Option<String>,
+) -> ReviewPartnerFocusRecord {
+    let input = GenerateReviewPartnerInput {
+        provider: document.provider,
+        working_directory: String::new(),
+        repository: document.stack.repository.clone(),
+        number: document.stack.selected_pr_number,
+        code_version_key: document.code_version_key.clone(),
+        title: String::new(),
+        body: String::new(),
+        url: String::new(),
+        base_ref_name: document.stack.trunk_branch.clone().unwrap_or_default(),
+        head_ref_name: String::new(),
+        comments: Vec::new(),
+        latest_reviews: Vec::new(),
+        review_threads: Vec::new(),
+        stack: document.stack.clone(),
+        structural_evidence: document.structural_evidence.clone(),
+        semantic_review: document.semantic_review.clone(),
+        review_memory: document.review_memory.clone(),
+        context: document.context.clone(),
+        focus_targets: vec![target.clone()],
+    };
+    fallback_focus_record(&input, target, warning)
 }
 
 pub fn upsert_focus_record(
@@ -2298,109 +2412,6 @@ fn short_hash(value: &str) -> String {
     hash.chars().take(12).collect()
 }
 
-fn build_prompt_context(input: &GenerateReviewPartnerInput) -> Value {
-    let mut issue_texts = vec![input.title.as_str(), input.body.as_str()];
-    issue_texts.extend(input.comments.iter().map(|comment| comment.body.as_str()));
-    issue_texts.extend(
-        input
-            .latest_reviews
-            .iter()
-            .map(|review| review.body.as_str()),
-    );
-    issue_texts.extend(
-        input
-            .review_threads
-            .iter()
-            .flat_map(|thread| thread.comments.iter().map(|comment| comment.body.as_str())),
-    );
-
-    json!({
-        "repository": input.repository,
-        "workingDirectory": input.working_directory,
-        "pullRequest": {
-            "number": input.number,
-            "title": input.title,
-            "url": input.url,
-            "baseRefName": input.base_ref_name,
-            "headRefName": input.head_ref_name,
-            "body": trim_text(&input.body, 2_500),
-        },
-        "partnerVersion": REVIEW_PARTNER_GENERATOR_VERSION,
-        "contextVersion": input.context.version,
-        "structuralEvidenceVersion": input.structural_evidence.version,
-        "focusTargets": input.focus_targets.iter().map(summarize_focus_target).collect::<Vec<_>>(),
-        "historyContext": {
-            "signals": input.review_memory.signals,
-            "limitations": input.review_memory.limitations,
-            "commitMessages": [],
-            "linkedIssues": crate::agents::prompt::linked_issue_refs(issue_texts),
-            "prComments": input
-                .comments
-                .iter()
-                .take(MAX_PARTNER_LAYERS)
-                .map(|comment| json!({
-                    "authorLogin": comment.author_login,
-                    "createdAt": comment.created_at,
-                    "body": trim_text(&comment.body, MAX_PROMPT_SNIPPET_CHARS),
-                }))
-                .collect::<Vec<_>>(),
-            "currentReviewThreadsForTouchedFiles": input
-                .review_threads
-                .iter()
-                .take(MAX_PARTNER_LAYERS)
-                .map(|thread| json!({
-                    "path": thread.path,
-                    "line": thread.line,
-                    "diffSide": thread.diff_side,
-                    "subjectType": thread.subject_type,
-                    "isResolved": thread.is_resolved,
-                }))
-                .collect::<Vec<_>>(),
-            "olderReviewThreadsForTouchedFiles": [],
-            "recentChangesToTouchedFiles": [],
-            "knownPriorPatterns": [],
-        },
-        "stack": {
-            "id": input.stack.id,
-            "source": input.stack.source,
-            "kind": input.stack.kind,
-            "generatorVersion": input.stack.generator_version,
-            "layers": input.stack.layers.iter().take(MAX_PARTNER_LAYERS).map(|layer| {
-                json!({
-                    "id": layer.id,
-                    "index": layer.index,
-                    "title": layer.title,
-                    "summary": layer.summary,
-                    "rationale": layer.rationale,
-                    "atomIds": layer.atom_ids.iter().take(MAX_LAYER_ATOMS).collect::<Vec<_>>(),
-                    "dependsOnLayerIds": layer.depends_on_layer_ids,
-                    "metrics": layer.metrics,
-                    "confidence": layer.confidence,
-                })
-            }).collect::<Vec<_>>(),
-            "atoms": input.stack.atoms.iter().map(|atom| {
-                json!({
-                    "id": atom.id,
-                    "path": atom.path,
-                    "previousPath": atom.previous_path,
-                    "role": atom.role.label(),
-                    "semanticKind": atom.semantic_kind,
-                    "symbolName": atom.symbol_name,
-                    "definedSymbols": atom.defined_symbols,
-                    "referencedSymbols": atom.referenced_symbols.iter().take(12).collect::<Vec<_>>(),
-                    "oldRange": atom.old_range,
-                    "newRange": atom.new_range,
-                    "changedLineCount": atom.additions + atom.deletions,
-                    "riskScore": atom.risk_score,
-                })
-            }).collect::<Vec<_>>(),
-        },
-        "collectedContext": summarize_context_pack(&input.context),
-        "structuralEvidence": summarize_structural_evidence(&input.structural_evidence),
-        "semanticEvidence": summarize_semantic_evidence(input.semantic_review.as_ref()),
-    })
-}
-
 fn summarize_focus_target(target: &ReviewPartnerFocusTarget) -> Value {
     json!({
         "key": target.key.as_str(),
@@ -2414,150 +2425,6 @@ fn summarize_focus_target(target: &ReviewPartnerFocusTarget) -> Value {
         "title": target.title.as_str(),
         "subtitle": target.subtitle.as_str(),
         "matchKind": target.match_kind,
-    })
-}
-
-fn summarize_partner_layer_for_prompt(layer: &ReviewPartnerLayer) -> Value {
-    json!({
-        "layerId": layer.layer_id,
-        "title": layer.title,
-        "brief": layer.brief,
-        "changedItems": layer.changed_items,
-        "removedItems": layer.removed_items,
-        "similarCode": layer.similar_code,
-        "codebaseFit": layer.codebase_fit,
-        "concerns": layer.concerns,
-        "limitations": layer.limitations,
-        "structuralEvidenceStatus": layer.structural_evidence_status,
-    })
-}
-
-fn summarize_context_pack(context: &ReviewPartnerContextPack) -> Value {
-    json!({
-        "version": context.version,
-        "warnings": context.warnings,
-        "layers": context.layers.iter().map(|layer| {
-            json!({
-                "layerId": layer.layer_id,
-                "semanticLayers": layer.semantic_layers,
-                "semanticFocus": layer.semantic_focus,
-                "changedSymbols": layer.changed_symbols.iter().map(summarize_collected_symbol).collect::<Vec<_>>(),
-                "removedSymbols": layer.removed_symbols.iter().map(summarize_collected_symbol).collect::<Vec<_>>(),
-                "similarLocations": layer.similar_locations,
-                "styleNotes": layer.style_notes,
-                "limitations": layer.limitations,
-            })
-        }).collect::<Vec<_>>(),
-    })
-}
-
-fn summarize_collected_symbol(symbol: &ReviewPartnerCollectedSymbol) -> Value {
-    json!({
-        "symbol": symbol.symbol,
-        "path": symbol.path,
-        "line": symbol.line,
-        "atomIds": symbol.atom_ids,
-        "searchStrategy": symbol.search_strategy,
-        "referenceCount": symbol.reference_count,
-    })
-}
-
-fn summarize_structural_evidence(evidence: &StructuralEvidencePack) -> Value {
-    let mut emitted_changes = 0usize;
-    let files = evidence
-        .files
-        .iter()
-        .take(MAX_EVIDENCE_FILES)
-        .map(|file| {
-            let remaining = MAX_EVIDENCE_CHANGES.saturating_sub(emitted_changes);
-            let changes = file
-                .changes
-                .iter()
-                .take(remaining)
-                .map(|change| {
-                    emitted_changes += 1;
-                    json!({
-                        "hunkIndex": change.hunk_index,
-                        "hunkHeader": change.hunk_header,
-                        "oldRange": change.old_range,
-                        "newRange": change.new_range,
-                        "atomIds": change.atom_ids,
-                        "changedLineCount": change.changed_line_count,
-                        "snippet": change.snippet.as_deref().map(|snippet| trim_text(snippet, MAX_PROMPT_SNIPPET_CHARS)),
-                    })
-                })
-                .collect::<Vec<_>>();
-            json!({
-                "path": file.path,
-                "previousPath": file.previous_path,
-                "status": file.status,
-                "message": file.message,
-                "matchedAtomIds": file.matched_atom_ids,
-                "unmatchedHunkCount": file.unmatched_hunk_count,
-                "changes": changes,
-            })
-        })
-        .collect::<Vec<_>>();
-
-    json!({
-        "version": evidence.version,
-        "warnings": evidence.warnings,
-        "files": files,
-    })
-}
-
-fn summarize_semantic_evidence(evidence: Option<&RemissSemanticReviewSummary>) -> Value {
-    const MAX_SEMANTIC_LAYERS: usize = 24;
-    const MAX_SEMANTIC_ATOMS: usize = 32;
-    const MAX_SEMANTIC_FILES: usize = 12;
-    const MAX_SEMANTIC_ENTITIES: usize = 16;
-    const MAX_SEMANTIC_WARNINGS: usize = 12;
-    const MAX_SEMANTIC_FOCUS: usize = 24;
-
-    let Some(evidence) = evidence else {
-        return json!({
-            "status": "unavailable",
-            "warnings": ["Semantic evidence was not available."],
-            "layers": [],
-        });
-    };
-
-    json!({
-        "status": if evidence.layer_count > 0 { "ready" } else { "empty" },
-        "version": evidence.version,
-        "semApiVersion": evidence.sem_api_version,
-        "codeVersionKey": evidence.code_version_key,
-        "analysisCacheKey": evidence.analysis_cache_key,
-        "layerCacheKey": evidence.layer_cache_key,
-        "summary": {
-            "fileCount": evidence.file_count,
-            "changeCount": evidence.change_count,
-            "layerCount": evidence.layer_count,
-            "addedCount": evidence.added_count,
-            "modifiedCount": evidence.modified_count,
-            "deletedCount": evidence.deleted_count,
-            "movedCount": evidence.moved_count,
-            "renamedCount": evidence.renamed_count,
-            "reorderedCount": evidence.reordered_count,
-            "orphanCount": evidence.orphan_count,
-        },
-        "warnings": evidence.warnings.iter().take(MAX_SEMANTIC_WARNINGS).collect::<Vec<_>>(),
-        "focus": evidence.focus_summaries.iter().take(MAX_SEMANTIC_FOCUS).collect::<Vec<_>>(),
-        "layers": evidence.layers.iter().take(MAX_SEMANTIC_LAYERS).map(|layer| {
-            json!({
-                "id": layer.id,
-                "index": layer.index,
-                "title": layer.title,
-                "summary": trim_text(&layer.summary, MAX_ITEM_TEXT_CHARS),
-                "rationale": trim_text(&layer.rationale, MAX_ITEM_TEXT_CHARS),
-                "dependsOnLayerIds": layer.depends_on_layer_ids,
-                "atomIds": layer.atom_ids.iter().take(MAX_SEMANTIC_ATOMS).collect::<Vec<_>>(),
-                "filePaths": layer.file_paths.iter().take(MAX_SEMANTIC_FILES).collect::<Vec<_>>(),
-                "hunkIndices": layer.hunk_indices,
-                "entityNames": layer.entity_names.iter().take(MAX_SEMANTIC_ENTITIES).collect::<Vec<_>>(),
-                "changeCount": layer.change_count,
-            })
-        }).collect::<Vec<_>>(),
     })
 }
 
@@ -2697,35 +2564,19 @@ fn focus_record_output_schema() -> Value {
 }
 
 fn build_focus_record_prompt(
-    document: &GeneratedReviewPartnerContext,
+    bundle: &ReviewPartnerContextBundle,
     target: &ReviewPartnerFocusTarget,
 ) -> String {
     let schema =
         serde_json::to_string_pretty(&focus_record_output_schema()).expect("schema must serialize");
-    let context = serde_json::to_string_pretty(&json!({
-        "repository": document.stack.repository.as_str(),
-        "pullRequestNumber": document.stack.selected_pr_number,
-        "target": summarize_focus_target(target),
-        "targetLayer": target
-            .layer_id
-            .as_deref()
-            .and_then(|layer_id| document.layer(layer_id))
-            .map(summarize_partner_layer_for_prompt),
-        "targetAtoms": target.atom_ids.iter().filter_map(|atom_id| document.stack.atom(atom_id)).collect::<Vec<_>>(),
-        "historyContext": {
-            "signals": document.review_memory.signals,
-            "limitations": document.review_memory.limitations,
-        },
-        "collectedContext": summarize_context_pack(&document.context),
-        "structuralEvidence": summarize_structural_evidence(&document.structural_evidence),
-        "semanticEvidence": summarize_semantic_evidence(document.semantic_review.as_ref()),
-    }))
-    .expect("context must serialize");
 
     [
         "You are generating one compact code explanation record for Remiss.",
         "This record appears in the right rail for the selected stack layer.",
         "The goal is explaining the scoped code, not assigning work or asking review questions.",
+        "You are running from a generated Review Partner agent workspace, not directly from the checkout.",
+        "Read manifest.json first. It indexes the target, deterministic context files, and the checkout/ symlink to the prepared source checkout.",
+        "Inspect target.json, the target layer file from manifest.layers, and relevant checkout/ source paths before answering.",
         "Return only context the reader cannot infer from the visible diff alone.",
         "Use historyContext.signals only as evidence-backed review memory. Do not treat prior signals as current truth when the current code contradicts them.",
         "When historyContext conflicts with current code, surface the conflict in assumptions, historySignals, or limitations instead of resolving it silently.",
@@ -2745,7 +2596,7 @@ fn build_focus_record_prompt(
         "Rewrite any question-shaped draft into a declarative explanation before returning JSON.",
         "Never end a summary with an ellipsis.",
         "Match the supplied focus scope exactly. Ground intent in the code, diff, collected context, or review memory.",
-        "Use semanticEvidence as internal code-structure evidence. Never mention Sem, semanticEvidence, internal tooling, atom IDs, layer IDs, semantic targets, loose file buckets, or grouping mechanics in user-facing fields.",
+        "Use semantic-evidence.json as internal code-structure evidence. Never mention Sem, semanticEvidence, internal tooling, atom IDs, layer IDs, semantic targets, loose file buckets, or grouping mechanics in user-facing fields.",
         "If intent or history is not supported by the supplied context, put the gap in assumptions or historySignals instead of inventing it in the summary.",
         "Usage rows are generated by Remiss from tree-sitter syntax context. Leave usage lists out of the JSON.",
         "Use codebaseFit only for grounded mismatch evidence and only the 2-3 strongest non-empty secondary sections.",
@@ -2759,8 +2610,11 @@ fn build_focus_record_prompt(
         "JSON schema:",
         &schema,
         "",
-        "Focus context:",
-        &context,
+        "Target key:",
+        target.key.as_str(),
+        "",
+        "Context manifest:",
+        &bundle.manifest_json,
     ]
     .join("\n")
 }

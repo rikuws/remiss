@@ -776,7 +776,7 @@ fn render_diagnostic_logs_panel(state: &Entity<AppState>, s: &AppState) -> impl 
                     .text_color(fg_muted())
                     .max_w(px(760.0))
                     .child(
-                        "Export recent Copilot, AI stack, and checkout logs as a zip file in Downloads.",
+                        "Export recent Copilot, stack, and checkout logs as a zip file in Downloads.",
                     ),
             )
             .child(
@@ -1011,7 +1011,7 @@ fn render_review_intelligence_settings_panel(
                     .text_color(fg_muted())
                     .max_w(px(760.0))
                     .child(
-                        "Choose the provider Remiss uses for Review Partner, Review Brief, and Guided Review. Automatic generation prewarms reviewer context per repository and only regenerates when the pull request code version changes.",
+                        "Choose the provider Remiss uses for Review Partner and Review Brief. Guided Review stacks are built locally from repository structure when GitHub does not provide a real stack.",
                     ),
             )
             .child(

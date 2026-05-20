@@ -11,9 +11,6 @@ use crate::github::{
     PullRequestDetail, PullRequestDetailSnapshot, PullRequestQueue, PullRequestReviewThread,
     PullRequestSummary, RepositoryFileContent, ReviewAction, WorkspaceSnapshot,
 };
-use crate::guided_review::{
-    self, build_guided_review_request_key, review_thread_anchor, GeneratedGuidedReview,
-};
 use crate::local_repo::LocalRepositoryStatus;
 use crate::local_review::{self, RememberedLocalRepository};
 use crate::lsp::{LspServerStatus, LspSessionManager, LspSymbolDetails};
@@ -25,6 +22,7 @@ use crate::onboarding::{
 use crate::review_ai::{
     self, DiffAnchor, ReviewAiProvider, ReviewAiProviderStatus, ReviewAiSettings,
 };
+use crate::review_anchors::review_thread_anchor;
 use crate::review_brief::ReviewBrief;
 use crate::review_partner::{GeneratedReviewPartnerContext, ReviewPartnerFocusTarget};
 use crate::review_queue::{default_review_file, ReviewQueue};
@@ -123,7 +121,6 @@ pub struct DetailState {
     pub review_brief_state: ReviewBriefState,
     pub review_partner_state: ReviewPartnerState,
     pub ai_stack_state: AiStackState,
-    pub guided_review_states: std::collections::HashMap<ReviewAiProvider, GuidedReviewState>,
     pub file_content_states: std::collections::HashMap<String, FileContentState>,
     pub structural_diff_states: std::collections::HashMap<String, StructuralDiffFileState>,
     pub structural_diff_warmup: StructuralDiffWarmupState,
@@ -155,7 +152,6 @@ impl Default for DetailState {
             review_brief_state: ReviewBriefState::default(),
             review_partner_state: ReviewPartnerState::default(),
             ai_stack_state: AiStackState::default(),
-            guided_review_states: std::collections::HashMap::new(),
             file_content_states: std::collections::HashMap::new(),
             structural_diff_states: std::collections::HashMap::new(),
             structural_diff_warmup: StructuralDiffWarmupState::default(),
@@ -268,39 +264,6 @@ impl Default for AiStackState {
             stack: None,
             loading: false,
             generating: false,
-            error: None,
-            message: None,
-            success: false,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct GuidedReviewState {
-    pub request_key: Option<String>,
-    pub document: Option<GeneratedGuidedReview>,
-    pub loading: bool,
-    pub generating: bool,
-    pub progress_summary: Option<String>,
-    pub progress_detail: Option<String>,
-    pub progress_log: Vec<String>,
-    pub progress_log_file_path: Option<String>,
-    pub error: Option<String>,
-    pub message: Option<String>,
-    pub success: bool,
-}
-
-impl Default for GuidedReviewState {
-    fn default() -> Self {
-        Self {
-            request_key: None,
-            document: None,
-            loading: false,
-            generating: false,
-            progress_summary: None,
-            progress_detail: None,
-            progress_log: Vec::new(),
-            progress_log_file_path: None,
             error: None,
             message: None,
             success: false,
@@ -952,7 +915,7 @@ fn review_focus_line_row_index(
             .hunks
             .get(*hunk_index)
             .and_then(|hunk| hunk.lines.get(*line_index))
-            .map(|line| guided_review::line_matches_diff_anchor(line, Some(&anchor)))
+            .map(|line| crate::review_anchors::line_matches_diff_anchor(line, Some(&anchor)))
             .unwrap_or(false),
         _ => false,
     })
@@ -1134,11 +1097,9 @@ pub struct AppState {
     pub review_ai_provider_statuses_loaded: bool,
     pub review_ai_provider_loading: bool,
     pub review_ai_provider_error: Option<String>,
-    pub automatic_guided_review_request_keys: std::collections::HashSet<String>,
     pub automatic_brief_request_keys: std::collections::HashSet<String>,
     pub automatic_partner_request_keys: std::collections::HashSet<String>,
     pub settings_scroll_handle: ScrollHandle,
-    pub guided_review_section_list_state: ListState,
     pub review_ai_settings: ReviewAiSettingsState,
     pub managed_lsp_settings: ManagedLspSettingsState,
 }
@@ -1288,11 +1249,9 @@ impl AppState {
             review_ai_provider_statuses_loaded: false,
             review_ai_provider_loading: false,
             review_ai_provider_error: None,
-            automatic_guided_review_request_keys: std::collections::HashSet::new(),
             automatic_brief_request_keys: std::collections::HashSet::new(),
             automatic_partner_request_keys: std::collections::HashSet::new(),
             settings_scroll_handle: ScrollHandle::new(),
-            guided_review_section_list_state: ListState::new(0, ListAlignment::Top, px(720.0)),
             review_ai_settings: initial_review_ai_settings,
             managed_lsp_settings: ManagedLspSettingsState::default(),
         };
@@ -1672,13 +1631,6 @@ impl AppState {
         self.detail_states.get(key)
     }
 
-    pub fn active_guided_review_state(&self) -> Option<&GuidedReviewState> {
-        let detail_state = self.active_detail_state()?;
-        detail_state
-            .guided_review_states
-            .get(&self.review_ai_settings.settings.provider)
-    }
-
     pub fn active_review_brief_state(&self) -> Option<&ReviewBriefState> {
         Some(&self.active_detail_state()?.review_brief_state)
     }
@@ -1703,14 +1655,6 @@ impl AppState {
         self.review_ai_provider_statuses
             .iter()
             .find(|status| status.provider == self.review_ai_settings.settings.provider)
-    }
-
-    pub fn active_guided_review_request_key(&self) -> Option<String> {
-        let detail = self.active_detail()?;
-        Some(build_guided_review_request_key(
-            detail,
-            self.review_ai_settings.settings.provider,
-        ))
     }
 
     pub fn selected_review_ai_provider(&self) -> ReviewAiProvider {

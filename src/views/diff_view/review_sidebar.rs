@@ -49,8 +49,8 @@ pub(super) fn prepare_review_stack(
     if ai_stack_state.generating {
         return Arc::new(ai_stack_placeholder(
             detail,
-            "Generating AI stack",
-            "The selected provider is planning review layers from the prepared checkout.",
+            "Building Guided Review stack",
+            "Remiss is deriving review layers from the prepared checkout.",
             None,
         ));
     }
@@ -58,11 +58,11 @@ pub(super) fn prepare_review_stack(
     if ai_stack_state.loading {
         return Arc::new(ai_stack_placeholder(
             detail,
-            "Preparing AI stack",
+            "Preparing stack",
             ai_stack_state
                 .message
                 .as_deref()
-                .unwrap_or("Preparing the local checkout before AI stack generation."),
+                .unwrap_or("Preparing the local checkout before stack generation."),
             None,
         ));
     }
@@ -70,16 +70,16 @@ pub(super) fn prepare_review_stack(
     if let Some(error) = ai_stack_state.error {
         return Arc::new(ai_stack_placeholder(
             detail,
-            "AI stack unavailable",
-            "The full pull request diff is still available while the AI stack is unavailable.",
+            "Stack unavailable",
+            "The full pull request diff is still available while the stack is unavailable.",
             Some(error),
         ));
     }
 
     Arc::new(ai_stack_placeholder(
         detail,
-        "AI stack queued",
-        "Entering Review will prepare the checkout and generate the AI stack.",
+        "Stack queued",
+        "Entering Review will prepare the checkout and build the Guided Review stack.",
         None,
     ))
 }
@@ -193,20 +193,25 @@ fn ai_stack_placeholder(
     warning: Option<String>,
 ) -> ReviewStack {
     let stack_id = format!(
-        "ai-stack-placeholder:{}#{}:{}",
+        "stack-placeholder:{}#{}:{}",
         detail.repository,
         detail.number,
         detail.head_ref_oid.as_deref().unwrap_or("unknown")
     );
     let warnings = warning
-        .map(|message| vec![StackWarning::new("ai-virtual-stack-unavailable", message)])
+        .map(|message| {
+            vec![StackWarning::new(
+                "guided-review-stack-unavailable",
+                message,
+            )]
+        })
         .unwrap_or_default();
 
     ReviewStack {
         id: stack_id.clone(),
         repository: detail.repository.clone(),
         selected_pr_number: detail.number,
-        source: StackSource::VirtualAi,
+        source: StackSource::VirtualSemantic,
         kind: StackKind::Virtual,
         confidence: Confidence::Low,
         trunk_branch: Some(detail.base_ref_name.clone()),
@@ -220,9 +225,9 @@ fn ai_stack_placeholder(
             rationale: summary.to_string(),
             pr: None,
             virtual_layer: Some(VirtualLayerRef {
-                source: StackSource::VirtualAi,
+                source: StackSource::VirtualSemantic,
                 role: crate::stacks::model::ChangeRole::Unknown,
-                source_label: "AI stack".to_string(),
+                source_label: "Guided Review stack".to_string(),
             }),
             base_oid: detail.base_ref_oid.clone(),
             head_oid: detail.head_ref_oid.clone(),
@@ -468,246 +473,6 @@ fn handle_file_tree_row_open(
             ensure_active_review_focus_loaded(state, window, cx);
         }
     }
-}
-
-fn render_guided_review_navigation_pane(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
-    let (
-        generated_tour,
-        provider_loading,
-        tour_loading,
-        tour_generating,
-        has_status_messages,
-        center_list_state,
-    ) = {
-        let app_state = state.read(cx);
-        let detail_state = app_state.active_detail_state();
-        let guided_review_state = app_state.active_guided_review_state();
-
-        (
-            guided_review_state.and_then(|state| state.document.clone()),
-            app_state.review_ai_provider_loading,
-            guided_review_state
-                .map(|state| state.loading)
-                .unwrap_or(false),
-            guided_review_state
-                .map(|state| state.generating)
-                .unwrap_or(false),
-            app_state.review_ai_provider_error.is_some()
-                || detail_state
-                    .and_then(|state| state.local_repository_error.as_ref())
-                    .is_some()
-                || guided_review_state
-                    .and_then(|state| state.error.as_ref())
-                    .is_some()
-                || guided_review_state
-                    .and_then(|state| state.message.as_ref())
-                    .is_some(),
-            app_state.guided_review_section_list_state.clone(),
-        )
-    };
-    let nav_list_state = {
-        let app_state = state.read(cx);
-        prepare_review_nav_list_state(&app_state)
-    };
-
-    match generated_tour {
-        Some(tour) => {
-            let tour = Arc::new(tour);
-            if nav_list_state.item_count() != tour.sections.len() {
-                nav_list_state.reset(tour.sections.len());
-            }
-
-            let has_progress = provider_loading || tour_loading || tour_generating;
-            let section_count = tour.sections.len();
-
-            div()
-                .w(file_tree_width())
-                .flex_shrink_0()
-                .min_h_0()
-                .bg(diff_editor_chrome())
-                .border_r(px(1.0))
-                .border_color(diff_annotation_border())
-                .flex()
-                .flex_col()
-                .child(render_sidebar_header(
-                    "Guided Review",
-                    "Review groups",
-                    tour.sections.len().to_string(),
-                ))
-                .child(
-                    div()
-                        .id("guided-review-nav-scroll")
-                        .flex_grow()
-                        .min_h_0()
-                        .flex()
-                        .flex_col()
-                        .px(px(8.0))
-                        .py(px(8.0))
-                        .child(
-                            list(nav_list_state, {
-                                let tour = tour.clone();
-                                let center_list_state = center_list_state.clone();
-                                move |ix, _window, _cx| {
-                                    let section = &tour.sections[ix];
-                                    let target_index = guided_review_section_content_index(
-                                        section_count,
-                                        has_progress,
-                                        has_status_messages,
-                                        ix,
-                                    );
-                                    render_guided_review_nav_row(
-                                        tour.as_ref(),
-                                        section,
-                                        ix,
-                                        target_index,
-                                        center_list_state.clone(),
-                                    )
-                                    .into_any_element()
-                                }
-                            })
-                            .with_sizing_behavior(ListSizingBehavior::Auto)
-                            .flex_grow()
-                            .min_h_0(),
-                        ),
-                )
-        }
-        None => div()
-            .w(file_tree_width())
-            .flex_shrink_0()
-            .min_h_0()
-            .bg(diff_editor_chrome())
-            .border_r(px(1.0))
-            .border_color(diff_annotation_border())
-            .flex()
-            .flex_col()
-            .child(render_sidebar_header(
-                "Guided Review",
-                "Review groups",
-                "0".to_string(),
-            ))
-            .child(
-                div()
-                    .px(px(14.0))
-                    .py(px(12.0))
-                    .text_size(px(12.0))
-                    .line_height(px(18.0))
-                    .text_color(fg_muted())
-                    .child("Generate Guided Review to navigate review groups here."),
-            ),
-    }
-}
-
-fn guided_review_section_content_index(
-    section_count: usize,
-    has_progress: bool,
-    has_status_messages: bool,
-    section_ix: usize,
-) -> usize {
-    let mut item_ix = 0usize;
-    if section_count > 0 {
-        item_ix += 1;
-    }
-    if has_progress {
-        item_ix += 1;
-    }
-    if has_status_messages {
-        item_ix += 1;
-    }
-    item_ix + section_ix
-}
-
-fn render_guided_review_nav_row(
-    tour: &GeneratedGuidedReview,
-    section: &GuidedReviewSection,
-    section_ix: usize,
-    target_index: usize,
-    list_state: ListState,
-) -> impl IntoElement {
-    let metrics = guided_review_section_metrics(tour, section);
-
-    div().pb(px(10.0)).child(
-        div()
-            .px(px(8.0))
-            .py(px(8.0))
-            .rounded(radius_sm())
-            .border_1()
-            .border_color(transparent())
-            .bg(bg_surface())
-            .hover(|style| style.bg(hover_bg()))
-            .on_mouse_down(MouseButton::Left, move |_, _, _| {
-                list_state.scroll_to(ListOffset {
-                    item_ix: target_index,
-                    offset_in_item: px(0.0),
-                });
-            })
-            .flex()
-            .items_start()
-            .gap(px(8.0))
-            .min_w_0()
-            .child(render_guided_review_category_icon(
-                section.category,
-                24.0,
-                13.0,
-            ))
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_grow()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .font_family(mono_font_family())
-                                    .text_color(fg_subtle())
-                                    .child(format!("{:02}", section_ix + 1)),
-                            )
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .text_size(px(12.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(fg_emphasis())
-                                    .whitespace_nowrap()
-                                    .overflow_x_hidden()
-                                    .text_ellipsis()
-                                    .child(section.title.clone()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .line_height(px(16.0))
-                            .text_color(fg_muted())
-                            .line_clamp(2)
-                            .child(section.summary.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .flex_wrap()
-                            .child(guided_review_metric_text(&format!(
-                                "{} file{}",
-                                metrics.file_count,
-                                if metrics.file_count == 1 { "" } else { "s" }
-                            )))
-                            .child(guided_review_delta_metric(
-                                metrics.additions,
-                                metrics.deletions,
-                            ))
-                            .child(render_guided_review_priority_chip(section.priority)),
-                    ),
-            ),
-    )
 }
 
 fn render_stack_navigation_pane(
@@ -2092,16 +1857,20 @@ fn render_stack_rail(
         .cloned();
     let selected_layer_id = selected_layer.as_ref().map(|layer| layer.id.clone());
     let reviewed_layer_ids = session.reviewed_stack_layer_ids.clone();
-    let ai_stack_unavailable = stack
-        .warnings
-        .iter()
-        .any(|warning| warning.code == "ai-virtual-stack-unavailable");
+    let ai_stack_unavailable = stack.warnings.iter().any(|warning| {
+        warning.code == "ai-virtual-stack-unavailable"
+            || warning.code == "guided-review-stack-unavailable"
+    });
     let stack_label = match (&stack.kind, stack.source) {
         (crate::stacks::model::StackKind::Real, _) => "Real stack".to_string(),
         (
             crate::stacks::model::StackKind::Virtual,
             crate::stacks::model::StackSource::VirtualAi,
-        ) if ai_stack_unavailable => "AI stack unavailable".to_string(),
+        ) if ai_stack_unavailable => "Stack unavailable".to_string(),
+        (
+            crate::stacks::model::StackKind::Virtual,
+            crate::stacks::model::StackSource::VirtualSemantic,
+        ) if ai_stack_unavailable => "Stack unavailable".to_string(),
         (
             crate::stacks::model::StackKind::Virtual,
             crate::stacks::model::StackSource::VirtualAi,
@@ -2129,7 +1898,11 @@ fn render_stack_rail(
         (
             crate::stacks::model::StackKind::Virtual,
             crate::stacks::model::StackSource::VirtualAi,
-        ) if ai_stack_unavailable => "No non-AI stack was generated",
+        ) if ai_stack_unavailable => "No generated stack is available",
+        (
+            crate::stacks::model::StackKind::Virtual,
+            crate::stacks::model::StackSource::VirtualSemantic,
+        ) if ai_stack_unavailable => "No generated stack is available",
         (
             crate::stacks::model::StackKind::Virtual,
             crate::stacks::model::StackSource::VirtualAi,

@@ -11,11 +11,10 @@ use crate::{
         PullRequestComment, PullRequestDetail, PullRequestFile, PullRequestReview,
         PullRequestReviewThread,
     },
-    guided_review::{
-        GuidedReviewPullRequestCommentContext, GuidedReviewReviewCommentContext,
-        GuidedReviewReviewContext, GuidedReviewReviewThreadContext,
-    },
     review_ai::{review_code_version_key, ReviewAiProgressUpdate, ReviewAiProvider},
+    review_context::{
+        ReviewCommentContext, ReviewContext, ReviewPullRequestCommentContext, ReviewThreadContext,
+    },
     review_memory::ReviewMemoryPromptContext,
 };
 
@@ -131,11 +130,11 @@ pub struct GenerateReviewBriefInput {
     pub changed_files: i64,
     pub commits_count: i64,
     pub files: Vec<ReviewBriefFileContext>,
-    pub comments: Vec<GuidedReviewPullRequestCommentContext>,
+    pub comments: Vec<ReviewPullRequestCommentContext>,
     pub raw_diff: String,
     pub parsed_diff: Vec<ParsedDiffFile>,
-    pub latest_reviews: Vec<GuidedReviewReviewContext>,
-    pub review_threads: Vec<GuidedReviewReviewThreadContext>,
+    pub latest_reviews: Vec<ReviewContext>,
+    pub review_threads: Vec<ReviewThreadContext>,
     #[serde(default)]
     pub review_memory: ReviewMemoryPromptContext,
 }
@@ -846,16 +845,16 @@ fn map_file_context(file: &PullRequestFile) -> ReviewBriefFileContext {
     }
 }
 
-fn map_comment_context(comment: &PullRequestComment) -> GuidedReviewPullRequestCommentContext {
-    GuidedReviewPullRequestCommentContext {
+fn map_comment_context(comment: &PullRequestComment) -> ReviewPullRequestCommentContext {
+    ReviewPullRequestCommentContext {
         author_login: comment.author_login.clone(),
         body: trim_text(&comment.body, MAX_COMMENT_BODY_CHARS),
         created_at: comment.created_at.clone(),
     }
 }
 
-fn map_review_context(review: &PullRequestReview) -> GuidedReviewReviewContext {
-    GuidedReviewReviewContext {
+fn map_review_context(review: &PullRequestReview) -> ReviewContext {
+    ReviewContext {
         author_login: review.author_login.clone(),
         state: review.state.clone(),
         body: review.body.clone(),
@@ -863,8 +862,8 @@ fn map_review_context(review: &PullRequestReview) -> GuidedReviewReviewContext {
     }
 }
 
-fn map_thread_context(thread: &PullRequestReviewThread) -> GuidedReviewReviewThreadContext {
-    GuidedReviewReviewThreadContext {
+fn map_thread_context(thread: &PullRequestReviewThread) -> ReviewThreadContext {
+    ReviewThreadContext {
         path: thread.path.clone(),
         line: thread.line,
         diff_side: if thread.diff_side.is_empty() {
@@ -877,7 +876,7 @@ fn map_thread_context(thread: &PullRequestReviewThread) -> GuidedReviewReviewThr
         comments: thread
             .comments
             .iter()
-            .map(|comment| GuidedReviewReviewCommentContext {
+            .map(|comment| ReviewCommentContext {
                 author_login: comment.author_login.clone(),
                 body: comment.body.clone(),
             })

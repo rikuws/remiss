@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::stacks::model::{ChangeAtomId, ReviewStackLayerId, StackDiffMode};
-use crate::{cache::CacheStore, guided_review::DiffAnchor};
+use crate::{cache::CacheStore, review_ai::DiffAnchor};
 
 const REVIEW_SESSION_CACHE_KEY_PREFIX: &str = "review-session-v2";
 const MAX_WAYMARKS: usize = 16;

@@ -8,7 +8,7 @@ use crate::code_display::{
 };
 use crate::diff::{DiffLineKind, ParsedDiffFile, ParsedDiffLine};
 use crate::github::PullRequestDetail;
-use crate::guided_review::DiffAnchor;
+use crate::review_ai::DiffAnchor;
 use crate::source_browser::build_full_file_diff_lines;
 use crate::state::{AppState, ReviewLineActionTarget, TempSourceSide, TempSourceTarget};
 use crate::theme::*;
@@ -758,7 +758,7 @@ mod tests {
     };
     use crate::diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk, ParsedDiffLine};
     use crate::github::{PullRequestDataCompleteness, PullRequestDetail};
-    use crate::guided_review::DiffAnchor;
+    use crate::review_ai::DiffAnchor;
     use crate::state::{ReviewLineActionTarget, TempSourceSide, TempSourceTarget};
     use std::collections::BTreeMap;
 

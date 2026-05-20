@@ -3,7 +3,8 @@ use std::{collections::HashMap, sync::Arc};
 #[cfg(test)]
 use ::difftastic::DifftasticChunk;
 use ::difftastic::{
-    diff_texts, DifftasticChange, DifftasticDiff, DifftasticLine,
+    diff_texts, DifftasticChange, DifftasticDiff, DifftasticLine, DifftasticLineRange,
+    DifftasticOperationKind, DifftasticOperationSummary,
     DifftasticOptions as LibraryDifftasticOptions, DifftasticSide,
     DifftasticStatus as LibraryDifftasticStatus,
 };
@@ -24,9 +25,40 @@ pub struct DifftasticAdaptOptions {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AdaptedDifftasticDiffFile {
     pub parsed_file: ParsedDiffFile,
+    #[serde(default)]
+    pub operations: Vec<AdaptedDifftasticOperationSummary>,
     pub emphasis_hunks: Vec<Vec<Vec<DiffInlineRange>>>,
     pub side_by_side_hunks: Vec<AdaptedDifftasticSideBySideHunk>,
     pub side_by_side_line_map: Vec<Vec<Option<AdaptedDifftasticSideBySideLineMap>>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdaptedDifftasticOperationSummary {
+    pub kind: AdaptedDifftasticOperationKind,
+    #[serde(default)]
+    pub lhs_line_range: Option<AdaptedDifftasticLineRange>,
+    #[serde(default)]
+    pub rhs_line_range: Option<AdaptedDifftasticLineRange>,
+    pub changed_line_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AdaptedDifftasticOperationKind {
+    Created,
+    Deleted,
+    Modified,
+    MovedOrReordered,
+    ImportOnly,
+    FallbackText,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdaptedDifftasticLineRange {
+    pub start_line: u32,
+    pub end_line: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -94,9 +126,46 @@ pub fn adapt_difftastic_file(
             hunks: adapted_hunks.hunks,
             is_binary: false,
         },
+        operations: adapt_difftastic_operations(&file.operations),
         emphasis_hunks: adapted_hunks.emphasis_hunks,
         side_by_side_hunks: adapted_hunks.side_by_side_hunks,
         side_by_side_line_map: adapted_hunks.side_by_side_line_map,
+    }
+}
+
+fn adapt_difftastic_operations(
+    operations: &[DifftasticOperationSummary],
+) -> Vec<AdaptedDifftasticOperationSummary> {
+    operations
+        .iter()
+        .map(|operation| AdaptedDifftasticOperationSummary {
+            kind: adapt_difftastic_operation_kind(operation.kind),
+            lhs_line_range: operation.lhs_line_range.map(adapt_difftastic_line_range),
+            rhs_line_range: operation.rhs_line_range.map(adapt_difftastic_line_range),
+            changed_line_count: operation.changed_line_count,
+        })
+        .collect()
+}
+
+fn adapt_difftastic_operation_kind(
+    kind: DifftasticOperationKind,
+) -> AdaptedDifftasticOperationKind {
+    match kind {
+        DifftasticOperationKind::Created => AdaptedDifftasticOperationKind::Created,
+        DifftasticOperationKind::Deleted => AdaptedDifftasticOperationKind::Deleted,
+        DifftasticOperationKind::Modified => AdaptedDifftasticOperationKind::Modified,
+        DifftasticOperationKind::MovedOrReordered => {
+            AdaptedDifftasticOperationKind::MovedOrReordered
+        }
+        DifftasticOperationKind::ImportOnly => AdaptedDifftasticOperationKind::ImportOnly,
+        DifftasticOperationKind::FallbackText => AdaptedDifftasticOperationKind::FallbackText,
+    }
+}
+
+fn adapt_difftastic_line_range(range: DifftasticLineRange) -> AdaptedDifftasticLineRange {
+    AdaptedDifftasticLineRange {
+        start_line: range.start_line,
+        end_line: range.end_line,
     }
 }
 
@@ -737,6 +806,7 @@ mod tests {
             }],
             fallback: None,
             language: Some("R".to_string()),
+            operations: Vec::new(),
             path: "new.R".to_string(),
             previous_path: None,
             status: LibraryDifftasticStatus::Changed,
@@ -770,6 +840,7 @@ mod tests {
                     ],
                 }],
             },
+            operations: Vec::new(),
             emphasis_hunks: vec![vec![vec![inline_range(8, 9)], vec![inline_range(10, 11)]]],
             side_by_side_hunks: Vec::new(),
             side_by_side_line_map: Vec::new(),
@@ -877,6 +948,7 @@ mod tests {
             chunks: Vec::new(),
             fallback: None,
             language: Some("Rust".to_string()),
+            operations: Vec::new(),
             path: "src/lib.rs".to_string(),
             previous_path: None,
             status: LibraryDifftasticStatus::Created,
@@ -930,6 +1002,7 @@ mod tests {
             }],
             fallback: None,
             language: None,
+            operations: Vec::new(),
             path: "notes.txt".to_string(),
             previous_path: None,
             status: LibraryDifftasticStatus::Changed,
