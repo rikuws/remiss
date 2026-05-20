@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     cache::{CacheStore, CachedDocument},
@@ -1797,6 +1797,7 @@ fn append_review_thread_comment_pages(
                     .comments
                     .extend(nodes.iter().filter_map(map_review_comment));
             }
+            dedupe_review_comments_by_id(&mut thread_page.thread.comments);
             page = page_info(&connection);
         }
 
@@ -2390,6 +2391,12 @@ fn map_review_thread_page(node: &Value) -> Option<ReviewThreadPage> {
 }
 
 fn map_review_thread(node: &Value) -> Option<PullRequestReviewThread> {
+    let mut comments = node
+        .get("comments")
+        .map(|connection| map_connection_items(connection, map_review_comment))
+        .unwrap_or_default();
+    dedupe_review_comments_by_id(&mut comments);
+
     Some(PullRequestReviewThread {
         id: node.get("id")?.as_str()?.to_string(),
         path: node.get("path")?.as_str()?.to_string(),
@@ -2432,11 +2439,13 @@ fn map_review_thread(node: &Value) -> Option<PullRequestReviewThread> {
             .get("viewerCanUnresolve")
             .and_then(Value::as_bool)
             .unwrap_or(false),
-        comments: node
-            .get("comments")
-            .map(|connection| map_connection_items(connection, map_review_comment))
-            .unwrap_or_default(),
+        comments,
     })
+}
+
+fn dedupe_review_comments_by_id(comments: &mut Vec<PullRequestReviewComment>) {
+    let mut seen = BTreeSet::new();
+    comments.retain(|comment| seen.insert(comment.id.clone()));
 }
 
 fn map_review_comment(node: &Value) -> Option<PullRequestReviewComment> {
@@ -2748,6 +2757,54 @@ mod tests {
         assert_eq!(threads[0].comments[0].id, "PRRC_draft");
         assert_eq!(threads[0].line, Some(42));
         assert_eq!(threads[0].start_line, Some(40));
+    }
+
+    #[test]
+    fn maps_review_thread_comments_once_by_id() {
+        let comment = json!({
+            "id": "PRRC_duplicate",
+            "body": "Please handle this edge case.",
+            "path": "src/lib.rs",
+            "line": 42,
+            "originalLine": 42,
+            "startLine": null,
+            "originalStartLine": null,
+            "state": "PUBLISHED",
+            "createdAt": "2026-05-13T10:00:00Z",
+            "updatedAt": "2026-05-13T10:01:00Z",
+            "publishedAt": "2026-05-13T10:02:00Z",
+            "url": "https://github.com/acme/repo/pull/1#discussion_r1",
+            "viewerCanUpdate": false,
+            "viewerCanDelete": false,
+            "replyTo": null,
+            "author": { "login": "reviewer", "avatarUrl": null }
+        });
+        let node = json!({
+            "id": "PRRT_thread",
+            "path": "src/lib.rs",
+            "line": 42,
+            "originalLine": 42,
+            "startLine": null,
+            "originalStartLine": null,
+            "diffSide": "RIGHT",
+            "startDiffSide": null,
+            "isCollapsed": false,
+            "isOutdated": false,
+            "isResolved": false,
+            "subjectType": "LINE",
+            "resolvedBy": null,
+            "viewerCanReply": true,
+            "viewerCanResolve": true,
+            "viewerCanUnresolve": false,
+            "comments": {
+                "nodes": [comment.clone(), comment]
+            }
+        });
+
+        let thread = map_review_thread(&node).expect("review thread");
+
+        assert_eq!(thread.comments.len(), 1);
+        assert_eq!(thread.comments[0].id, "PRRC_duplicate");
     }
 
     #[test]

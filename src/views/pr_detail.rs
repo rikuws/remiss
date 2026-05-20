@@ -28,6 +28,8 @@ use super::sections::{
     review_button, success_text, user_avatar,
 };
 
+const ACTIVITY_MARKDOWN_PREVIEW_LIMIT: usize = 900;
+
 mod overview;
 
 use self::overview::*;
@@ -1741,7 +1743,7 @@ fn activity_item_for_comment(comment: &PullRequestComment) -> ActivityItem {
         author_avatar_url: comment.author_avatar_url.clone(),
         timestamp: comment.created_at.clone(),
         title: format!("{} commented on the pull request", comment.author_login),
-        preview: full_markdown_comment_body(&comment.body),
+        preview: activity_markdown_preview(&comment.body),
         status_label: None,
         status_code: None,
         location_label: None,
@@ -1790,7 +1792,7 @@ fn activity_item_for_review(review: &PullRequestReview) -> ActivityItem {
                 _ => "left a review",
             }
         ),
-        preview: review_activity_preview(review),
+        preview: activity_optional_markdown_preview(&review.body),
         status_label: Some(humanize_review_state(&review.state)),
         status_code: Some(review.state.clone()),
         location_label: None,
@@ -1805,11 +1807,9 @@ fn activity_item_for_thread(
     unread_comment_ids: &BTreeSet<String>,
 ) -> Option<ActivityItem> {
     let digest = thread_digest_item(thread, unread_comment_ids)?;
-    let thread_comments = thread
-        .comments
-        .iter()
-        .map(activity_thread_comment)
-        .collect::<Vec<_>>();
+    let latest_comment = thread.comments.iter().rev().find(|comment| {
+        !comment.author_login.trim().is_empty() || !comment.body.trim().is_empty()
+    })?;
     let mut status_parts = Vec::new();
     if digest.unread_count > 0 {
         status_parts.push(format!("{} new", digest.unread_count));
@@ -1827,7 +1827,7 @@ fn activity_item_for_thread(
         author_avatar_url: digest.latest_author_avatar_url.clone(),
         timestamp: digest.updated_at.clone(),
         title: format!("{} commented", digest.latest_author),
-        preview: String::new(),
+        preview: activity_markdown_preview(&latest_comment.body),
         status_label: if status_parts.is_empty() {
             Some(format!("{} comments", digest.comment_count))
         } else {
@@ -1837,21 +1837,8 @@ fn activity_item_for_thread(
         location_label: Some(digest.location_label.clone()),
         file_path: Some(digest.file_path),
         anchor: Some(digest.anchor),
-        thread_comments,
+        thread_comments: Vec::new(),
     })
-}
-
-fn activity_thread_comment(comment: &PullRequestReviewComment) -> ActivityThreadComment {
-    ActivityThreadComment {
-        id: comment.id.clone(),
-        author_login: comment.author_login.clone(),
-        author_avatar_url: comment.author_avatar_url.clone(),
-        timestamp: comment
-            .published_at
-            .clone()
-            .unwrap_or_else(|| comment.created_at.clone()),
-        body: full_markdown_comment_body(&comment.body),
-    }
 }
 
 fn commit_author_display_name(commit: &PullRequestCommit) -> String {
@@ -1862,15 +1849,6 @@ fn commit_author_display_name(commit: &PullRequestCommit) -> String {
         .filter(|author| !author.trim().is_empty())
         .unwrap_or("unknown")
         .to_string()
-}
-
-fn review_activity_preview(review: &PullRequestReview) -> String {
-    let body = review.body.trim();
-    if body.is_empty() {
-        return String::new();
-    }
-
-    full_markdown_comment_body(body)
 }
 
 fn summarize_participants(
@@ -1991,6 +1969,23 @@ fn summarize_text_preview(text: &str, limit: usize) -> String {
         preview.push('…');
     }
     preview
+}
+
+fn activity_markdown_preview(body: &str) -> String {
+    let full_body = full_markdown_comment_body(body);
+    if full_body.chars().count() <= ACTIVITY_MARKDOWN_PREVIEW_LIMIT {
+        return full_body;
+    }
+
+    summarize_text_preview(&full_body, ACTIVITY_MARKDOWN_PREVIEW_LIMIT)
+}
+
+fn activity_optional_markdown_preview(body: &str) -> String {
+    if body.trim().is_empty() {
+        String::new()
+    } else {
+        activity_markdown_preview(body)
+    }
 }
 
 fn count_copy(count: usize, singular: &str, plural: &str) -> String {
@@ -2182,11 +2177,11 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{
-        apply_submitted_review_to_detail, automation_activity_needs_attention,
-        humanize_review_state, is_automation_actor, participant_display_name,
-        summarize_commit_freshness, summarize_feedback_preview, summarize_own_pr_feedback,
-        summarize_participants, summarize_recent_activity, summarize_review_status, ActivityItem,
-        ActivityItemKind,
+        activity_markdown_preview, apply_submitted_review_to_detail,
+        automation_activity_needs_attention, humanize_review_state, is_automation_actor,
+        participant_display_name, summarize_commit_freshness, summarize_feedback_preview,
+        summarize_own_pr_feedback, summarize_participants, summarize_recent_activity,
+        summarize_review_status, ActivityItem, ActivityItemKind, ACTIVITY_MARKDOWN_PREVIEW_LIMIT,
     };
     use crate::github::{
         PullRequestComment, PullRequestCommit, PullRequestDetail, PullRequestFile,
@@ -2421,24 +2416,33 @@ mod tests {
         assert_eq!(items[3].kind, ActivityItemKind::Thread);
         assert_eq!(items[3].title, "dave commented");
         assert_eq!(items[3].location_label.as_deref(), Some("src/main.rs:42"));
-        assert_eq!(items[3].thread_comments.len(), 2);
-        assert_eq!(items[3].thread_comments[0].author_login, "carol");
-        assert_eq!(
-            items[3].thread_comments[0].body,
-            "Please rename this helper so the intent is clearer."
-        );
-        assert_eq!(items[3].thread_comments[1].author_login, "dave");
-        assert_eq!(
-            items[3].thread_comments[1].body,
-            "Done in the follow-up commit."
-        );
-        assert!(items[3].preview.is_empty());
+        assert!(items[3].thread_comments.is_empty());
+        assert_eq!(items[3].preview, "Done in the follow-up commit.");
         assert_eq!(items[4].kind, ActivityItemKind::Commit);
         assert_eq!(
             items[4].title,
             "rikuws committed Tighten commit freshness timeline"
         );
         assert_eq!(items[4].status_label.as_deref(), Some("6a1525e"));
+    }
+
+    #[test]
+    fn activity_preview_compacts_long_markdown_comments() {
+        let body = format!(
+            "| File | Description |\n| --- | --- |\n{}",
+            (0..120)
+                .map(|index| format!(
+                    "| src/file_{index}.rs | This row describes a generated finding. |"
+                ))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+
+        let preview = activity_markdown_preview(&body);
+
+        assert!(preview.chars().count() <= ACTIVITY_MARKDOWN_PREVIEW_LIMIT + 1);
+        assert!(preview.ends_with('…'));
+        assert!(!preview.contains("\n| src/file_"));
     }
 
     #[test]

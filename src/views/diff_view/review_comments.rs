@@ -2485,6 +2485,7 @@ fn render_thread_reply_prompt(
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     div()
+        .px(px(10.0))
         .pt(px(8.0))
         .pb(px(10.0))
         .flex()
@@ -2525,6 +2526,7 @@ fn render_thread_reply_editor(
     let animation_id = thread_reply_editor_animation_id(thread_id);
 
     div()
+        .px(px(10.0))
         .pt(px(8.0))
         .pb(px(10.0))
         .flex()

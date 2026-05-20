@@ -826,16 +826,25 @@ fn render_review_partner_section_header(
     div()
         .min_w_0()
         .flex()
-        .items_center()
+        .items_start()
         .gap(px(7.0))
-        .child(lucide_icon(icon, 13.0, tone))
+        .child(
+            div()
+                .w(px(13.0))
+                .h(px(16.0))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(lucide_icon(icon, 13.0, tone)),
+        )
         .child(
             div()
                 .min_w_0()
                 .flex_grow()
                 .flex()
-                .items_baseline()
-                .gap(px(7.0))
+                .flex_col()
+                .gap(px(2.0))
                 .child(
                     div()
                         .text_size(px(11.0))
@@ -851,11 +860,10 @@ fn render_review_partner_section_header(
                         div()
                             .min_w_0()
                             .text_size(px(10.0))
+                            .line_height(px(15.0))
                             .font_family(mono_font_family())
                             .text_color(fg_muted())
-                            .whitespace_nowrap()
-                            .overflow_x_hidden()
-                            .text_ellipsis()
+                            .whitespace_normal()
                             .child(detail),
                     )
                 }),
