@@ -40,6 +40,7 @@ mod branding;
 mod cache;
 mod cli_binary;
 mod code_display;
+mod code_symbols;
 mod command_runner;
 mod deep_link;
 mod diagnostic_logs;

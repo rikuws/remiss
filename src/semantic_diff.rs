@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::{
+    code_symbols::{declaration_symbol_name, strip_declaration_modifiers, DECLARATION_PATTERNS},
     diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk},
     github::{PullRequestFile, PullRequestReviewThread},
     review_ai::DiffAnchor,
@@ -354,58 +355,24 @@ fn semantic_title_for_hunk(hunk: &ParsedDiffHunk, file_path: &str, hunk_index: u
 }
 
 fn clean_symbol_title(value: &str) -> Option<String> {
-    let trimmed = value
-        .trim()
-        .trim_start_matches("pub ")
-        .trim_start_matches("async ")
-        .trim_start_matches("export ")
-        .trim_start_matches("default ");
+    let trimmed = strip_declaration_modifiers(value);
 
     if trimmed.is_empty() {
         return None;
     }
 
-    let candidate = [
-        "fn ",
-        "struct ",
-        "enum ",
-        "trait ",
-        "impl ",
-        "mod ",
-        "type ",
-        "class ",
-        "interface ",
-        "function ",
-        "def ",
-        "func ",
-    ]
-    .iter()
-    .find_map(|pattern| extract_after_pattern(trimmed, pattern))
-    .or_else(|| trimmed.contains(" => ").then(|| trim_title(trimmed)))
-    .unwrap_or_else(|| trim_title(trimmed));
+    let candidate = DECLARATION_PATTERNS
+        .iter()
+        .find_map(|pattern| declaration_symbol_title(trimmed, pattern.prefix))
+        .or_else(|| trimmed.contains(" => ").then(|| trim_title(trimmed)))
+        .unwrap_or_else(|| trim_title(trimmed));
 
     (!candidate.is_empty()).then_some(candidate)
 }
 
-fn extract_after_pattern(value: &str, pattern: &str) -> Option<String> {
-    let (_, rest) = value.split_once(pattern)?;
-    let rest = rest.trim();
-    if rest.is_empty() {
-        return None;
-    }
-
-    let name = if pattern == "impl " {
-        rest.split('{').next().unwrap_or(rest).trim()
-    } else {
-        rest.split(['(', '{', '<', ':', '=', ' '])
-            .next()
-            .unwrap_or(rest)
-            .trim()
-    };
-
-    if name.is_empty() {
-        None
-    } else if pattern == "impl " {
+fn declaration_symbol_title(value: &str, pattern: &str) -> Option<String> {
+    let name = declaration_symbol_name(value, pattern)?;
+    if pattern == "impl " {
         Some(trim_title(&format!("impl {name}")))
     } else {
         Some(trim_title(&format!("{pattern}{name}")))
