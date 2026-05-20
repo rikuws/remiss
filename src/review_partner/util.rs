@@ -21,6 +21,14 @@ pub(super) fn symbol_position_in_document(
         .find_map(|(index, line)| identifier_column(line, symbol).map(|column| (index + 1, column)))
 }
 
+pub(super) fn symbol_position_in_document_line(
+    document: &str,
+    line: usize,
+    symbol: &str,
+) -> Option<(usize, usize)> {
+    column_for_symbol(document, line, symbol).map(|column| (line, column))
+}
+
 fn column_for_symbol(document: &str, line: usize, symbol: &str) -> Option<usize> {
     let line_text = document.lines().nth(line.checked_sub(1)?)?;
     identifier_column(line_text, symbol)
@@ -53,7 +61,13 @@ pub(super) fn clean_symbol(symbol: &str) -> String {
 }
 
 pub(super) fn is_searchable_symbol(symbol: &str) -> bool {
-    symbol.len() > 2 && symbol.chars().any(|ch| ch.is_ascii_alphabetic()) && !is_keyword(symbol)
+    symbol.len() > 2
+        && symbol.chars().any(|ch| ch.is_ascii_alphabetic())
+        && symbol
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == ':')
+        && !symbol.split("::").any(str::is_empty)
+        && !is_keyword(symbol)
 }
 
 pub(super) fn declaration_symbol(line: &str) -> Option<String> {

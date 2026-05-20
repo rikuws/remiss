@@ -402,6 +402,7 @@ impl Render for ReviewBriefTooltip {
             .border_color(transparent())
             .bg(bg_overlay())
             .shadow(tooltip_shadow())
+            .occlude()
             .text_size(px(11.0))
             .font_weight(FontWeight::MEDIUM)
             .text_color(fg_emphasis())

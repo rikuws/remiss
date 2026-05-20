@@ -75,8 +75,14 @@ pub(super) fn collect_layer_context(
 ) -> ReviewPartnerCollectedLayer {
     let semantic_layers = semantic_layers_for_layer(layer, semantic_review);
     let semantic_focus = semantic_focus_for_layer(layer, semantic_review);
-    let changed_symbols =
-        collect_changed_symbols(layer, atoms, checkout_root, lsp_session_manager, warnings);
+    let changed_symbols = collect_changed_symbols(
+        detail,
+        layer,
+        atoms,
+        checkout_root,
+        lsp_session_manager,
+        warnings,
+    );
     let removed_symbols = collect_removed_symbols(detail, atoms, checkout_root, warnings);
     let similar_locations = collect_similar_locations(
         &changed_symbols,
@@ -96,12 +102,12 @@ pub(super) fn collect_layer_context(
             ));
         } else if symbol.search_strategy.contains("tree-sitter") {
             limitations.push(format!(
-                "{} occurrences came from a bounded tree-sitter syntax scan.",
+                "{} matches came from a bounded tree-sitter syntax scan.",
                 symbol.symbol
             ));
         } else if symbol.search_strategy.contains("rg") {
             limitations.push(format!(
-                "{} references came from a bounded text search.",
+                "{} matches came from a bounded text search.",
                 symbol.symbol
             ));
         }
@@ -190,6 +196,7 @@ fn review_partner_semantic_layer(layer: &RemissSemanticLayerSummary) -> ReviewPa
 }
 
 fn collect_changed_symbols(
+    detail: &PullRequestDetail,
     layer: &ReviewStackLayer,
     atoms: &[&ChangeAtom],
     checkout_root: &Path,
@@ -200,53 +207,50 @@ fn collect_changed_symbols(
     let mut symbols = Vec::new();
 
     for atom in atoms {
-        let mut candidates = atom.defined_symbols.clone();
-        if let Some(symbol) = &atom.symbol_name {
-            candidates.push(symbol.clone());
-        }
-
-        for symbol in candidates {
-            let symbol = clean_symbol(&symbol);
+        for candidate in usage_symbol_candidates_for_atom(detail, checkout_root, atom) {
+            let symbol = clean_symbol(&candidate.symbol);
             if !is_searchable_symbol(&symbol) || !seen.insert(symbol.clone()) {
                 continue;
             }
 
-            let tree_sitter_references =
-                search_tree_sitter_symbol_locations(checkout_root, &symbol, MAX_RG_LOCATIONS);
-            let (locations, reference_count, strategy) = match tree_sitter_references {
-                Some(result) if !result.locations.is_empty() => {
-                    (result.locations, result.reference_count, result.strategy)
-                }
-                _ => match references_for_symbol(
-                    checkout_root,
-                    lsp_session_manager,
-                    atom,
-                    &symbol,
-                    MAX_REFERENCES_PER_SYMBOL,
-                ) {
-                    Ok(result) if !result.locations.is_empty() => (
-                        result.locations,
-                        result.reference_count,
-                        result.strategy.to_string(),
-                    ),
-                    _ => {
-                        let result =
-                            search_symbol_locations(checkout_root, &symbol, MAX_RG_LOCATIONS);
-                        if let Some(error) = result.warning {
-                            warnings.push(format!(
-                                "{}: {error}",
-                                normalize_stack_layer_title(&layer.title, "Stack layer")
-                            ));
-                        }
-                        (result.locations, result.reference_count, result.strategy)
-                    }
+            let result = match references_for_symbol(
+                checkout_root,
+                lsp_session_manager,
+                atom,
+                candidate.line,
+                &symbol,
+                MAX_REFERENCES_PER_SYMBOL,
+            ) {
+                Ok(result) if !result.locations.is_empty() => SearchResult {
+                    locations: result.locations,
+                    reference_count: result.reference_count,
+                    strategy: result.strategy.to_string(),
+                    warning: None,
                 },
+                _ if candidate.allow_fallback => {
+                    fallback_symbol_locations(checkout_root, &symbol, MAX_RG_LOCATIONS)
+                }
+                _ => SearchResult::empty("lsp references unavailable"),
             };
+            if let Some(error) = &result.warning {
+                warnings.push(format!(
+                    "{}: {error}",
+                    normalize_stack_layer_title(&layer.title, "Stack layer")
+                ));
+            }
+            let SearchResult {
+                locations,
+                reference_count,
+                strategy,
+                warning: _,
+            } = result;
 
             symbols.push(ReviewPartnerCollectedSymbol {
                 symbol,
                 path: atom.path.clone(),
-                line: atom.new_range.and_then(line_from_range),
+                line: candidate
+                    .line
+                    .or_else(|| atom.new_range.and_then(line_from_range)),
                 atom_ids: vec![atom.id.clone()],
                 search_strategy: strategy,
                 reference_count,
@@ -263,6 +267,304 @@ fn collect_changed_symbols(
     }
 
     symbols
+}
+
+#[derive(Clone, Debug)]
+struct UsageSymbolCandidate {
+    symbol: String,
+    line: Option<usize>,
+    allow_fallback: bool,
+}
+
+impl UsageSymbolCandidate {
+    fn new(symbol: impl Into<String>, line: Option<usize>, allow_fallback: bool) -> Self {
+        Self {
+            symbol: symbol.into(),
+            line,
+            allow_fallback,
+        }
+    }
+}
+
+fn usage_symbol_candidates_for_atom(
+    detail: &PullRequestDetail,
+    checkout_root: &Path,
+    atom: &ChangeAtom,
+) -> Vec<UsageSymbolCandidate> {
+    let mut candidates = Vec::new();
+    let mut seen = BTreeSet::<String>::new();
+    let changed_lines = changed_line_anchors_for_atom(detail, atom);
+    if changed_lines.is_empty() {
+        return candidates;
+    }
+
+    for candidate in tree_sitter_changed_symbol_candidates(checkout_root, atom, &changed_lines) {
+        push_usage_symbol_candidate(&mut candidates, &mut seen, candidate);
+    }
+    if candidates.is_empty() {
+        for candidate in changed_line_declaration_candidates(checkout_root, atom, &changed_lines) {
+            push_usage_symbol_candidate(&mut candidates, &mut seen, candidate);
+        }
+    }
+
+    candidates
+}
+
+fn changed_line_anchors_for_atom(detail: &PullRequestDetail, atom: &ChangeAtom) -> BTreeSet<usize> {
+    let Some(parsed) = find_parsed_diff_file(&detail.parsed_diff, &atom.path) else {
+        return BTreeSet::new();
+    };
+    let mut hunk_indices = atom.hunk_indices.iter().copied().collect::<BTreeSet<_>>();
+    if hunk_indices.is_empty() {
+        hunk_indices.extend(0..parsed.hunks.len());
+    }
+
+    let mut lines = BTreeSet::new();
+    for (hunk_index, hunk) in parsed.hunks.iter().enumerate() {
+        if !hunk_indices.contains(&hunk_index) {
+            continue;
+        }
+        for (line_index, line) in hunk.lines.iter().enumerate() {
+            if !matches!(line.kind, DiffLineKind::Addition | DiffLineKind::Deletion)
+                || !is_code_change_line(&line.content)
+            {
+                continue;
+            }
+            let right_line = match line.kind {
+                DiffLineKind::Addition => line.right_line_number,
+                DiffLineKind::Deletion => nearest_right_line_for_deleted_line(hunk, line_index),
+                _ => None,
+            };
+            if let Some(line_number) = right_line.and_then(|line| usize::try_from(line).ok()) {
+                lines.insert(line_number);
+            }
+        }
+    }
+    lines
+}
+
+fn nearest_right_line_for_deleted_line(hunk: &ParsedDiffHunk, line_index: usize) -> Option<i64> {
+    hunk.lines[line_index + 1..]
+        .iter()
+        .find_map(|line| line.right_line_number)
+        .or_else(|| {
+            hunk.lines[..line_index]
+                .iter()
+                .rev()
+                .find_map(|line| line.right_line_number)
+        })
+}
+
+fn is_code_change_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || is_comment_only_line(trimmed) {
+        return false;
+    }
+    trimmed
+        .chars()
+        .any(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+fn push_usage_symbol_candidate(
+    candidates: &mut Vec<UsageSymbolCandidate>,
+    seen: &mut BTreeSet<String>,
+    mut candidate: UsageSymbolCandidate,
+) {
+    candidate.symbol = clean_symbol(&candidate.symbol);
+    if !is_searchable_symbol(&candidate.symbol) || !seen.insert(candidate.symbol.clone()) {
+        return;
+    }
+    candidates.push(candidate);
+}
+
+fn tree_sitter_changed_symbol_candidates(
+    checkout_root: &Path,
+    atom: &ChangeAtom,
+    changed_lines: &BTreeSet<usize>,
+) -> Vec<UsageSymbolCandidate> {
+    let path = checkout_root.join(&atom.path);
+    if !is_tree_sitter_rust_candidate(&path) {
+        return Vec::new();
+    }
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let mut parser = Parser::new();
+    let language = tree_sitter_rust_orchard::LANGUAGE.into();
+    if parser.set_language(&language).is_err() {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(&text, None) else {
+        return Vec::new();
+    };
+
+    let mut candidates = Vec::new();
+    collect_touched_declaration_candidates(tree.root_node(), &text, changed_lines, &mut candidates);
+    for line in changed_lines {
+        if let Some(candidate) = enclosing_symbol_candidate(tree.root_node(), &text, *line) {
+            candidates.push(candidate);
+        }
+    }
+    candidates
+}
+
+fn changed_line_declaration_candidates(
+    checkout_root: &Path,
+    atom: &ChangeAtom,
+    changed_lines: &BTreeSet<usize>,
+) -> Vec<UsageSymbolCandidate> {
+    let Ok(text) = fs::read_to_string(checkout_root.join(&atom.path)) else {
+        return Vec::new();
+    };
+    text.lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let line_number = index + 1;
+            if !changed_lines.contains(&line_number) {
+                return None;
+            }
+            declaration_symbol(line)
+                .map(|symbol| UsageSymbolCandidate::new(symbol, Some(line_number), true))
+        })
+        .collect()
+}
+
+fn collect_touched_declaration_candidates(
+    node: Node<'_>,
+    text: &str,
+    changed_lines: &BTreeSet<usize>,
+    candidates: &mut Vec<UsageSymbolCandidate>,
+) {
+    if is_usage_declaration_node(node) {
+        if let Some(name_node) = declaration_name_node(node) {
+            let name_line = name_node.start_position().row + 1;
+            if changed_lines.contains(&name_line) {
+                if let Some(symbol) = node_symbol_text(name_node, text) {
+                    candidates.push(UsageSymbolCandidate::new(
+                        symbol,
+                        Some(name_line),
+                        declaration_allows_fallback(node),
+                    ));
+                }
+            }
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_touched_declaration_candidates(child, text, changed_lines, candidates);
+    }
+}
+
+fn enclosing_symbol_candidate(
+    root: Node<'_>,
+    text: &str,
+    line: usize,
+) -> Option<UsageSymbolCandidate> {
+    let node = smallest_enclosing_symbol_node(root, line)?;
+    let name_node = declaration_name_node(node)?;
+    let symbol = node_symbol_text(name_node, text)?;
+    Some(UsageSymbolCandidate::new(
+        symbol,
+        Some(name_node.start_position().row + 1),
+        true,
+    ))
+}
+
+fn smallest_enclosing_symbol_node<'a>(node: Node<'a>, line: usize) -> Option<Node<'a>> {
+    if !node_contains_line(node, line) {
+        return None;
+    }
+
+    let mut best = if is_enclosing_usage_node(node) {
+        Some(node)
+    } else {
+        None
+    };
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(candidate) = smallest_enclosing_symbol_node(child, line) {
+            best = Some(candidate);
+        }
+    }
+    best
+}
+
+fn node_contains_line(node: Node<'_>, line: usize) -> bool {
+    let start = node.start_position().row + 1;
+    let end = node.end_position().row + 1;
+    start <= line && line <= end
+}
+
+fn is_usage_declaration_node(node: Node<'_>) -> bool {
+    matches!(
+        node.kind(),
+        "associated_type"
+            | "const_item"
+            | "enum_item"
+            | "field_declaration"
+            | "function_item"
+            | "let_declaration"
+            | "mod_item"
+            | "parameter"
+            | "static_item"
+            | "struct_item"
+            | "trait_item"
+            | "type_item"
+    )
+}
+
+fn is_enclosing_usage_node(node: Node<'_>) -> bool {
+    matches!(
+        node.kind(),
+        "associated_type"
+            | "const_item"
+            | "enum_item"
+            | "field_declaration"
+            | "function_item"
+            | "mod_item"
+            | "static_item"
+            | "struct_item"
+            | "trait_item"
+            | "type_item"
+    )
+}
+
+fn declaration_allows_fallback(node: Node<'_>) -> bool {
+    !matches!(node.kind(), "let_declaration" | "parameter")
+}
+
+fn declaration_name_node<'a>(node: Node<'a>) -> Option<Node<'a>> {
+    node.child_by_field_name("name")
+        .or_else(|| node.child_by_field_name("pattern"))
+        .and_then(first_identifier_node)
+        .or_else(|| first_identifier_node(node))
+}
+
+fn first_identifier_node<'a>(node: Node<'a>) -> Option<Node<'a>> {
+    if is_identifier_node(node) {
+        return Some(node);
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(identifier) = first_identifier_node(child) {
+            return Some(identifier);
+        }
+    }
+    None
+}
+
+fn is_identifier_node(node: Node<'_>) -> bool {
+    let kind = node.kind();
+    kind == "identifier" || kind.ends_with("_identifier")
+}
+
+fn node_symbol_text(node: Node<'_>, text: &str) -> Option<String> {
+    node.utf8_text(text.as_bytes())
+        .ok()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 pub(super) fn collect_removed_symbols(
@@ -354,6 +656,7 @@ fn references_for_symbol(
     checkout_root: &Path,
     lsp_session_manager: Option<&LspSessionManager>,
     atom: &ChangeAtom,
+    candidate_line: Option<usize>,
     symbol: &str,
     limit: usize,
 ) -> Result<SymbolReferenceResult, String> {
@@ -363,8 +666,10 @@ fn references_for_symbol(
     let document_path = checkout_root.join(&atom.path);
     let document = fs::read_to_string(&document_path)
         .map_err(|error| format!("Failed to read {}: {error}", atom.path))?;
-    let Some((line, column)) = symbol_position_in_document(&document, atom.new_range, symbol)
-    else {
+    let position = candidate_line
+        .and_then(|line| symbol_position_in_document_line(&document, line, symbol))
+        .or_else(|| symbol_position_in_document(&document, atom.new_range, symbol));
+    let Some((line, column)) = position else {
         return Err(format!("Could not locate {symbol} in {}", atom.path));
     };
     let document_text: Arc<str> = Arc::from(document.as_str());
@@ -397,11 +702,29 @@ fn references_for_symbol(
     })
 }
 
+fn fallback_symbol_locations(checkout_root: &Path, symbol: &str, limit: usize) -> SearchResult {
+    match search_tree_sitter_symbol_locations(checkout_root, symbol, limit) {
+        Some(result) if !result.locations.is_empty() => result,
+        _ => search_symbol_locations(checkout_root, symbol, limit),
+    }
+}
+
 struct SearchResult {
     locations: Vec<ReviewPartnerLocation>,
     reference_count: usize,
     strategy: String,
     warning: Option<String>,
+}
+
+impl SearchResult {
+    fn empty(strategy: impl Into<String>) -> Self {
+        Self {
+            locations: Vec::new(),
+            reference_count: 0,
+            strategy: strategy.into(),
+            warning: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -484,7 +807,7 @@ fn search_tree_sitter_symbol_locations(
     Some(SearchResult {
         locations,
         reference_count,
-        strategy: "tree-sitter rust identifier scan".to_string(),
+        strategy: "tree-sitter rust syntax scan".to_string(),
         warning: None,
     })
 }
@@ -502,7 +825,9 @@ fn collect_tree_sitter_symbol_locations(
     seen: &mut BTreeSet<String>,
     reference_count: &mut usize,
 ) {
-    if tree_sitter_node_matches_symbol(node, text, symbol) {
+    if tree_sitter_node_matches_symbol(node, text, symbol)
+        && !is_tree_sitter_declaration_identifier(node)
+    {
         let line = node.start_position().row + 1;
         let relative = relative_path(checkout_root, path);
         let key = format!("{relative}:{line}");
@@ -545,6 +870,36 @@ fn tree_sitter_node_matches_symbol(node: Node<'_>, text: &str, symbol: &str) -> 
     node.utf8_text(text.as_bytes())
         .map(|value| value == symbol)
         .unwrap_or(false)
+}
+
+fn is_tree_sitter_declaration_identifier(node: Node<'_>) -> bool {
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    if matches!(
+        parent.kind(),
+        "associated_type"
+            | "const_item"
+            | "enum_item"
+            | "field_declaration"
+            | "function_item"
+            | "impl_item"
+            | "let_declaration"
+            | "mod_item"
+            | "parameter"
+            | "static_item"
+            | "struct_item"
+            | "trait_item"
+            | "type_item"
+            | "use_declaration"
+    ) {
+        return true;
+    }
+
+    matches!(
+        parent.parent().map(|ancestor| ancestor.kind()),
+        Some("use_declaration")
+    )
 }
 
 fn is_tree_sitter_rust_candidate(path: &Path) -> bool {
@@ -710,7 +1065,10 @@ fn scan_symbol_locations_from(
                 continue;
             };
             for (index, line) in text.lines().enumerate() {
-                if is_comment_only_line(line) || !line_matches_search(line, symbol, mode) {
+                if is_comment_only_line(line)
+                    || line_is_declaration_match(line, symbol, mode)
+                    || !line_matches_search(line, symbol, mode)
+                {
                     continue;
                 }
                 reference_count += 1;
@@ -755,8 +1113,16 @@ fn location_matches_search(
     location
         .snippet
         .as_deref()
-        .map(|snippet| !is_comment_only_line(snippet) && line_matches_search(snippet, symbol, mode))
+        .map(|snippet| {
+            !is_comment_only_line(snippet)
+                && !line_is_declaration_match(snippet, symbol, mode)
+                && line_matches_search(snippet, symbol, mode)
+        })
         .unwrap_or(false)
+}
+
+fn line_is_declaration_match(line: &str, symbol: &str, mode: SearchMode) -> bool {
+    matches!(mode, SearchMode::Identifier) && declaration_symbol(line).as_deref() == Some(symbol)
 }
 
 fn is_comment_only_line(line: &str) -> bool {
@@ -893,16 +1259,22 @@ pub(super) fn items_from_changed_symbols(
         .changed_symbols
         .iter()
         .map(|symbol| {
+            let noun = if symbol.search_strategy == "lsp references" {
+                "reference"
+            } else {
+                "match"
+            };
             ReviewPartnerItem::new(
                 symbol.symbol.clone(),
                 format!(
-                    "Changed in {}{}; {} reference{} surfaced via {}.",
+                    "Changed in {}{}; {} {}{} surfaced via {}.",
                     symbol.path,
                     symbol
                         .line
                         .map(|line| format!(":{line}"))
                         .unwrap_or_default(),
                     symbol.reference_count,
+                    noun,
                     if symbol.reference_count == 1 { "" } else { "s" },
                     symbol.search_strategy,
                 ),

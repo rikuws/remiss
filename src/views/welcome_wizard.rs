@@ -87,6 +87,7 @@ pub(super) fn render_onboarding_wizard(state: &Entity<AppState>, cx: &App) -> im
     div()
         .absolute()
         .inset_0()
+        .occlude()
         .child(
             coachmark_position(step.target)
                 .w(px(COACHMARK_WIDTH))

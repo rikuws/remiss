@@ -40,6 +40,7 @@ impl Render for StaticTooltipView {
             .border_color(transparent())
             .bg(bg_overlay())
             .shadow(tooltip_shadow())
+            .occlude()
             .text_size(px(11.0));
 
         match self.tone {

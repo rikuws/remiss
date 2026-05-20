@@ -2215,6 +2215,7 @@ fn render_notification_drawer(state: &Entity<AppState>, cx: &App) -> impl IntoEl
         .border_color(transparent())
         .bg(bg_overlay())
         .shadow(popover_shadow())
+        .occlude()
         .flex()
         .flex_col()
         .overflow_hidden()

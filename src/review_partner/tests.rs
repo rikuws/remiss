@@ -27,7 +27,7 @@ fn partner_cache_key_includes_versions() {
         "context-y",
     );
 
-    assert!(key.starts_with("review-partner-v24:"));
+    assert!(key.starts_with("review-partner-v26:"));
     assert!(key.contains("stack-x"));
     assert!(key.contains("context-y"));
 }
@@ -770,7 +770,7 @@ fn merge_accepts_layer_id_focus_record_key_alias() {
 }
 
 #[test]
-fn merge_uses_collected_tree_sitter_usages_instead_of_llm_usages() {
+fn merge_uses_collected_usage_context_instead_of_llm_usages() {
     let input = input(ReviewPartnerContextPack {
         version: REVIEW_PARTNER_CONTEXT_VERSION.to_string(),
         layers: vec![ReviewPartnerCollectedLayer {
@@ -782,7 +782,7 @@ fn merge_uses_collected_tree_sitter_usages_instead_of_llm_usages() {
                 path: "src/lib.rs".to_string(),
                 line: Some(1),
                 atom_ids: vec!["atom-1".to_string()],
-                search_strategy: "tree-sitter rust identifier scan".to_string(),
+                search_strategy: "lsp references".to_string(),
                 reference_count: 2,
                 references: vec![
                     ReviewPartnerLocation {
@@ -835,7 +835,7 @@ fn merge_uses_collected_tree_sitter_usages_instead_of_llm_usages() {
     assert_eq!(record.usage_context.len(), 1);
     assert_eq!(record.usage_context[0].symbol, "render_review");
     assert_eq!(record.usage_context[0].usages.len(), 2);
-    assert!(record.usage_context[0].summary.contains("tree-sitter"));
+    assert!(record.usage_context[0].summary.contains("language server"));
     assert!(record.codebase_fit.follows);
 }
 
@@ -1227,7 +1227,7 @@ fn removed_symbols_report_no_remaining_reference() {
 }
 
 #[test]
-fn lsp_unavailable_usage_context_uses_tree_sitter() {
+fn lsp_unavailable_usage_context_uses_tree_sitter_syntax_matches() {
     let root = unique_test_directory("review-partner-tree-sitter-usage");
     fs::create_dir_all(root.join("src")).expect("dir");
     fs::write(
@@ -1263,7 +1263,7 @@ fn lsp_unavailable_usage_context_uses_tree_sitter() {
         warnings: Vec::new(),
     };
     let collected = collect_layer_context(
-        &detail_with_deleted_symbol(),
+        &detail_with_added_lines(&[(1, "fn changed_helper() {}")]),
         &layer,
         &[&atom],
         &root,
@@ -1275,7 +1275,7 @@ fn lsp_unavailable_usage_context_uses_tree_sitter() {
     assert_eq!(collected.changed_symbols.len(), 1);
     assert_eq!(
         collected.changed_symbols[0].search_strategy,
-        "tree-sitter rust identifier scan"
+        "tree-sitter rust syntax scan"
     );
     assert!(collected.changed_symbols[0].references.len() <= MAX_REFERENCES_PER_SYMBOL);
     assert!(collected.changed_symbols[0].references.len() >= 3);
@@ -1306,7 +1306,119 @@ fn lsp_unavailable_usage_context_uses_tree_sitter() {
     };
     let usage = usage_groups_for_target(&target, &context);
     assert_eq!(usage.len(), 1);
-    assert!(usage[0].summary.contains("tree-sitter"));
+    assert!(usage[0].summary.contains("syntax match"));
+}
+
+#[test]
+fn usage_symbol_selection_prefers_enclosing_changed_function() {
+    let root = unique_test_directory("review-partner-enclosing-usage-symbol");
+    fs::create_dir_all(root.join("src")).expect("dir");
+    fs::write(
+        root.join("src/lib.rs"),
+        [
+            "fn context_helper() -> i32 { 1 }",
+            "fn changed_behavior() -> i32 {",
+            "    context_helper() + 1",
+            "}",
+            "fn caller() { let _ = changed_behavior(); }",
+        ]
+        .join("\n"),
+    )
+    .expect("write");
+
+    let mut atom = atom("atom-1", "src/lib.rs", 3, 3);
+    atom.symbol_name = Some("Default".to_string());
+    atom.defined_symbols = vec!["context_helper".to_string(), "WELCOME_STEPS".to_string()];
+    let layer = layer_for_atom(&atom);
+    let collected = collect_layer_context(
+        &detail_with_added_lines(&[(3, "    helper() + 1")]),
+        &layer,
+        &[&atom],
+        &root,
+        None,
+        None,
+        &mut Vec::new(),
+    );
+
+    assert_eq!(collected.changed_symbols[0].symbol, "changed_behavior");
+    assert_eq!(collected.changed_symbols[0].line, Some(2));
+    assert!(!collected.changed_symbols.iter().any(|symbol| matches!(
+        symbol.symbol.as_str(),
+        "context_helper" | "WELCOME_STEPS" | "Default"
+    )));
+    assert!(collected.changed_symbols[0]
+        .references
+        .iter()
+        .any(|reference| reference.line == 5));
+}
+
+#[test]
+fn usage_symbol_selection_includes_changed_local_binding_without_text_fallback() {
+    let root = unique_test_directory("review-partner-local-binding-usage-symbol");
+    fs::create_dir_all(root.join("src")).expect("dir");
+    fs::write(
+        root.join("src/lib.rs"),
+        [
+            "fn changed_behavior() -> i32 {",
+            "    let parsed_value = 1;",
+            "    parsed_value + 1",
+            "}",
+            "fn other() { let parsed_value = 3; }",
+        ]
+        .join("\n"),
+    )
+    .expect("write");
+
+    let mut atom = atom("atom-1", "src/lib.rs", 2, 2);
+    atom.symbol_name = None;
+    atom.defined_symbols = Vec::new();
+    let layer = layer_for_atom(&atom);
+    let collected = collect_layer_context(
+        &detail_with_added_lines(&[(2, "    let parsed_value = 1;")]),
+        &layer,
+        &[&atom],
+        &root,
+        None,
+        None,
+        &mut Vec::new(),
+    );
+
+    assert_eq!(collected.changed_symbols[0].symbol, "parsed_value");
+    assert_eq!(
+        collected.changed_symbols[0].search_strategy,
+        "lsp references unavailable"
+    );
+    assert_eq!(collected.changed_symbols[0].reference_count, 0);
+    assert_eq!(collected.changed_symbols[1].symbol, "changed_behavior");
+}
+
+#[test]
+fn fallback_usage_context_hides_low_signal_syntax_groups() {
+    let stack = stack();
+    let target = focus_target_from_layer(&stack, &stack.layers[0]);
+    let context = context_with_changed_symbols(vec![
+        collected_symbol("WELCOME_STEPS", "tree-sitter rust syntax scan"),
+        collected_symbol("github", "tree-sitter rust syntax scan"),
+        collected_symbol("impl AppState", "tree-sitter rust syntax scan"),
+        collected_symbol("Default", "tree-sitter rust syntax scan"),
+    ]);
+
+    let usage = usage_groups_for_target(&target, &context);
+
+    assert!(usage.is_empty());
+}
+
+#[test]
+fn lsp_usage_context_keeps_low_signal_symbols_when_resolved() {
+    let stack = stack();
+    let target = focus_target_from_layer(&stack, &stack.layers[0]);
+    let context = context_with_changed_symbols(vec![collected_symbol("Default", "lsp references")]);
+
+    let usage = usage_groups_for_target(&target, &context);
+
+    assert_eq!(usage.len(), 1);
+    assert_eq!(usage[0].symbol, "Default");
+    assert!(usage[0].summary.contains("language server"));
 }
 
 #[test]
@@ -1406,6 +1518,61 @@ fn input(context: ReviewPartnerContextPack) -> GenerateReviewPartnerInput {
         review_memory: ReviewMemoryPromptContext::default(),
         context,
         focus_targets,
+    }
+}
+
+fn context_with_changed_symbols(
+    changed_symbols: Vec<ReviewPartnerCollectedSymbol>,
+) -> ReviewPartnerContextPack {
+    ReviewPartnerContextPack {
+        version: REVIEW_PARTNER_CONTEXT_VERSION.to_string(),
+        layers: vec![ReviewPartnerCollectedLayer {
+            layer_id: "layer-1".to_string(),
+            semantic_layers: Vec::new(),
+            semantic_focus: Vec::new(),
+            changed_symbols,
+            removed_symbols: Vec::new(),
+            similar_locations: Vec::new(),
+            style_notes: Vec::new(),
+            limitations: Vec::new(),
+        }],
+        warnings: Vec::new(),
+    }
+}
+
+fn collected_symbol(symbol: &str, strategy: &str) -> ReviewPartnerCollectedSymbol {
+    ReviewPartnerCollectedSymbol {
+        symbol: symbol.to_string(),
+        path: "src/lib.rs".to_string(),
+        line: Some(1),
+        atom_ids: vec!["atom-1".to_string()],
+        search_strategy: strategy.to_string(),
+        reference_count: 1,
+        references: vec![ReviewPartnerLocation {
+            path: "src/lib.rs".to_string(),
+            line: 4,
+            snippet: Some(format!("fn caller() {{ {symbol}(); }}")),
+        }],
+    }
+}
+
+fn layer_for_atom(atom: &ChangeAtom) -> ReviewStackLayer {
+    ReviewStackLayer {
+        id: "layer-1".to_string(),
+        index: 0,
+        title: "Changed helper".to_string(),
+        summary: "Layer summary".to_string(),
+        rationale: "Layer rationale".to_string(),
+        pr: None,
+        virtual_layer: None,
+        base_oid: None,
+        head_oid: None,
+        atom_ids: vec![atom.id.clone()],
+        depends_on_layer_ids: Vec::new(),
+        metrics: LayerMetrics::default(),
+        status: LayerReviewStatus::NotReviewed,
+        confidence: Confidence::Medium,
+        warnings: Vec::new(),
     }
 }
 
@@ -1608,6 +1775,37 @@ fn detail_with_deleted_symbol() -> PullRequestDetail {
         parsed_diff,
         data_completeness: crate::github::PullRequestDataCompleteness::default(),
     }
+}
+
+fn detail_with_added_lines(lines: &[(i64, &str)]) -> PullRequestDetail {
+    let mut detail = detail_with_deleted_symbol();
+    detail.additions = lines.len() as i64;
+    detail.deletions = 0;
+    detail.parsed_diff = vec![ParsedDiffFile {
+        path: "src/lib.rs".to_string(),
+        previous_path: None,
+        is_binary: false,
+        hunks: vec![ParsedDiffHunk {
+            header: "@@ -1,1 +1,1 @@".to_string(),
+            lines: lines
+                .iter()
+                .map(|(line, content)| ParsedDiffLine {
+                    kind: DiffLineKind::Addition,
+                    prefix: "+".to_string(),
+                    left_line_number: None,
+                    right_line_number: Some(*line),
+                    content: (*content).to_string(),
+                })
+                .collect(),
+        }],
+    }];
+    detail.files = vec![crate::github::PullRequestFile {
+        path: "src/lib.rs".to_string(),
+        additions: detail.additions,
+        deletions: detail.deletions,
+        change_type: "modified".to_string(),
+    }];
+    detail
 }
 
 fn unique_test_directory(prefix: &str) -> PathBuf {

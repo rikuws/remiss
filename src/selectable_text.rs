@@ -154,6 +154,7 @@ struct GroupTextSelectionState {
 #[doc(hidden)]
 #[derive(Default)]
 pub struct SelectableTextState {
+    focus_handle: Option<FocusHandle>,
     selection: Rc<RefCell<TextSelectionState>>,
     tooltip: Rc<RefCell<TextTooltipState>>,
 }
@@ -303,8 +304,15 @@ impl Element for SelectableText {
         window.with_optional_element_state::<SelectableTextState, _>(
             global_id,
             |selectable_state, window| {
-                let selectable_state =
+                let mut selectable_state =
                     selectable_state.map(|selectable_state| selectable_state.unwrap_or_default());
+                if let Some(selectable_state) = selectable_state.as_mut() {
+                    let focus_handle = selectable_state
+                        .focus_handle
+                        .get_or_insert_with(|| cx.focus_handle())
+                        .clone();
+                    window.set_focus_handle(&focus_handle, cx);
+                }
 
                 self.text
                     .prepaint(None, inspector_id, bounds, state, window, cx);
@@ -390,6 +398,7 @@ impl Element for SelectableText {
             global_id.unwrap(),
             |selectable_state, window| {
                 let selectable_state = selectable_state.unwrap_or_default();
+                let focus_handle = selectable_state.focus_handle.clone();
                 let selection_state = selectable_state.selection.clone();
                 selection_state.borrow_mut().clamp(raw_text.len());
                 if let Some(group) = selection_group.as_ref() {
@@ -535,6 +544,7 @@ impl Element for SelectableText {
                 let mouse_down_id = selection_id.clone();
                 let mouse_down_group = selection_group.clone();
                 let mouse_down_text = raw_text.clone();
+                let mouse_down_focus = focus_handle.clone();
                 window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                     if phase != DispatchPhase::Capture
                         || event.button != MouseButton::Left
@@ -562,6 +572,9 @@ impl Element for SelectableText {
                         start_group_text_selection(group, index, event.modifiers.shift);
                     }
 
+                    if let Some(focus_handle) = mouse_down_focus.as_ref() {
+                        focus_handle.focus(window);
+                    }
                     set_active_text_target(mouse_down_id.clone());
                     cx.stop_propagation();
                     window.refresh();
@@ -1732,5 +1745,31 @@ mod tests {
         assert_eq!(quad.bounds.left(), px(120.0));
         assert_eq!(quad.bounds.top(), px(42.0));
         assert_eq!(quad.bounds.size, size(px(2.0), px(18.0)));
+    }
+
+    #[test]
+    fn selected_group_text_joins_ordered_row_ranges() {
+        let group_id = "selected-group-text-joins-ordered-row-ranges";
+        let first = GroupTextSelectionConfig {
+            group_id: group_id.to_string(),
+            row_order: 0,
+        };
+        let middle = GroupTextSelectionConfig {
+            group_id: group_id.to_string(),
+            row_order: 1,
+        };
+        let last = GroupTextSelectionConfig {
+            group_id: group_id.to_string(),
+            row_order: 2,
+        };
+
+        register_group_text_row(&first, "foo");
+        register_group_text_row(&middle, "bar");
+        register_group_text_row(&last, "baz");
+        start_group_text_selection(&first, 1, false);
+        update_group_text_selection(&last, 2);
+        finish_group_text_selection(&last);
+
+        assert_eq!(selected_group_text(&first), Some("oo\nbar\nba".to_string()));
     }
 }
