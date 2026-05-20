@@ -18,7 +18,14 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 const DETAIL_AUTO_REFRESH_TTL_MS: i64 = 5 * 60 * 1000;
 const OVERVIEW_CONTENT_MAX_WIDTH: f32 = 1440.0;
 const KANBAN_LANE_WIDTH: f32 = 320.0;
+const KANBAN_LANE_GAP: f32 = 16.0;
+const KANBAN_BOARD_SCROLLBAR_WIDTH: f32 = 8.0;
 const KANBAN_LANE_SCROLLBAR_WIDTH: f32 = 8.0;
+
+fn restrict_scroll_to_axis(mut element: Div) -> Div {
+    element.style().restrict_scroll_to_axis = Some(true);
+    element
+}
 
 pub fn render_section_workspace(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let s = state.read(cx);
@@ -1005,12 +1012,16 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
 
     let has_my_items = !my_items.is_empty();
     let has_any_lanes = has_my_items || !repo_groups.is_empty();
+    let lane_count = usize::from(has_my_items) + repo_groups.len();
+    let lane_strip_width = lane_count as f32 * KANBAN_LANE_WIDTH
+        + lane_count.saturating_sub(1) as f32 * KANBAN_LANE_GAP;
     let muted_list: Vec<String> = muted_repos.iter().cloned().collect::<Vec<_>>();
     let has_muted = !muted_list.is_empty();
 
     div()
         .relative()
         .flex()
+        .min_w_0()
         .min_h_0()
         .flex_grow()
         // Sidebar
@@ -1099,6 +1110,7 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
         .child(
             div()
                 .flex_grow()
+                .min_w_0()
                 .min_h_0()
                 .flex()
                 .flex_col()
@@ -1168,18 +1180,22 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                 })
                 // Swim lanes
                 .child(
-                    div()
+                    restrict_scroll_to_axis(div())
+                        .w_full()
+                        .min_w_0()
                         .flex_grow()
                         .min_h_0()
                         .id("kanban-board-hscroll")
                         .overflow_x_scroll()
                         .overflow_y_hidden()
+                        .scrollbar_width(px(KANBAN_BOARD_SCROLLBAR_WIDTH))
                         .px(px(24.0))
                         .pb(px(24.0))
                         .child(
                             div()
                                 .flex()
-                                .gap(px(16.0))
+                                .gap(px(KANBAN_LANE_GAP))
+                                .min_w(px(lane_strip_width))
                                 .h_full()
                                 .when(has_my_items, |el| {
                                     let state = state_for_lanes.clone();
