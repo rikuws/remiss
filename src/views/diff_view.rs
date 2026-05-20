@@ -1138,8 +1138,12 @@ fn render_diff_panel(
                 .and_then(|detail_state| detail_state.structural_diff_warmup.status_text())
         })
         .flatten();
+    let guided_review_preparation_overlay = (center_mode == ReviewCenterMode::GuidedReview)
+        .then(|| render_guided_review_preparation_overlay(state, app_state, window))
+        .flatten();
 
     div()
+        .relative()
         .flex_grow()
         .min_h_0()
         .min_w_0()
@@ -1235,6 +1239,9 @@ fn render_diff_panel(
                     },
                 ),
         )
+        .when_some(guided_review_preparation_overlay, |el, overlay| {
+            el.child(overlay)
+        })
 }
 
 fn render_review_header_change_summary(

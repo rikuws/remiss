@@ -54,6 +54,410 @@ pub(super) fn render_guided_review_view(
         .into_any_element()
 }
 
+const GUIDED_REVIEW_OVERLAY_PHRASE_MS: u128 = 3600;
+const GUIDED_REVIEW_OVERLAY_PHRASE_TRANSITION_MS: u128 = 640;
+const GUIDED_REVIEW_STACK_PHRASES: [&str; 10] = [
+    "Getting the branch ready",
+    "Finding the shape of the change",
+    "Sorting the review stack",
+    "Reading the changed files",
+    "Connecting related edits",
+    "Looking for the review path",
+    "Making sense of the diff",
+    "Grouping the interesting bits",
+    "Checking how the pieces fit",
+    "Setting up Guided Review",
+];
+const GUIDED_REVIEW_PARTNER_PHRASES: [&str; 10] = [
+    "Reading the stack context",
+    "Checking nearby code",
+    "Looking for gotchas",
+    "Tracing the important paths",
+    "Building Review Partner",
+    "Pulling together the notes",
+    "Checking what needs attention",
+    "Writing the layer context",
+    "Getting the review ready",
+    "Opening Guided Review",
+];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum GuidedReviewPreparationState {
+    Ready,
+    Preparing {
+        detail: String,
+        stack_ready: bool,
+        partner_ready: bool,
+    },
+    Failed {
+        message: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct GuidedReviewPhraseTransition {
+    previous: &'static str,
+    current: &'static str,
+    progress: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct GuidedReviewPreparationInputs<'a> {
+    stack_ready: bool,
+    stack_busy: bool,
+    stack_error: Option<&'a str>,
+    stack_message: Option<&'a str>,
+    partner_ready: bool,
+    partner_busy: bool,
+    partner_error: Option<&'a str>,
+    partner_progress: Option<&'a str>,
+    partner_fallback: Option<&'a str>,
+}
+
+pub(super) fn render_guided_review_preparation_overlay(
+    state: &Entity<AppState>,
+    app_state: &AppState,
+    window: &mut Window,
+) -> Option<AnyElement> {
+    let detail_state = app_state.active_detail_state()?;
+    let stack_state = &detail_state.ai_stack_state;
+    let partner_state = &detail_state.review_partner_state;
+    let partner_fallback = partner_state
+        .document
+        .as_ref()
+        .and_then(|document| guided_review_partner_fallback_reason(document.as_ref()));
+    let stack_ready = guided_review_stack_ready(stack_state);
+    let partner_ready = guided_review_partner_ready(partner_state, partner_fallback);
+    let preparation_state =
+        guided_review_preparation_state_from_inputs(GuidedReviewPreparationInputs {
+            stack_ready,
+            stack_busy: stack_state.loading || stack_state.generating,
+            stack_error: stack_state.error.as_deref(),
+            stack_message: stack_state.message.as_deref(),
+            partner_ready,
+            partner_busy: partner_state.loading || partner_state.generating,
+            partner_error: partner_state.error.as_deref(),
+            partner_progress: partner_state.progress_text.as_deref(),
+            partner_fallback,
+        });
+
+    match preparation_state {
+        GuidedReviewPreparationState::Ready => None,
+        GuidedReviewPreparationState::Preparing {
+            detail: _,
+            stack_ready,
+            partner_ready,
+        } => {
+            window.request_animation_frame();
+            Some(
+                render_guided_review_loading_overlay(stack_ready, partner_ready).into_any_element(),
+            )
+        }
+        GuidedReviewPreparationState::Failed { message } => {
+            Some(render_guided_review_failed_overlay(state, &message).into_any_element())
+        }
+    }
+}
+
+fn guided_review_stack_ready(stack_state: &AiStackState) -> bool {
+    stack_state.stack.is_some()
+}
+
+fn guided_review_partner_ready(
+    partner_state: &ReviewPartnerState,
+    fallback_reason: Option<&str>,
+) -> bool {
+    partner_state.document.is_some() && fallback_reason.is_none()
+}
+
+fn guided_review_partner_fallback_reason(
+    document: &crate::review_partner::GeneratedReviewPartnerContext,
+) -> Option<&str> {
+    document.fallback_reason.as_deref().or_else(|| {
+        document
+            .warnings
+            .iter()
+            .find(|warning| warning.contains("AI Review Partner context unavailable"))
+            .map(String::as_str)
+    })
+}
+
+fn guided_review_preparation_state_from_inputs(
+    inputs: GuidedReviewPreparationInputs<'_>,
+) -> GuidedReviewPreparationState {
+    if !inputs.stack_ready {
+        if let Some(error) = inputs.stack_error {
+            return GuidedReviewPreparationState::Failed {
+                message: format!("Guided Review stack generation failed. {error}"),
+            };
+        }
+    }
+
+    if !inputs.partner_ready {
+        if let Some(error) = inputs.partner_error {
+            return GuidedReviewPreparationState::Failed {
+                message: format!("Review Partner generation failed. {error}"),
+            };
+        }
+
+        if let Some(reason) = inputs.partner_fallback {
+            return GuidedReviewPreparationState::Failed {
+                message: format!("Review Partner used fallback context. {reason}"),
+            };
+        }
+    }
+
+    if inputs.stack_ready && inputs.partner_ready {
+        return GuidedReviewPreparationState::Ready;
+    }
+
+    GuidedReviewPreparationState::Preparing {
+        detail: guided_review_preparation_detail(inputs),
+        stack_ready: inputs.stack_ready,
+        partner_ready: inputs.partner_ready,
+    }
+}
+
+fn guided_review_preparation_detail(inputs: GuidedReviewPreparationInputs<'_>) -> String {
+    if !inputs.stack_ready {
+        return inputs
+            .stack_message
+            .or_else(|| inputs.stack_busy.then_some("Building Guided Review stack."))
+            .unwrap_or("Starting Guided Review.")
+            .to_string();
+    }
+
+    if !inputs.partner_ready {
+        return inputs
+            .partner_progress
+            .or_else(|| {
+                inputs
+                    .partner_busy
+                    .then_some("Building Review Partner context.")
+            })
+            .unwrap_or("Preparing Review Partner context.")
+            .to_string();
+    }
+
+    "Opening Guided Review.".to_string()
+}
+
+fn render_guided_review_loading_overlay(
+    stack_ready: bool,
+    partner_ready: bool,
+) -> impl IntoElement {
+    let elapsed_ms = guided_review_overlay_elapsed_ms();
+    let phrase = guided_review_overlay_phrase_transition(stack_ready, partner_ready, elapsed_ms);
+    let phrase_phase = ((elapsed_ms % GUIDED_REVIEW_OVERLAY_PHRASE_MS) as f32
+        / GUIDED_REVIEW_OVERLAY_PHRASE_MS as f32)
+        .clamp(0.0, 1.0);
+    let pulse = 1.0 - ((phrase_phase - 0.5).abs() * 2.0).clamp(0.0, 1.0);
+    let tone = mix_rgba(fg_emphasis(), accent(), 0.22 + pulse * 0.28);
+
+    div()
+        .absolute()
+        .inset_0()
+        .occlude()
+        .bg(diff_editor_bg())
+        .px(px(32.0))
+        .py(px(28.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .w_full()
+                .max_w(px(620.0))
+                .flex()
+                .flex_col()
+                .items_center()
+                .text_align(TextAlign::Center)
+                .child(
+                    div()
+                        .mb(px(18.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .text_size(px(11.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg_subtle())
+                        .child(lucide_icon(LucideIcon::Sparkles, 14.0, accent()))
+                        .child("Guided Review"),
+                )
+                .child(render_guided_review_phrase_transition(phrase, tone))
+                .child(
+                    div()
+                        .mt(px(16.0))
+                        .max_w(px(520.0))
+                        .text_size(px(12.0))
+                        .line_height(px(18.0))
+                        .text_color(fg_subtle())
+                        .child(
+                            "You can switch to Brief, Diff, or another view. Guided Review keeps preparing in the background.",
+                        ),
+                ),
+        )
+}
+
+fn render_guided_review_failed_overlay(
+    state: &Entity<AppState>,
+    message: &str,
+) -> impl IntoElement {
+    let state_for_retry = state.clone();
+
+    div()
+        .absolute()
+        .inset_0()
+        .occlude()
+        .bg(diff_editor_bg())
+        .px(px(32.0))
+        .py(px(28.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .w_full()
+                .max_w(px(620.0))
+                .flex()
+                .flex_col()
+                .items_center()
+                .text_align(TextAlign::Center)
+                .child(
+                    div()
+                        .mb(px(18.0))
+                        .size(px(42.0))
+                        .rounded(px(10.0))
+                        .bg(with_alpha(danger(), 0.10))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(lucide_icon(LucideIcon::AlertTriangle, 21.0, danger())),
+                )
+                .child(
+                    div()
+                        .text_size(px(24.0))
+                        .line_height(px(32.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg_emphasis())
+                        .child("Guided Review is not ready"),
+                )
+                .child(
+                    div()
+                        .mt(px(10.0))
+                        .max_w(px(540.0))
+                        .text_size(px(13.0))
+                        .line_height(px(20.0))
+                        .text_color(fg_muted())
+                        .child(message.to_string()),
+                )
+                .child(div().mt(px(20.0)).child(review_button(
+                    "Retry Guided Review",
+                    move |_, window, cx| {
+                        review_intelligence::trigger_review_intelligence(
+                            &state_for_retry,
+                            window,
+                            cx,
+                            review_intelligence::ReviewIntelligenceScope::StackOnly,
+                            true,
+                        );
+                    },
+                ))),
+        )
+}
+
+fn guided_review_overlay_phrase_transition(
+    stack_ready: bool,
+    partner_ready: bool,
+    elapsed_ms: u128,
+) -> GuidedReviewPhraseTransition {
+    let phrases: &[&str] = if !stack_ready {
+        &GUIDED_REVIEW_STACK_PHRASES
+    } else if !partner_ready {
+        &GUIDED_REVIEW_PARTNER_PHRASES
+    } else {
+        &["Opening Guided Review"]
+    };
+    let index = ((elapsed_ms / GUIDED_REVIEW_OVERLAY_PHRASE_MS) as usize) % phrases.len();
+    let previous_index = if index == 0 {
+        phrases.len().saturating_sub(1)
+    } else {
+        index - 1
+    };
+    let phase_ms = elapsed_ms % GUIDED_REVIEW_OVERLAY_PHRASE_MS;
+    let progress = if phrases.len() <= 1 || phase_ms >= GUIDED_REVIEW_OVERLAY_PHRASE_TRANSITION_MS {
+        1.0
+    } else {
+        guided_review_phrase_ease(
+            phase_ms as f32 / GUIDED_REVIEW_OVERLAY_PHRASE_TRANSITION_MS as f32,
+        )
+    };
+
+    GuidedReviewPhraseTransition {
+        previous: phrases[previous_index],
+        current: phrases[index],
+        progress,
+    }
+}
+
+fn render_guided_review_phrase_transition(
+    phrase: GuidedReviewPhraseTransition,
+    tone: Rgba,
+) -> impl IntoElement {
+    let progress = phrase.progress.clamp(0.0, 1.0);
+    let previous_offset = -7.0 * progress;
+    let current_offset = 7.0 * (1.0 - progress);
+
+    div()
+        .h(px(44.0))
+        .w_full()
+        .relative()
+        .overflow_hidden()
+        .child(guided_review_phrase_text(
+            phrase.previous,
+            tone,
+            1.0 - progress,
+            previous_offset,
+        ))
+        .child(guided_review_phrase_text(
+            phrase.current,
+            tone,
+            progress,
+            current_offset,
+        ))
+}
+
+fn guided_review_phrase_text(
+    phrase: &'static str,
+    tone: Rgba,
+    opacity: f32,
+    top: f32,
+) -> impl IntoElement {
+    div()
+        .absolute()
+        .left(px(0.0))
+        .right(px(0.0))
+        .top(px(top))
+        .text_size(px(28.0))
+        .line_height(px(36.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(tone)
+        .opacity(opacity.clamp(0.0, 1.0))
+        .child(phrase)
+}
+
+fn guided_review_phrase_ease(progress: f32) -> f32 {
+    let progress = progress.clamp(0.0, 1.0);
+    progress * progress * (3.0 - (2.0 * progress))
+}
+
+fn guided_review_overlay_elapsed_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
 #[derive(Clone)]
 struct GuidedReviewPanelResizeDrag {
     id: String,
@@ -1493,4 +1897,165 @@ fn diff_layout_segment(
                     .text_color(mix_rgba(fg_muted(), fg_emphasis(), progress))
             },
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::{
+        state::{AiStackState, ReviewPartnerState},
+        tutorial_pr,
+    };
+
+    use super::{
+        guided_review_overlay_phrase_transition, guided_review_partner_ready,
+        guided_review_preparation_state_from_inputs, guided_review_stack_ready,
+        GuidedReviewPreparationInputs, GuidedReviewPreparationState,
+        GUIDED_REVIEW_OVERLAY_PHRASE_MS, GUIDED_REVIEW_OVERLAY_PHRASE_TRANSITION_MS,
+    };
+
+    #[test]
+    fn guided_review_overlay_waits_for_stack() {
+        let state = guided_review_preparation_state_from_inputs(GuidedReviewPreparationInputs {
+            stack_busy: true,
+            stack_message: Some("Preparing local checkout for Guided Review."),
+            ..GuidedReviewPreparationInputs::default()
+        });
+
+        assert_eq!(
+            state,
+            GuidedReviewPreparationState::Preparing {
+                detail: "Preparing local checkout for Guided Review.".to_string(),
+                stack_ready: false,
+                partner_ready: false,
+            }
+        );
+    }
+
+    #[test]
+    fn guided_review_overlay_waits_for_review_partner_after_stack() {
+        let state = guided_review_preparation_state_from_inputs(GuidedReviewPreparationInputs {
+            stack_ready: true,
+            partner_busy: true,
+            partner_progress: Some("Checking usages and codebase context."),
+            ..GuidedReviewPreparationInputs::default()
+        });
+
+        assert_eq!(
+            state,
+            GuidedReviewPreparationState::Preparing {
+                detail: "Checking usages and codebase context.".to_string(),
+                stack_ready: true,
+                partner_ready: false,
+            }
+        );
+    }
+
+    #[test]
+    fn guided_review_overlay_clears_after_stack_and_partner_are_ready() {
+        let state = guided_review_preparation_state_from_inputs(GuidedReviewPreparationInputs {
+            stack_ready: true,
+            partner_ready: true,
+            ..GuidedReviewPreparationInputs::default()
+        });
+
+        assert_eq!(state, GuidedReviewPreparationState::Ready);
+    }
+
+    #[test]
+    fn guided_review_overlay_keeps_cached_stack_ready_during_background_refresh() {
+        let stack_state = AiStackState {
+            stack: Some(Arc::new(tutorial_pr::review_stack())),
+            loading: true,
+            generating: true,
+            error: Some("background refresh timed out".to_string()),
+            ..AiStackState::default()
+        };
+
+        assert!(guided_review_stack_ready(&stack_state));
+    }
+
+    #[test]
+    fn guided_review_overlay_keeps_cached_partner_ready_during_background_refresh() {
+        let detail = tutorial_pr::detail();
+        let partner = tutorial_pr::review_partner(&detail, tutorial_pr::review_stack());
+        let partner_state = ReviewPartnerState {
+            document: Some(Arc::new(partner)),
+            loading: true,
+            generating: true,
+            error: Some("background refresh timed out".to_string()),
+            ..ReviewPartnerState::default()
+        };
+
+        assert!(guided_review_partner_ready(&partner_state, None));
+    }
+
+    #[test]
+    fn guided_review_overlay_keeps_stack_errors_covered() {
+        let state = guided_review_preparation_state_from_inputs(GuidedReviewPreparationInputs {
+            stack_error: Some("provider timed out"),
+            ..GuidedReviewPreparationInputs::default()
+        });
+
+        assert_eq!(
+            state,
+            GuidedReviewPreparationState::Failed {
+                message: "Guided Review stack generation failed. provider timed out".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn guided_review_overlay_treats_partner_fallback_as_failure() {
+        let state = guided_review_preparation_state_from_inputs(GuidedReviewPreparationInputs {
+            stack_ready: true,
+            partner_fallback: Some("Codex timed out"),
+            ..GuidedReviewPreparationInputs::default()
+        });
+
+        assert_eq!(
+            state,
+            GuidedReviewPreparationState::Failed {
+                message: "Review Partner used fallback context. Codex timed out".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn guided_review_overlay_phrase_changes_on_slow_cycle() {
+        let first = guided_review_overlay_phrase_transition(false, false, 0);
+        let still_first = guided_review_overlay_phrase_transition(
+            false,
+            false,
+            GUIDED_REVIEW_OVERLAY_PHRASE_MS - 1,
+        );
+        let second =
+            guided_review_overlay_phrase_transition(false, false, GUIDED_REVIEW_OVERLAY_PHRASE_MS);
+
+        assert_eq!(first.current, "Getting the branch ready");
+        assert_eq!(still_first.current, "Getting the branch ready");
+        assert_eq!(second.previous, "Getting the branch ready");
+        assert_eq!(second.current, "Finding the shape of the change");
+    }
+
+    #[test]
+    fn guided_review_overlay_phrase_crossfades_at_phrase_boundary() {
+        let start =
+            guided_review_overlay_phrase_transition(false, false, GUIDED_REVIEW_OVERLAY_PHRASE_MS);
+        let mid = guided_review_overlay_phrase_transition(
+            false,
+            false,
+            GUIDED_REVIEW_OVERLAY_PHRASE_MS + (GUIDED_REVIEW_OVERLAY_PHRASE_TRANSITION_MS / 2),
+        );
+        let done = guided_review_overlay_phrase_transition(
+            false,
+            false,
+            GUIDED_REVIEW_OVERLAY_PHRASE_MS + GUIDED_REVIEW_OVERLAY_PHRASE_TRANSITION_MS,
+        );
+
+        assert_eq!(start.progress, 0.0);
+        assert!(mid.progress > 0.0 && mid.progress < 1.0);
+        assert_eq!(done.progress, 1.0);
+    }
 }
