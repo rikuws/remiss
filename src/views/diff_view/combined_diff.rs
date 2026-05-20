@@ -236,6 +236,7 @@ pub(super) fn render_combined_diff_files(
         rows.into_any_element()
     };
     let body = render_diff_scroll_body(
+        &state,
         body,
         &scrollbar_list_state,
         item_count,
@@ -277,6 +278,7 @@ pub(super) fn render_combined_diff_files(
 }
 
 pub(super) fn render_diff_scroll_body(
+    state: &Entity<AppState>,
     body: AnyElement,
     list_state: &ListState,
     item_count: usize,
@@ -302,6 +304,7 @@ pub(super) fn render_diff_scroll_body(
             })
         })
         .flatten();
+    let scroll_state = state.clone();
     let scroll_activity = scrollbar_activity.clone();
 
     div()
@@ -315,6 +318,10 @@ pub(super) fn render_diff_scroll_body(
             el.pb(px(DIFF_SCROLLBAR_WIDTH + 4.0))
         })
         .on_scroll_wheel(move |_, window, cx| {
+            scroll_state.update(cx, |state, cx| {
+                state.suppress_diff_gutter_hover_for(DIFF_GUTTER_HOVER_SCROLL_SUPPRESSION);
+                cx.notify();
+            });
             mark_diff_scrollbars_active(&scroll_activity, window, cx);
         })
         .child(body)
@@ -453,6 +460,7 @@ impl Render for DiffScrollbarDragPreview {
 }
 
 const DIFF_SCROLLBAR_IDLE_HIDE_DELAY: Duration = Duration::from_millis(650);
+const DIFF_GUTTER_HOVER_SCROLL_SUPPRESSION: Duration = Duration::from_millis(180);
 
 fn mark_diff_scrollbars_active(
     scrollbar_activity: &DiffScrollbarActivity,
@@ -915,7 +923,7 @@ fn prepare_combined_diff_view_state(
 ) -> CombinedDiffViewState {
     let scope = match center_mode {
         ReviewCenterMode::StructuralDiff => "combined-structural-diff",
-        ReviewCenterMode::Stack => "combined-stack-diff",
+        ReviewCenterMode::GuidedReview => "combined-guided-review-diff",
         _ => "combined-files-diff",
     };
     let key = review_cache_key(app_state.active_pr_key.as_deref(), scope);
@@ -962,7 +970,7 @@ fn scroll_combined_diff_list_to_focus(
 
     if let Some(item_ix) = item_ix {
         view_state.list_state.scroll_to(ListOffset {
-            item_ix: item_ix.saturating_sub(2),
+            item_ix: diff_focus_scroll_top_item_ix(item_ix),
             offset_in_item: px(0.0),
         });
         *last_focus_key = Some(target_key);
@@ -1017,10 +1025,7 @@ fn install_combined_diff_scroll_handler(
                     };
                     let session_matches = session_mode == center_mode
                         || (session_mode == ReviewCenterMode::GuidedReview
-                            && matches!(
-                                center_mode,
-                                ReviewCenterMode::Stack | ReviewCenterMode::StructuralDiff
-                            ));
+                            && center_mode == ReviewCenterMode::StructuralDiff);
                     if !session_matches {
                         return;
                     }

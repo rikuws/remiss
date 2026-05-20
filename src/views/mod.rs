@@ -1,4 +1,3 @@
-pub(crate) mod ai_tour;
 pub(crate) mod diff_view;
 mod file_tree;
 mod palette;

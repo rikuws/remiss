@@ -29,6 +29,8 @@ const CODE_LINE_HEIGHT: f32 = 21.0;
 const CODE_LINE_NUMBER_FONT_SIZE: f32 = 12.5;
 const CODE_LINE_NUMBER_GUTTER_WIDTH: f32 = 56.0;
 const CODE_DIFF_MARKER_WIDTH: f32 = 16.0;
+const LSP_HOVER_MIN_WIDTH: f32 = 420.0;
+const LSP_HOVER_MAX_WIDTH: f32 = 780.0;
 
 fn code_row_height_px() -> Pixels {
     code_row_height(CODE_ROW_HEIGHT)
@@ -827,6 +829,7 @@ fn render_prepared_code_line_content(
                     query.detail_key.clone(),
                     query.query_key.clone(),
                     query.token_label.clone(),
+                    query.request.file_path.clone(),
                     cx,
                 ),
             ))
@@ -1097,10 +1100,11 @@ pub fn build_lsp_hover_tooltip_view(
     detail_key: String,
     query_key: String,
     token_label: String,
+    source_hint: String,
     cx: &mut App,
 ) -> AnyView {
     AnyView::from(cx.new(move |cx| {
-        SharedLspHoverTooltipView::new(state, detail_key, query_key, token_label, cx)
+        SharedLspHoverTooltipView::new(state, detail_key, query_key, token_label, source_hint, cx)
     }))
 }
 
@@ -1109,6 +1113,8 @@ struct SharedLspHoverTooltipView {
     detail_key: String,
     query_key: String,
     token_label: String,
+    source_hint: String,
+    scroll_handle: ScrollHandle,
     references_expanded: bool,
 }
 
@@ -1118,6 +1124,7 @@ impl SharedLspHoverTooltipView {
         detail_key: String,
         query_key: String,
         token_label: String,
+        source_hint: String,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&state, |_, _, cx| {
@@ -1130,6 +1137,8 @@ impl SharedLspHoverTooltipView {
             detail_key,
             query_key,
             token_label,
+            source_hint,
+            scroll_handle: ScrollHandle::new(),
             references_expanded: false,
         }
     }
@@ -1153,16 +1162,27 @@ impl Render for SharedLspHoverTooltipView {
             .detail_states
             .get(&self.detail_key)
             .and_then(|detail_state| detail_state.lsp_symbol_states.get(&self.query_key));
+        let header_snippet = lsp_hover_header_snippet(
+            symbol_state.and_then(|state| state.details.as_ref()),
+            &self.token_label,
+            &self.source_hint,
+        );
+        let hover_width = lsp_hover_preferred_width(
+            &header_snippet,
+            symbol_state.and_then(|state| state.details.as_ref()),
+            self.references_expanded,
+        );
 
         div()
-            .w(px(440.0))
-            .max_w(px(560.0))
-            .min_w(px(360.0))
+            .w(px(hover_width))
+            .max_w(px(LSP_HOVER_MAX_WIDTH))
+            .min_w(px(LSP_HOVER_MIN_WIDTH))
             .rounded(radius())
             .border_1()
             .border_color(transparent())
             .bg(bg_overlay())
             .shadow(popover_shadow())
+            .occlude()
             .child(
                 div()
                     .px(px(12.0))
@@ -1171,23 +1191,25 @@ impl Render for SharedLspHoverTooltipView {
                     .border_color(border_default())
                     .bg(bg_surface())
                     .flex()
-                    .items_center()
+                    .items_start()
                     .justify_between()
                     .gap(px(8.0))
                     .child(
                         div()
-                            .flex_grow()
+                            .id(ElementId::Name(
+                                format!("lsp-hover-title-scroll-{}", self.query_key).into(),
+                            ))
+                            .flex_1()
                             .min_w_0()
-                            .font_family(mono_font_family())
-                            .text_size(px(12.0))
-                            .text_color(fg_emphasis())
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .overflow_x_hidden()
-                            .child(self.token_label.clone()),
+                            .overflow_x_scroll()
+                            .child(render_lsp_hover_header_code(
+                                &format!("lsp-hover-title-{}", self.query_key),
+                                &header_snippet,
+                            )),
                     )
                     .child(
                         div()
+                            .flex_shrink_0()
                             .px(px(6.0))
                             .py(px(2.0))
                             .rounded(radius_sm())
@@ -1201,8 +1223,10 @@ impl Render for SharedLspHoverTooltipView {
             .child(
                 div()
                     .id("lsp-hover-scroll")
-                    .max_h(px(480.0))
+                    .max_h(px(560.0))
                     .overflow_y_scroll()
+                    .scrollbar_width(px(8.0))
+                    .track_scroll(&self.scroll_handle)
                     .w_full()
                     .min_w_0()
                     .px(px(12.0))
@@ -1250,6 +1274,242 @@ impl Render for SharedLspHoverTooltipView {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LspHeaderSnippet {
+    source_hint: String,
+    code: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ExtractedLspCodeBlock {
+    source_hint: Option<String>,
+    code: String,
+    body_markdown: String,
+}
+
+fn lsp_hover_header_snippet(
+    details: Option<&lsp::LspSymbolDetails>,
+    token_label: &str,
+    source_hint: &str,
+) -> LspHeaderSnippet {
+    if let Some(block) = details
+        .and_then(|details| details.hover.as_ref())
+        .and_then(|hover| extract_lsp_declaration_code_block(&hover.markdown))
+    {
+        if let Some(code) = compact_lsp_declaration_code(&block.code) {
+            return LspHeaderSnippet {
+                source_hint: block
+                    .source_hint
+                    .filter(|hint| !hint.trim().is_empty())
+                    .unwrap_or_else(|| source_hint.to_string()),
+                code,
+            };
+        }
+    }
+
+    if let Some(signature) = details.and_then(|details| details.signature_help.as_ref()) {
+        if let Some(code) = compact_lsp_declaration_code(&signature.label) {
+            return LspHeaderSnippet {
+                source_hint: source_hint.to_string(),
+                code,
+            };
+        }
+    }
+
+    LspHeaderSnippet {
+        source_hint: source_hint.to_string(),
+        code: token_label.to_string(),
+    }
+}
+
+fn lsp_hover_preferred_width(
+    header: &LspHeaderSnippet,
+    details: Option<&lsp::LspSymbolDetails>,
+    references_expanded: bool,
+) -> f32 {
+    let header_chars = longest_line_char_count(&header.code);
+    let mut detail_chars = 0usize;
+    if let Some(details) = details {
+        for warning in &details.warnings {
+            detail_chars = detail_chars.max(longest_line_char_count(warning));
+        }
+        for target in &details.definition_targets {
+            detail_chars = detail_chars.max(lsp_target_display_char_count(target));
+        }
+        if references_expanded {
+            for target in &details.reference_targets {
+                detail_chars = detail_chars.max(lsp_target_display_char_count(target));
+            }
+        }
+        if let Some(signature) = details.signature_help.as_ref() {
+            detail_chars = detail_chars.max(longest_line_char_count(&signature.label));
+        }
+    }
+
+    let content_chars = header_chars.max(detail_chars);
+    (96.0 + content_chars as f32 * 7.4).clamp(LSP_HOVER_MIN_WIDTH, LSP_HOVER_MAX_WIDTH)
+}
+
+fn lsp_target_display_char_count(target: &lsp::LspDefinitionTarget) -> usize {
+    target.display_path().chars().count() + target.line.to_string().chars().count() + 1
+}
+
+fn longest_line_char_count(text: &str) -> usize {
+    text.lines()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or_else(|| text.chars().count())
+}
+
+fn render_lsp_hover_header_code(id: &str, snippet: &LspHeaderSnippet) -> impl IntoElement {
+    let spans = syntax::highlight_line(&snippet.source_hint, &snippet.code);
+    let selectable = if let Some(runs) = code_text_runs(&snippet.code, &spans, fg_emphasis()) {
+        SelectableText::new(id.to_string(), snippet.code.clone()).with_runs(runs)
+    } else {
+        SelectableText::new(id.to_string(), snippet.code.clone())
+    };
+
+    div()
+        .min_w_0()
+        .font_family(mono_font_family())
+        .text_size(px(12.5))
+        .line_height(px(18.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(fg_emphasis())
+        .whitespace_nowrap()
+        .child(selectable)
+}
+
+fn lsp_hover_body_markdown(markdown: &str) -> Option<String> {
+    let body = extract_lsp_declaration_code_block(markdown)
+        .map(|block| block.body_markdown)
+        .unwrap_or_else(|| markdown.trim().to_string());
+    (!body.trim().is_empty()).then(|| body.trim().to_string())
+}
+
+fn extract_lsp_declaration_code_block(markdown: &str) -> Option<ExtractedLspCodeBlock> {
+    let block = extract_first_fenced_code_block(markdown)?;
+    if !markdown[..block.start].trim().is_empty() {
+        return None;
+    }
+    compact_lsp_declaration_code(&block.code)?;
+    Some(ExtractedLspCodeBlock {
+        source_hint: block.source_hint,
+        code: block.code,
+        body_markdown: block.body_markdown,
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MarkdownCodeBlock {
+    start: usize,
+    source_hint: Option<String>,
+    code: String,
+    body_markdown: String,
+}
+
+fn extract_first_fenced_code_block(markdown: &str) -> Option<MarkdownCodeBlock> {
+    let lines = markdown_line_ranges(markdown);
+    for (line_ix, (line_start, line_end, line)) in lines.iter().enumerate() {
+        let trimmed = line.trim_end_matches(['\r', '\n']).trim_start();
+        let fence_character = if trimmed.starts_with("```") {
+            '`'
+        } else if trimmed.starts_with("~~~") {
+            '~'
+        } else {
+            continue;
+        };
+        let fence_len = trimmed
+            .chars()
+            .take_while(|character| *character == fence_character)
+            .count();
+        if fence_len < 3 {
+            continue;
+        }
+
+        let source_hint = normalize_code_fence_language(&trimmed[fence_len..]);
+        let mut code_end = None;
+        let mut block_end = None;
+        let fence = fence_character.to_string().repeat(fence_len);
+
+        for (closing_start, closing_end, closing_line) in lines.iter().skip(line_ix + 1) {
+            let closing_trimmed = closing_line.trim_end_matches(['\r', '\n']).trim_start();
+            if closing_trimmed.starts_with(&fence) && closing_trimmed[fence_len..].trim().is_empty()
+            {
+                code_end = Some(*closing_start);
+                block_end = Some(*closing_end);
+                break;
+            }
+        }
+
+        let code_end = code_end?;
+        let block_end = block_end?;
+        let code = trim_code_block_content(&markdown[*line_end..code_end]);
+        if code.is_empty() {
+            return None;
+        }
+
+        return Some(MarkdownCodeBlock {
+            start: *line_start,
+            source_hint,
+            code,
+            body_markdown: markdown_without_range(markdown, *line_start, block_end),
+        });
+    }
+
+    None
+}
+
+fn markdown_line_ranges(markdown: &str) -> Vec<(usize, usize, &str)> {
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+    for line in markdown.split_inclusive('\n') {
+        let end = start + line.len();
+        ranges.push((start, end, line));
+        start = end;
+    }
+    if ranges.is_empty() && !markdown.is_empty() {
+        ranges.push((0, markdown.len(), markdown));
+    }
+    ranges
+}
+
+fn markdown_without_range(markdown: &str, start: usize, end: usize) -> String {
+    let before = markdown[..start].trim_end();
+    let after = markdown[end..].trim_start();
+    match (before.is_empty(), after.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => after.to_string(),
+        (false, true) => before.to_string(),
+        (false, false) => format!("{before}\n\n{after}"),
+    }
+}
+
+fn normalize_code_fence_language(info: &str) -> Option<String> {
+    let first = info.split_whitespace().next()?.trim();
+    if first.is_empty() {
+        return None;
+    }
+    let first = first.trim_matches(['{', '}']);
+    let first = first.strip_prefix('.').unwrap_or(first);
+    let first = first.split([',', '{', '}']).next().unwrap_or(first).trim();
+    (!first.is_empty()).then(|| first.to_string())
+}
+
+fn trim_code_block_content(code: &str) -> String {
+    code.trim_matches(['\r', '\n']).to_string()
+}
+
+fn compact_lsp_declaration_code(code: &str) -> Option<String> {
+    let compact = code
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!compact.is_empty()).then_some(compact)
+}
+
 fn render_lsp_symbol_details(
     details: &lsp::LspSymbolDetails,
     id_prefix: &str,
@@ -1264,13 +1524,33 @@ fn render_lsp_symbol_details(
             .into_any_element();
     }
 
+    let hover_body_markdown = details
+        .hover
+        .as_ref()
+        .and_then(|hover| lsp_hover_body_markdown(&hover.markdown));
+
     div()
         .w_full()
         .min_w_0()
         .flex()
         .flex_col()
         .gap(px(12.0))
-        .when_some(details.hover.as_ref(), |el, hover| {
+        .when(!details.warnings.is_empty(), |el| {
+            el.children(details.warnings.iter().map(render_lsp_warning))
+        })
+        .when(!details.definition_targets.is_empty(), |el| {
+            el.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .child(render_lsp_section_label("DEFINED IN"))
+                    .children(details.definition_targets.iter().map(render_lsp_target_row)),
+            )
+        })
+        .when_some(hover_body_markdown.as_ref(), |el, hover| {
             el.child(
                 div()
                     .w_full()
@@ -1278,11 +1558,13 @@ fn render_lsp_symbol_details(
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
-                    .child(render_lsp_section_label("HOVER"))
-                    .child(div().w_full().min_w_0().child(render_markdown(
-                        &format!("{id_prefix}-hover"),
-                        &hover.markdown,
-                    ))),
+                    .child(render_lsp_section_label("DOCUMENTATION"))
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .child(render_markdown(&format!("{id_prefix}-hover"), hover)),
+                    ),
             )
         })
         .when_some(details.signature_help.as_ref(), |el, signature| {
@@ -1328,18 +1610,6 @@ fn render_lsp_symbol_details(
                             documentation,
                         )))
                     }),
-            )
-        })
-        .when(!details.definition_targets.is_empty(), |el| {
-            el.child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.0))
-                    .child(render_lsp_section_label("DEFINITION"))
-                    .children(details.definition_targets.iter().map(render_lsp_target_row)),
             )
         })
         .when(!details.reference_targets.is_empty(), |el| {
@@ -1388,6 +1658,22 @@ fn render_lsp_symbol_details(
         .into_any_element()
 }
 
+fn render_lsp_warning(message: &String) -> impl IntoElement {
+    div()
+        .w_full()
+        .min_w_0()
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(warning())
+        .bg(warning_muted())
+        .px(px(8.0))
+        .py(px(7.0))
+        .text_size(px(12.0))
+        .line_height(px(17.0))
+        .text_color(fg_default())
+        .child(message.clone())
+}
+
 fn render_lsp_target_row(target: &lsp::LspDefinitionTarget) -> impl IntoElement {
     div()
         .w_full()
@@ -1396,7 +1682,7 @@ fn render_lsp_target_row(target: &lsp::LspDefinitionTarget) -> impl IntoElement 
         .text_size(px(12.0))
         .text_color(fg_default())
         .whitespace_normal()
-        .child(format!("{}:{}", target.path, target.line))
+        .child(format!("{}:{}", target.display_path(), target.line))
 }
 
 fn lsp_reference_count_label(count: usize) -> String {
@@ -1440,8 +1726,9 @@ mod tests {
     use crate::syntax::SyntaxSpan;
 
     use super::{
-        build_interactive_code_tokens, code_text_runs, lsp_reference_count_label,
-        prepared_code_block_element_id, prepared_excerpt_range, prepared_lsp_text_id,
+        build_interactive_code_tokens, code_text_runs, lsp_hover_body_markdown,
+        lsp_hover_header_snippet, lsp_reference_count_label, prepared_code_block_element_id,
+        prepared_excerpt_range, prepared_lsp_text_id,
     };
 
     fn total_run_len(runs: &[TextRun]) -> usize {
@@ -1542,5 +1829,45 @@ mod tests {
     fn lsp_reference_count_label_pluralizes_count() {
         assert_eq!(lsp_reference_count_label(1), "1 reference");
         assert_eq!(lsp_reference_count_label(3), "3 references");
+    }
+
+    #[test]
+    fn lsp_hover_header_uses_leading_declaration_fence() {
+        let details = crate::lsp::LspSymbolDetails {
+            hover: Some(crate::lsp::LspHoverResult {
+                markdown: "```kotlin\nval name: String\n```\n\nThe display name.".to_string(),
+            }),
+            ..Default::default()
+        };
+
+        let snippet = lsp_hover_header_snippet(Some(&details), "name", "src/User.kt");
+
+        assert_eq!(snippet.code, "val name: String");
+        assert_eq!(snippet.source_hint, "kotlin");
+        assert_eq!(
+            lsp_hover_body_markdown(details.hover.as_ref().unwrap().markdown.as_str()).as_deref(),
+            Some("The display name.")
+        );
+    }
+
+    #[test]
+    fn lsp_hover_header_falls_back_to_signature_then_token() {
+        let details = crate::lsp::LspSymbolDetails {
+            signature_help: Some(crate::lsp::LspSignatureHelp {
+                label: "fn render(name: &str)".to_string(),
+                documentation: None,
+                active_parameter: None,
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            lsp_hover_header_snippet(Some(&details), "render", "src/lib.rs").code,
+            "fn render(name: &str)"
+        );
+        assert_eq!(
+            lsp_hover_header_snippet(None, "render", "src/lib.rs").code,
+            "render"
+        );
     }
 }

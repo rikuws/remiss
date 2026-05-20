@@ -1,4 +1,11 @@
-use std::{cell::RefCell, mem, ops::Range, rc::Rc, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, HashMap},
+    mem,
+    ops::Range,
+    rc::Rc,
+    time::Duration,
+};
 
 use gpui::{
     fill, point, px, size, AnyTooltip, AnyView, App, Bounds, ClipboardItem, DispatchPhase, Element,
@@ -16,6 +23,7 @@ use crate::{
 
 thread_local! {
     static ACTIVE_TEXT_TARGET: RefCell<Option<String>> = const { RefCell::new(None) };
+    static TEXT_SELECTION_GROUPS: RefCell<HashMap<String, GroupTextSelectionState>> = RefCell::new(HashMap::new());
 }
 
 const TEXT_TOOLTIP_SHOW_DELAY: Duration = Duration::from_millis(500);
@@ -122,6 +130,27 @@ struct SelectableTextClickEvent {
     mouse_up_index: usize,
 }
 
+#[derive(Clone)]
+struct GroupTextSelectionConfig {
+    group_id: String,
+    row_order: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct GroupTextPoint {
+    row_order: i64,
+    index: usize,
+}
+
+#[derive(Default)]
+struct GroupTextSelectionState {
+    rows: BTreeMap<i64, String>,
+    anchor: Option<GroupTextPoint>,
+    head: Option<GroupTextPoint>,
+    mouse_down: Option<GroupTextPoint>,
+    selecting: bool,
+}
+
 #[doc(hidden)]
 #[derive(Default)]
 pub struct SelectableTextState {
@@ -143,6 +172,7 @@ pub struct SelectableText {
     tooltip_builder: Option<Rc<dyn Fn(usize, &mut Window, &mut App) -> Option<(String, AnyView)>>>,
     clickable_ranges: Vec<Range<usize>>,
     selection_color: gpui::Rgba,
+    selection_group: Option<GroupTextSelectionConfig>,
 }
 
 impl SelectableText {
@@ -163,6 +193,7 @@ impl SelectableText {
             tooltip_builder: None,
             clickable_ranges: Vec::new(),
             selection_color: accent_muted(),
+            selection_group: None,
         }
     }
 
@@ -226,6 +257,14 @@ impl SelectableText {
         builder: impl Fn(usize, &mut Window, &mut App) -> Option<(String, AnyView)> + 'static,
     ) -> Self {
         self.tooltip_builder = Some(Rc::new(builder));
+        self
+    }
+
+    pub fn selection_group(mut self, group_id: impl Into<String>, row_order: i64) -> Self {
+        self.selection_group = Some(GroupTextSelectionConfig {
+            group_id: group_id.into(),
+            row_order,
+        });
         self
     }
 }
@@ -345,6 +384,7 @@ impl Element for SelectableText {
         let text_layout = self.text.layout().clone();
         let selection_id = self.selection_id.clone();
         let raw_text = self.raw_text.clone();
+        let selection_group = self.selection_group.clone();
 
         window.with_element_state::<SelectableTextState, _>(
             global_id.unwrap(),
@@ -352,6 +392,9 @@ impl Element for SelectableText {
                 let selectable_state = selectable_state.unwrap_or_default();
                 let selection_state = selectable_state.selection.clone();
                 selection_state.borrow_mut().clamp(raw_text.len());
+                if let Some(group) = selection_group.as_ref() {
+                    register_group_text_row(group, raw_text.as_ref());
+                }
 
                 if let Some(hover_listener) = self.hover_listener.take() {
                     let hover_selection = selection_state.clone();
@@ -466,6 +509,7 @@ impl Element for SelectableText {
                 let clear_selection_hitbox = hitbox.clone();
                 let clear_selection_id = selection_id.clone();
                 let clear_selection_state = selection_state.clone();
+                let clear_selection_group = selection_group.clone();
                 window.on_mouse_event(move |_event: &MouseDownEvent, phase, window, _cx| {
                     if phase != DispatchPhase::Capture {
                         return;
@@ -478,6 +522,9 @@ impl Element for SelectableText {
                     }
 
                     clear_selection_state.borrow_mut().clear();
+                    if let Some(group) = clear_selection_group.as_ref() {
+                        clear_group_text_selection(group);
+                    }
                     clear_active_text_target(&clear_selection_id);
                     window.refresh();
                 });
@@ -486,6 +533,8 @@ impl Element for SelectableText {
                 let mouse_down_layout = text_layout.clone();
                 let mouse_down_selection = selection_state.clone();
                 let mouse_down_id = selection_id.clone();
+                let mouse_down_group = selection_group.clone();
+                let mouse_down_text = raw_text.clone();
                 window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                     if phase != DispatchPhase::Capture
                         || event.button != MouseButton::Left
@@ -508,6 +557,10 @@ impl Element for SelectableText {
                             state.collapse_to(index);
                         }
                     }
+                    if let Some(group) = mouse_down_group.as_ref() {
+                        register_group_text_row(group, mouse_down_text.as_ref());
+                        start_group_text_selection(group, index, event.modifiers.shift);
+                    }
 
                     set_active_text_target(mouse_down_id.clone());
                     cx.stop_propagation();
@@ -516,9 +569,23 @@ impl Element for SelectableText {
 
                 let mouse_move_selection = selection_state.clone();
                 let mouse_move_layout = text_layout.clone();
+                let mouse_move_hitbox = hitbox.clone();
+                let mouse_move_group = selection_group.clone();
+                let mouse_move_text = raw_text.clone();
                 window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, _cx| {
                     if phase != DispatchPhase::Bubble {
                         return;
+                    }
+
+                    if let Some(group) = mouse_move_group.as_ref() {
+                        register_group_text_row(group, mouse_move_text.as_ref());
+                        if is_group_text_selecting(group) && mouse_move_hitbox.is_hovered(window) {
+                            let index = mouse_move_layout
+                                .index_for_position(event.position)
+                                .unwrap_or_else(|index| index);
+                            update_group_text_selection(group, index);
+                            window.refresh();
+                        }
                     }
 
                     if !mouse_move_selection.borrow().selecting {
@@ -534,6 +601,9 @@ impl Element for SelectableText {
 
                 let mouse_up_selection = selection_state.clone();
                 let mouse_up_layout = text_layout.clone();
+                let mouse_up_hitbox = hitbox.clone();
+                let mouse_up_group = selection_group.clone();
+                let mouse_up_text = raw_text.clone();
                 let cursor_click_ranges = self.clickable_ranges.clone();
                 let click_requires_platform_modifier = self.click_requires_platform_modifier;
                 let click_ranges = mem::take(&mut self.clickable_ranges);
@@ -552,6 +622,13 @@ impl Element for SelectableText {
                     let mouse_up_index = mouse_up_layout
                         .index_for_position(event.position)
                         .unwrap_or_else(|index| index);
+                    if let Some(group) = mouse_up_group.as_ref() {
+                        register_group_text_row(group, mouse_up_text.as_ref());
+                        if mouse_up_hitbox.is_hovered(window) {
+                            update_group_text_selection(group, mouse_up_index);
+                        }
+                        finish_group_text_selection(group);
+                    }
 
                     let mut state = mouse_up_selection.borrow_mut();
                     if state.selecting {
@@ -609,6 +686,7 @@ impl Element for SelectableText {
                     let key_selection = selection_state.clone();
                     let key_id = selection_id.clone();
                     let key_text = raw_text.clone();
+                    let key_group = selection_group.clone();
                     move |event: &KeyDownEvent, phase, _window, cx| {
                         if phase != DispatchPhase::Bubble || !is_active_text_target(&key_id) {
                             return;
@@ -618,10 +696,21 @@ impl Element for SelectableText {
                         let platform_only = platform_primary_modifier(modifiers);
                         match event.keystroke.key.as_str() {
                             "a" if platform_only && !key_text.is_empty() => {
-                                key_selection.borrow_mut().select_all(key_text.len());
+                                if let Some(group) = key_group.as_ref() {
+                                    select_all_group_text(group);
+                                } else {
+                                    key_selection.borrow_mut().select_all(key_text.len());
+                                }
                                 cx.stop_propagation();
                             }
                             "c" if platform_only => {
+                                if let Some(group) = key_group.as_ref() {
+                                    if let Some(text) = selected_group_text(group) {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                        cx.stop_propagation();
+                                        return;
+                                    }
+                                }
                                 if let Some(range) = key_selection.borrow().selection_range() {
                                     if !range.is_empty() {
                                         cx.write_to_clipboard(ClipboardItem::new_string(
@@ -652,7 +741,11 @@ impl Element for SelectableText {
                     window.set_cursor_style(gpui::CursorStyle::IBeam, hitbox);
                 }
 
-                if let Some(range) = selection_state.borrow().selection_range() {
+                if let Some(range) = selection_group
+                    .as_ref()
+                    .and_then(|group| group_text_row_selection_range(group, raw_text.len()))
+                    .or_else(|| selection_state.borrow().selection_range())
+                {
                     for quad in selection_quads_for_range(
                         raw_text.as_ref(),
                         &text_layout,
@@ -1417,15 +1510,12 @@ fn wrapped_segment_end_indices(layout: &WrappedLineLayout) -> Vec<usize> {
 
 fn cursor_quad_for_index(layout: &TextLayout, index: usize) -> Option<PaintQuad> {
     let position = layout.position_for_index(index)?;
-    let bounds = layout.bounds();
     let line_height = layout.line_height();
-    Some(fill(
-        Bounds::new(
-            point(bounds.left() + position.x, bounds.top() + position.y),
-            size(px(2.0), line_height),
-        ),
-        accent(),
-    ))
+    Some(cursor_quad_from_position(position, line_height))
+}
+
+fn cursor_quad_from_position(position: gpui::Point<Pixels>, line_height: Pixels) -> PaintQuad {
+    fill(Bounds::new(position, size(px(2.0), line_height)), accent())
 }
 
 fn previous_boundary(text: &str, offset: usize) -> usize {
@@ -1449,6 +1539,169 @@ fn platform_click_modifier(modifiers: gpui::Modifiers) -> bool {
     shortcuts::secondary_plain_modifier(modifiers)
 }
 
+fn register_group_text_row(group: &GroupTextSelectionConfig, text: &str) {
+    TEXT_SELECTION_GROUPS.with(|groups| {
+        groups
+            .borrow_mut()
+            .entry(group.group_id.clone())
+            .or_default()
+            .rows
+            .insert(group.row_order, text.to_string());
+    });
+}
+
+fn start_group_text_selection(group: &GroupTextSelectionConfig, index: usize, extend: bool) {
+    TEXT_SELECTION_GROUPS.with(|groups| {
+        let mut groups = groups.borrow_mut();
+        let state = groups.entry(group.group_id.clone()).or_default();
+        let point = GroupTextPoint {
+            row_order: group.row_order,
+            index,
+        };
+        if extend && state.anchor.is_some() {
+            state.head = Some(point);
+        } else {
+            state.anchor = Some(point);
+            state.head = Some(point);
+        }
+        state.mouse_down = Some(point);
+        state.selecting = true;
+    });
+}
+
+fn update_group_text_selection(group: &GroupTextSelectionConfig, index: usize) {
+    TEXT_SELECTION_GROUPS.with(|groups| {
+        let mut groups = groups.borrow_mut();
+        let state = groups.entry(group.group_id.clone()).or_default();
+        if state.anchor.is_none() {
+            state.anchor = Some(GroupTextPoint {
+                row_order: group.row_order,
+                index,
+            });
+        }
+        state.head = Some(GroupTextPoint {
+            row_order: group.row_order,
+            index,
+        });
+    });
+}
+
+fn finish_group_text_selection(group: &GroupTextSelectionConfig) {
+    TEXT_SELECTION_GROUPS.with(|groups| {
+        if let Some(state) = groups.borrow_mut().get_mut(&group.group_id) {
+            state.selecting = false;
+            state.mouse_down = None;
+        }
+    });
+}
+
+fn clear_group_text_selection(group: &GroupTextSelectionConfig) {
+    TEXT_SELECTION_GROUPS.with(|groups| {
+        if let Some(state) = groups.borrow_mut().get_mut(&group.group_id) {
+            state.anchor = None;
+            state.head = None;
+            state.mouse_down = None;
+            state.selecting = false;
+        }
+    });
+}
+
+fn is_group_text_selecting(group: &GroupTextSelectionConfig) -> bool {
+    TEXT_SELECTION_GROUPS.with(|groups| {
+        groups
+            .borrow()
+            .get(&group.group_id)
+            .map(|state| state.selecting)
+            .unwrap_or(false)
+    })
+}
+
+fn select_all_group_text(group: &GroupTextSelectionConfig) {
+    TEXT_SELECTION_GROUPS.with(|groups| {
+        let mut groups = groups.borrow_mut();
+        let state = groups.entry(group.group_id.clone()).or_default();
+        let Some((&first_order, _)) = state.rows.first_key_value() else {
+            return;
+        };
+        let Some((&last_order, last_text)) = state.rows.last_key_value() else {
+            return;
+        };
+        state.anchor = Some(GroupTextPoint {
+            row_order: first_order,
+            index: 0,
+        });
+        state.head = Some(GroupTextPoint {
+            row_order: last_order,
+            index: last_text.len(),
+        });
+        state.mouse_down = None;
+        state.selecting = false;
+    });
+}
+
+fn group_text_row_selection_range(
+    group: &GroupTextSelectionConfig,
+    row_len: usize,
+) -> Option<Range<usize>> {
+    TEXT_SELECTION_GROUPS.with(|groups| {
+        let groups = groups.borrow();
+        let state = groups.get(&group.group_id)?;
+        let (start, end) = ordered_group_text_points(state)?;
+        selection_range_for_group_row(start, end, group.row_order, row_len)
+    })
+}
+
+fn selected_group_text(group: &GroupTextSelectionConfig) -> Option<String> {
+    TEXT_SELECTION_GROUPS.with(|groups| {
+        let groups = groups.borrow();
+        let state = groups.get(&group.group_id)?;
+        let (start, end) = ordered_group_text_points(state)?;
+        let mut lines = Vec::new();
+        for (&row_order, text) in state.rows.range(start.row_order..=end.row_order) {
+            let range =
+                selection_range_for_group_row(start, end, row_order, text.len()).unwrap_or(0..0);
+            lines.push(text.get(range).unwrap_or_default().to_string());
+        }
+        let selected = lines.join("\n");
+        (!selected.is_empty()).then_some(selected)
+    })
+}
+
+fn ordered_group_text_points(
+    state: &GroupTextSelectionState,
+) -> Option<(GroupTextPoint, GroupTextPoint)> {
+    let anchor = state.anchor?;
+    let head = state.head.unwrap_or(anchor);
+    if anchor <= head {
+        Some((anchor, head))
+    } else {
+        Some((head, anchor))
+    }
+}
+
+fn selection_range_for_group_row(
+    start: GroupTextPoint,
+    end: GroupTextPoint,
+    row_order: i64,
+    row_len: usize,
+) -> Option<Range<usize>> {
+    if start == end || row_order < start.row_order || row_order > end.row_order {
+        return None;
+    }
+
+    let range = if start.row_order == end.row_order {
+        start.index.min(row_len)..end.index.min(row_len)
+    } else if row_order == start.row_order {
+        start.index.min(row_len)..row_len
+    } else if row_order == end.row_order {
+        0..end.index.min(row_len)
+    } else {
+        0..row_len
+    };
+
+    (!range.is_empty()).then_some(range)
+}
+
 fn set_active_text_target(id: String) {
     ACTIVE_TEXT_TARGET.with(|active| {
         active.replace(Some(id));
@@ -1466,4 +1719,18 @@ fn clear_active_text_target(id: &str) {
 
 fn is_active_text_target(id: &str) -> bool {
     ACTIVE_TEXT_TARGET.with(|active| active.borrow().as_deref() == Some(id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_quad_uses_absolute_layout_position() {
+        let quad = cursor_quad_from_position(point(px(120.0), px(42.0)), px(18.0));
+
+        assert_eq!(quad.bounds.left(), px(120.0));
+        assert_eq!(quad.bounds.top(), px(42.0));
+        assert_eq!(quad.bounds.size, size(px(2.0), px(18.0)));
+    }
 }

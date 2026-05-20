@@ -340,6 +340,7 @@ pub(super) fn render_normal_side_by_side_diff_row(
             side_by_side_scroll_handles.handle_for(SideBySideDiffSide::Left),
             column_widths.width_for(SideBySideDiffSide::Left),
             file_path,
+            hunk_index,
             hunk_header,
             hunk,
             highlighted_hunk,
@@ -358,6 +359,7 @@ pub(super) fn render_normal_side_by_side_diff_row(
             side_by_side_scroll_handles.handle_for(SideBySideDiffSide::Right),
             column_widths.width_for(SideBySideDiffSide::Right),
             file_path,
+            hunk_index,
             hunk_header,
             hunk,
             highlighted_hunk,
@@ -378,6 +380,7 @@ fn render_normal_side_by_side_cell(
     scroll_handle: &ScrollHandle,
     column_width: f32,
     file_path: &str,
+    hunk_index: usize,
     hunk_header: &str,
     hunk: &ParsedDiffHunk,
     highlighted_hunk: Option<&Vec<DiffLineHighlight>>,
@@ -417,6 +420,10 @@ fn render_normal_side_by_side_cell(
             let temp_source_target = detail.and_then(|detail| {
                 temp_source_target_for_diff_side(detail, parsed_file, line, target_side)
             });
+            let text_selection = DiffTextSelectionContext::new(
+                format!("diff-text:{file_path}:normal:{}", side.id_label()),
+                diff_text_row_order(hunk_index, line_index),
+            );
 
             render_reviewable_diff_line(
                 state,
@@ -429,6 +436,7 @@ fn render_normal_side_by_side_cell(
                 selected_anchor,
                 line_lsp_context.as_ref(),
                 temp_source_target,
+                Some(text_selection),
                 cx,
             )
             .into_any_element()
@@ -484,6 +492,8 @@ pub(super) fn render_structural_side_by_side_diff_row(
             side_by_side_scroll_handles.handle_for(SideBySideDiffSide::Left),
             column_widths.width_for(SideBySideDiffSide::Left),
             file_path,
+            hunk_index,
+            row_index,
             hunk_header,
             row.left.as_ref(),
             selected_anchor,
@@ -500,6 +510,8 @@ pub(super) fn render_structural_side_by_side_diff_row(
             side_by_side_scroll_handles.handle_for(SideBySideDiffSide::Right),
             column_widths.width_for(SideBySideDiffSide::Right),
             file_path,
+            hunk_index,
+            row_index,
             hunk_header,
             row.right.as_ref(),
             selected_anchor,
@@ -518,6 +530,8 @@ fn render_structural_side_by_side_cell(
     scroll_handle: &ScrollHandle,
     column_width: f32,
     file_path: &str,
+    hunk_index: usize,
+    row_index: usize,
     hunk_header: &str,
     cell: Option<&crate::difftastic::AdaptedDifftasticSideBySideCell>,
     selected_anchor: Option<&DiffAnchor>,
@@ -559,6 +573,10 @@ fn render_structural_side_by_side_cell(
             let temp_source_target = detail.and_then(|detail| {
                 temp_source_target_for_diff_side(detail, parsed_file, &cell.line, target_side)
             });
+            let text_selection = DiffTextSelectionContext::new(
+                format!("diff-text:{file_path}:structural:{}", side.id_label()),
+                diff_text_row_order(hunk_index, row_index),
+            );
 
             render_reviewable_diff_line(
                 state,
@@ -571,6 +589,7 @@ fn render_structural_side_by_side_cell(
                 selected_anchor,
                 line_lsp_context.as_ref(),
                 temp_source_target,
+                Some(text_selection),
                 cx,
             )
             .into_any_element()

@@ -31,7 +31,11 @@ pub(super) fn render_overview_surface(state: &Entity<AppState>, cx: &App) -> imp
         .as_deref()
         .map(|viewer_login| detail.author_login == viewer_login)
         .unwrap_or(false);
-    let review_status = summarize_review_status(&detail.reviewers, &detail.latest_reviews);
+    let review_status = summarize_review_status(
+        &detail.reviewers,
+        &detail.latest_reviews,
+        detail.review_decision.as_deref(),
+    );
     let own_pr_feedback = viewer_login
         .as_deref()
         .filter(|_| is_own_pull_request)
@@ -46,20 +50,31 @@ pub(super) fn render_overview_surface(state: &Entity<AppState>, cx: &App) -> imp
     let thread_digest =
         summarize_thread_activity(&detail.review_threads, &s.unread_review_comment_ids);
     let recent_activity = summarize_recent_activity(detail, &s.unread_review_comment_ids);
+    let commit_freshness = viewer_login
+        .as_deref()
+        .and_then(|viewer_login| summarize_commit_freshness(detail, viewer_login));
     let automation_activity_key = automation_activity_key(detail);
     let automation_activity_expanded = s
         .expanded_automation_activity_keys
         .contains(&automation_activity_key);
+    let activity_history_key = activity_history_key(detail);
+    let activity_history_expanded = s
+        .expanded_activity_history_keys
+        .contains(&activity_history_key);
+    let review_snapshot_key = review_snapshot_key(detail);
+    let review_snapshot_expanded = s
+        .expanded_review_snapshot_keys
+        .contains(&review_snapshot_key);
     let participants = summarize_participants(detail, &review_status);
-    let provider = s.selected_tour_provider();
-    let provider_status = s.selected_tour_provider_status().cloned();
-    let provider_loading = s.code_tour_provider_loading;
-    let provider_error = s.code_tour_provider_error.clone();
+    let provider = s.selected_review_ai_provider();
+    let provider_status = s.selected_review_ai_provider_status().cloned();
+    let provider_loading = s.review_ai_provider_loading;
+    let provider_error = s.review_ai_provider_error.clone();
     let brief_automatic_enabled = s
-        .code_tour_settings
+        .review_ai_settings
         .settings
         .automatically_generates_for(&detail.repository);
-    let brief_settings_loaded = s.code_tour_settings.loaded;
+    let brief_settings_loaded = s.review_ai_settings.loaded;
 
     let state_for_review = state.clone();
     let state_for_brief = state.clone();
@@ -84,6 +99,7 @@ pub(super) fn render_overview_surface(state: &Entity<AppState>, cx: &App) -> imp
                 .child(render_overview_summary_strip(
                     detail,
                     is_own_pull_request,
+                    commit_freshness.as_ref(),
                     &state_for_files,
                 ))
                 .child(render_pull_request_summary_panel(
@@ -108,12 +124,16 @@ pub(super) fn render_overview_surface(state: &Entity<AppState>, cx: &App) -> imp
                     &own_pr_feedback,
                     &thread_digest,
                     is_own_pull_request,
+                    review_snapshot_key,
+                    review_snapshot_expanded,
                     &state_for_threads,
                 ))
                 .child(render_recent_activity_panel(
                     &recent_activity,
                     &automation_activity_key,
                     automation_activity_expanded,
+                    &activity_history_key,
+                    activity_history_expanded,
                     &state_for_activity,
                 ))
                 .when(!is_own_pull_request && !is_local_review, |el| {
@@ -156,6 +176,7 @@ pub(super) fn pr_detail_section() -> Div {
 fn render_overview_summary_strip(
     detail: &github::PullRequestDetail,
     is_own_pull_request: bool,
+    commit_freshness: Option<&CommitFreshnessSummary>,
     state: &Entity<AppState>,
 ) -> impl IntoElement {
     let state = state.clone();
@@ -195,16 +216,45 @@ fn render_overview_summary_strip(
                     ))
                     .child(render_change_meter(detail.additions, detail.deletions)),
             )
+            .when_some(commit_freshness, |el, freshness| {
+                el.child(render_commit_freshness_chip(freshness))
+            })
             .child(review_button(action_label, move |_, window, cx| {
                 enter_files_surface(&state, window, cx)
             })),
     )
 }
 
+fn render_commit_freshness_chip(freshness: &CommitFreshnessSummary) -> impl IntoElement {
+    let commit_copy = count_copy(freshness.commits_since_activity, "commit", "commits");
+    let label = format!(
+        "{} {} since your last activity \u{2022} latest committed {}",
+        freshness.commits_since_activity,
+        commit_copy,
+        format_relative_time(&freshness.latest_commit_at),
+    );
+
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .px(px(9.0))
+        .py(px(5.0))
+        .rounded(radius_sm())
+        .bg(warning_muted())
+        .border_1()
+        .border_color(warning())
+        .text_size(px(12.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(fg_emphasis())
+        .child(lucide_icon(LucideIcon::GitCommit, 13.0, warning()))
+        .child(label)
+}
+
 fn render_review_brief_panel(
     brief_state: ReviewBriefState,
-    provider: CodeTourProvider,
-    provider_status: Option<CodeTourProviderStatus>,
+    provider: ReviewAiProvider,
+    provider_status: Option<ReviewAiProviderStatus>,
     provider_loading: bool,
     provider_error: Option<String>,
     local_repository_loading: bool,
@@ -370,8 +420,8 @@ fn render_review_brief_document(brief: &ReviewBrief) -> impl IntoElement {
 }
 
 fn render_review_brief_progress(
-    provider: CodeTourProvider,
-    provider_status: Option<&CodeTourProviderStatus>,
+    provider: ReviewAiProvider,
+    provider_status: Option<&ReviewAiProviderStatus>,
     provider_error: Option<&str>,
     local_repository_loading: bool,
     progress_text: Option<&str>,
@@ -495,7 +545,7 @@ fn render_review_brief_error(error: &str, state: &Entity<AppState>) -> impl Into
 }
 
 fn render_review_brief_setup_needed(
-    provider_status: Option<&CodeTourProviderStatus>,
+    provider_status: Option<&ReviewAiProviderStatus>,
     provider_error: Option<&str>,
     state: &Entity<AppState>,
     state_for_settings: Entity<AppState>,
@@ -577,7 +627,7 @@ fn render_review_brief_idle(
     let copy = if automatic_enabled {
         "No cached review brief is available for this pull request head yet."
     } else {
-        "Automatic briefings use the Background code tours repository setting."
+        "Automatic briefings use the Review Intelligence repository setting."
     };
 
     div()
@@ -722,9 +772,16 @@ fn render_review_snapshot_panel(
     own_pr_feedback: &[OwnPrFeedbackItem],
     thread_digest: &[ThreadDigestItem],
     is_own_pull_request: bool,
+    snapshot_key: String,
+    expanded: bool,
     state: &Entity<AppState>,
 ) -> impl IntoElement {
     let review_decision = detail.review_decision.clone();
+    let title = if is_own_pull_request {
+        "Feedback Summary"
+    } else {
+        "Review Snapshot"
+    };
     let highlight_count = if is_own_pull_request {
         format!("{} highlights", own_pr_feedback.len())
     } else {
@@ -743,87 +800,125 @@ fn render_review_snapshot_panel(
     } else {
         build_review_snapshot_text(review_status, thread_digest, detail.comments_count as usize)
     };
+    let toggle_state = state.clone();
+    let tooltip = if expanded {
+        "Collapse review snapshot"
+    } else {
+        "Open review snapshot"
+    };
+    let toggle_icon = if expanded {
+        LucideIcon::ChevronDown
+    } else {
+        LucideIcon::ChevronRight
+    };
 
     pr_detail_section()
         .child(
             div()
+                .id("review-snapshot-disclosure")
+                .rounded(radius_sm())
+                .px(px(8.0))
+                .py(px(8.0))
                 .flex()
-                .items_center()
-                .justify_between()
+                .flex_col()
                 .gap(px(12.0))
-                .flex_wrap()
-                .mb(px(14.0))
+                .tooltip(move |_, cx| build_review_brief_tooltip(tooltip, cx))
+                .hover(|style| style.bg(hover_bg()))
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    toggle_state.update(cx, |state, cx| {
+                        if !state
+                            .expanded_review_snapshot_keys
+                            .insert(snapshot_key.clone())
+                        {
+                            state.expanded_review_snapshot_keys.remove(&snapshot_key);
+                        }
+                        cx.notify();
+                    });
+                })
                 .child(
                     div()
-                        .text_size(px(15.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(fg_emphasis())
-                        .child(if is_own_pull_request {
-                            "Feedback Summary"
-                        } else {
-                            "Review Snapshot"
-                        }),
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(12.0))
+                        .flex_wrap()
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex()
+                                .items_center()
+                                .gap(px(7.0))
+                                .child(lucide_icon(toggle_icon, 14.0, fg_muted()))
+                                .child(
+                                    div()
+                                        .text_size(px(15.0))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(fg_emphasis())
+                                        .child(title),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(6.0))
+                                .flex_wrap()
+                                .child(badge(&highlight_count))
+                                .when_some(review_decision, |el, decision| {
+                                    el.child(review_decision_badge(&decision))
+                                }),
+                        ),
                 )
                 .child(
                     div()
                         .flex()
-                        .gap(px(6.0))
+                        .gap(px(8.0))
                         .flex_wrap()
-                        .child(badge(&highlight_count))
-                        .when_some(review_decision, |el, decision| {
-                            el.child(review_decision_badge(&decision))
-                        }),
+                        .child(if is_own_pull_request {
+                            render_snapshot_stat(
+                                unresolved_feedback.to_string(),
+                                "Needs reply",
+                                "Reviewer threads still waiting on you.",
+                                accent(),
+                            )
+                            .into_any_element()
+                        } else {
+                            render_snapshot_stat(
+                                unresolved_threads.to_string(),
+                                "Open threads",
+                                "Thread discussions still in progress.",
+                                accent(),
+                            )
+                            .into_any_element()
+                        })
+                        .child(render_snapshot_stat(
+                            review_status.waiting.len().to_string(),
+                            "Waiting",
+                            "Requested reviewers without a latest verdict.",
+                            fg_muted(),
+                        ))
+                        .child(render_snapshot_stat(
+                            review_status.approved.len().to_string(),
+                            "Approved",
+                            "Reviewers whose latest review is approval.",
+                            success(),
+                        ))
+                        .child(render_snapshot_stat(
+                            review_status.changes_requested_display_value(),
+                            "Changes",
+                            "Reviewers currently requesting updates.",
+                            danger(),
+                        )),
                 ),
         )
-        .child(readable_text(summary_text))
-        .child(
-            div()
-                .mt(px(12.0))
-                .flex()
-                .gap(px(8.0))
-                .flex_wrap()
-                .child(if is_own_pull_request {
-                    render_snapshot_stat(
-                        unresolved_feedback.to_string(),
-                        "Needs reply",
-                        "Reviewer threads still waiting on you.",
-                        accent(),
-                    )
-                    .into_any_element()
-                } else {
-                    render_snapshot_stat(
-                        unresolved_threads.to_string(),
-                        "Open threads",
-                        "Thread discussions still in progress.",
-                        accent(),
-                    )
-                    .into_any_element()
-                })
-                .child(render_snapshot_stat(
-                    review_status.waiting.len().to_string(),
-                    "Waiting",
-                    "Requested reviewers without a latest verdict.",
-                    fg_muted(),
-                ))
-                .child(render_snapshot_stat(
-                    review_status.approved.len().to_string(),
-                    "Approved",
-                    "Reviewers whose latest review is approval.",
-                    success(),
-                ))
-                .child(render_snapshot_stat(
-                    review_status.changes_requested.len().to_string(),
-                    "Changes",
-                    "Reviewers currently requesting updates.",
-                    danger(),
-                )),
-        )
-        .child(div().mt(px(18.0)).child(render_thread_focus_panel(
-            own_pr_feedback,
-            thread_digest,
-            is_own_pull_request,
-            state,
-        )))
+        .when(expanded, |el| {
+            el.child(div().mt(px(14.0)).child(readable_text(summary_text)))
+                .child(div().mt(px(18.0)).child(render_thread_focus_panel(
+                    own_pr_feedback,
+                    thread_digest,
+                    is_own_pull_request,
+                    state,
+                )))
+        })
 }
 
 fn render_snapshot_stat(value: String, label: &str, _hint: &str, color: Rgba) -> impl IntoElement {
@@ -1203,10 +1298,42 @@ fn render_pull_request_summary_panel(
         }))
 }
 
+const RECENT_HUMAN_ACTIVITY_LIMIT: usize = 10;
+
+enum ActivityTimelineEntry<'a> {
+    Human(&'a ActivityItem),
+    HistoryToggle {
+        hidden_count: usize,
+        latest_timestamp: &'a str,
+        expanded: bool,
+        key: &'a str,
+    },
+    Automation {
+        items: Vec<&'a ActivityItem>,
+        latest_timestamp: &'a str,
+    },
+}
+
+impl<'a> ActivityTimelineEntry<'a> {
+    fn timestamp(&self) -> &str {
+        match self {
+            ActivityTimelineEntry::Human(item) => &item.timestamp,
+            ActivityTimelineEntry::HistoryToggle {
+                latest_timestamp, ..
+            } => latest_timestamp,
+            ActivityTimelineEntry::Automation {
+                latest_timestamp, ..
+            } => latest_timestamp,
+        }
+    }
+}
+
 fn render_recent_activity_panel(
     activity: &[ActivityItem],
     automation_key: &str,
     automation_expanded: bool,
+    history_key: &str,
+    history_expanded: bool,
     state: &Entity<AppState>,
 ) -> impl IntoElement {
     let mut human_activity = Vec::new();
@@ -1218,9 +1345,55 @@ fn render_recent_activity_panel(
             human_activity.push(item);
         }
     }
-    let displayed_count = human_activity.len() + usize::from(!automation_activity.is_empty());
-    let visible_human_count = human_activity.len().min(10);
-    let has_automation_activity = !automation_activity.is_empty();
+    human_activity.sort_by(|left, right| left.timestamp.cmp(&right.timestamp));
+    automation_activity.sort_by(|left, right| left.timestamp.cmp(&right.timestamp));
+    let hidden_human_count = human_activity
+        .len()
+        .saturating_sub(RECENT_HUMAN_ACTIVITY_LIMIT);
+    let (older_human_activity, recent_human_activity) = human_activity.split_at(hidden_human_count);
+    let displayed_count = activity.len();
+    let latest_automation_timestamp = automation_activity
+        .iter()
+        .map(|item| item.timestamp.as_str())
+        .max();
+    let mut timeline_entries = Vec::new();
+    if history_expanded {
+        timeline_entries.extend(
+            older_human_activity
+                .iter()
+                .copied()
+                .map(ActivityTimelineEntry::Human),
+        );
+        if let Some(latest_hidden) = older_human_activity.last() {
+            timeline_entries.push(ActivityTimelineEntry::HistoryToggle {
+                hidden_count: older_human_activity.len(),
+                latest_timestamp: &latest_hidden.timestamp,
+                expanded: true,
+                key: history_key,
+            });
+        }
+    } else if let Some(latest_hidden) = older_human_activity.last() {
+        timeline_entries.push(ActivityTimelineEntry::HistoryToggle {
+            hidden_count: older_human_activity.len(),
+            latest_timestamp: &latest_hidden.timestamp,
+            expanded: false,
+            key: history_key,
+        });
+    }
+    timeline_entries.extend(
+        recent_human_activity
+            .iter()
+            .copied()
+            .map(ActivityTimelineEntry::Human),
+    );
+    if let Some(latest_timestamp) = latest_automation_timestamp {
+        timeline_entries.push(ActivityTimelineEntry::Automation {
+            items: automation_activity,
+            latest_timestamp,
+        });
+    }
+    timeline_entries.sort_by(|left, right| left.timestamp().cmp(right.timestamp()));
+    let timeline_count = timeline_entries.len();
 
     pr_detail_section()
         .child(
@@ -1246,29 +1419,138 @@ fn render_recent_activity_panel(
                 .flex()
                 .flex_col()
                 .children(
-                    human_activity
+                    timeline_entries
                         .into_iter()
-                        .take(10)
                         .enumerate()
-                        .map(|(index, item)| {
-                            render_activity_card(
-                                item,
-                                state,
-                                index > 0,
-                                index + 1 < visible_human_count || has_automation_activity,
-                            )
+                        .map(|(index, entry)| {
+                            let connector_above = index > 0;
+                            let connector_below = index + 1 < timeline_count;
+                            match entry {
+                                ActivityTimelineEntry::Human(item) => render_activity_card(
+                                    item,
+                                    state,
+                                    connector_above,
+                                    connector_below,
+                                ),
+                                ActivityTimelineEntry::HistoryToggle {
+                                    hidden_count,
+                                    expanded,
+                                    key,
+                                    ..
+                                } => render_activity_history_toggle(
+                                    hidden_count,
+                                    key,
+                                    expanded,
+                                    state,
+                                    connector_above,
+                                    connector_below,
+                                ),
+                                ActivityTimelineEntry::Automation { items, .. } => {
+                                    render_automation_activity_group(
+                                        items,
+                                        automation_key,
+                                        automation_expanded,
+                                        state,
+                                        connector_above,
+                                        connector_below,
+                                    )
+                                    .into_any_element()
+                                }
+                            }
                         }),
-                )
-                .when(has_automation_activity, |el| {
-                    el.child(render_automation_activity_group(
-                        automation_activity,
-                        automation_key,
-                        automation_expanded,
-                        state,
-                        visible_human_count > 0,
-                    ))
-                }),
+                ),
         )
+}
+
+fn render_activity_history_toggle(
+    hidden_count: usize,
+    key: &str,
+    expanded: bool,
+    state: &Entity<AppState>,
+    connector_above: bool,
+    connector_below: bool,
+) -> AnyElement {
+    let toggle_state = state.clone();
+    let key = key.to_string();
+    let item_copy = count_copy(hidden_count, "item", "items");
+    let label = if expanded {
+        format!("Hide {hidden_count} older {item_copy}")
+    } else {
+        format!("Show {hidden_count} older {item_copy}")
+    };
+    let chevron = if expanded {
+        LucideIcon::ChevronDown
+    } else {
+        LucideIcon::ChevronRight
+    };
+
+    div()
+        .min_w_0()
+        .py(px(4.0))
+        .flex()
+        .relative()
+        .gap(px(10.0))
+        .child(render_activity_row_connector(
+            connector_above,
+            connector_below,
+            13.0,
+            33.0,
+        ))
+        .child(render_activity_timeline_icon(LucideIcon::Clock))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .rounded(radius_sm())
+                .px(px(12.0))
+                .py(px(8.0))
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(10.0))
+                .hover(|style| style.bg(hover_bg()))
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    toggle_state.update(cx, |state, cx| {
+                        if !state.expanded_activity_history_keys.insert(key.clone()) {
+                            state.expanded_activity_history_keys.remove(&key);
+                        }
+                        cx.notify();
+                    });
+                })
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(fg_muted())
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .overflow_x_hidden()
+                        .child(label),
+                )
+                .child(lucide_icon(chevron, 12.0, fg_subtle())),
+        )
+        .into_any_element()
+}
+
+fn activity_status_text(item: &ActivityItem, status: &str) -> impl IntoElement {
+    let color = if item.status_code.is_some() {
+        fg_muted()
+    } else {
+        fg_subtle()
+    };
+
+    div()
+        .min_w_0()
+        .text_size(px(12.0))
+        .text_color(color)
+        .when(item.kind == ActivityItemKind::Commit, |el| {
+            el.font_family(mono_font_family())
+        })
+        .text_ellipsis()
+        .whitespace_nowrap()
+        .overflow_x_hidden()
+        .child(status.to_string())
 }
 
 fn render_activity_card(
@@ -1287,19 +1569,32 @@ fn render_activity_card(
     let file_path = item.file_path.clone();
     let anchor = item.anchor.clone();
     let timestamp = format_relative_time(&item.timestamp);
+    let has_metadata = item.location_label.is_some() || item.status_label.is_some();
+    let is_commit = item.kind == ActivityItemKind::Commit;
+    let (connector_gap_top, connector_gap_bottom) = if is_commit {
+        (13.0, 33.0)
+    } else {
+        (12.0, 34.0)
+    };
 
     div()
         .min_w_0()
         .py(px(4.0))
         .flex()
-        .items_start()
+        .relative()
         .gap(px(10.0))
-        .child(render_activity_timeline_avatar(
-            &item.author_login,
-            item.author_avatar_url.as_deref(),
+        .child(render_activity_row_connector(
             connector_above,
             connector_below,
+            connector_gap_top,
+            connector_gap_bottom,
         ))
+        .child(if is_commit {
+            render_activity_timeline_icon(LucideIcon::GitCommit).into_any_element()
+        } else {
+            render_activity_timeline_avatar(&item.author_login, item.author_avatar_url.as_deref())
+                .into_any_element()
+        })
         .child(
             div()
                 .flex_1()
@@ -1338,9 +1633,6 @@ fn render_activity_card(
                                 .gap(px(8.0))
                                 .flex_grow()
                                 .min_w_0()
-                                .when(item.kind != ActivityItemKind::Thread, |el| {
-                                    el.child(activity_kind_badge(&item.kind))
-                                })
                                 .child(
                                     div()
                                         .min_w_0()
@@ -1361,26 +1653,28 @@ fn render_activity_card(
                                 .child(timestamp),
                         ),
                 )
-                .child(
-                    div()
-                        .mt(px(8.0))
-                        .flex()
-                        .items_start()
-                        .gap(px(6.0))
-                        .flex_wrap()
-                        .min_w_0()
-                        .when_some(item.location_label.clone(), |el, location| {
-                            el.child(
-                                div()
-                                    .min_w_0()
-                                    .max_w(px(720.0))
-                                    .child(activity_location_text(&location)),
-                            )
-                        })
-                        .when_some(item.status_label.clone(), |el, status| {
-                            el.child(activity_status_badge(item, &status))
-                        }),
-                )
+                .when(has_metadata, |el| {
+                    el.child(
+                        div()
+                            .mt(px(6.0))
+                            .flex()
+                            .items_start()
+                            .gap(px(8.0))
+                            .flex_wrap()
+                            .min_w_0()
+                            .when_some(item.location_label.clone(), |el, location| {
+                                el.child(
+                                    div()
+                                        .min_w_0()
+                                        .max_w(px(720.0))
+                                        .child(activity_location_text(&location)),
+                                )
+                            })
+                            .when_some(item.status_label.clone(), |el, status| {
+                                el.child(activity_status_text(item, &status))
+                            }),
+                    )
+                })
                 .when(
                     item.thread_comments.is_empty() && !item.preview.is_empty(),
                     |el| {
@@ -1406,6 +1700,7 @@ fn render_activity_thread_card(
     let anchor = item.anchor.clone();
     let timestamp = format_relative_time(&item.timestamp);
     let comment_count = item.thread_comments.len();
+    let has_metadata = item.location_label.is_some() || item.status_label.is_some();
 
     div()
         .flex()
@@ -1415,13 +1710,17 @@ fn render_activity_thread_card(
                 .min_w_0()
                 .py(px(4.0))
                 .flex()
-                .items_start()
+                .relative()
                 .gap(px(10.0))
+                .child(render_activity_row_connector(
+                    connector_above,
+                    true,
+                    12.0,
+                    34.0,
+                ))
                 .child(render_activity_timeline_avatar(
                     &item.author_login,
                     item.author_avatar_url.as_deref(),
-                    connector_above,
-                    true,
                 ))
                 .child(
                     div()
@@ -1473,26 +1772,28 @@ fn render_activity_thread_card(
                                         .child(timestamp),
                                 ),
                         )
-                        .child(
-                            div()
-                                .mt(px(8.0))
-                                .flex()
-                                .items_start()
-                                .gap(px(6.0))
-                                .flex_wrap()
-                                .min_w_0()
-                                .when_some(item.location_label.clone(), |el, location| {
-                                    el.child(
-                                        div()
-                                            .min_w_0()
-                                            .max_w(px(720.0))
-                                            .child(activity_location_text(&location)),
-                                    )
-                                })
-                                .when_some(item.status_label.clone(), |el, status| {
-                                    el.child(activity_status_badge(item, &status))
-                                }),
-                        ),
+                        .when(has_metadata, |el| {
+                            el.child(
+                                div()
+                                    .mt(px(6.0))
+                                    .flex()
+                                    .items_start()
+                                    .gap(px(8.0))
+                                    .flex_wrap()
+                                    .min_w_0()
+                                    .when_some(item.location_label.clone(), |el, location| {
+                                        el.child(
+                                            div()
+                                                .min_w_0()
+                                                .max_w(px(720.0))
+                                                .child(activity_location_text(&location)),
+                                        )
+                                    })
+                                    .when_some(item.status_label.clone(), |el, status| {
+                                        el.child(activity_status_text(item, &status))
+                                    }),
+                            )
+                        }),
                 ),
         )
         .children(
@@ -1518,13 +1819,17 @@ fn render_activity_thread_comment_row(
         .min_w_0()
         .py(px(4.0))
         .flex()
-        .items_start()
+        .relative()
         .gap(px(10.0))
+        .child(render_activity_row_connector(
+            connector_above,
+            connector_below,
+            6.0,
+            24.0,
+        ))
         .child(render_activity_thread_comment_avatar(
             &comment.author_login,
             comment.author_avatar_url.as_deref(),
-            connector_above,
-            connector_below,
         ))
         .child(
             div()
@@ -1561,8 +1866,6 @@ fn render_activity_thread_comment_row(
 fn render_activity_thread_comment_avatar(
     login: &str,
     avatar_url: Option<&str>,
-    connector_above: bool,
-    connector_below: bool,
 ) -> impl IntoElement {
     div()
         .relative()
@@ -1573,36 +1876,9 @@ fn render_activity_thread_comment_avatar(
         .justify_center()
         .pt(px(2.0))
         .child(user_avatar(login, avatar_url, 18.0, false))
-        .when(connector_above, |el| {
-            el.child(
-                div()
-                    .absolute()
-                    .top(px(0.0))
-                    .left(px(15.5))
-                    .w(px(1.0))
-                    .h(px(4.0))
-                    .bg(border_muted()),
-            )
-        })
-        .when(connector_below, |el| {
-            el.child(
-                div()
-                    .absolute()
-                    .top(px(24.0))
-                    .bottom(px(-6.0))
-                    .left(px(15.5))
-                    .w(px(1.0))
-                    .bg(border_muted()),
-            )
-        })
 }
 
-fn render_activity_timeline_avatar(
-    login: &str,
-    avatar_url: Option<&str>,
-    connector_above: bool,
-    connector_below: bool,
-) -> impl IntoElement {
+fn render_activity_timeline_avatar(login: &str, avatar_url: Option<&str>) -> impl IntoElement {
     div()
         .relative()
         .w(px(32.0))
@@ -1612,35 +1888,9 @@ fn render_activity_timeline_avatar(
         .justify_center()
         .pt(px(8.0))
         .child(user_avatar(login, avatar_url, 22.0, false))
-        .when(connector_above, |el| {
-            el.child(
-                div()
-                    .absolute()
-                    .top(px(0.0))
-                    .left(px(15.5))
-                    .w(px(1.0))
-                    .h(px(8.0))
-                    .bg(border_muted()),
-            )
-        })
-        .when(connector_below, |el| {
-            el.child(
-                div()
-                    .absolute()
-                    .top(px(34.0))
-                    .bottom(px(0.0))
-                    .left(px(15.5))
-                    .w(px(1.0))
-                    .bg(border_muted()),
-            )
-        })
 }
 
-fn render_activity_timeline_icon(
-    icon: LucideIcon,
-    connector_above: bool,
-    connector_below: bool,
-) -> impl IntoElement {
+fn render_activity_timeline_icon(icon: LucideIcon) -> impl IntoElement {
     div()
         .relative()
         .w(px(32.0))
@@ -1661,14 +1911,28 @@ fn render_activity_timeline_icon(
                 .justify_center()
                 .child(lucide_icon(icon, 12.0, fg_muted())),
         )
+}
+
+fn render_activity_row_connector(
+    connector_above: bool,
+    connector_below: bool,
+    gap_top: f32,
+    gap_bottom: f32,
+) -> impl IntoElement {
+    div()
+        .absolute()
+        .top(px(0.0))
+        .bottom(px(0.0))
+        .left(px(15.5))
+        .w(px(1.0))
         .when(connector_above, |el| {
             el.child(
                 div()
                     .absolute()
-                    .top(px(0.0))
-                    .left(px(15.5))
+                    .top(px(-4.0))
+                    .left(px(0.0))
                     .w(px(1.0))
-                    .h(px(9.0))
+                    .h(px(gap_top + 4.0))
                     .bg(border_muted()),
             )
         })
@@ -1676,9 +1940,9 @@ fn render_activity_timeline_icon(
             el.child(
                 div()
                     .absolute()
-                    .top(px(35.0))
-                    .bottom(px(0.0))
-                    .left(px(15.5))
+                    .top(px(gap_bottom))
+                    .bottom(px(-4.0))
+                    .left(px(0.0))
                     .w(px(1.0))
                     .bg(border_muted()),
             )
@@ -1690,6 +1954,14 @@ fn automation_activity_key(detail: &github::PullRequestDetail) -> String {
         "{}#{}:automation-activity",
         detail.repository, detail.number
     )
+}
+
+fn activity_history_key(detail: &github::PullRequestDetail) -> String {
+    format!("{}#{}:activity-history", detail.repository, detail.number)
+}
+
+fn review_snapshot_key(detail: &github::PullRequestDetail) -> String {
+    format!("{}#{}", detail.repository, detail.number)
 }
 
 pub(super) fn is_automation_actor(login: &str) -> bool {
@@ -1739,6 +2011,7 @@ fn render_automation_activity_group(
     expanded: bool,
     state: &Entity<AppState>,
     connector_above: bool,
+    connector_below: bool,
 ) -> impl IntoElement {
     let key = automation_key.to_string();
     let toggle_state = state.clone();
@@ -1746,7 +2019,7 @@ fn render_automation_activity_group(
         .iter()
         .any(|item| automation_activity_needs_attention(item));
     let latest = items
-        .first()
+        .last()
         .map(|item| format_relative_time(&item.timestamp))
         .unwrap_or_default();
     let count = items.len();
@@ -1759,13 +2032,15 @@ fn render_automation_activity_group(
                 .min_w_0()
                 .py(px(4.0))
                 .flex()
-                .items_start()
+                .relative()
                 .gap(px(10.0))
-                .child(render_activity_timeline_icon(
-                    LucideIcon::Zap,
+                .child(render_activity_row_connector(
                     connector_above,
-                    expanded,
+                    expanded || connector_below,
+                    13.0,
+                    33.0,
                 ))
+                .child(render_activity_timeline_icon(LucideIcon::Zap))
                 .child(
                     div()
                         .flex_1()
@@ -1801,14 +2076,20 @@ fn render_automation_activity_group(
                                         .text_color(fg_emphasis())
                                         .child("Automation updates"),
                                 )
-                                .child(subtle_badge(&format!("{count} updates")))
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .text_color(fg_subtle())
+                                        .child(format!("{count} updates")),
+                                )
                                 .when(has_attention, |el| {
-                                    el.child(tone_badge(
-                                        "needs attention",
-                                        danger(),
-                                        danger_muted(),
-                                        diff_remove_border(),
-                                    ))
+                                    el.child(
+                                        div()
+                                            .text_size(px(12.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(danger())
+                                            .child("needs attention"),
+                                    )
                                 }),
                         )
                         .child(
@@ -1821,10 +2102,8 @@ fn render_automation_activity_group(
                 ),
         )
         .when(expanded, |el| {
-            el.children(
-                items.into_iter().enumerate().map(|(index, item)| {
-                    render_activity_card(item, state, true, index + 1 < count)
-                }),
-            )
+            el.children(items.into_iter().enumerate().map(|(index, item)| {
+                render_activity_card(item, state, true, index + 1 < count || connector_below)
+            }))
         })
 }

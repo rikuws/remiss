@@ -2,13 +2,9 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::cache::CacheStore;
-use crate::code_tour::{
-    self, build_tour_request_key, review_thread_anchor, CodeTourProvider, CodeTourProviderStatus,
-    CodeTourSettings, DiffAnchor, GeneratedCodeTour,
-};
 use crate::diff::{build_diff_render_rows, find_parsed_diff_file, DiffRenderRow, ParsedDiffFile};
 use crate::difftastic::AdaptedDifftasticDiffFile;
 use crate::github::{
@@ -23,6 +19,10 @@ use crate::notifications;
 use crate::onboarding::{
     self, GhSetupStatus, OnboardingProgress, StartupWizardOptions, WizardSession, WizardStepTarget,
 };
+use crate::review_ai::{
+    self, DiffAnchor, ReviewAiProvider, ReviewAiProviderStatus, ReviewAiSettings,
+};
+use crate::review_anchors::review_thread_anchor;
 use crate::review_brief::ReviewBrief;
 use crate::review_partner::{GeneratedReviewPartnerContext, ReviewPartnerFocusTarget};
 use crate::review_queue::{default_review_file, ReviewQueue};
@@ -121,7 +121,6 @@ pub struct DetailState {
     pub review_brief_state: ReviewBriefState,
     pub review_partner_state: ReviewPartnerState,
     pub ai_stack_state: AiStackState,
-    pub tour_states: std::collections::HashMap<CodeTourProvider, CodeTourState>,
     pub file_content_states: std::collections::HashMap<String, FileContentState>,
     pub structural_diff_states: std::collections::HashMap<String, StructuralDiffFileState>,
     pub structural_diff_warmup: StructuralDiffWarmupState,
@@ -153,7 +152,6 @@ impl Default for DetailState {
             review_brief_state: ReviewBriefState::default(),
             review_partner_state: ReviewPartnerState::default(),
             ai_stack_state: AiStackState::default(),
-            tour_states: std::collections::HashMap::new(),
             file_content_states: std::collections::HashMap::new(),
             structural_diff_states: std::collections::HashMap::new(),
             structural_diff_warmup: StructuralDiffWarmupState::default(),
@@ -266,39 +264,6 @@ impl Default for AiStackState {
             stack: None,
             loading: false,
             generating: false,
-            error: None,
-            message: None,
-            success: false,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct CodeTourState {
-    pub request_key: Option<String>,
-    pub document: Option<GeneratedCodeTour>,
-    pub loading: bool,
-    pub generating: bool,
-    pub progress_summary: Option<String>,
-    pub progress_detail: Option<String>,
-    pub progress_log: Vec<String>,
-    pub progress_log_file_path: Option<String>,
-    pub error: Option<String>,
-    pub message: Option<String>,
-    pub success: bool,
-}
-
-impl Default for CodeTourState {
-    fn default() -> Self {
-        Self {
-            request_key: None,
-            document: None,
-            loading: false,
-            generating: false,
-            progress_summary: None,
-            progress_detail: None,
-            progress_log: Vec::new(),
-            progress_log_file_path: None,
             error: None,
             message: None,
             success: false,
@@ -471,8 +436,8 @@ pub struct ManagedLspSettingsState {
 }
 
 #[derive(Clone, Debug)]
-pub struct CodeTourSettingsState {
-    pub settings: CodeTourSettings,
+pub struct ReviewAiSettingsState {
+    pub settings: ReviewAiSettings,
     pub loading: bool,
     pub loaded: bool,
     pub error: Option<String>,
@@ -481,10 +446,10 @@ pub struct CodeTourSettingsState {
     pub background_error: Option<String>,
 }
 
-impl Default for CodeTourSettingsState {
+impl Default for ReviewAiSettingsState {
     fn default() -> Self {
         Self {
-            settings: CodeTourSettings::default(),
+            settings: ReviewAiSettings::default(),
             loading: false,
             loaded: false,
             error: None,
@@ -950,7 +915,7 @@ fn review_focus_line_row_index(
             .hunks
             .get(*hunk_index)
             .and_then(|hunk| hunk.lines.get(*line_index))
-            .map(|line| code_tour::line_matches_diff_anchor(line, Some(&anchor)))
+            .map(|line| crate::review_anchors::line_matches_diff_anchor(line, Some(&anchor)))
             .unwrap_or(false),
         _ => false,
     })
@@ -1040,6 +1005,8 @@ pub struct AppState {
     pub detail_states: std::collections::HashMap<String, DetailState>,
     pub unread_review_comment_ids: std::collections::BTreeSet<String>,
     pub expanded_automation_activity_keys: std::collections::BTreeSet<String>,
+    pub expanded_activity_history_keys: std::collections::BTreeSet<String>,
+    pub expanded_review_snapshot_keys: std::collections::BTreeSet<String>,
 
     // Bootstrap
     pub gh_available: bool,
@@ -1094,6 +1061,8 @@ pub struct AppState {
     pub review_line_action_mode: ReviewLineActionMode,
     pub active_review_line_drag_origin: Option<ReviewLineActionTarget>,
     pub active_review_line_drag_current: Option<ReviewLineActionTarget>,
+    pub hovered_diff_gutter_action_key: Option<String>,
+    pub diff_gutter_hover_suppressed_until: Option<Instant>,
     pub inline_comment_draft: String,
     pub inline_comment_preview: bool,
     pub inline_comment_loading: bool,
@@ -1123,17 +1092,15 @@ pub struct AppState {
     pub waypoint_spotlight_query: String,
     pub waypoint_spotlight_selected_index: usize,
 
-    // Code tours
-    pub code_tour_provider_statuses: Vec<CodeTourProviderStatus>,
-    pub code_tour_provider_statuses_loaded: bool,
-    pub code_tour_provider_loading: bool,
-    pub code_tour_provider_error: Option<String>,
-    pub automatic_tour_request_keys: std::collections::HashSet<String>,
+    // Review intelligence
+    pub review_ai_provider_statuses: Vec<ReviewAiProviderStatus>,
+    pub review_ai_provider_statuses_loaded: bool,
+    pub review_ai_provider_loading: bool,
+    pub review_ai_provider_error: Option<String>,
     pub automatic_brief_request_keys: std::collections::HashSet<String>,
     pub automatic_partner_request_keys: std::collections::HashSet<String>,
     pub settings_scroll_handle: ScrollHandle,
-    pub ai_tour_section_list_state: ListState,
-    pub code_tour_settings: CodeTourSettingsState,
+    pub review_ai_settings: ReviewAiSettingsState,
     pub managed_lsp_settings: ManagedLspSettingsState,
 }
 
@@ -1152,15 +1119,15 @@ impl AppState {
         let cache_path = cache.path().display().to_string();
         let unread_review_comment_ids =
             notifications::load_unread_review_comment_ids(&cache).unwrap_or_default();
-        let initial_code_tour_settings = match code_tour::load_code_tour_settings(&cache) {
-            Ok(settings) => CodeTourSettingsState {
+        let initial_review_ai_settings = match review_ai::load_review_ai_settings(&cache) {
+            Ok(settings) => ReviewAiSettingsState {
                 settings,
                 loaded: true,
-                ..CodeTourSettingsState::default()
+                ..ReviewAiSettingsState::default()
             },
-            Err(error) => CodeTourSettingsState {
+            Err(error) => ReviewAiSettingsState {
                 error: Some(error),
-                ..CodeTourSettingsState::default()
+                ..ReviewAiSettingsState::default()
             },
         };
         let local_review_repositories =
@@ -1201,6 +1168,8 @@ impl AppState {
             detail_states: std::collections::HashMap::new(),
             unread_review_comment_ids,
             expanded_automation_activity_keys: std::collections::BTreeSet::new(),
+            expanded_activity_history_keys: std::collections::BTreeSet::new(),
+            expanded_review_snapshot_keys: std::collections::BTreeSet::new(),
             gh_available: false,
             gh_version: None,
             cache_path,
@@ -1248,6 +1217,8 @@ impl AppState {
             review_line_action_mode: ReviewLineActionMode::Menu,
             active_review_line_drag_origin: None,
             active_review_line_drag_current: None,
+            hovered_diff_gutter_action_key: None,
+            diff_gutter_hover_suppressed_until: None,
             inline_comment_draft: String::new(),
             inline_comment_preview: false,
             inline_comment_loading: false,
@@ -1274,16 +1245,14 @@ impl AppState {
             waypoint_spotlight_open: false,
             waypoint_spotlight_query: String::new(),
             waypoint_spotlight_selected_index: 0,
-            code_tour_provider_statuses: Vec::new(),
-            code_tour_provider_statuses_loaded: false,
-            code_tour_provider_loading: false,
-            code_tour_provider_error: None,
-            automatic_tour_request_keys: std::collections::HashSet::new(),
+            review_ai_provider_statuses: Vec::new(),
+            review_ai_provider_statuses_loaded: false,
+            review_ai_provider_loading: false,
+            review_ai_provider_error: None,
             automatic_brief_request_keys: std::collections::HashSet::new(),
             automatic_partner_request_keys: std::collections::HashSet::new(),
             settings_scroll_handle: ScrollHandle::new(),
-            ai_tour_section_list_state: ListState::new(0, ListAlignment::Top, px(720.0)),
-            code_tour_settings: initial_code_tour_settings,
+            review_ai_settings: initial_review_ai_settings,
             managed_lsp_settings: ManagedLspSettingsState::default(),
         };
 
@@ -1662,13 +1631,6 @@ impl AppState {
         self.detail_states.get(key)
     }
 
-    pub fn active_tour_state(&self) -> Option<&CodeTourState> {
-        let detail_state = self.active_detail_state()?;
-        detail_state
-            .tour_states
-            .get(&self.code_tour_settings.settings.provider)
-    }
-
     pub fn active_review_brief_state(&self) -> Option<&ReviewBriefState> {
         Some(&self.active_detail_state()?.review_brief_state)
     }
@@ -1689,22 +1651,14 @@ impl AppState {
         self.active_detail_state()?.local_repository_status.as_ref()
     }
 
-    pub fn selected_tour_provider_status(&self) -> Option<&CodeTourProviderStatus> {
-        self.code_tour_provider_statuses
+    pub fn selected_review_ai_provider_status(&self) -> Option<&ReviewAiProviderStatus> {
+        self.review_ai_provider_statuses
             .iter()
-            .find(|status| status.provider == self.code_tour_settings.settings.provider)
+            .find(|status| status.provider == self.review_ai_settings.settings.provider)
     }
 
-    pub fn active_tour_request_key(&self) -> Option<String> {
-        let detail = self.active_detail()?;
-        Some(build_tour_request_key(
-            detail,
-            self.code_tour_settings.settings.provider,
-        ))
-    }
-
-    pub fn selected_tour_provider(&self) -> CodeTourProvider {
-        self.code_tour_settings.settings.provider
+    pub fn selected_review_ai_provider(&self) -> ReviewAiProvider {
+        self.review_ai_settings.settings.provider
     }
 
     pub fn section_count(&self, section: SectionId) -> i64 {
@@ -1782,11 +1736,9 @@ impl AppState {
 
         self.selected_file_path.clone().map(|file_path| {
             match session.map(|session| session.center_mode) {
-                Some(
-                    ReviewCenterMode::GuidedReview
-                    | ReviewCenterMode::AiTour
-                    | ReviewCenterMode::Stack,
-                ) => ReviewLocation::from_ai_tour(file_path, self.selected_diff_anchor.clone()),
+                Some(ReviewCenterMode::GuidedReview) => {
+                    ReviewLocation::from_guided_review(file_path, self.selected_diff_anchor.clone())
+                }
                 Some(ReviewCenterMode::StructuralDiff) => ReviewLocation::from_structural_diff(
                     file_path,
                     self.selected_diff_anchor.clone(),
@@ -1844,18 +1796,7 @@ impl AppState {
         self.ensure_active_selected_file_is_valid();
     }
 
-    pub fn navigate_to_review_location(
-        &mut self,
-        mut location: ReviewLocation,
-        push_history: bool,
-    ) {
-        if matches!(
-            location.mode,
-            ReviewCenterMode::AiTour | ReviewCenterMode::Stack
-        ) {
-            location.mode = ReviewCenterMode::GuidedReview;
-        }
-
+    pub fn navigate_to_review_location(&mut self, location: ReviewLocation, push_history: bool) {
         let previous = if push_history {
             self.current_review_location()
         } else {
@@ -1881,9 +1822,7 @@ impl AppState {
         match location.mode {
             ReviewCenterMode::SemanticDiff
             | ReviewCenterMode::StructuralDiff
-            | ReviewCenterMode::GuidedReview
-            | ReviewCenterMode::AiTour
-            | ReviewCenterMode::Stack => {
+            | ReviewCenterMode::GuidedReview => {
                 self.selected_file_path = Some(location.file_path.clone());
                 self.selected_diff_anchor = location.anchor.clone();
             }
@@ -2288,18 +2227,13 @@ impl AppState {
                     }
                 }
             }
-            ReviewCenterMode::GuidedReview | ReviewCenterMode::AiTour | ReviewCenterMode::Stack => {
-            }
+            ReviewCenterMode::GuidedReview => {}
         }
 
         self.reset_review_focus_scroll();
     }
 
     pub fn set_review_center_mode(&mut self, mode: ReviewCenterMode) {
-        let mode = match mode {
-            ReviewCenterMode::AiTour | ReviewCenterMode::Stack => ReviewCenterMode::GuidedReview,
-            mode => mode,
-        };
         if let Some(session) = self.active_review_session_mut() {
             session.center_mode = mode;
             if matches!(
@@ -2327,6 +2261,17 @@ impl AppState {
         for view_state in self.combined_diff_view_states.borrow().values() {
             *view_state.last_focus_key.borrow_mut() = None;
         }
+    }
+
+    pub fn suppress_diff_gutter_hover_for(&mut self, duration: Duration) {
+        self.hovered_diff_gutter_action_key = None;
+        self.diff_gutter_hover_suppressed_until = Some(Instant::now() + duration);
+    }
+
+    pub fn diff_gutter_hover_suppressed(&self) -> bool {
+        self.diff_gutter_hover_suppressed_until
+            .map(|until| until > Instant::now())
+            .unwrap_or(false)
     }
 
     pub fn set_review_scroll_focus(
@@ -2817,6 +2762,7 @@ mod tests {
             changed_files: 2,
             comments_count: 0,
             commits_count: 1,
+            commits: Vec::new(),
             created_at: "2026-05-13T00:00:00Z".to_string(),
             updated_at: "2026-05-13T00:00:00Z".to_string(),
             labels: Vec::new(),

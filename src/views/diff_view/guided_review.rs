@@ -17,7 +17,7 @@ pub(super) fn render_guided_review_view(
     let diff_center_mode = if guided_review_lens == ReviewGuideLens::Structural {
         ReviewCenterMode::StructuralDiff
     } else {
-        ReviewCenterMode::Stack
+        ReviewCenterMode::GuidedReview
     };
     let diff_layout = if guided_review_lens == ReviewGuideLens::Structural {
         structural_diff_layout
@@ -193,7 +193,7 @@ fn render_guided_review_panel(
             focus_record,
             focus_loading,
             focus_error,
-            app_state.selected_tour_provider(),
+            app_state.selected_review_ai_provider(),
             crate::review_session::sanitize_guided_review_panel_width(panel_width),
         )
     };

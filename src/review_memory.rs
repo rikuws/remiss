@@ -11,9 +11,9 @@ use crate::{
     agents::{self, jsonrepair::parse_tolerant, AgentJsonPromptOptions},
     cache::CacheStore,
     code_symbols::{declaration_symbol, strip_declaration_modifiers},
-    code_tour::{CodeTourProgressUpdate, CodeTourProvider},
     diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk},
     github::{PullRequestDetail, PullRequestReviewThread},
+    review_ai::{ReviewAiProgressUpdate, ReviewAiProvider},
 };
 
 const REVIEW_MEMORY_CACHE_PREFIX: &str = "review-memory-v1";
@@ -346,7 +346,7 @@ pub struct ReviewMemoryLlmExtractionDocument {
     pub version: String,
     pub repository: String,
     pub pr_number: i64,
-    pub provider: CodeTourProvider,
+    pub provider: ReviewAiProvider,
     pub code_version_key: String,
     pub generated_at_ms: i64,
     #[serde(default)]
@@ -360,7 +360,7 @@ pub struct ReviewMemoryLlmExtractionDocument {
 pub fn generate_llm_review_memory_candidates(
     cache: &CacheStore,
     detail: &PullRequestDetail,
-    provider: CodeTourProvider,
+    provider: ReviewAiProvider,
     working_directory: &str,
     force: bool,
 ) -> Result<ReviewMemoryLlmExtractionDocument, String> {
@@ -377,10 +377,10 @@ pub fn generate_llm_review_memory_candidates(
 pub fn generate_llm_review_memory_candidates_with_progress(
     cache: &CacheStore,
     detail: &PullRequestDetail,
-    provider: CodeTourProvider,
+    provider: ReviewAiProvider,
     working_directory: &str,
     force: bool,
-    on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
+    on_progress: &mut dyn FnMut(ReviewAiProgressUpdate),
 ) -> Result<ReviewMemoryLlmExtractionDocument, String> {
     if working_directory.trim().is_empty() {
         return Err("Review Memory extraction requires a local checkout path.".to_string());
@@ -630,7 +630,7 @@ fn entry_seen_in_current_pr(entry: &ReviewMemoryEntry, current_pr_number: i64) -
     entry.first_seen_pr == Some(current_pr_number) || entry.last_seen_pr == Some(current_pr_number)
 }
 
-fn llm_extraction_cache_key(detail: &PullRequestDetail, provider: CodeTourProvider) -> String {
+fn llm_extraction_cache_key(detail: &PullRequestDetail, provider: ReviewAiProvider) -> String {
     format!(
         "{}:{}:{}:{}:{}",
         REVIEW_MEMORY_LLM_EXTRACTION_PREFIX,
@@ -1776,6 +1776,7 @@ mod tests {
             changed_files: 1,
             comments_count: 0,
             commits_count: 1,
+            commits: Vec::new(),
             created_at: "2026-05-18T10:00:00Z".to_string(),
             updated_at: "2026-05-18T10:30:00Z".to_string(),
             labels: Vec::new(),

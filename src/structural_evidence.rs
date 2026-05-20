@@ -4,8 +4,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     cache::CacheStore,
-    code_tour::find_parsed_diff_file,
-    diff::{DiffLineKind, ParsedDiffHunk, ParsedDiffLine},
+    diff::{find_parsed_diff_file, DiffLineKind, ParsedDiffHunk, ParsedDiffLine},
+    difftastic::{
+        AdaptedDifftasticLineRange, AdaptedDifftasticOperationKind,
+        AdaptedDifftasticOperationSummary,
+    },
     github::PullRequestDetail,
     stacks::model::{ChangeAtom, ChangeAtomSource, ChangeRole, LineRange},
     structural_diff::{
@@ -15,7 +18,7 @@ use crate::{
     structural_diff_cache::load_cached_structural_diff,
 };
 
-pub const STRUCTURAL_EVIDENCE_VERSION: &str = "structural-evidence-v1";
+pub const STRUCTURAL_EVIDENCE_VERSION: &str = "structural-evidence-v2";
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -100,11 +103,35 @@ pub struct StructuralEvidenceFile {
     #[serde(default)]
     pub message: Option<String>,
     #[serde(default)]
+    pub operations: Vec<StructuralEvidenceOperation>,
+    #[serde(default)]
     pub changes: Vec<StructuralEvidenceChange>,
     #[serde(default)]
     pub matched_atom_ids: Vec<String>,
     #[serde(default)]
     pub unmatched_hunk_count: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StructuralEvidenceOperation {
+    pub kind: StructuralEvidenceOperationKind,
+    #[serde(default)]
+    pub old_range: Option<LineRange>,
+    #[serde(default)]
+    pub new_range: Option<LineRange>,
+    pub changed_line_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum StructuralEvidenceOperationKind {
+    Created,
+    Deleted,
+    Modified,
+    MovedOrReordered,
+    ImportOnly,
+    FallbackText,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -143,6 +170,7 @@ pub fn build_structural_evidence_pack(
                 previous_path: parsed.and_then(|parsed| parsed.previous_path.clone()),
                 status: StructuralEvidenceStatus::Unavailable,
                 message: Some("Structural diff request could not be built.".to_string()),
+                operations: Vec::new(),
                 changes: Vec::new(),
                 matched_atom_ids: atoms_for_file(atoms, &file.path),
                 unmatched_hunk_count: 0,
@@ -164,6 +192,7 @@ pub fn build_structural_evidence_pack(
                     &file.path,
                     atoms,
                     diff.parsed_file.hunks,
+                    diff.operations,
                 ));
             }
             StructuralDiffBuildResult::TerminalError(message) => {
@@ -172,6 +201,7 @@ pub fn build_structural_evidence_pack(
                     previous_path: request.previous_path,
                     status: StructuralEvidenceStatus::Unavailable,
                     message: Some(message),
+                    operations: Vec::new(),
                     changes: Vec::new(),
                     matched_atom_ids: atoms_for_file(atoms, &file.path),
                     unmatched_hunk_count: 0,
@@ -187,6 +217,7 @@ pub fn build_structural_evidence_pack(
                     previous_path: request.previous_path,
                     status: StructuralEvidenceStatus::Unavailable,
                     message: Some(message),
+                    operations: Vec::new(),
                     changes: Vec::new(),
                     matched_atom_ids: atoms_for_file(atoms, &file.path),
                     unmatched_hunk_count: 0,
@@ -206,6 +237,7 @@ pub fn evidence_file_from_diff(
     path: &str,
     atoms: &[ChangeAtom],
     hunks: Vec<ParsedDiffHunk>,
+    operations: Vec<AdaptedDifftasticOperationSummary>,
 ) -> StructuralEvidenceFile {
     let mut changes = Vec::new();
     let mut matched_atom_ids = Vec::<String>::new();
@@ -260,9 +292,52 @@ pub fn evidence_file_from_diff(
         previous_path: None,
         status,
         message: None,
+        operations: structural_operations_from_adapted(&operations),
         changes,
         matched_atom_ids,
         unmatched_hunk_count,
+    }
+}
+
+fn structural_operations_from_adapted(
+    operations: &[AdaptedDifftasticOperationSummary],
+) -> Vec<StructuralEvidenceOperation> {
+    operations
+        .iter()
+        .map(|operation| StructuralEvidenceOperation {
+            kind: structural_operation_kind(operation.kind),
+            old_range: operation
+                .lhs_line_range
+                .map(structural_range_from_difftastic_range),
+            new_range: operation
+                .rhs_line_range
+                .map(structural_range_from_difftastic_range),
+            changed_line_count: operation.changed_line_count,
+        })
+        .collect()
+}
+
+fn structural_operation_kind(
+    kind: AdaptedDifftasticOperationKind,
+) -> StructuralEvidenceOperationKind {
+    match kind {
+        AdaptedDifftasticOperationKind::Created => StructuralEvidenceOperationKind::Created,
+        AdaptedDifftasticOperationKind::Deleted => StructuralEvidenceOperationKind::Deleted,
+        AdaptedDifftasticOperationKind::Modified => StructuralEvidenceOperationKind::Modified,
+        AdaptedDifftasticOperationKind::MovedOrReordered => {
+            StructuralEvidenceOperationKind::MovedOrReordered
+        }
+        AdaptedDifftasticOperationKind::ImportOnly => StructuralEvidenceOperationKind::ImportOnly,
+        AdaptedDifftasticOperationKind::FallbackText => {
+            StructuralEvidenceOperationKind::FallbackText
+        }
+    }
+}
+
+fn structural_range_from_difftastic_range(range: AdaptedDifftasticLineRange) -> LineRange {
+    LineRange {
+        start: i64::from(range.start_line) + 1,
+        end: i64::from(range.end_line) + 1,
     }
 }
 
@@ -376,7 +451,7 @@ mod tests {
             ],
         };
 
-        let file = evidence_file_from_diff("src/lib.rs", &[atom], vec![hunk]);
+        let file = evidence_file_from_diff("src/lib.rs", &[atom], vec![hunk], Vec::new());
 
         assert_eq!(file.status, StructuralEvidenceStatus::Full);
         assert_eq!(file.changes[0].atom_ids, vec!["atom-a"]);
@@ -395,7 +470,7 @@ mod tests {
             lines: vec![line(DiffLineKind::Addition, None, Some(10), "new")],
         };
 
-        let file = evidence_file_from_diff("src/lib.rs", &[atom], vec![hunk]);
+        let file = evidence_file_from_diff("src/lib.rs", &[atom], vec![hunk], Vec::new());
 
         assert_eq!(file.status, StructuralEvidenceStatus::Partial);
         assert_eq!(file.unmatched_hunk_count, 1);
@@ -416,10 +491,38 @@ mod tests {
             lines: vec![line(DiffLineKind::Addition, None, Some(10), "new")],
         };
 
-        let file = evidence_file_from_diff("src/lib.rs", &[atom], vec![hunk]);
+        let file = evidence_file_from_diff("src/lib.rs", &[atom], vec![hunk], Vec::new());
 
         assert_eq!(file.status, StructuralEvidenceStatus::Partial);
         assert!(file.matched_atom_ids.is_empty());
+    }
+
+    #[test]
+    fn includes_difftastic_operation_summaries() {
+        let file = evidence_file_from_diff(
+            "src/lib.rs",
+            &[],
+            Vec::new(),
+            vec![AdaptedDifftasticOperationSummary {
+                kind: AdaptedDifftasticOperationKind::ImportOnly,
+                lhs_line_range: None,
+                rhs_line_range: Some(AdaptedDifftasticLineRange {
+                    start_line: 2,
+                    end_line: 3,
+                }),
+                changed_line_count: 2,
+            }],
+        );
+
+        assert_eq!(file.operations.len(), 1);
+        assert_eq!(
+            file.operations[0].kind,
+            StructuralEvidenceOperationKind::ImportOnly
+        );
+        assert_eq!(
+            file.operations[0].new_range,
+            Some(LineRange { start: 3, end: 4 })
+        );
     }
 
     fn atom(id: &str, path: &str, new_range: Option<LineRange>) -> ChangeAtom {

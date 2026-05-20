@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use crate::{
     code_symbols::{declaration_symbol_name, strip_declaration_modifiers, DECLARATION_PATTERNS},
-    code_tour::DiffAnchor,
     diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk},
     github::{PullRequestFile, PullRequestReviewThread},
+    review_ai::DiffAnchor,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

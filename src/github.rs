@@ -13,6 +13,7 @@ const WORKSPACE_CACHE_KEY: &str = "workspace-snapshot-v3";
 const AUTH_STATE_CACHE_KEY: &str = "auth-state-v1";
 const GITHUB_GRAPHQL_PAGE_SIZE: i64 = 100;
 const GITHUB_SEARCH_RESULT_LIMIT: usize = 1_000;
+const OVERSIZED_DIFF_UNAVAILABLE_REASON: &str = "GitHub did not return the unified diff because this pull request is too large; automatic review intelligence will wait until the pull request changes.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthState {
@@ -144,6 +145,22 @@ pub struct PullRequestComment {
     pub url: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PullRequestCommit {
+    pub id: String,
+    pub oid: String,
+    pub abbreviated_oid: String,
+    pub message_headline: String,
+    pub committed_date: String,
+    #[serde(default)]
+    pub author_name: Option<String>,
+    #[serde(default)]
+    pub author_login: Option<String>,
+    #[serde(default)]
+    pub author_avatar_url: Option<String>,
+    pub url: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PullRequestReviewThread {
     pub id: String,
@@ -209,6 +226,10 @@ pub struct PullRequestDataCompleteness {
     pub review_threads: ConnectionCompleteness,
     pub review_thread_comments: ConnectionCompleteness,
     pub files: ConnectionCompleteness,
+    #[serde(default)]
+    pub diff: ConnectionCompleteness,
+    #[serde(default)]
+    pub commits: ConnectionCompleteness,
 }
 
 impl PullRequestDataCompleteness {
@@ -220,6 +241,8 @@ impl PullRequestDataCompleteness {
             && self.review_threads.is_complete
             && self.review_thread_comments.is_complete
             && self.files.is_complete
+            && self.diff.is_complete
+            && self.commits.is_complete
     }
 
     pub fn warnings(&self) -> Vec<String> {
@@ -231,6 +254,8 @@ impl PullRequestDataCompleteness {
             ("review threads", &self.review_threads),
             ("thread comments", &self.review_thread_comments),
             ("files", &self.files),
+            ("diff files", &self.diff),
+            ("commits", &self.commits),
         ]
         .into_iter()
         .filter_map(|(label, completeness)| {
@@ -263,6 +288,8 @@ impl Default for PullRequestDataCompleteness {
             review_threads: ConnectionCompleteness::default(),
             review_thread_comments: ConnectionCompleteness::default(),
             files: ConnectionCompleteness::default(),
+            diff: ConnectionCompleteness::default(),
+            commits: ConnectionCompleteness::default(),
         }
     }
 }
@@ -298,6 +325,8 @@ pub struct PullRequestDetail {
     pub reviewer_avatar_urls: BTreeMap<String, String>,
     #[serde(default)]
     pub comments: Vec<PullRequestComment>,
+    #[serde(default)]
+    pub commits: Vec<PullRequestCommit>,
     pub latest_reviews: Vec<PullRequestReview>,
     pub review_threads: Vec<PullRequestReviewThread>,
     #[serde(default)]
@@ -1241,7 +1270,26 @@ fn fetch_pull_request_detail(repository: &str, number: i64) -> Result<PullReques
                   author { login avatarUrl }
                 }
               }
-              commits { totalCount }
+              commits(first: $count) {
+                totalCount
+                pageInfo { hasNextPage endCursor }
+                nodes {
+                  id
+                  commit {
+                    id
+                    oid
+                    abbreviatedOid
+                    messageHeadline
+                    committedDate
+                    url
+                    author {
+                      name
+                      avatarUrl
+                      user { login avatarUrl }
+                    }
+                  }
+                }
+              }
               labels(first: $count) {
                 totalCount
                 pageInfo { hasNextPage endCursor }
@@ -1252,7 +1300,7 @@ fn fetch_pull_request_detail(repository: &str, number: i64) -> Result<PullReques
                 pageInfo { hasNextPage endCursor }
                 nodes { requestedReviewer { ... on User { login avatarUrl } ... on Team { slug avatarUrl } } }
               }
-              latestReviews(first: $count) {
+              latestReviews: reviews(first: $count, states: [APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED]) {
                 totalCount
                 pageInfo { hasNextPage endCursor }
                 nodes { id state body submittedAt author { login avatarUrl } }
@@ -1327,27 +1375,15 @@ fn fetch_pull_request_detail(repository: &str, number: i64) -> Result<PullReques
         .and_then(|v| v.get("pullRequest"))
         .ok_or_else(|| format!("Pull request {repository}#{number} was not found."))?;
 
-    let diff_output = gh::run_owned(vec![
-        "pr".to_string(),
-        "diff".to_string(),
-        number.to_string(),
-        "--repo".to_string(),
-        repository.to_string(),
-    ])?;
-
-    if diff_output.exit_code != Some(0) {
-        return Err(combine_process_error(
-            diff_output,
-            &format!("Failed to fetch diff for {repository}#{number}"),
-        ));
-    }
-
-    let parsed_diff = crate::diff::parse_unified_diff(&diff_output.stdout);
-    let raw_diff = diff_output.stdout;
+    let diff_fetch = fetch_pull_request_diff(repository, number, i64_field(pr, "changedFiles"))?;
+    let raw_diff = diff_fetch.raw_diff;
+    let parsed_diff = diff_fetch.parsed_diff;
+    let diff_completeness = diff_fetch.completeness;
 
     let author = pr.get("author");
     let null = Value::Null;
     let comments_connection = pr.get("comments").unwrap_or(&null);
+    let commits_connection = pr.get("commits").unwrap_or(&null);
     let labels_connection = pr.get("labels").unwrap_or(&null);
     let review_requests_connection = pr.get("reviewRequests").unwrap_or(&null);
     let latest_reviews_connection = pr.get("latestReviews").unwrap_or(&null);
@@ -1365,6 +1401,18 @@ fn fetch_pull_request_detail(repository: &str, number: i64) -> Result<PullReques
         comments_connection,
         &mut comments,
         map_pull_request_comment,
+    )?;
+
+    let mut commits = map_connection_items(commits_connection, map_pull_request_commit);
+    let commits_completeness = append_pull_request_connection_pages(
+        owner,
+        name,
+        number,
+        "commits",
+        pull_request_commits_selection(),
+        commits_connection,
+        &mut commits,
+        map_pull_request_commit,
     )?;
 
     let mut labels = map_connection_items(labels_connection, map_label_name);
@@ -1404,6 +1452,7 @@ fn fetch_pull_request_detail(repository: &str, number: i64) -> Result<PullReques
         &mut latest_reviews,
         map_pull_request_review,
     )?;
+    latest_reviews = latest_reviews_by_author(latest_reviews);
 
     let viewer_pending_review =
         map_connection_items(pending_reviews_connection, map_pending_pull_request_review)
@@ -1452,6 +1501,8 @@ fn fetch_pull_request_detail(repository: &str, number: i64) -> Result<PullReques
         review_threads: review_threads_completeness,
         review_thread_comments: review_thread_comments_completeness,
         files: files_completeness,
+        diff: diff_completeness,
+        commits: commits_completeness,
     };
 
     Ok(PullRequestDetail {
@@ -1496,6 +1547,7 @@ fn fetch_pull_request_detail(repository: &str, number: i64) -> Result<PullReques
         updated_at: str_field(pr, "updatedAt"),
         labels,
         comments,
+        commits,
         reviewers,
         reviewer_avatar_urls,
         latest_reviews,
@@ -1506,6 +1558,74 @@ fn fetch_pull_request_detail(repository: &str, number: i64) -> Result<PullReques
         parsed_diff,
         data_completeness,
     })
+}
+
+#[derive(Debug, Clone)]
+struct PullRequestDiffFetch {
+    raw_diff: String,
+    parsed_diff: Vec<ParsedDiffFile>,
+    completeness: ConnectionCompleteness,
+}
+
+fn fetch_pull_request_diff(
+    repository: &str,
+    number: i64,
+    changed_files: i64,
+) -> Result<PullRequestDiffFetch, String> {
+    let diff_output = gh::run_owned(vec![
+        "pr".to_string(),
+        "diff".to_string(),
+        number.to_string(),
+        "--repo".to_string(),
+        repository.to_string(),
+    ])?;
+
+    if diff_output.exit_code == Some(0) {
+        let parsed_diff = crate::diff::parse_unified_diff(&diff_output.stdout);
+        return Ok(PullRequestDiffFetch {
+            raw_diff: diff_output.stdout,
+            parsed_diff,
+            completeness: complete_connection_for_count(changed_files),
+        });
+    }
+
+    let message = combine_process_error(
+        diff_output,
+        &format!("Failed to fetch diff for {repository}#{number}"),
+    );
+    if is_non_retryable_diff_unavailable_error(&message) {
+        return Ok(PullRequestDiffFetch {
+            raw_diff: String::new(),
+            parsed_diff: Vec::new(),
+            completeness: ConnectionCompleteness::from_counts(
+                0,
+                changed_files.max(0),
+                Some(OVERSIZED_DIFF_UNAVAILABLE_REASON.to_string()),
+            ),
+        });
+    }
+
+    Err(message)
+}
+
+fn complete_connection_for_count(total_count: i64) -> ConnectionCompleteness {
+    ConnectionCompleteness::from_counts(
+        usize::try_from(total_count.max(0)).unwrap_or(usize::MAX),
+        total_count.max(0),
+        None,
+    )
+}
+
+fn is_non_retryable_diff_unavailable_error(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    let mentions_diff = normalized.contains("diff");
+    let mentions_pull_request = normalized.contains("pull request");
+
+    (mentions_diff || mentions_pull_request)
+        && (normalized.contains("too large")
+            || normalized.contains("too many files")
+            || normalized.contains("taking too long to generate")
+            || normalized.contains("took too long to generate"))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1757,6 +1877,31 @@ fn pull_request_comments_selection() -> &'static str {
     "#
 }
 
+fn pull_request_commits_selection() -> &'static str {
+    r#"
+      commits(first: $count, after: $cursor) {
+        totalCount
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          commit {
+            id
+            oid
+            abbreviatedOid
+            messageHeadline
+            committedDate
+            url
+            author {
+              name
+              avatarUrl
+              user { login avatarUrl }
+            }
+          }
+        }
+      }
+    "#
+}
+
 fn pull_request_labels_selection() -> &'static str {
     r#"
       labels(first: $count, after: $cursor) {
@@ -1784,7 +1929,7 @@ fn pull_request_review_requests_selection() -> &'static str {
 
 fn pull_request_latest_reviews_selection() -> &'static str {
     r#"
-      latestReviews(first: $count, after: $cursor) {
+      latestReviews: reviews(first: $count, after: $cursor, states: [APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED]) {
         totalCount
         pageInfo { hasNextPage endCursor }
         nodes { id state body submittedAt author { login avatarUrl } }
@@ -2033,6 +2178,50 @@ fn map_pull_request_comment(node: &Value) -> Option<PullRequestComment> {
     })
 }
 
+fn map_pull_request_commit(node: &Value) -> Option<PullRequestCommit> {
+    let commit = node.get("commit")?;
+    let author = commit.get("author");
+    let author_user = author.and_then(|author| author.get("user"));
+    let author_login = author_user
+        .and_then(|user| user.get("login"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let author_name = author
+        .and_then(|author| author.get("name"))
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| author_login.clone());
+    let author_avatar_url = author_user
+        .and_then(|user| user.get("avatarUrl"))
+        .and_then(Value::as_str)
+        .filter(|url| !url.trim().is_empty())
+        .or_else(|| {
+            author
+                .and_then(|author| author.get("avatarUrl"))
+                .and_then(Value::as_str)
+                .filter(|url| !url.trim().is_empty())
+        })
+        .map(str::to_string);
+
+    Some(PullRequestCommit {
+        id: commit.get("id")?.as_str()?.to_string(),
+        oid: str_field(commit, "oid"),
+        abbreviated_oid: str_field(commit, "abbreviatedOid"),
+        message_headline: str_field(commit, "messageHeadline"),
+        committed_date: str_field(commit, "committedDate"),
+        author_name,
+        author_login,
+        author_avatar_url,
+        url: node
+            .get("url")
+            .and_then(Value::as_str)
+            .or_else(|| commit.get("url").and_then(Value::as_str))
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
 fn map_label_name(node: &Value) -> Option<String> {
     node.get("name").and_then(Value::as_str).map(str::to_string)
 }
@@ -2058,6 +2247,36 @@ fn split_reviewer_items(
         }
     }
     (reviewers, avatar_urls)
+}
+
+fn latest_reviews_by_author(reviews: Vec<PullRequestReview>) -> Vec<PullRequestReview> {
+    let mut latest = BTreeMap::<String, PullRequestReview>::new();
+
+    for review in reviews {
+        let author = review.author_login.trim().to_string();
+        if author.is_empty() {
+            continue;
+        }
+
+        let replace = latest
+            .get(&author)
+            .map(|existing| review_submitted_after(&review, existing))
+            .unwrap_or(true);
+        if replace {
+            latest.insert(author, review);
+        }
+    }
+
+    latest.into_values().collect()
+}
+
+fn review_submitted_after(left: &PullRequestReview, right: &PullRequestReview) -> bool {
+    match (left.submitted_at.as_deref(), right.submitted_at.as_deref()) {
+        (Some(left), Some(right)) => left >= right,
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        (None, None) => true,
+    }
 }
 
 fn map_pull_request_review(node: &Value) -> Option<PullRequestReview> {
@@ -2394,6 +2613,95 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn maps_pull_request_commit_with_linked_user_author() {
+        let node = json!({
+            "id": "PRC_1",
+            "commit": {
+                "id": "C_kwDOcommit",
+                "oid": "5f34fac6c995fdf1197dc62bfe2cd0f88360baca",
+                "abbreviatedOid": "5f34fac",
+                "messageHeadline": "Split local Git actions out of root view",
+                "committedDate": "2026-05-18T06:28:00Z",
+                "url": "https://github.com/acme/repo/commit/5f34fac",
+                "author": {
+                    "name": "Riku Wikman",
+                    "avatarUrl": "https://example.com/git-avatar.png",
+                    "user": {
+                        "login": "rikuws",
+                        "avatarUrl": "https://example.com/user-avatar.png"
+                    }
+                }
+            }
+        });
+
+        let commit = map_pull_request_commit(&node).expect("commit");
+
+        assert_eq!(commit.id, "C_kwDOcommit");
+        assert_eq!(commit.oid, "5f34fac6c995fdf1197dc62bfe2cd0f88360baca");
+        assert_eq!(commit.abbreviated_oid, "5f34fac");
+        assert_eq!(
+            commit.message_headline,
+            "Split local Git actions out of root view"
+        );
+        assert_eq!(commit.committed_date, "2026-05-18T06:28:00Z");
+        assert_eq!(commit.author_name.as_deref(), Some("Riku Wikman"));
+        assert_eq!(commit.author_login.as_deref(), Some("rikuws"));
+        assert_eq!(
+            commit.author_avatar_url.as_deref(),
+            Some("https://example.com/user-avatar.png")
+        );
+        assert_eq!(commit.url, "https://github.com/acme/repo/commit/5f34fac");
+    }
+
+    #[test]
+    fn maps_pull_request_commit_author_without_linked_user() {
+        let node = json!({
+            "id": "PRC_2",
+            "commit": {
+                "id": "C_kwDOcommit2",
+                "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "abbreviatedOid": "aaaaaaa",
+                "messageHeadline": "Initial implementation",
+                "committedDate": "2026-05-18T05:00:00Z",
+                "url": "https://github.com/acme/repo/commit/aaaaaaa",
+                "author": {
+                    "name": "Local Author",
+                    "avatarUrl": "https://example.com/git-avatar.png",
+                    "user": null
+                }
+            }
+        });
+
+        let commit = map_pull_request_commit(&node).expect("commit");
+
+        assert_eq!(commit.author_name.as_deref(), Some("Local Author"));
+        assert_eq!(commit.author_login, None);
+        assert_eq!(
+            commit.author_avatar_url.as_deref(),
+            Some("https://example.com/git-avatar.png")
+        );
+    }
+
+    #[test]
+    fn normalizes_submitted_reviews_to_latest_by_author() {
+        let latest = latest_reviews_by_author(vec![
+            pull_request_review("alice", "CHANGES_REQUESTED", Some("2026-04-14T10:00:00Z")),
+            pull_request_review("bob", "COMMENTED", Some("2026-04-14T12:00:00Z")),
+            pull_request_review("alice", "APPROVED", Some("2026-04-14T11:00:00Z")),
+            pull_request_review("carol", "DISMISSED", Some("2026-04-14T09:00:00Z")),
+        ]);
+
+        let by_author = latest
+            .iter()
+            .map(|review| (review.author_login.as_str(), review.state.as_str()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        assert_eq!(by_author.get("alice").copied(), Some("APPROVED"));
+        assert_eq!(by_author.get("bob").copied(), Some("COMMENTED"));
+        assert_eq!(by_author.get("carol").copied(), Some("DISMISSED"));
+    }
+
+    #[test]
     fn maps_viewer_pending_review_comments_and_permissions() {
         let node = json!({
             "id": "PRR_pending",
@@ -2469,5 +2777,33 @@ mod tests {
         });
 
         assert_eq!(review_thread_reply_comment_id(&response), None);
+    }
+
+    #[test]
+    fn classifies_oversized_diff_fetch_errors_as_non_retryable() {
+        assert!(is_non_retryable_diff_unavailable_error(
+            "Failed to fetch diff for acme/repo#7: GraphQL: This diff is too large to display."
+        ));
+        assert!(is_non_retryable_diff_unavailable_error(
+            "Failed to fetch diff for acme/repo#7: pull request contains too many files"
+        ));
+        assert!(!is_non_retryable_diff_unavailable_error(
+            "Failed to fetch diff for acme/repo#7: HTTP 502: gateway timeout"
+        ));
+    }
+
+    fn pull_request_review(
+        author_login: &str,
+        state: &str,
+        submitted_at: Option<&str>,
+    ) -> PullRequestReview {
+        PullRequestReview {
+            id: None,
+            author_login: author_login.to_string(),
+            author_avatar_url: None,
+            state: state.to_string(),
+            body: String::new(),
+            submitted_at: submitted_at.map(str::to_string),
+        }
     }
 }

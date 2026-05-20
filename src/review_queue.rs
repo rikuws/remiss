@@ -1,6 +1,6 @@
 use crate::{
-    code_tour::DiffAnchor,
     github::{PullRequestDetail, PullRequestFile},
+    review_ai::DiffAnchor,
     semantic_diff::{build_semantic_diff_file, SemanticChangeKind},
 };
 
@@ -207,6 +207,7 @@ mod tests {
             changed_files: 2,
             comments_count: 0,
             commits_count: 1,
+            commits: Vec::new(),
             created_at: String::new(),
             updated_at: String::new(),
             labels: Vec::new(),

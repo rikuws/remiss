@@ -4,14 +4,15 @@ use std::time::Duration;
 use gpui::prelude::*;
 use gpui::*;
 
-use crate::code_tour::{review_thread_anchor, CodeTourProvider, CodeTourProviderStatus};
 use crate::github::{
-    self, PullRequestComment, PullRequestReview, PullRequestReviewComment, PullRequestReviewThread,
-    ReviewAction,
+    self, PullRequestComment, PullRequestCommit, PullRequestReview, PullRequestReviewComment,
+    PullRequestReviewThread, ReviewAction,
 };
 use crate::icons::{lucide_icon, LucideIcon};
 use crate::markdown::render_markdown;
 use crate::notifications;
+use crate::review_ai::{ReviewAiProvider, ReviewAiProviderStatus};
+use crate::review_anchors::review_thread_anchor;
 use crate::review_brief::ReviewBrief;
 use crate::review_intelligence::{self, ReviewIntelligenceScope};
 use crate::review_session::ReviewCenterMode;
@@ -40,11 +41,30 @@ struct ReviewStatusSummary {
     changes_requested: Vec<String>,
     commented: Vec<String>,
     waiting: Vec<String>,
+    has_unattributed_changes_requested: bool,
+}
+
+impl ReviewStatusSummary {
+    fn changes_requested_display_value(&self) -> String {
+        if self.changes_requested.is_empty() && self.has_unattributed_changes_requested {
+            "1+".to_string()
+        } else {
+            self.changes_requested.len().to_string()
+        }
+    }
+
+    fn changes_requested_floor_count(&self) -> usize {
+        if self.changes_requested.is_empty() && self.has_unattributed_changes_requested {
+            1
+        } else {
+            self.changes_requested.len()
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct OwnPrFeedbackItem {
-    anchor: crate::code_tour::DiffAnchor,
+    anchor: crate::review_ai::DiffAnchor,
     file_path: String,
     location_label: String,
     author_login: String,
@@ -61,7 +81,7 @@ struct OwnPrFeedbackItem {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ThreadDigestItem {
-    anchor: crate::code_tour::DiffAnchor,
+    anchor: crate::review_ai::DiffAnchor,
     file_path: String,
     location_label: String,
     latest_author: String,
@@ -91,6 +111,7 @@ struct ParticipantItem {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ActivityItemKind {
     Conversation,
+    Commit,
     Review,
     Thread,
 }
@@ -107,7 +128,7 @@ struct ActivityItem {
     status_code: Option<String>,
     location_label: Option<String>,
     file_path: Option<String>,
-    anchor: Option<crate::code_tour::DiffAnchor>,
+    anchor: Option<crate::review_ai::DiffAnchor>,
     thread_comments: Vec<ActivityThreadComment>,
 }
 
@@ -120,9 +141,16 @@ struct ActivityThreadComment {
     body: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CommitFreshnessSummary {
+    commits_since_activity: usize,
+    latest_commit_at: String,
+}
+
 fn summarize_review_status(
     reviewers: &[String],
     latest_reviews: &[PullRequestReview],
+    review_decision: Option<&str>,
 ) -> ReviewStatusSummary {
     let mut latest_by_author = BTreeMap::<String, &PullRequestReview>::new();
     for review in latest_reviews {
@@ -130,7 +158,13 @@ fn summarize_review_status(
         if author.is_empty() {
             continue;
         }
-        latest_by_author.insert(author.to_string(), review);
+        let replace = latest_by_author
+            .get(author)
+            .map(|existing| review_submitted_after(review, existing))
+            .unwrap_or(true);
+        if replace {
+            latest_by_author.insert(author.to_string(), review);
+        }
     }
 
     let mut approved = BTreeSet::new();
@@ -145,11 +179,16 @@ fn summarize_review_status(
             "CHANGES_REQUESTED" => {
                 changes_requested.insert(author);
             }
-            _ => {
+            "COMMENTED" => {
                 commented.insert(author);
             }
+            "DISMISSED" => {}
+            _ => {}
         }
     }
+
+    let has_unattributed_changes_requested =
+        changes_requested.is_empty() && review_decision == Some("CHANGES_REQUESTED");
 
     let mut waiting = BTreeSet::new();
     for reviewer in reviewers {
@@ -170,6 +209,16 @@ fn summarize_review_status(
         changes_requested: changes_requested.into_iter().collect(),
         commented: commented.into_iter().collect(),
         waiting: waiting.into_iter().collect(),
+        has_unattributed_changes_requested,
+    }
+}
+
+fn review_submitted_after(left: &PullRequestReview, right: &PullRequestReview) -> bool {
+    match (left.submitted_at.as_deref(), right.submitted_at.as_deref()) {
+        (Some(left), Some(right)) => left >= right,
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        (None, None) => true,
     }
 }
 
@@ -233,7 +282,7 @@ fn own_pr_feedback_item(
 
 fn feedback_location_label(
     thread: &PullRequestReviewThread,
-    anchor: &crate::code_tour::DiffAnchor,
+    anchor: &crate::review_ai::DiffAnchor,
 ) -> String {
     match anchor.line.or(thread.line).or(thread.original_line) {
         Some(line) => format!("{}:{}", thread.path, line),
@@ -1390,31 +1439,8 @@ fn subtle_badge(label: &str) -> impl IntoElement {
     tone_badge(label, fg_muted(), bg_emphasis(), border_muted())
 }
 
-fn activity_kind_badge(kind: &ActivityItemKind) -> AnyElement {
-    match kind {
-        ActivityItemKind::Conversation => {
-            tone_badge("comment", accent(), accent_muted(), accent()).into_any_element()
-        }
-        ActivityItemKind::Review => {
-            tone_badge("review", fg_emphasis(), bg_emphasis(), border_muted()).into_any_element()
-        }
-        ActivityItemKind::Thread => {
-            tone_badge("thread", fg_muted(), bg_emphasis(), border_muted()).into_any_element()
-        }
-    }
-}
-
 fn activity_location_text(location: &str) -> AnyElement {
     overflow_safe_code_label(location, fg_subtle()).into_any_element()
-}
-
-fn activity_status_badge(item: &ActivityItem, status: &str) -> AnyElement {
-    if let Some(code) = item.status_code.as_deref() {
-        let (fg, bg, border) = review_state_colors(code);
-        return tone_badge(status, fg, bg, border).into_any_element();
-    }
-
-    subtle_badge(status).into_any_element()
 }
 
 fn pull_request_state_badge(state: &str, is_draft: bool) -> AnyElement {
@@ -1486,7 +1512,7 @@ fn build_own_pr_summary_text(
         .count();
     let waiting = review_status.waiting.len();
     let approvals = review_status.approved.len();
-    let changes_requested = review_status.changes_requested.len();
+    let changes_requested = review_status.changes_requested_floor_count();
 
     format!(
         "{} {}, {} {}, {} {}, and {} {}.",
@@ -1523,7 +1549,7 @@ fn build_review_snapshot_text(
         .filter(|item| !item.is_resolved)
         .count();
     let responded = review_status.approved.len()
-        + review_status.changes_requested.len()
+        + review_status.changes_requested_floor_count()
         + review_status.commented.len();
 
     format!(
@@ -1621,6 +1647,7 @@ fn summarize_recent_activity(
         .map(activity_item_for_comment)
         .collect::<Vec<_>>();
 
+    items.extend(detail.commits.iter().map(activity_item_for_commit));
     items.extend(detail.latest_reviews.iter().map(activity_item_for_review));
     items.extend(
         detail
@@ -1630,12 +1657,93 @@ fn summarize_recent_activity(
     );
 
     items.sort_by(|left, right| {
-        right
-            .timestamp
-            .cmp(&left.timestamp)
+        left.timestamp
+            .cmp(&right.timestamp)
             .then_with(|| left.title.cmp(&right.title))
     });
     items
+}
+
+fn summarize_commit_freshness(
+    detail: &github::PullRequestDetail,
+    viewer_login: &str,
+) -> Option<CommitFreshnessSummary> {
+    let latest_activity_at = latest_viewer_review_activity_at(detail, viewer_login)?;
+    let commits_after_activity = detail
+        .commits
+        .iter()
+        .filter(|commit| {
+            !commit.committed_date.is_empty()
+                && commit.committed_date.as_str() > latest_activity_at.as_str()
+        })
+        .collect::<Vec<_>>();
+
+    let latest_commit_at = commits_after_activity
+        .iter()
+        .map(|commit| commit.committed_date.as_str())
+        .max()?;
+
+    Some(CommitFreshnessSummary {
+        commits_since_activity: commits_after_activity.len(),
+        latest_commit_at: latest_commit_at.to_string(),
+    })
+}
+
+fn latest_viewer_review_activity_at(
+    detail: &github::PullRequestDetail,
+    viewer_login: &str,
+) -> Option<String> {
+    let viewer_login = viewer_login.trim();
+    if viewer_login.is_empty() {
+        return None;
+    }
+
+    let mut latest: Option<String> = None;
+    for comment in &detail.comments {
+        if comment.author_login == viewer_login {
+            update_latest_timestamp(&mut latest, &comment.created_at);
+        }
+    }
+
+    for review in &detail.latest_reviews {
+        if review.author_login == viewer_login {
+            if let Some(submitted_at) = review.submitted_at.as_deref() {
+                update_latest_timestamp(&mut latest, submitted_at);
+            }
+        }
+    }
+
+    for comment in detail
+        .review_threads
+        .iter()
+        .flat_map(|thread| thread.comments.iter())
+    {
+        if comment.author_login != viewer_login || comment.state == "PENDING" {
+            continue;
+        }
+
+        let timestamp = comment
+            .published_at
+            .as_deref()
+            .unwrap_or(comment.created_at.as_str());
+        update_latest_timestamp(&mut latest, timestamp);
+    }
+
+    latest
+}
+
+fn update_latest_timestamp(latest: &mut Option<String>, candidate: &str) {
+    if candidate.is_empty() {
+        return;
+    }
+
+    if latest
+        .as_deref()
+        .map(|current| candidate > current)
+        .unwrap_or(true)
+    {
+        *latest = Some(candidate.to_string());
+    }
 }
 
 fn activity_item_for_comment(comment: &PullRequestComment) -> ActivityItem {
@@ -1643,10 +1751,34 @@ fn activity_item_for_comment(comment: &PullRequestComment) -> ActivityItem {
         kind: ActivityItemKind::Conversation,
         author_login: comment.author_login.clone(),
         author_avatar_url: comment.author_avatar_url.clone(),
-        timestamp: comment.updated_at.clone(),
+        timestamp: comment.created_at.clone(),
         title: format!("{} commented on the pull request", comment.author_login),
         preview: full_markdown_comment_body(&comment.body),
         status_label: None,
+        status_code: None,
+        location_label: None,
+        file_path: None,
+        anchor: None,
+        thread_comments: Vec::new(),
+    }
+}
+
+fn activity_item_for_commit(commit: &PullRequestCommit) -> ActivityItem {
+    let author = commit_author_display_name(commit);
+    let headline = if commit.message_headline.trim().is_empty() {
+        "Commit".to_string()
+    } else {
+        commit.message_headline.clone()
+    };
+
+    ActivityItem {
+        kind: ActivityItemKind::Commit,
+        author_login: author.clone(),
+        author_avatar_url: commit.author_avatar_url.clone(),
+        timestamp: commit.committed_date.clone(),
+        title: format!("{author} committed {headline}"),
+        preview: String::new(),
+        status_label: Some(commit.abbreviated_oid.clone()),
         status_code: None,
         location_label: None,
         file_path: None,
@@ -1729,9 +1861,19 @@ fn activity_thread_comment(comment: &PullRequestReviewComment) -> ActivityThread
         timestamp: comment
             .published_at
             .clone()
-            .unwrap_or_else(|| comment.updated_at.clone()),
+            .unwrap_or_else(|| comment.created_at.clone()),
         body: full_markdown_comment_body(&comment.body),
     }
+}
+
+fn commit_author_display_name(commit: &PullRequestCommit) -> String {
+    commit
+        .author_login
+        .as_deref()
+        .or(commit.author_name.as_deref())
+        .filter(|author| !author.trim().is_empty())
+        .unwrap_or("unknown")
+        .to_string()
 }
 
 fn review_activity_preview(review: &PullRequestReview) -> String {
@@ -2054,12 +2196,13 @@ mod tests {
     use super::{
         apply_submitted_review_to_detail, automation_activity_needs_attention,
         humanize_review_state, is_automation_actor, participant_display_name,
-        summarize_feedback_preview, summarize_own_pr_feedback, summarize_participants,
-        summarize_recent_activity, summarize_review_status, ActivityItem, ActivityItemKind,
+        summarize_commit_freshness, summarize_feedback_preview, summarize_own_pr_feedback,
+        summarize_participants, summarize_recent_activity, summarize_review_status, ActivityItem,
+        ActivityItemKind,
     };
     use crate::github::{
-        PullRequestComment, PullRequestDetail, PullRequestFile, PullRequestReview,
-        PullRequestReviewComment, PullRequestReviewThread, ReviewAction,
+        PullRequestComment, PullRequestCommit, PullRequestDetail, PullRequestFile,
+        PullRequestReview, PullRequestReviewComment, PullRequestReviewThread, ReviewAction,
     };
 
     #[test]
@@ -2078,12 +2221,62 @@ mod tests {
                 review("carol", "COMMENTED", None),
                 review("", "APPROVED", None),
             ],
+            None,
         );
 
         assert_eq!(summary.approved, vec!["alice".to_string()]);
         assert_eq!(summary.changes_requested, vec!["bob".to_string()]);
         assert_eq!(summary.commented, vec!["carol".to_string()]);
         assert_eq!(summary.waiting, vec!["sam".to_string(), "zoe".to_string()]);
+        assert!(!summary.has_unattributed_changes_requested);
+        assert_eq!(summary.changes_requested_display_value(), "1");
+    }
+
+    #[test]
+    fn summarize_review_status_uses_latest_submitted_review_per_author() {
+        let summary = summarize_review_status(
+            &["alice".to_string()],
+            &[
+                review("alice", "APPROVED", Some("2026-04-14T11:00:00Z")),
+                review("alice", "CHANGES_REQUESTED", Some("2026-04-14T10:00:00Z")),
+            ],
+            Some("APPROVED"),
+        );
+
+        assert_eq!(summary.approved, vec!["alice".to_string()]);
+        assert!(summary.changes_requested.is_empty());
+        assert!(summary.waiting.is_empty());
+    }
+
+    #[test]
+    fn summarize_review_status_treats_dismissed_as_inactive() {
+        let summary = summarize_review_status(
+            &["bob".to_string()],
+            &[
+                review("bob", "CHANGES_REQUESTED", Some("2026-04-14T10:00:00Z")),
+                review("bob", "DISMISSED", Some("2026-04-14T11:00:00Z")),
+            ],
+            None,
+        );
+
+        assert!(summary.approved.is_empty());
+        assert!(summary.changes_requested.is_empty());
+        assert!(summary.commented.is_empty());
+        assert_eq!(summary.waiting, vec!["bob".to_string()]);
+    }
+
+    #[test]
+    fn summarize_review_status_exposes_unattributed_changes_requested_decision() {
+        let summary = summarize_review_status(
+            &["alice".to_string()],
+            &[review("alice", "COMMENTED", Some("2026-04-14T10:00:00Z"))],
+            Some("CHANGES_REQUESTED"),
+        );
+
+        assert!(summary.changes_requested.is_empty());
+        assert!(summary.has_unattributed_changes_requested);
+        assert_eq!(summary.changes_requested_display_value(), "1+");
+        assert_eq!(summary.changes_requested_floor_count(), 1);
     }
 
     #[test]
@@ -2187,8 +2380,8 @@ mod tests {
     }
 
     #[test]
-    fn summarize_recent_activity_sorts_conversation_reviews_and_threads() {
-        let detail = detail_with_activity(
+    fn summarize_recent_activity_sorts_visible_events_chronologically() {
+        let mut detail = detail_with_activity(
             vec![issue_comment(
                 "alice",
                 "Left a top-level conversation comment.",
@@ -2215,29 +2408,140 @@ mod tests {
                 ],
             )],
         );
+        detail.commits = vec![
+            commit(
+                "5f34fac",
+                "Split local Git actions out of root view",
+                "2026-04-14T10:30:00Z",
+            ),
+            commit(
+                "6a1525e",
+                "Tighten commit freshness timeline",
+                "2026-04-14T11:10:00Z",
+            ),
+        ];
 
         let items = summarize_recent_activity(&detail, &BTreeSet::new());
 
-        assert_eq!(items.len(), 3);
-        assert_eq!(items[0].kind, ActivityItemKind::Thread);
-        assert_eq!(items[0].title, "dave commented");
-        assert_eq!(items[0].location_label.as_deref(), Some("src/main.rs:42"));
-        assert_eq!(items[0].thread_comments.len(), 2);
-        assert_eq!(items[0].thread_comments[0].author_login, "carol");
-        assert_eq!(
-            items[0].thread_comments[0].body,
-            "Please rename this helper so the intent is clearer."
-        );
-        assert_eq!(items[0].thread_comments[1].author_login, "dave");
-        assert_eq!(
-            items[0].thread_comments[1].body,
-            "Done in the follow-up commit."
-        );
-        assert!(items[0].preview.is_empty());
+        assert_eq!(items.len(), 5);
+        assert_eq!(items[0].kind, ActivityItemKind::Conversation);
         assert_eq!(items[1].kind, ActivityItemKind::Review);
         assert_eq!(items[1].status_code.as_deref(), Some("APPROVED"));
         assert!(items[1].preview.is_empty());
-        assert_eq!(items[2].kind, ActivityItemKind::Conversation);
+        assert_eq!(items[2].kind, ActivityItemKind::Commit);
+        assert_eq!(items[2].status_label.as_deref(), Some("5f34fac"));
+        assert_eq!(items[3].kind, ActivityItemKind::Thread);
+        assert_eq!(items[3].title, "dave commented");
+        assert_eq!(items[3].location_label.as_deref(), Some("src/main.rs:42"));
+        assert_eq!(items[3].thread_comments.len(), 2);
+        assert_eq!(items[3].thread_comments[0].author_login, "carol");
+        assert_eq!(
+            items[3].thread_comments[0].body,
+            "Please rename this helper so the intent is clearer."
+        );
+        assert_eq!(items[3].thread_comments[1].author_login, "dave");
+        assert_eq!(
+            items[3].thread_comments[1].body,
+            "Done in the follow-up commit."
+        );
+        assert!(items[3].preview.is_empty());
+        assert_eq!(items[4].kind, ActivityItemKind::Commit);
+        assert_eq!(
+            items[4].title,
+            "rikuws committed Tighten commit freshness timeline"
+        );
+        assert_eq!(items[4].status_label.as_deref(), Some("6a1525e"));
+    }
+
+    #[test]
+    fn commit_freshness_counts_commits_after_latest_viewer_activity() {
+        let mut detail = detail_with_activity(
+            vec![issue_comment(
+                "me",
+                "I left a top-level note.",
+                "2026-04-14T09:00:00Z",
+            )],
+            vec![review("me", "COMMENTED", Some("2026-04-14T10:00:00Z"))],
+            vec![line_thread(
+                "thread-freshness",
+                "src/main.rs",
+                42,
+                false,
+                false,
+                vec![comment(
+                    "me",
+                    "Please handle the empty state here.",
+                    "2026-04-14T11:00:00Z",
+                )],
+            )],
+        );
+        detail.commits = vec![
+            commit("aaaaaaa", "Before feedback", "2026-04-14T10:30:00Z"),
+            commit("bbbbbbb", "Address review note", "2026-04-14T11:30:00Z"),
+            commit("ccccccc", "Follow-up polish", "2026-04-14T12:00:00Z"),
+        ];
+
+        let freshness = summarize_commit_freshness(&detail, "me").expect("freshness summary");
+
+        assert_eq!(freshness.commits_since_activity, 2);
+        assert_eq!(freshness.latest_commit_at, "2026-04-14T12:00:00Z");
+    }
+
+    #[test]
+    fn commit_freshness_is_empty_when_no_commits_follow_viewer_activity() {
+        let mut detail = detail_with_activity(
+            Vec::new(),
+            vec![review("me", "APPROVED", Some("2026-04-14T10:00:00Z"))],
+            Vec::new(),
+        );
+        detail.commits = vec![commit(
+            "aaaaaaa",
+            "Initial implementation",
+            "2026-04-14T09:30:00Z",
+        )];
+
+        assert_eq!(summarize_commit_freshness(&detail, "me"), None);
+    }
+
+    #[test]
+    fn commit_freshness_ignores_pending_draft_comments() {
+        let mut pending = comment("me", "Draft note", "2026-04-14T12:00:00Z");
+        pending.state = "PENDING".to_string();
+        pending.published_at = None;
+        let mut detail = detail_with_activity(
+            Vec::new(),
+            vec![review("me", "COMMENTED", Some("2026-04-14T10:00:00Z"))],
+            vec![line_thread(
+                "thread-pending",
+                "src/main.rs",
+                42,
+                false,
+                false,
+                vec![pending],
+            )],
+        );
+        detail.commits = vec![commit(
+            "bbbbbbb",
+            "Follow-up after review",
+            "2026-04-14T11:00:00Z",
+        )];
+
+        let freshness = summarize_commit_freshness(&detail, "me").expect("freshness summary");
+
+        assert_eq!(freshness.commits_since_activity, 1);
+        assert_eq!(freshness.latest_commit_at, "2026-04-14T11:00:00Z");
+    }
+
+    #[test]
+    fn commit_freshness_is_empty_without_viewer_activity() {
+        let mut detail = detail_with_activity(Vec::new(), Vec::new(), Vec::new());
+        detail.commits = vec![commit(
+            "bbbbbbb",
+            "Follow-up without reviewer activity",
+            "2026-04-14T11:00:00Z",
+        )];
+
+        assert_eq!(summarize_commit_freshness(&detail, "me"), None);
     }
 
     #[test]
@@ -2286,7 +2590,11 @@ mod tests {
             )],
         );
 
-        let review_status = summarize_review_status(&detail.reviewers, &detail.latest_reviews);
+        let review_status = summarize_review_status(
+            &detail.reviewers,
+            &detail.latest_reviews,
+            detail.review_decision.as_deref(),
+        );
         let participants = summarize_participants(&detail, &review_status);
 
         let author = participants
@@ -2328,7 +2636,11 @@ mod tests {
 
         apply_submitted_review_to_detail(&mut detail, "alice", ReviewAction::Approve, "Looks good");
 
-        let review_status = summarize_review_status(&detail.reviewers, &detail.latest_reviews);
+        let review_status = summarize_review_status(
+            &detail.reviewers,
+            &detail.latest_reviews,
+            detail.review_decision.as_deref(),
+        );
         assert_eq!(
             review_status.approved,
             vec!["alice".to_string(), "bob".to_string()]
@@ -2419,6 +2731,24 @@ mod tests {
         }
     }
 
+    fn commit(
+        abbreviated_oid: &str,
+        message_headline: &str,
+        committed_date: &str,
+    ) -> PullRequestCommit {
+        PullRequestCommit {
+            id: format!("commit-{abbreviated_oid}"),
+            oid: format!("{abbreviated_oid}000000000000000000000000000000000"),
+            abbreviated_oid: abbreviated_oid.to_string(),
+            message_headline: message_headline.to_string(),
+            committed_date: committed_date.to_string(),
+            author_name: Some("Riku Wikman".to_string()),
+            author_login: Some("rikuws".to_string()),
+            author_avatar_url: None,
+            url: format!("https://example.com/commit/{abbreviated_oid}"),
+        }
+    }
+
     fn line_thread(
         id: &str,
         path: &str,
@@ -2502,6 +2832,7 @@ mod tests {
             changed_files: 3,
             comments_count: comments.len() as i64,
             commits_count: 2,
+            commits: Vec::new(),
             created_at: "2026-04-14T08:00:00Z".to_string(),
             updated_at: "2026-04-14T11:30:00Z".to_string(),
             labels: vec!["ui".to_string()],

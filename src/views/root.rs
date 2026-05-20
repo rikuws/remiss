@@ -11,7 +11,7 @@ use crate::app_menu::{
     AddLocalRepository, AddWaypoint, CheckForUpdates, CycleCodeTheme, DecreaseCodeFontSize,
     IncreaseCodeFontSize, JumpToNextReviewComment, OpenReviewFiles, OpenSelectedLineInSource,
     RefreshLocalRepositories, ResetCodeFontSize, ShowPullRequestBriefing, ShowSettings,
-    SubmitReview, SwitchToAiTour, SwitchToCode, SwitchToDiff, SwitchToSource, SwitchToStack,
+    SubmitReview, SwitchToCode, SwitchToDiff, SwitchToGuidedReview, SwitchToSource, SwitchToStack,
     SwitchToStructuralDiff, SyncWorkspace, ToggleCommandPalette, ToggleWaypointSpotlight,
 };
 use crate::branding::APP_NAME;
@@ -720,7 +720,7 @@ async fn inspect_and_open_local_review(
             warm_structural_diffs_flow(model.clone(), cx).await;
             crate::review_intelligence::run_review_intelligence_flow(
                 model.clone(),
-                crate::review_intelligence::ReviewIntelligenceScope::TourOnly,
+                crate::review_intelligence::ReviewIntelligenceScope::StackOnly,
                 false,
                 false,
                 cx,
@@ -930,7 +930,7 @@ fn attach_app_menu_action_handlers(
     let state_for_diff = state.clone();
     let state_for_structural = state.clone();
     let state_for_source = state.clone();
-    let state_for_ai_tour = state.clone();
+    let state_for_guided_review = state.clone();
     let state_for_stack = state.clone();
     let element = element.when(availability.has_active_detail, move |element| {
         element
@@ -969,8 +969,8 @@ fn attach_app_menu_action_handlers(
                 );
                 cx.stop_propagation();
             })
-            .on_action(move |_: &SwitchToAiTour, window, cx| {
-                switch_to_ai_tour_from_menu(&state_for_ai_tour, window, cx);
+            .on_action(move |_: &SwitchToGuidedReview, window, cx| {
+                switch_to_guided_review_from_menu(&state_for_guided_review, window, cx);
                 cx.stop_propagation();
             })
             .on_action(move |_: &SwitchToStack, window, cx| {
@@ -1056,7 +1056,7 @@ fn switch_code_lens_from_menu(
     switch_review_code_mode(state, mode, window, cx);
 }
 
-fn switch_to_ai_tour_from_menu(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
+fn switch_to_guided_review_from_menu(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
     enter_stack_review_mode(state, window, cx);
 }
 

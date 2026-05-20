@@ -6,9 +6,9 @@ use crate::code_display::{
     render_virtualized_prepared_file_with_line_numbers_and_focus_flush,
     render_virtualized_prepared_file_with_line_numbers_diffs_and_focus_flush,
 };
-use crate::code_tour::DiffAnchor;
 use crate::diff::{DiffLineKind, ParsedDiffFile, ParsedDiffLine};
 use crate::github::PullRequestDetail;
+use crate::review_ai::DiffAnchor;
 use crate::source_browser::build_full_file_diff_lines;
 use crate::state::{AppState, ReviewLineActionTarget, TempSourceSide, TempSourceTarget};
 use crate::theme::*;
@@ -756,9 +756,9 @@ mod tests {
         centered_source_item_ix, temp_source_diff_lines_for_target,
         temp_source_target_for_current_diff_selection, temp_source_target_for_diff_line_with_refs,
     };
-    use crate::code_tour::DiffAnchor;
     use crate::diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk, ParsedDiffLine};
     use crate::github::{PullRequestDataCompleteness, PullRequestDetail};
+    use crate::review_ai::DiffAnchor;
     use crate::state::{ReviewLineActionTarget, TempSourceSide, TempSourceTarget};
     use std::collections::BTreeMap;
 
@@ -810,6 +810,7 @@ mod tests {
             changed_files: 1,
             comments_count: 0,
             commits_count: 1,
+            commits: Vec::new(),
             created_at: "2026-04-17T00:00:00Z".to_string(),
             updated_at: "2026-04-18T00:00:00Z".to_string(),
             labels: Vec::new(),

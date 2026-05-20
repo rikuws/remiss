@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    env,
+    env, fs,
     io::{BufRead, BufReader, Write},
     path::{Component, Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
@@ -139,6 +139,7 @@ pub struct LspSymbolDetails {
     pub signature_help: Option<LspSignatureHelp>,
     pub definition_targets: Vec<LspDefinitionTarget>,
     pub reference_targets: Vec<LspReferenceTarget>,
+    pub warnings: Vec<String>,
 }
 
 impl LspSymbolDetails {
@@ -147,6 +148,7 @@ impl LspSymbolDetails {
             && self.signature_help.is_none()
             && self.definition_targets.is_empty()
             && self.reference_targets.is_empty()
+            && self.warnings.is_empty()
     }
 }
 
@@ -166,8 +168,15 @@ pub struct LspSignatureHelp {
 pub struct LspDefinitionTarget {
     pub uri: String,
     pub path: String,
+    pub package_path: Option<String>,
     pub line: usize,
     pub column: usize,
+}
+
+impl LspDefinitionTarget {
+    pub fn display_path(&self) -> &str {
+        self.package_path.as_deref().unwrap_or(self.path.as_str())
+    }
 }
 
 pub type LspReferenceTarget = LspDefinitionTarget;
@@ -224,7 +233,14 @@ impl LspSessionManager {
 
         match session.capabilities() {
             Ok(capabilities) => {
-                LspServerStatus::ready(config.language_id, config.command, capabilities)
+                let mut status =
+                    LspServerStatus::ready(config.language_id, config.command, capabilities);
+                if status.language_id.as_deref() == Some("kotlin") {
+                    if let Some(note) = kotlin_workspace_note(repo_root, file_path) {
+                        status.message = format!("{} {note}", status.message);
+                    }
+                }
+                status
             }
             Err(error) => {
                 LspServerStatus::error(Some(config.language_id), Some(config.command), error)
@@ -252,6 +268,8 @@ impl LspSessionManager {
                 details.reference_targets = targets;
             }
         }
+        let warnings = lsp_analysis_warnings(&config.language_id, request, &details);
+        details.warnings.extend(warnings);
         Ok(details)
     }
 
@@ -522,6 +540,7 @@ impl LspSession {
             signature_help,
             definition_targets: Vec::new(),
             reference_targets: Vec::new(),
+            warnings: Vec::new(),
         })
     }
 
@@ -673,6 +692,76 @@ fn capability_summary(capabilities: &LspServerCapabilities) -> String {
     } else {
         features.join(", ")
     }
+}
+
+fn kotlin_workspace_note(repo_root: &Path, file_path: &str) -> Option<String> {
+    let relative_path = validated_repo_relative_path(file_path).ok()?;
+    let document_path = repo_root.join(relative_path);
+    let document_dir = document_path.parent().unwrap_or(repo_root);
+    let settings_file = find_nearest_file_upwards(
+        document_dir,
+        repo_root,
+        &["settings.gradle.kts", "settings.gradle"],
+    );
+    let build_file = find_nearest_file_upwards(
+        document_dir,
+        repo_root,
+        &["build.gradle.kts", "build.gradle"],
+    );
+
+    let gradle_summary = match (settings_file.as_ref(), build_file.as_ref()) {
+        (Some(settings), Some(build)) => format!(
+            "nearest Gradle settings {}; nearest build file {}",
+            display_repo_relative_path(repo_root, settings),
+            display_repo_relative_path(repo_root, build)
+        ),
+        (Some(settings), None) => format!(
+            "nearest Gradle settings {}; no build.gradle(.kts) found above the file",
+            display_repo_relative_path(repo_root, settings)
+        ),
+        (None, Some(build)) => format!(
+            "nearest build file {}; no settings.gradle(.kts) found above the file",
+            display_repo_relative_path(repo_root, build)
+        ),
+        (None, None) => {
+            "no Gradle settings/build file found above the file in this checkout".to_string()
+        }
+    };
+
+    Some(format!(
+        "Kotlin workspace root {}; {gradle_summary}.",
+        display_repo_relative_path(repo_root, repo_root)
+    ))
+}
+
+fn find_nearest_file_upwards(start: &Path, repo_root: &Path, names: &[&str]) -> Option<PathBuf> {
+    let mut current = start;
+    loop {
+        for name in names {
+            let candidate = current.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+
+        if current == repo_root {
+            break;
+        }
+        current = current.parent()?;
+        if !current.starts_with(repo_root) {
+            break;
+        }
+    }
+
+    None
+}
+
+fn display_repo_relative_path(repo_root: &Path, path: &Path) -> String {
+    path.strip_prefix(repo_root)
+        .ok()
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|| ".".to_string())
 }
 
 fn resolve_server_configuration_for_path(
@@ -1072,6 +1161,156 @@ fn parse_hover_result(result: &Value) -> Option<LspHoverResult> {
     }
 }
 
+fn lsp_analysis_warnings(
+    language_id: &str,
+    request: &LspTextDocumentRequest,
+    details: &LspSymbolDetails,
+) -> Vec<String> {
+    if language_id == "kotlin" {
+        kotlin_lsp_analysis_warnings(request, details)
+    } else {
+        Vec::new()
+    }
+}
+
+fn kotlin_lsp_analysis_warnings(
+    request: &LspTextDocumentRequest,
+    details: &LspSymbolDetails,
+) -> Vec<String> {
+    if details.is_empty() {
+        return word_at_text_position(request.document_text.as_ref(), request.line, request.column)
+            .map(|symbol| {
+                vec![format!(
+                    "Kotlin LSP returned no hover, definition, or reference data for `{symbol}`. If this is an imported dependency symbol, the current LSP workspace may be missing its Gradle/classpath model."
+                )]
+            })
+            .unwrap_or_default();
+    }
+
+    let Some(hover) = details.hover.as_ref() else {
+        return Vec::new();
+    };
+    let Some((variable, reported_type)) = parse_kotlin_variable_hover_type(&hover.markdown) else {
+        return Vec::new();
+    };
+    let Some(line_text) = request
+        .document_text
+        .lines()
+        .nth(request.line.saturating_sub(1))
+    else {
+        return Vec::new();
+    };
+    let Some(initializer_call) = kotlin_initializer_call_name(line_text, &variable) else {
+        return Vec::new();
+    };
+
+    if initializer_call == reported_type && starts_lowercase_identifier(&reported_type) {
+        vec![format!(
+            "Kotlin LSP reported `{reported_type}` as the inferred type for `{variable}`, matching the initializer call name. That usually means the server could not resolve that call from the current Gradle/classpath model."
+        )]
+    } else {
+        Vec::new()
+    }
+}
+
+fn parse_kotlin_variable_hover_type(markdown: &str) -> Option<(String, String)> {
+    let line = first_lsp_code_line(markdown)?;
+    let line = line.trim();
+    let declaration = line
+        .strip_prefix("val ")
+        .or_else(|| line.strip_prefix("var "))?;
+    let (name, type_name) = declaration.split_once(':')?;
+    let name = name.trim();
+    let type_name = type_name.trim();
+    if name.is_empty() || type_name.is_empty() {
+        return None;
+    }
+
+    Some((name.to_string(), type_name.to_string()))
+}
+
+fn first_lsp_code_line(markdown: &str) -> Option<&str> {
+    markdown
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .find(|line| !line.starts_with("```") && !line.starts_with("~~~"))
+}
+
+fn kotlin_initializer_call_name(line_text: &str, variable: &str) -> Option<String> {
+    let (left, right) = line_text.split_once('=')?;
+    let left = left.trim();
+    let declaration = left
+        .strip_prefix("val ")
+        .or_else(|| left.strip_prefix("var "))?;
+    if declaration.trim() != variable {
+        return None;
+    }
+
+    leading_identifier(right.trim())
+}
+
+fn word_at_text_position(text: &str, line: usize, column: usize) -> Option<String> {
+    let line_text = text.lines().nth(line.checked_sub(1)?)?;
+    let target = column.checked_sub(1)?;
+    let byte_index = byte_index_for_char_column(line_text, target)?;
+    word_at_byte_index(line_text, byte_index)
+}
+
+fn byte_index_for_char_column(line_text: &str, column_zero_based: usize) -> Option<usize> {
+    if column_zero_based == line_text.chars().count() {
+        return Some(line_text.len());
+    }
+    line_text
+        .char_indices()
+        .nth(column_zero_based)
+        .map(|(byte_index, _)| byte_index)
+}
+
+fn word_at_byte_index(line_text: &str, byte_index: usize) -> Option<String> {
+    if byte_index > line_text.len() || !line_text.is_char_boundary(byte_index) {
+        return None;
+    }
+
+    let mut start = byte_index;
+    while start > 0 {
+        let (previous, character) = line_text[..start].char_indices().next_back()?;
+        if !is_identifier_character(character) {
+            break;
+        }
+        start = previous;
+    }
+
+    let mut end = byte_index;
+    for (offset, character) in line_text[byte_index..].char_indices() {
+        if !is_identifier_character(character) {
+            break;
+        }
+        end = byte_index + offset + character.len_utf8();
+    }
+
+    (start < end).then(|| line_text[start..end].to_string())
+}
+
+fn leading_identifier(text: &str) -> Option<String> {
+    let identifier = text
+        .chars()
+        .take_while(|character| is_identifier_character(*character))
+        .collect::<String>();
+    (!identifier.is_empty()).then_some(identifier)
+}
+
+fn starts_lowercase_identifier(text: &str) -> bool {
+    text.chars()
+        .next()
+        .map(|character| character == '_' || character.is_lowercase())
+        .unwrap_or(false)
+}
+
+fn is_identifier_character(character: char) -> bool {
+    character == '_' || character.is_alphanumeric()
+}
+
 fn parse_signature_help(result: &Value) -> Option<LspSignatureHelp> {
     let signatures = result.get("signatures")?.as_array()?;
     if signatures.is_empty() {
@@ -1124,13 +1363,14 @@ fn parse_signature_parameter_label(
 }
 
 fn parse_definition_targets(repo_root: &Path, result: &Value) -> Vec<LspDefinitionTarget> {
+    let mut package_cache = HashMap::new();
     match result {
         Value::Null => Vec::new(),
         Value::Array(items) => items
             .iter()
-            .filter_map(|item| parse_definition_target(repo_root, item))
+            .filter_map(|item| parse_definition_target(repo_root, item, &mut package_cache))
             .collect(),
-        _ => parse_definition_target(repo_root, result)
+        _ => parse_definition_target(repo_root, result, &mut package_cache)
             .into_iter()
             .collect(),
     }
@@ -1140,12 +1380,17 @@ fn parse_reference_targets(repo_root: &Path, result: &Value) -> Vec<LspReference
     parse_definition_targets(repo_root, result)
 }
 
-fn parse_definition_target(repo_root: &Path, value: &Value) -> Option<LspDefinitionTarget> {
+fn parse_definition_target(
+    repo_root: &Path,
+    value: &Value,
+    package_cache: &mut HashMap<String, Option<String>>,
+) -> Option<LspDefinitionTarget> {
     let uri = value
         .get("targetUri")
         .or_else(|| value.get("uri"))
         .and_then(Value::as_str)?;
     let path = path_from_file_uri(repo_root, uri)?;
+    let package_path = package_path_for_target(repo_root, path.as_str(), package_cache);
     let start = value
         .pointer("/targetSelectionRange/start")
         .or_else(|| value.pointer("/targetRange/start"))
@@ -1154,9 +1399,87 @@ fn parse_definition_target(repo_root: &Path, value: &Value) -> Option<LspDefinit
     Some(LspDefinitionTarget {
         uri: uri.to_string(),
         path,
+        package_path,
         line: start.get("line").and_then(Value::as_u64)? as usize + 1,
         column: start.get("character").and_then(Value::as_u64)? as usize + 1,
     })
+}
+
+fn package_path_for_target(
+    repo_root: &Path,
+    path: &str,
+    package_cache: &mut HashMap<String, Option<String>>,
+) -> Option<String> {
+    if let Some(package_path) = package_cache.get(path) {
+        return package_path.clone();
+    }
+
+    let package_path = fs::read_to_string(repo_root.join(path))
+        .ok()
+        .and_then(|source| package_path_from_source(&source));
+    package_cache.insert(path.to_string(), package_path.clone());
+    package_path
+}
+
+fn package_path_from_source(source: &str) -> Option<String> {
+    let mut in_block_comment = false;
+    for line in source.lines().take(120) {
+        let trimmed = line.trim_start();
+        if in_block_comment {
+            if trimmed.contains("*/") {
+                in_block_comment = false;
+            }
+            continue;
+        }
+        if trimmed.starts_with("/*") {
+            if !trimmed.contains("*/") {
+                in_block_comment = true;
+            }
+            continue;
+        }
+        if let Some(package_path) = package_path_from_line(line) {
+            return Some(package_path);
+        }
+    }
+    None
+}
+
+fn package_path_from_line(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    if trimmed.is_empty()
+        || trimmed.starts_with("//")
+        || trimmed.starts_with("/*")
+        || trimmed.starts_with('*')
+    {
+        return None;
+    }
+
+    package_path_after_keyword(trimmed, "package")
+        .or_else(|| package_path_after_keyword(trimmed, "namespace"))
+}
+
+fn package_path_after_keyword(line: &str, keyword: &str) -> Option<String> {
+    let rest = line.strip_prefix(keyword)?;
+    if !rest
+        .chars()
+        .next()
+        .map(char::is_whitespace)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    let mut value = String::new();
+    for character in rest.trim_start().chars() {
+        if character.is_alphanumeric() || matches!(character, '_' | '.' | '`' | '\\') {
+            value.push(character);
+        } else {
+            break;
+        }
+    }
+
+    let value = value.replace('\\', ".").replace('`', "");
+    (!value.trim().is_empty()).then(|| value.trim().to_string())
 }
 
 fn markdown_from_lsp_value(value: Option<&Value>) -> Option<String> {
@@ -1776,6 +2099,48 @@ mod tests {
     }
 
     #[test]
+    fn warns_when_kotlin_variable_type_matches_initializer_call() {
+        let request = LspTextDocumentRequest {
+            file_path: "src/main/kotlin/demo/Demo.kt".to_string(),
+            document_text: std::sync::Arc::<str>::from(
+                "package demo\n\nsuspend fun demo() {\n    val reittiData = coroutineScope {\n        42\n    }\n}\n",
+            ),
+            line: 4,
+            column: 9,
+        };
+        let details = LspSymbolDetails {
+            hover: Some(LspHoverResult {
+                markdown: "````kotlin\nval reittiData: coroutineScope\n````\n".to_string(),
+            }),
+            ..Default::default()
+        };
+
+        let warnings = lsp_analysis_warnings("kotlin", &request, &details);
+
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("Gradle/classpath model"));
+        assert!(warnings[0].contains("coroutineScope"));
+    }
+
+    #[test]
+    fn warns_when_kotlin_symbol_has_no_details() {
+        let request = LspTextDocumentRequest {
+            file_path: "src/main/kotlin/demo/Demo.kt".to_string(),
+            document_text: std::sync::Arc::<str>::from(
+                "package demo\n\nsuspend fun demo() {\n    val reittiData = coroutineScope {\n        42\n    }\n}\n",
+            ),
+            line: 4,
+            column: 22,
+        };
+
+        let warnings = lsp_analysis_warnings("kotlin", &request, &LspSymbolDetails::default());
+
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("coroutineScope"));
+        assert!(warnings[0].contains("no hover, definition, or reference data"));
+    }
+
+    #[test]
     fn parses_signature_help_for_active_parameter() {
         let signature = parse_signature_help(&json!({
             "signatures": [
@@ -1829,10 +2194,64 @@ mod tests {
             vec![LspDefinitionTarget {
                 uri: target_uri,
                 path: "src/lsp.rs".to_string(),
+                package_path: None,
                 line: 10,
                 column: 5,
             }]
         );
+    }
+
+    #[test]
+    fn parses_definition_target_package_path_from_source_file() {
+        let repo_root = std::env::temp_dir().join(format!(
+            "remiss-lsp-package-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock should be after unix epoch")
+                .as_nanos()
+        ));
+        let target_path = repo_root
+            .join("src")
+            .join("main")
+            .join("kotlin")
+            .join("demo")
+            .join("User.kt");
+        std::fs::create_dir_all(target_path.parent().expect("target parent"))
+            .expect("create target parent");
+        std::fs::write(
+            &target_path,
+            "// Copyright\n\npackage com.example.demo\n\nval name: String = \"Ada\"\n",
+        )
+        .expect("write target");
+
+        let target_uri = file_uri(&target_path).expect("expected target URI");
+        let targets = parse_definition_targets(
+            &repo_root,
+            &json!({
+                "uri": target_uri.clone(),
+                "range": {
+                    "start": {
+                        "line": 4,
+                        "character": 4
+                    }
+                }
+            }),
+        );
+
+        std::fs::remove_dir_all(&repo_root).ok();
+
+        assert_eq!(
+            targets,
+            vec![LspDefinitionTarget {
+                uri: target_uri,
+                path: "src/main/kotlin/demo/User.kt".to_string(),
+                package_path: Some("com.example.demo".to_string()),
+                line: 5,
+                column: 5,
+            }]
+        );
+        assert_eq!(targets[0].display_path(), "com.example.demo");
     }
 
     #[test]

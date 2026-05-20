@@ -6,11 +6,12 @@ use std::{
 use sem_core::{
     embedded::{
         analyze_file_changes, build_impact_context_from_graph, build_repo_graph,
-        discover_repo_files, generate_review_layers, resolve_focus_target, SemDiffAnalysis,
-        SemEmbeddedChange, SemEmbeddedOptions, SemEntityTarget, SemFileChange, SemFocusResolution,
-        SemFocusTarget, SemFocusedEntity, SemHunk, SemHunkTarget, SemImpactRequest,
-        SemLayerGenerationOptions, SemLineRange, SemLocationTarget, SemRepoScanOptions,
-        SemReviewLayerPlan, SemSide, SEM_EMBEDDED_API_VERSION,
+        discover_repo_files, generate_review_layers, generate_review_layers_for_atoms,
+        resolve_focus_target, SemDiffAnalysis, SemEmbeddedChange, SemEmbeddedOptions,
+        SemEntityTarget, SemFileChange, SemFocusResolution, SemFocusTarget, SemFocusedEntity,
+        SemHunk, SemHunkTarget, SemImpactRequest, SemLayerGenerationOptions, SemLineRange,
+        SemLocationTarget, SemRepoScanOptions, SemReviewAtom, SemReviewLayerPlan, SemSide,
+        SEM_EMBEDDED_API_VERSION,
     },
     git::types::FileStatus,
     parser::graph::EntityInfo,
@@ -19,16 +20,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     cache::CacheStore,
-    code_tour::tour_code_version_key,
     diff::{ParsedDiffFile, ParsedDiffHunk},
     github::{PullRequestDetail, PullRequestFile},
     local_documents,
-    stacks::model::{ChangeAtom, LineRange},
+    review_ai::review_code_version_key,
+    stacks::model::{ChangeAtom, ChangeAtomSource, ChangeRole, LineRange},
     structural_diff::{build_structural_diff_request, StructuralDiffSideRequest},
 };
 
-pub const REMISS_SEMANTIC_REVIEW_VERSION: &str = "remiss-semantic-review-v2";
-const SEMANTIC_REVIEW_CACHE_PREFIX: &str = "semantic-review-v2";
+pub const REMISS_SEMANTIC_REVIEW_VERSION: &str = "remiss-semantic-review-v3";
+const SEMANTIC_REVIEW_CACHE_PREFIX: &str = "semantic-review-v3";
 const MAX_SEMANTIC_FOCUS_SUMMARIES: usize = 128;
 const MAX_SEMANTIC_IMPACT_SUMMARIES: usize = 48;
 const MAX_SEMANTIC_ENTITY_SUMMARIES: usize = 12;
@@ -212,18 +213,74 @@ fn build_semantic_review_from_changes(
     options: &SemEmbeddedOptions,
 ) -> RemissSemanticReview {
     let analysis = analyze_file_changes(&changes, options);
-    let layers = generate_review_layers(&changes, &SemLayerGenerationOptions::default(), options);
+    let sem_atoms = sem_review_atoms_from_change_atoms(atoms);
+    let layers = generate_review_layers_for_atoms(
+        &changes,
+        &sem_atoms,
+        &SemLayerGenerationOptions::default(),
+        options,
+    );
     let layer_atom_mappings =
         map_sem_layers_to_atoms_with_analysis(&layers, Some(&analysis), atoms);
     RemissSemanticReview {
         version: REMISS_SEMANTIC_REVIEW_VERSION.to_string(),
         sem_api_version: SEM_EMBEDDED_API_VERSION.to_string(),
-        code_version_key: tour_code_version_key(detail),
+        code_version_key: review_code_version_key(detail),
         analysis,
         layers,
         layer_atom_mappings,
         focus_summaries: Vec::new(),
         warnings: Vec::new(),
+    }
+}
+
+fn sem_review_atoms_from_change_atoms(atoms: &[ChangeAtom]) -> Vec<SemReviewAtom> {
+    atoms
+        .iter()
+        .map(|atom| SemReviewAtom {
+            atom_id: atom.id.clone(),
+            file_path: atom.path.clone(),
+            old_file_path: atom.previous_path.clone(),
+            role: Some(sem_role_label(atom.role).to_string()),
+            semantic_kind: atom.semantic_kind.clone(),
+            symbol_name: atom.symbol_name.clone(),
+            defined_symbols: atom.defined_symbols.clone(),
+            referenced_symbols: atom.referenced_symbols.clone(),
+            old_range: sem_range_from_stack_range(atom.old_range.as_ref()),
+            new_range: sem_range_from_stack_range(atom.new_range.as_ref()),
+            hunk_indices: atom.hunk_indices.clone(),
+            changed_lines: atom.additions + atom.deletions,
+            manual_review: atom.role == ChangeRole::Generated
+                || matches!(
+                    atom.source,
+                    ChangeAtomSource::GeneratedPlaceholder | ChangeAtomSource::BinaryPlaceholder
+                ),
+        })
+        .collect()
+}
+
+fn sem_range_from_stack_range(range: Option<&LineRange>) -> Option<SemLineRange> {
+    let range = range?;
+    if range.start < 0 || range.end < 0 {
+        return None;
+    }
+    Some(SemLineRange {
+        start_line: range.start as usize,
+        end_line: range.end as usize,
+    })
+}
+
+fn sem_role_label(role: ChangeRole) -> &'static str {
+    match role {
+        ChangeRole::Foundation => "foundation",
+        ChangeRole::CoreLogic => "coreLogic",
+        ChangeRole::Integration => "integration",
+        ChangeRole::Presentation => "presentation",
+        ChangeRole::Tests => "tests",
+        ChangeRole::Docs => "docs",
+        ChangeRole::Config => "config",
+        ChangeRole::Generated => "generated",
+        ChangeRole::Unknown => "unknown",
     }
 }
 
@@ -240,7 +297,7 @@ pub fn semantic_review_cache_key(
         "{SEMANTIC_REVIEW_CACHE_PREFIX}:{}#{}:{}:{}:{}",
         detail.repository,
         detail.number,
-        tour_code_version_key(detail),
+        review_code_version_key(detail),
         semantic_review_version_key(),
         head_identity,
     ))
@@ -330,7 +387,7 @@ pub fn load_semantic_file_contents(
     let mut warnings = Vec::new();
 
     for file in &detail.files {
-        let parsed = crate::code_tour::find_parsed_diff_file(&detail.parsed_diff, &file.path);
+        let parsed = crate::diff::find_parsed_diff_file(&detail.parsed_diff, &file.path);
         if parsed.map(|parsed| parsed.is_binary).unwrap_or(false) {
             warnings.push(format!(
                 "Semantic evidence is unavailable for binary file {}.",
@@ -759,11 +816,15 @@ fn map_sem_layers_to_atoms_with_analysis(
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            let atom_ids = atoms
-                .iter()
-                .filter(|atom| sem_layer_matches_atom(layer, &layer_changes, atom))
-                .map(|atom| atom.id.clone())
-                .collect::<Vec<_>>();
+            let atom_ids = if layer.atom_ids.is_empty() {
+                atoms
+                    .iter()
+                    .filter(|atom| sem_layer_matches_atom(layer, &layer_changes, atom))
+                    .map(|atom| atom.id.clone())
+                    .collect::<Vec<_>>()
+            } else {
+                layer.atom_ids.clone()
+            };
             RemissSemLayerAtomMapping {
                 layer_id: layer.id.clone(),
                 atom_ids,
@@ -1001,7 +1062,7 @@ fn unavailable_semantic_review(
     RemissSemanticReview {
         version: REMISS_SEMANTIC_REVIEW_VERSION.to_string(),
         sem_api_version: SEM_EMBEDDED_API_VERSION.to_string(),
-        code_version_key: tour_code_version_key(detail),
+        code_version_key: review_code_version_key(detail),
         analysis: analyze_file_changes(&changes, &options),
         layers: generate_review_layers(&changes, &SemLayerGenerationOptions::default(), &options),
         layer_atom_mappings: Vec::new(),
@@ -1016,7 +1077,7 @@ fn semantic_review_matches_current(
 ) -> bool {
     review.version == REMISS_SEMANTIC_REVIEW_VERSION
         && review.sem_api_version == SEM_EMBEDDED_API_VERSION
-        && review.code_version_key == tour_code_version_key(detail)
+        && review.code_version_key == review_code_version_key(detail)
 }
 
 fn semantic_review_head_identity(
@@ -1272,17 +1333,68 @@ mod tests {
                 rationale: String::new(),
                 depends_on_layer_ids: Vec::new(),
                 change_indices: vec![0],
+                atom_ids: Vec::new(),
                 file_paths: vec!["src/lib.rs".to_string()],
                 hunk_indices: vec![2],
                 entity_names: vec!["demo".to_string()],
             }],
             manual_review_change_indices: Vec::new(),
+            manual_review_atom_ids: Vec::new(),
             warnings: Vec::new(),
         };
 
         let mappings = map_sem_layers_to_atoms(&layers, &[atom]);
 
         assert_eq!(mappings[0].atom_ids, vec!["atom-1".to_string()]);
+    }
+
+    #[test]
+    fn maps_sem_layers_to_atoms_from_sem_atom_ids_first() {
+        let atom = ChangeAtom {
+            id: "atom-direct".to_string(),
+            source: ChangeAtomSource::Hunk { hunk_index: 7 },
+            path: "src/lib.rs".to_string(),
+            previous_path: None,
+            role: ChangeRole::CoreLogic,
+            semantic_kind: None,
+            symbol_name: None,
+            defined_symbols: Vec::new(),
+            referenced_symbols: Vec::new(),
+            old_range: None,
+            new_range: None,
+            hunk_headers: Vec::new(),
+            hunk_indices: vec![7],
+            additions: 1,
+            deletions: 0,
+            patch_hash: "hash".to_string(),
+            risk_score: 1,
+            review_thread_ids: Vec::new(),
+            warnings: Vec::<StackWarning>::new(),
+        };
+        let layers = SemReviewLayerPlan {
+            api_version: "test".to_string(),
+            cache_key: "key".to_string(),
+            layers: vec![sem_core::embedded::SemReviewLayer {
+                id: "layer-1".to_string(),
+                index: 0,
+                title: "Update demo".to_string(),
+                summary: String::new(),
+                rationale: String::new(),
+                depends_on_layer_ids: Vec::new(),
+                change_indices: Vec::new(),
+                atom_ids: vec!["atom-direct".to_string()],
+                file_paths: vec!["other.rs".to_string()],
+                hunk_indices: vec![99],
+                entity_names: Vec::new(),
+            }],
+            manual_review_change_indices: Vec::new(),
+            manual_review_atom_ids: Vec::new(),
+            warnings: Vec::new(),
+        };
+
+        let mappings = map_sem_layers_to_atoms(&layers, &[atom]);
+
+        assert_eq!(mappings[0].atom_ids, vec!["atom-direct".to_string()]);
     }
 
     #[test]
@@ -1319,11 +1431,13 @@ mod tests {
                 rationale: String::new(),
                 depends_on_layer_ids: Vec::new(),
                 change_indices: vec![0],
+                atom_ids: Vec::new(),
                 file_paths: vec!["src/lib.rs".to_string()],
                 hunk_indices: vec![99],
                 entity_names: vec!["demo".to_string()],
             }],
             manual_review_change_indices: Vec::new(),
+            manual_review_atom_ids: Vec::new(),
             warnings: Vec::new(),
         };
         let semantic_change = serde_json::from_value(serde_json::json!({
@@ -1529,7 +1643,7 @@ mod tests {
         assert_ne!(key_a, key_b);
         assert!(key_a.contains(REMISS_SEMANTIC_REVIEW_VERSION));
         assert!(key_a.contains(SEM_EMBEDDED_API_VERSION));
-        assert!(key_a.contains(&tour_code_version_key(&pr_detail)));
+        assert!(key_a.contains(&review_code_version_key(&pr_detail)));
 
         let local_detail = detail(
             "local:acme/widgets:dirty",
@@ -1587,6 +1701,7 @@ mod tests {
             changed_files: files.len() as i64,
             comments_count: 0,
             commits_count: 1,
+            commits: Vec::new(),
             created_at: String::new(),
             updated_at: String::new(),
             labels: Vec::new(),

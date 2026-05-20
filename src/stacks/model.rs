@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{semantic_review::RemissSemanticReview, structural_evidence::StructuralEvidencePack};
 
-pub const STACK_GENERATOR_VERSION: &str = "virtual-stacks-v5";
+pub const STACK_GENERATOR_VERSION: &str = "virtual-stacks-v6";
 pub const STACK_LAYER_TITLE_MAX_CHARS: usize = 56;
 pub const STACK_LAYER_TITLE_MAX_WORDS: usize = 10;
 
@@ -440,7 +440,7 @@ pub struct StackDiscoveryOptions {
     pub enable_sem_virtual: bool,
     pub enable_virtual_commits: bool,
     pub enable_virtual_semantic: bool,
-    pub ai_provider: Option<crate::code_tour::CodeTourProvider>,
+    pub ai_provider: Option<crate::review_ai::ReviewAiProvider>,
     pub sizing: VirtualStackSizing,
 }
 

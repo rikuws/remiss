@@ -13,11 +13,7 @@ use gpui::*;
 
 use crate::code_display::{
     build_interactive_code_tokens, build_lsp_hover_tooltip_view, code_text_runs, mono_code_font,
-    render_highlighted_code_block, render_highlighted_code_content, InteractiveCodeToken,
-};
-use crate::code_tour::{
-    line_matches_diff_anchor, thread_matches_diff_anchor, CodeTourProvider, CodeTourProviderStatus,
-    DiffAnchor, GeneratedCodeTour, TourSection, TourSectionCategory, TourSectionPriority, TourStep,
+    render_highlighted_code_content, InteractiveCodeToken,
 };
 use crate::diff::{
     build_diff_render_rows, build_diff_render_rows_for_parsed_file, find_parsed_diff_file,
@@ -37,17 +33,17 @@ use crate::local_repo;
 use crate::lsp;
 use crate::markdown::render_markdown;
 use crate::onboarding::WizardStepTarget;
-use crate::review_file_header::{
-    render_review_file_header, render_review_file_header_with_controls, ReviewFileHeaderProps,
-};
+use crate::review_ai::DiffAnchor;
+use crate::review_anchors::line_matches_diff_anchor;
+use crate::review_file_header::{render_review_file_header_with_controls, ReviewFileHeaderProps};
 use crate::review_file_tree::{
     build_repository_file_tree_rows, build_review_file_tree_rows,
     ordered_review_files_from_tree_rows, review_file_tree_cache_scope, review_file_tree_totals,
 };
 use crate::review_queue::{build_review_queue, ReviewQueue, ReviewQueueBucket};
 use crate::review_session::{
-    DiffLayout, ReviewCenterMode, ReviewGuideLens, ReviewLocation, ReviewSourceTarget,
-    GUIDED_REVIEW_PANEL_DEFAULT_WIDTH, GUIDED_REVIEW_PANEL_MAX_WIDTH,
+    location_label, DiffLayout, ReviewCenterMode, ReviewGuideLens, ReviewLocation,
+    ReviewSourceTarget, GUIDED_REVIEW_PANEL_DEFAULT_WIDTH, GUIDED_REVIEW_PANEL_MAX_WIDTH,
     GUIDED_REVIEW_PANEL_MIN_WIDTH,
 };
 use crate::selectable_text::{AppTextFieldKind, AppTextInput, SelectableText};
@@ -78,7 +74,6 @@ use crate::temp_source_window::{
 use crate::theme::*;
 use crate::{github, notifications, review_intelligence};
 
-use super::ai_tour::trigger_generate_tour;
 use super::file_tree::{
     render_file_tree_directory_row, render_file_tree_file_row, render_file_tree_header,
     render_file_tree_state_message, render_structural_warmup_status, ReviewFileRowOpenHandler,
@@ -91,7 +86,6 @@ use super::sections::{
 };
 use super::tooltips::{build_static_tooltip, build_text_tooltip};
 
-mod ai_tour_panel;
 mod combined_diff;
 mod diff_metrics;
 mod file_content;
@@ -100,7 +94,6 @@ mod review_comments;
 mod review_sidebar;
 mod side_by_side;
 mod single_file_diff;
-mod tour_diff_preview;
 
 pub use self::file_content::{
     ensure_selected_file_content_loaded, load_local_source_file_content_flow,
@@ -111,17 +104,16 @@ pub use self::review_comments::{
     trigger_submit_inline_comment, trigger_submit_review_from_review_mode,
 };
 
-use self::ai_tour_panel::*;
 use self::combined_diff::*;
 use self::diff_metrics::*;
 use self::guided_review::*;
 use self::review_comments::{
     begin_review_line_drag, build_review_line_action_target, finish_review_line_drag,
-    open_review_line_action, pending_review_comment_count, render_diff_open_source_icon,
-    render_diff_waypoint_icon, render_finish_review_modal, render_review_line_action_overlay,
-    render_review_thread, render_reviewable_diff_line, render_waypoint_pill,
-    review_line_action_target_with_range, review_thread_ui_state, update_review_line_drag,
-    ReviewThreadUiState,
+    open_review_line_action, pending_review_comment_count, render_diff_comment_icon,
+    render_diff_open_source_icon, render_diff_waypoint_icon, render_finish_review_modal,
+    render_review_line_action_overlay, render_review_thread, render_reviewable_diff_line,
+    render_waypoint_pill, review_line_action_target_with_range, review_thread_ui_state,
+    update_review_line_drag, ReviewThreadUiState,
 };
 use self::review_sidebar::{
     default_stack_layer, default_waymark_name, metric_pill, open_review_location_card,
@@ -131,7 +123,13 @@ use self::review_sidebar::{
 };
 use self::side_by_side::*;
 use self::single_file_diff::*;
-use self::tour_diff_preview::render_tour_diff_file_compact;
+
+pub(super) const DIFF_FOCUS_CONTEXT_ROWS: usize = 12;
+
+pub(super) fn diff_focus_scroll_top_item_ix(focus_item_ix: usize) -> usize {
+    focus_item_ix.saturating_sub(DIFF_FOCUS_CONTEXT_ROWS)
+}
+
 pub fn enter_files_surface(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
     state.update(cx, |s, cx| {
         s.active_surface = PullRequestSurface::Files;
@@ -766,44 +764,115 @@ fn render_waypoint_spotlight_row(
     selected: bool,
 ) -> impl IntoElement {
     let location = waymark.location.clone();
+    let location_label = waypoint_spotlight_location_label(&waymark.location);
+    let detail_label = waypoint_spotlight_detail_label(waymark, &location_label);
+    let mode_label = waymark.location.mode.label();
     let state = state.clone();
 
     div()
+        .w_full()
+        .flex_shrink_0()
         .px(px(20.0))
-        .py(px(13.0))
+        .py(px(12.0))
         .border_t(px(1.0))
         .border_color(border_muted())
         .bg(if selected {
-            bg_emphasis()
+            bg_selected()
         } else {
             bg_overlay()
         })
-        .hover(move |style| {
-            style.bg(if selected {
-                bg_emphasis()
-            } else {
-                bg_selected()
-            })
-        })
+        .hover(move |style| style.bg(if selected { bg_selected() } else { bg_subtle() }))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             close_waypoint_spotlight(&state, cx);
             open_review_location_card(&state, &location, window, cx);
         })
-        .child(render_waypoint_pill(&waymark.name, selected))
         .child(
             div()
-                .mt(px(8.0))
-                .text_size(px(12.0))
-                .text_color(fg_emphasis())
-                .child(waymark.location.label.clone()),
+                .w_full()
+                .flex()
+                .items_start()
+                .gap(px(12.0))
+                .flex_grow()
+                .min_w_0()
+                .child(
+                    div()
+                        .mt(px(1.0))
+                        .w(px(24.0))
+                        .h(px(24.0))
+                        .flex_shrink_0()
+                        .rounded(radius_sm())
+                        .border_1()
+                        .border_color(border_muted())
+                        .bg(if selected { bg_overlay() } else { bg_surface() })
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(lucide_icon(
+                            LucideIcon::Waypoints,
+                            13.0,
+                            if selected { accent() } else { fg_muted() },
+                        )),
+                )
+                .child(
+                    div()
+                        .flex_grow()
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .gap(px(4.0))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .text_size(px(12.0))
+                                .line_height(px(16.0))
+                                .font_family(mono_font_family())
+                                .text_color(fg_emphasis())
+                                .child(location_label),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .text_size(px(11.0))
+                                .line_height(px(15.0))
+                                .text_color(fg_muted())
+                                .child(
+                                    detail_label
+                                        .map(|detail| format!("{detail} · {mode_label}"))
+                                        .unwrap_or_else(|| mode_label.to_string()),
+                                ),
+                        ),
+                ),
         )
-        .child(
-            div()
-                .mt(px(4.0))
-                .text_size(px(11.0))
-                .text_color(fg_muted())
-                .child(waymark.location.mode.label()),
-        )
+}
+
+fn waypoint_spotlight_location_label(location: &ReviewLocation) -> String {
+    let line = match location.mode {
+        ReviewCenterMode::SourceBrowser => location.source_line,
+        ReviewCenterMode::SemanticDiff
+        | ReviewCenterMode::StructuralDiff
+        | ReviewCenterMode::GuidedReview => location
+            .anchor
+            .as_ref()
+            .and_then(|anchor| anchor.line)
+            .and_then(|line| usize::try_from(line).ok())
+            .filter(|line| *line > 0),
+    };
+
+    let rebuilt = location_label(&location.file_path, line);
+    if rebuilt.trim().is_empty() {
+        location.label.clone()
+    } else {
+        rebuilt
+    }
+}
+
+fn waypoint_spotlight_detail_label(
+    waymark: &crate::review_session::ReviewWaymark,
+    primary_label: &str,
+) -> Option<String> {
+    let name = waymark.name.trim();
+    (!name.is_empty() && name != primary_label && name != waymark.location.label)
+        .then(|| name.to_string())
 }
 
 pub fn render_files_view(
@@ -1021,10 +1090,7 @@ fn render_diff_panel(
         .active_review_session()
         .cloned()
         .unwrap_or_default();
-    let center_mode = match review_session.center_mode {
-        ReviewCenterMode::AiTour | ReviewCenterMode::Stack => ReviewCenterMode::GuidedReview,
-        mode => mode,
-    };
+    let center_mode = review_session.center_mode;
     let normal_diff_layout = review_session.normal_diff_layout;
     let structural_diff_layout = review_session.structural_diff_layout;
     let guided_review_lens = review_session.guided_review_lens;
@@ -1035,19 +1101,16 @@ fn render_diff_panel(
         }
         _ => normal_diff_layout,
     };
-    let stack_filter = matches!(
-        center_mode,
-        ReviewCenterMode::GuidedReview | ReviewCenterMode::Stack
-    )
-    .then(|| {
-        build_layer_diff_filter(
-            review_stack.as_ref(),
-            review_session.stack_diff_mode,
-            review_session.selected_stack_layer_id.as_deref(),
-            &review_session.reviewed_stack_atom_ids,
-        )
-    })
-    .flatten();
+    let stack_filter = (center_mode == ReviewCenterMode::GuidedReview)
+        .then(|| {
+            build_layer_diff_filter(
+                review_stack.as_ref(),
+                review_session.stack_diff_mode,
+                review_session.selected_stack_layer_id.as_deref(),
+                &review_session.reviewed_stack_atom_ids,
+            )
+        })
+        .flatten();
     let has_textual_diff = detail
         .parsed_diff
         .iter()
@@ -1263,7 +1326,6 @@ fn render_diff_toolbar(
         ReviewCenterMode::SemanticDiff
             | ReviewCenterMode::StructuralDiff
             | ReviewCenterMode::GuidedReview
-            | ReviewCenterMode::Stack
     );
     let is_local_review = crate::local_review::is_local_review_detail(detail);
     let state_for_refresh = state.clone();
@@ -1516,9 +1578,11 @@ mod tests {
     use super::review_sidebar::sync_stack_timeline_item_count;
     use super::{
         build_normal_side_by_side_diff_file, current_combined_diff_file_index_for_scroll_top,
-        focus_item_index_around, max_side_by_side_column_widths, reading_focus_item_index,
-        CombinedDiffViewItem, DiffFileCollapseScrollAdjustment, DiffViewItem,
-        SideBySideColumnWidths, StructuralDiffTerminalStatus, DIFF_FILE_HEADER_TOP_MARGIN,
+        diff_focus_scroll_top_item_ix, focus_item_index_around, max_side_by_side_column_widths,
+        reading_focus_item_index, waypoint_spotlight_detail_label,
+        waypoint_spotlight_location_label, CombinedDiffViewItem, DiffFileCollapseScrollAdjustment,
+        DiffViewItem, SideBySideColumnWidths, StructuralDiffTerminalStatus,
+        DIFF_FILE_HEADER_TOP_MARGIN, DIFF_FOCUS_CONTEXT_ROWS,
     };
 
     fn test_bounds(top: f32, bottom: f32) -> Bounds<Pixels> {
@@ -1617,6 +1681,53 @@ mod tests {
         let scroll_top = list_state.logical_scroll_top();
         assert_eq!(scroll_top.item_ix, 2);
         assert_eq!(scroll_top.offset_in_item, px(7.0));
+    }
+
+    #[test]
+    fn diff_focus_scroll_uses_middle_context_offset() {
+        assert_eq!(
+            diff_focus_scroll_top_item_ix(DIFF_FOCUS_CONTEXT_ROWS + 9),
+            9
+        );
+        assert_eq!(diff_focus_scroll_top_item_ix(4), 0);
+    }
+
+    #[test]
+    fn waypoint_spotlight_rebuilds_primary_location_label() {
+        let anchor = crate::review_ai::DiffAnchor {
+            file_path: "src/views/diff_view.rs".to_string(),
+            hunk_header: None,
+            line: Some(842),
+            side: Some("RIGHT".to_string()),
+            thread_id: None,
+        };
+        let mut location = crate::review_session::ReviewLocation::from_diff(
+            "src/views/diff_view.rs",
+            Some(anchor),
+        );
+        location.label = "...".to_string();
+
+        assert_eq!(
+            waypoint_spotlight_location_label(&location),
+            "src/views/diff_view.rs:842"
+        );
+    }
+
+    #[test]
+    fn waypoint_spotlight_suppresses_duplicate_detail_label() {
+        let location =
+            crate::review_session::ReviewLocation::from_source("src/main.rs", Some(12), None);
+        let waymark = crate::review_session::ReviewWaymark {
+            id: "wm-test".to_string(),
+            name: "src/main.rs:12".to_string(),
+            location,
+            created_at_ms: 0,
+        };
+
+        assert_eq!(
+            waypoint_spotlight_detail_label(&waymark, "src/main.rs:12"),
+            None
+        );
     }
 
     #[test]

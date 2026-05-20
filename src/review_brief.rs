@@ -6,15 +6,14 @@ use serde_json::{json, Value};
 use crate::{
     agents::{self, jsonrepair::parse_tolerant},
     cache::CacheStore,
-    code_tour::{
-        tour_code_version_key, CodeTourProgressUpdate, CodeTourProvider,
-        CodeTourPullRequestCommentContext, CodeTourReviewCommentContext, CodeTourReviewContext,
-        CodeTourReviewThreadContext,
-    },
     diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk, ParsedDiffLine},
     github::{
         PullRequestComment, PullRequestDetail, PullRequestFile, PullRequestReview,
         PullRequestReviewThread,
+    },
+    review_ai::{review_code_version_key, ReviewAiProgressUpdate, ReviewAiProvider},
+    review_context::{
+        ReviewCommentContext, ReviewContext, ReviewPullRequestCommentContext, ReviewThreadContext,
     },
     review_memory::ReviewMemoryPromptContext,
 };
@@ -74,7 +73,7 @@ pub enum ReviewBriefReadingMode {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewBrief {
-    pub provider: CodeTourProvider,
+    pub provider: ReviewAiProvider,
     pub generated_at_ms: i64,
     pub code_version_key: String,
     pub confidence: ReviewBriefConfidence,
@@ -110,7 +109,7 @@ pub struct ReviewBriefFileContext {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateReviewBriefInput {
-    pub provider: CodeTourProvider,
+    pub provider: ReviewAiProvider,
     pub working_directory: String,
     pub repository: String,
     pub number: i64,
@@ -131,11 +130,11 @@ pub struct GenerateReviewBriefInput {
     pub changed_files: i64,
     pub commits_count: i64,
     pub files: Vec<ReviewBriefFileContext>,
-    pub comments: Vec<CodeTourPullRequestCommentContext>,
+    pub comments: Vec<ReviewPullRequestCommentContext>,
     pub raw_diff: String,
     pub parsed_diff: Vec<ParsedDiffFile>,
-    pub latest_reviews: Vec<CodeTourReviewContext>,
-    pub review_threads: Vec<CodeTourReviewThreadContext>,
+    pub latest_reviews: Vec<ReviewContext>,
+    pub review_threads: Vec<ReviewThreadContext>,
     #[serde(default)]
     pub review_memory: ReviewMemoryPromptContext,
 }
@@ -162,7 +161,7 @@ struct ReviewBriefResponse {
 pub fn load_review_brief(
     cache: &CacheStore,
     detail: &PullRequestDetail,
-    provider: CodeTourProvider,
+    provider: ReviewAiProvider,
 ) -> Result<Option<ReviewBrief>, String> {
     let cache_key = review_brief_cache_key(detail, provider);
     Ok(cache
@@ -180,7 +179,7 @@ pub fn generate_review_brief(
 pub fn generate_review_brief_with_progress(
     cache: &CacheStore,
     input: GenerateReviewBriefInput,
-    on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
+    on_progress: &mut dyn FnMut(ReviewAiProgressUpdate),
 ) -> Result<ReviewBrief, String> {
     if input.working_directory.trim().is_empty() {
         return Err("Review brief generation requires a local checkout path.".to_string());
@@ -230,7 +229,7 @@ pub fn generate_review_brief_with_progress(
 fn request_review_brief_response(
     input: &GenerateReviewBriefInput,
     compact_retry: bool,
-    on_progress: &mut dyn FnMut(CodeTourProgressUpdate),
+    on_progress: &mut dyn FnMut(ReviewAiProgressUpdate),
 ) -> Result<(ReviewBriefResponse, Option<String>), String> {
     let prompt = build_review_brief_prompt_for_attempt(input, compact_retry);
     let response = agents::run_json_prompt_with_progress(
@@ -247,7 +246,7 @@ fn request_review_brief_response(
 
 pub fn build_review_brief_generation_input(
     detail: &PullRequestDetail,
-    provider: CodeTourProvider,
+    provider: ReviewAiProvider,
     working_directory: &str,
 ) -> GenerateReviewBriefInput {
     GenerateReviewBriefInput {
@@ -255,7 +254,7 @@ pub fn build_review_brief_generation_input(
         working_directory: working_directory.to_string(),
         repository: detail.repository.clone(),
         number: detail.number,
-        code_version_key: tour_code_version_key(detail),
+        code_version_key: review_code_version_key(detail),
         title: detail.title.clone(),
         author_body: trim_text(&detail.body, MAX_BODY_CHARS),
         url: detail.url.clone(),
@@ -297,30 +296,30 @@ pub fn build_review_brief_generation_input(
 
 pub fn build_review_brief_request_key(
     detail: &PullRequestDetail,
-    provider: CodeTourProvider,
+    provider: ReviewAiProvider,
 ) -> String {
     format!(
         "{}:{}#{}:{}",
         provider.slug(),
         detail.repository,
         detail.number,
-        tour_code_version_key(detail)
+        review_code_version_key(detail)
     )
 }
 
-pub fn review_brief_cache_key(detail: &PullRequestDetail, provider: CodeTourProvider) -> String {
+pub fn review_brief_cache_key(detail: &PullRequestDetail, provider: ReviewAiProvider) -> String {
     review_brief_cache_key_from_parts(
         &detail.repository,
         detail.number,
         provider,
-        &tour_code_version_key(detail),
+        &review_code_version_key(detail),
     )
 }
 
 pub fn review_brief_cache_key_from_parts(
     repository: &str,
     number: i64,
-    provider: CodeTourProvider,
+    provider: ReviewAiProvider,
     code_version: &str,
 ) -> String {
     format!(
@@ -846,16 +845,16 @@ fn map_file_context(file: &PullRequestFile) -> ReviewBriefFileContext {
     }
 }
 
-fn map_comment_context(comment: &PullRequestComment) -> CodeTourPullRequestCommentContext {
-    CodeTourPullRequestCommentContext {
+fn map_comment_context(comment: &PullRequestComment) -> ReviewPullRequestCommentContext {
+    ReviewPullRequestCommentContext {
         author_login: comment.author_login.clone(),
         body: trim_text(&comment.body, MAX_COMMENT_BODY_CHARS),
         created_at: comment.created_at.clone(),
     }
 }
 
-fn map_review_context(review: &PullRequestReview) -> CodeTourReviewContext {
-    CodeTourReviewContext {
+fn map_review_context(review: &PullRequestReview) -> ReviewContext {
+    ReviewContext {
         author_login: review.author_login.clone(),
         state: review.state.clone(),
         body: review.body.clone(),
@@ -863,8 +862,8 @@ fn map_review_context(review: &PullRequestReview) -> CodeTourReviewContext {
     }
 }
 
-fn map_thread_context(thread: &PullRequestReviewThread) -> CodeTourReviewThreadContext {
-    CodeTourReviewThreadContext {
+fn map_thread_context(thread: &PullRequestReviewThread) -> ReviewThreadContext {
+    ReviewThreadContext {
         path: thread.path.clone(),
         line: thread.line,
         diff_side: if thread.diff_side.is_empty() {
@@ -877,7 +876,7 @@ fn map_thread_context(thread: &PullRequestReviewThread) -> CodeTourReviewThreadC
         comments: thread
             .comments
             .iter()
-            .map(|comment| CodeTourReviewCommentContext {
+            .map(|comment| ReviewCommentContext {
                 author_login: comment.author_login.clone(),
                 body: comment.body.clone(),
             })
@@ -915,9 +914,9 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use crate::{
-        code_tour::CodeTourProvider,
         diff::parse_unified_diff,
         github::{PullRequestDataCompleteness, PullRequestDetail, PullRequestFile},
+        review_ai::ReviewAiProvider,
     };
 
     fn detail(updated_at: &str, head_ref_oid: Option<&str>, raw_diff: &str) -> PullRequestDetail {
@@ -942,6 +941,7 @@ mod tests {
             changed_files: 1,
             comments_count: 0,
             commits_count: 1,
+            commits: Vec::new(),
             created_at: "2026-04-17T00:00:00Z".to_string(),
             updated_at: updated_at.to_string(),
             labels: Vec::new(),
@@ -977,15 +977,15 @@ mod tests {
         );
 
         assert_ne!(
-            review_brief_cache_key(&first, CodeTourProvider::Codex),
-            review_brief_cache_key(&first, CodeTourProvider::Copilot)
+            review_brief_cache_key(&first, ReviewAiProvider::Codex),
+            review_brief_cache_key(&first, ReviewAiProvider::Copilot)
         );
         assert_ne!(
-            review_brief_cache_key(&first, CodeTourProvider::Codex),
-            review_brief_cache_key(&changed, CodeTourProvider::Codex)
+            review_brief_cache_key(&first, ReviewAiProvider::Codex),
+            review_brief_cache_key(&changed, ReviewAiProvider::Codex)
         );
         assert!(
-            review_brief_cache_key(&first, CodeTourProvider::Codex).starts_with("review-brief-v5:")
+            review_brief_cache_key(&first, ReviewAiProvider::Codex).starts_with("review-brief-v5:")
         );
     }
 
@@ -1006,8 +1006,8 @@ mod tests {
         second.body = "Updated description".to_string();
 
         assert_eq!(
-            review_brief_cache_key(&first, CodeTourProvider::Codex),
-            review_brief_cache_key(&second, CodeTourProvider::Codex)
+            review_brief_cache_key(&first, ReviewAiProvider::Codex),
+            review_brief_cache_key(&second, ReviewAiProvider::Codex)
         );
     }
 
@@ -1025,7 +1025,7 @@ mod tests {
         let detail = detail("2026-04-17T10:00:00Z", Some("head123"), raw_diff);
         let input = build_review_brief_generation_input(
             &detail,
-            CodeTourProvider::Copilot,
+            ReviewAiProvider::Copilot,
             "/tmp/acme-api",
         );
         let prompt = build_review_brief_prompt(&input);
@@ -1059,7 +1059,7 @@ mod tests {
                 Some("head123"),
                 "diff --git a/a b/a\n+one\n",
             ),
-            CodeTourProvider::Copilot,
+            ReviewAiProvider::Copilot,
             "/tmp/acme-api",
         );
         let prompt = build_retry_review_brief_prompt(&input);
@@ -1077,7 +1077,7 @@ mod tests {
                 Some("head123"),
                 "diff --git a/a b/a\n+one\n",
             ),
-            CodeTourProvider::Codex,
+            ReviewAiProvider::Codex,
             "/tmp/acme-api",
         );
         let brief = merge_review_brief(
@@ -1122,7 +1122,7 @@ mod tests {
                 Some("head123"),
                 "diff --git a/src/session.rs b/src/session.rs\n+require_token();\n",
             ),
-            CodeTourProvider::Codex,
+            ReviewAiProvider::Codex,
             "/tmp/acme-api",
         );
         let brief = merge_review_brief(
@@ -1156,7 +1156,7 @@ mod tests {
                 Some("head123"),
                 "diff --git a/a b/a\n+one\n",
             ),
-            CodeTourProvider::Codex,
+            ReviewAiProvider::Codex,
             "/tmp/acme-api",
         );
         let error = merge_review_brief(
@@ -1191,7 +1191,7 @@ mod tests {
                 Some("head123"),
                 "diff --git a/a b/a\n+one\n",
             ),
-            CodeTourProvider::Codex,
+            ReviewAiProvider::Codex,
             "/tmp/acme-api",
         );
         let error = merge_review_brief(

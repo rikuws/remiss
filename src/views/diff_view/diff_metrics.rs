@@ -1,5 +1,34 @@
 use super::*;
 
+#[derive(Clone)]
+struct DiffCommentDrag {
+    state: Entity<AppState>,
+    origin: ReviewLineActionTarget,
+}
+
+struct DiffCommentDragPreview;
+
+impl Render for DiffCommentDragPreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<'_, Self>) -> impl IntoElement {
+        div().w(px(0.0)).h(px(0.0))
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct DiffTextSelectionContext {
+    group_id: String,
+    row_order: i64,
+}
+
+impl DiffTextSelectionContext {
+    pub(super) fn new(group_id: impl Into<String>, row_order: i64) -> Self {
+        Self {
+            group_id: group_id.into(),
+            row_order,
+        }
+    }
+}
+
 pub(super) fn render_diff_section_header(label: &str, count: usize) -> impl IntoElement {
     div()
         .px(px(14.0))
@@ -144,8 +173,12 @@ pub(super) fn render_hunk(
             div()
                 .flex()
                 .flex_col()
-                .children(hunk.lines.iter().map(|line| {
+                .children(hunk.lines.iter().enumerate().map(|(line_index, line)| {
                     let threads_for_line = find_threads_for_line(file_path, line, line_threads);
+                    let text_selection = DiffTextSelectionContext::new(
+                        format!("diff-text:{file_path}:unified"),
+                        diff_text_row_order(0, line_index),
+                    );
                     render_diff_line_with_threads(
                         gutter_layout,
                         file_path,
@@ -154,6 +187,7 @@ pub(super) fn render_hunk(
                         selected_anchor,
                         unread_comment_ids,
                         state,
+                        Some(text_selection),
                         cx,
                     )
                 })),
@@ -168,8 +202,16 @@ pub(super) fn render_diff_line_with_threads(
     selected_anchor: Option<&DiffAnchor>,
     unread_comment_ids: &BTreeSet<String>,
     state: &Entity<AppState>,
+    text_selection: Option<DiffTextSelectionContext>,
     cx: &App,
 ) -> impl IntoElement {
+    let hovered_diff_gutter_action_key = {
+        let app_state = state.read(cx);
+        (!app_state.diff_gutter_hover_suppressed())
+            .then(|| app_state.hovered_diff_gutter_action_key.clone())
+            .flatten()
+    };
+
     div()
         .flex()
         .flex_col()
@@ -186,6 +228,8 @@ pub(super) fn render_diff_line_with_threads(
             false,
             false,
             false,
+            hovered_diff_gutter_action_key.as_deref(),
+            text_selection,
             false,
         ))
         .when(!threads.is_empty(), |el| {
@@ -226,6 +270,8 @@ pub(super) fn render_diff_line(
     has_waypoint: bool,
     force_marker_visible: bool,
     range_selected: bool,
+    hovered_diff_gutter_action_key: Option<&str>,
+    text_selection: Option<DiffTextSelectionContext>,
     wrap_diff_lines: bool,
 ) -> impl IntoElement {
     let is_selected = line_matches_diff_anchor(line, selected_anchor) || range_selected;
@@ -233,6 +279,8 @@ pub(super) fn render_diff_line(
     let has_gutter_line_action = gutter_line_action.is_some();
     let source_slot_action = source_action.clone();
     let hover_source_action = source_action.clone();
+    let row_drag_action = line_action.clone();
+    let row_drop_action = line_action.clone();
 
     let left_num = line
         .left_line_number
@@ -309,6 +357,21 @@ pub(super) fn render_diff_line(
                 });
             })
         })
+        .when_some(row_drag_action, |el, (_, target)| {
+            el.on_drag_move(move |event: &DragMoveEvent<DiffCommentDrag>, _, cx| {
+                if event.bounds.contains(&event.event.position) {
+                    cx.stop_propagation();
+                    let drag_state = event.drag(cx).state.clone();
+                    update_review_line_drag(&drag_state, target.clone(), cx);
+                }
+            })
+        })
+        .when_some(row_drop_action, |el, (_, target)| {
+            el.on_drop::<DiffCommentDrag>(move |drag, window, cx| {
+                cx.stop_propagation();
+                finish_review_line_drag(&drag.state, target.clone(), window.mouse_position(), cx);
+            })
+        })
         .child(
             div()
                 .flex()
@@ -328,6 +391,13 @@ pub(super) fn render_diff_line(
                             .justify_center()
                             .when_some(source_slot_action, |slot, (state, target)| {
                                 let tooltip_label = format!("Open {} source", target.side.label());
+                                let action_key = diff_source_action_key(&target);
+                                let icon_visible =
+                                    hovered_diff_gutter_action_key == Some(action_key.as_str());
+                                let move_state = state.clone();
+                                let move_key = action_key.clone();
+                                let leave_state = state.clone();
+                                let leave_key = action_key.clone();
                                 slot.child(
                                     div()
                                         .id((
@@ -350,7 +420,24 @@ pub(super) fn render_diff_line(
                                         .flex()
                                         .items_center()
                                         .justify_center()
-                                        .hover(|style| style.bg(diff_editor_surface()))
+                                        .on_mouse_move(move |_, _, cx| {
+                                            set_hovered_diff_gutter_action(
+                                                &move_state,
+                                                &move_key,
+                                                true,
+                                                cx,
+                                            );
+                                        })
+                                        .on_hover(move |hovered, _, cx| {
+                                            if !*hovered {
+                                                set_hovered_diff_gutter_action(
+                                                    &leave_state,
+                                                    &leave_key,
+                                                    false,
+                                                    cx,
+                                                );
+                                            }
+                                        })
                                         .tooltip(move |_, cx| {
                                             build_text_tooltip(
                                                 SharedString::from(tooltip_label.clone()),
@@ -366,7 +453,7 @@ pub(super) fn render_diff_line(
                                                 cx,
                                             );
                                         })
-                                        .child(render_diff_open_source_icon()),
+                                        .child(render_diff_open_source_icon(icon_visible)),
                                 )
                             }),
                     )
@@ -380,10 +467,19 @@ pub(super) fn render_diff_line(
                             .items_center()
                             .justify_center()
                             .when_some(gutter_line_action, |slot, (state, target)| {
+                                let action_key = diff_comment_action_key(&target);
+                                let icon_visible =
+                                    hovered_diff_gutter_action_key == Some(action_key.as_str());
                                 let move_state = state.clone();
-                                let move_target = target.clone();
-                                let up_state = state.clone();
-                                let up_target = target.clone();
+                                let move_key = action_key.clone();
+                                let leave_state = state.clone();
+                                let leave_key = action_key.clone();
+                                let click_state = state.clone();
+                                let click_target = target.clone();
+                                let drag_payload = DiffCommentDrag {
+                                    state: state.clone(),
+                                    origin: target.clone(),
+                                };
                                 slot.child(
                                     div()
                                         .id((
@@ -401,49 +497,76 @@ pub(super) fn render_diff_line(
                                         .flex()
                                         .items_center()
                                         .justify_center()
-                                        .hover(|style| style.bg(diff_editor_surface()))
+                                        .on_mouse_move(move |_, _, cx| {
+                                            set_hovered_diff_gutter_action(
+                                                &move_state,
+                                                &move_key,
+                                                true,
+                                                cx,
+                                            );
+                                        })
+                                        .on_hover(move |hovered, _, cx| {
+                                            if !*hovered {
+                                                set_hovered_diff_gutter_action(
+                                                    &leave_state,
+                                                    &leave_key,
+                                                    false,
+                                                    cx,
+                                                );
+                                            }
+                                        })
                                         .tooltip(|_, cx| {
                                             build_static_tooltip("click or drag to comment", cx)
                                         })
-                                        .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+                                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                                             cx.stop_propagation();
-                                            if event.modifiers.shift {
+                                        })
+                                        .on_click(move |event, _, cx| {
+                                            if !event.standard_click() {
+                                                return;
+                                            }
+                                            cx.stop_propagation();
+                                            if event.modifiers().shift {
                                                 let target = review_line_action_target_with_range(
-                                                    &state,
-                                                    target.clone(),
+                                                    &click_state,
+                                                    click_target.clone(),
                                                     true,
                                                     cx,
                                                 );
                                                 open_review_line_action(
-                                                    &state,
+                                                    &click_state,
                                                     target,
-                                                    event.position,
+                                                    event.position(),
                                                     cx,
                                                 );
                                             } else {
-                                                begin_review_line_drag(&state, target.clone(), cx);
+                                                let target = review_line_action_target_with_range(
+                                                    &click_state,
+                                                    click_target.clone(),
+                                                    false,
+                                                    cx,
+                                                );
+                                                open_review_line_action(
+                                                    &click_state,
+                                                    target,
+                                                    event.position(),
+                                                    cx,
+                                                );
                                             }
                                         })
-                                        .on_mouse_move(move |_, _, cx| {
-                                            update_review_line_drag(
-                                                &move_state,
-                                                move_target.clone(),
+                                        .on_drag(drag_payload, move |drag, _, _, cx| {
+                                            begin_review_line_drag(
+                                                &drag.state,
+                                                drag.origin.clone(),
                                                 cx,
                                             );
-                                        })
-                                        .on_mouse_up(MouseButton::Left, move |event, _, cx| {
-                                            cx.stop_propagation();
-                                            finish_review_line_drag(
-                                                &up_state,
-                                                up_target.clone(),
-                                                event.position,
-                                                cx,
-                                            );
+                                            cx.new(|_| DiffCommentDragPreview)
                                         })
                                         .child(if has_waypoint {
                                             render_diff_waypoint_icon().into_any_element()
                                         } else {
-                                            div().into_any_element()
+                                            render_diff_comment_icon(icon_visible)
+                                                .into_any_element()
                                         }),
                                 )
                             })
@@ -511,8 +634,41 @@ pub(super) fn render_diff_line(
             fallback_text_color,
             lsp_context,
             line_action,
+            text_selection,
             wrap_diff_lines,
         ))
+}
+
+fn diff_source_action_key(target: &TempSourceTarget) -> String {
+    format!("source:{}", target.focus_key())
+}
+
+fn diff_comment_action_key(target: &ReviewLineActionTarget) -> String {
+    format!("comment:{}", target.stable_key())
+}
+
+fn set_hovered_diff_gutter_action(
+    state: &Entity<AppState>,
+    key: &str,
+    hovered: bool,
+    cx: &mut App,
+) {
+    state.update(cx, |state, cx| {
+        if hovered {
+            if state.diff_gutter_hover_suppressed() {
+                return;
+            }
+            if state.hovered_diff_gutter_action_key.as_deref() == Some(key) {
+                return;
+            }
+            state.hovered_diff_gutter_action_key = Some(key.to_string());
+        } else if state.hovered_diff_gutter_action_key.as_deref() == Some(key) {
+            state.hovered_diff_gutter_action_key = None;
+        } else {
+            return;
+        }
+        cx.notify();
+    });
 }
 
 pub(super) fn render_syntax_content(
@@ -523,6 +679,7 @@ pub(super) fn render_syntax_content(
     fallback_color: Rgba,
     lsp_context: Option<&DiffLineLspContext>,
     line_action: Option<(Entity<AppState>, ReviewLineActionTarget)>,
+    text_selection: Option<DiffTextSelectionContext>,
     wrap_diff_lines: bool,
 ) -> Div {
     let content = line.content.as_str();
@@ -596,40 +753,43 @@ pub(super) fn render_syntax_content(
             .with_runs(runs)
         } else {
             SelectableText::new(selection_id.clone(), content.to_string())
-        }
-        .on_click(click_ranges, move |range_ix, window, cx| {
-            let token = &click_tokens[range_ix];
-            let Some(query) =
-                click_context.query_for_index(token.byte_range.start, click_tokens.as_ref())
-            else {
-                return;
-            };
-            navigate_to_diff_lsp_definition(query, window, cx);
-        })
-        .require_platform_modifier_for_click()
-        .on_hover(move |index, _event, window, cx| {
-            let Some(index) = index else {
-                return;
-            };
-            let Some(query) = hover_context.query_for_index(index, hover_tokens.as_ref()) else {
-                return;
-            };
-            request_diff_line_lsp_details(query, window, cx);
-        })
-        .tooltip_with_key(move |index, window, cx| {
-            let query = tooltip_context.query_for_index(index, tooltip_tokens.as_ref())?;
-            request_diff_line_lsp_details(query.clone(), window, cx);
-            Some((
-                query.query_key.clone(),
-                build_lsp_hover_tooltip_view(
-                    query.state.clone(),
-                    query.detail_key.clone(),
+        };
+        let interactive = apply_diff_text_selection_group(interactive, text_selection.as_ref())
+            .on_click(click_ranges, move |range_ix, window, cx| {
+                let token = &click_tokens[range_ix];
+                let Some(query) =
+                    click_context.query_for_index(token.byte_range.start, click_tokens.as_ref())
+                else {
+                    return;
+                };
+                navigate_to_diff_lsp_definition(query, window, cx);
+            })
+            .require_platform_modifier_for_click()
+            .on_hover(move |index, _event, window, cx| {
+                let Some(index) = index else {
+                    return;
+                };
+                let Some(query) = hover_context.query_for_index(index, hover_tokens.as_ref())
+                else {
+                    return;
+                };
+                request_diff_line_lsp_details(query, window, cx);
+            })
+            .tooltip_with_key(move |index, window, cx| {
+                let query = tooltip_context.query_for_index(index, tooltip_tokens.as_ref())?;
+                request_diff_line_lsp_details(query.clone(), window, cx);
+                Some((
                     query.query_key.clone(),
-                    query.token_label.clone(),
-                    cx,
-                ),
-            ))
-        });
+                    build_lsp_hover_tooltip_view(
+                        query.state.clone(),
+                        query.detail_key.clone(),
+                        query.query_key.clone(),
+                        query.token_label.clone(),
+                        query.request.file_path.clone(),
+                        cx,
+                    ),
+                ))
+            });
 
         let interactive = if let Some((state, target)) = unmatched_click {
             interactive.on_click_unmatched(move |window, cx| {
@@ -644,6 +804,7 @@ pub(super) fn render_syntax_content(
 
     if spans.is_empty() && rendered_runs.is_none() {
         let mut selectable = SelectableText::new(selection_id, content.to_string());
+        selectable = apply_diff_text_selection_group(selectable, text_selection.as_ref());
         if let Some((state, target)) = line_action {
             selectable = selectable.on_click_unmatched(move |window, cx| {
                 open_review_line_action(&state, target.clone(), window.mouse_position(), cx);
@@ -657,6 +818,7 @@ pub(super) fn render_syntax_content(
     } else {
         SelectableText::new(selection_id, content.to_string())
     };
+    selectable = apply_diff_text_selection_group(selectable, text_selection.as_ref());
 
     if let Some((state, target)) = line_action {
         selectable = selectable.on_click_unmatched(move |window, cx| {
@@ -665,6 +827,22 @@ pub(super) fn render_syntax_content(
     }
 
     content_div.text_color(fallback_color).child(selectable)
+}
+
+pub(super) fn diff_text_row_order(hunk_index: usize, line_index: usize) -> i64 {
+    const DIFF_TEXT_HUNK_ORDER_STRIDE: i64 = 1_000_000;
+    (hunk_index as i64) * DIFF_TEXT_HUNK_ORDER_STRIDE + line_index as i64
+}
+
+fn apply_diff_text_selection_group(
+    selectable: SelectableText,
+    text_selection: Option<&DiffTextSelectionContext>,
+) -> SelectableText {
+    if let Some(text_selection) = text_selection {
+        selectable.selection_group(text_selection.group_id.clone(), text_selection.row_order)
+    } else {
+        selectable
+    }
 }
 
 pub(super) const DIFF_ROW_HEIGHT: f32 = 25.0;
