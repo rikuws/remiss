@@ -832,17 +832,34 @@ fn nested_permission_request_kinds_are_read(value: &Value) -> bool {
         "promptRequest",
         "prompt_request",
     ] {
-        if let Some(kind) = value
-            .get(key)
-            .and_then(|nested| first_string(nested, &["kind"]))
-        {
+        if let Some(is_read) = value.get(key).and_then(nested_permission_request_is_read) {
             saw_permission_kind = true;
-            if !kind.eq_ignore_ascii_case("read") {
+            if !is_read {
                 return false;
             }
         }
     }
     saw_permission_kind
+}
+
+fn nested_permission_request_is_read(value: &Value) -> Option<bool> {
+    let kind = first_string(value, &["kind"]);
+    let access_kind = first_string(value, &["accessKind", "access_kind"]);
+
+    match kind
+        .as_deref()
+        .map(|value| value.trim().to_ascii_lowercase())
+    {
+        Some(kind) if kind == "read" => Some(true),
+        Some(kind) if kind == "path" => Some(
+            access_kind
+                .as_deref()
+                .map(|value| value.eq_ignore_ascii_case("read"))
+                .unwrap_or(false),
+        ),
+        Some(_) => Some(false),
+        None => access_kind.map(|value| value.eq_ignore_ascii_case("read")),
+    }
 }
 
 fn permission_denial_message(outcome: &CopilotOutcome, data: &Value) -> Option<String> {
@@ -1640,6 +1657,78 @@ mod tests {
 
         assert!(is_read_permission_request(&read));
         assert!(!is_read_permission_request(&write));
+    }
+
+    #[test]
+    fn read_only_permission_policy_allows_path_prompt_reads() {
+        let read = PermissionRequestData {
+            kind: None,
+            tool_call_id: None,
+            extra: json!({
+                "requestId": "request-1",
+                "permissionRequest": {
+                    "kind": "read",
+                    "toolCallId": "tool-1",
+                    "path": "/Users/example/Library/Application Support/remiss/workspace/checkout/src/main.kt"
+                },
+                "promptRequest": {
+                    "kind": "path",
+                    "accessKind": "read",
+                    "paths": [
+                        "/Users/example/Library/Application Support/remiss/workspace/checkout/src/main.kt"
+                    ],
+                    "toolCallId": "tool-1"
+                }
+            }),
+        };
+        let write = PermissionRequestData {
+            kind: None,
+            tool_call_id: None,
+            extra: json!({
+                "requestId": "request-2",
+                "permissionRequest": {
+                    "kind": "read",
+                    "toolCallId": "tool-2",
+                    "path": "/Users/example/Library/Application Support/remiss/workspace/checkout/src/main.kt"
+                },
+                "promptRequest": {
+                    "kind": "path",
+                    "accessKind": "write",
+                    "paths": [
+                        "/Users/example/Library/Application Support/remiss/workspace/checkout/src/main.kt"
+                    ],
+                    "toolCallId": "tool-2"
+                }
+            }),
+        };
+
+        assert!(is_read_permission_request(&read));
+        assert!(!is_read_permission_request(&write));
+    }
+
+    #[test]
+    fn read_only_permission_policy_allows_logged_copilot_path_read_shape() {
+        let data: PermissionRequestData = serde_json::from_value(json!({
+            "requestId": "6d12ad6d-7ac4-493c-a455-46bb67ff98f6",
+            "permissionRequest": {
+                "kind": "read",
+                "toolCallId": "call_Qt0vE1LtEnkkKRWF1ba4dMjY",
+                "intention": "Read file: /Users/example/Library/Application Support/remiss/workspace/checkout/src/main.kt",
+                "path": "/Users/example/Library/Application Support/remiss/workspace/checkout/src/main.kt"
+            },
+            "promptRequest": {
+                "kind": "path",
+                "accessKind": "read",
+                "paths": [
+                    "/Users/example/Library/Application Support/remiss/workspace/checkout/src/main.kt"
+                ],
+                "toolCallId": "call_Qt0vE1LtEnkkKRWF1ba4dMjY"
+            }
+        }))
+        .expect("permission request should deserialize");
+
+        assert!(data.kind.is_none());
+        assert!(is_read_permission_request(&data));
     }
 
     #[test]
