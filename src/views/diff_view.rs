@@ -79,6 +79,7 @@ use super::file_tree::{
     render_file_tree_state_message, render_structural_warmup_status, ReviewFileRowOpenHandler,
     ReviewFileRowOpenMode, REVIEW_FILE_TREE_ROW_HEIGHT,
 };
+use super::motion::{lerp_px, lerp_rgba};
 use super::root::refresh_active_local_review;
 use super::sections::{
     badge, badge_success, error_text, eyebrow, format_relative_time, ghost_button, nested_panel,

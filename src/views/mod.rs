@@ -1,5 +1,6 @@
 pub(crate) mod diff_view;
 mod file_tree;
+mod motion;
 mod palette;
 mod pr_detail;
 mod root;

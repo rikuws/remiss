@@ -30,6 +30,7 @@ use super::diff_view::{
     trigger_add_waypoint_shortcut, trigger_submit_inline_comment,
     trigger_submit_review_from_review_mode, warm_structural_diffs_flow,
 };
+use super::motion::{lerp_f32, lerp_px};
 use super::palette::{render_palette, toggle_palette};
 use super::pr_detail::render_pr_workspace;
 use super::sections::render_section_workspace;
@@ -38,6 +39,7 @@ use super::settings::{
     increase_code_font_size_preference, prepare_settings_view, reset_code_font_size_preference,
     trigger_software_update_check, update_theme_preference,
 };
+use super::tooltips::build_chrome_tooltip as build_static_tooltip;
 use super::welcome_wizard::{refresh_onboarding_gh_status, render_onboarding_wizard};
 use super::workspace_sync::{
     sync_workspace_flow, trigger_sync_workspace, wait_for_workspace_poll_interval,
@@ -2391,40 +2393,6 @@ fn sidebar_hidden_progress(hidden: bool, delta: f32) -> f32 {
         delta
     } else {
         1.0 - delta
-    }
-}
-
-fn lerp_px(from: f32, to: f32, progress: f32) -> Pixels {
-    px(from + (to - from) * progress)
-}
-
-fn lerp_f32(from: f32, to: f32, progress: f32) -> f32 {
-    from + (to - from) * progress
-}
-
-fn build_static_tooltip(text: &'static str, cx: &mut App) -> AnyView {
-    AnyView::from(cx.new(|_| ChromeTooltipView {
-        text: SharedString::from(text),
-    }))
-}
-
-struct ChromeTooltipView {
-    text: SharedString,
-}
-
-impl Render for ChromeTooltipView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px(px(8.0))
-            .py(px(4.0))
-            .rounded(radius_sm())
-            .border_1()
-            .border_color(transparent())
-            .bg(bg_overlay())
-            .shadow(tooltip_shadow())
-            .text_size(px(11.0))
-            .text_color(fg_default())
-            .child(self.text.clone())
     }
 }
 

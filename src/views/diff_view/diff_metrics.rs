@@ -142,19 +142,6 @@ pub(super) fn render_file_stat_bar(additions: i64, deletions: i64) -> impl IntoE
         }))
 }
 
-pub(super) fn lerp_px(from: f32, to: f32, progress: f32) -> Pixels {
-    px(from + (to - from) * progress)
-}
-
-pub(super) fn lerp_rgba(from: Rgba, to: Rgba, progress: f32) -> Rgba {
-    Rgba {
-        r: from.r + (to.r - from.r) * progress,
-        g: from.g + (to.g - from.g) * progress,
-        b: from.b + (to.b - from.b) * progress,
-        a: from.a + (to.a - from.a) * progress,
-    }
-}
-
 pub(super) fn render_hunk(
     gutter_layout: DiffGutterLayout,
     file_path: &str,
