@@ -34,7 +34,7 @@ use crate::lsp;
 use crate::markdown::render_markdown;
 use crate::onboarding::WizardStepTarget;
 use crate::review_ai::DiffAnchor;
-use crate::review_anchors::line_matches_diff_anchor;
+use crate::review_anchors::{line_matches_diff_anchor, review_thread_anchor};
 use crate::review_file_header::{render_review_file_header_with_controls, ReviewFileHeaderProps};
 use crate::review_file_tree::{
     build_repository_file_tree_rows, build_review_file_tree_rows,
@@ -1548,25 +1548,9 @@ fn find_threads_for_line<'a>(
             if t.path != file_path {
                 return false;
             }
-            match line.kind {
-                DiffLineKind::Addition | DiffLineKind::Context => {
-                    let line_no = line.right_line_number;
-                    if t.diff_side == "RIGHT" {
-                        t.line == line_no || t.original_line == line_no
-                    } else {
-                        false
-                    }
-                }
-                DiffLineKind::Deletion => {
-                    let line_no = line.left_line_number;
-                    if t.diff_side == "LEFT" {
-                        t.line == line_no || t.original_line == line_no
-                    } else {
-                        false
-                    }
-                }
-                DiffLineKind::Meta => false,
-            }
+            review_thread_anchor(t)
+                .map(|anchor| line_matches_diff_anchor(line, Some(&anchor)))
+                .unwrap_or(false)
         })
         .collect()
 }

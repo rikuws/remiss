@@ -382,20 +382,16 @@ fn push_thread_anchor(
     original_line: Option<i64>,
     thread_index: usize,
 ) {
-    if let Some(line) = line {
+    let anchor_line = match side {
+        DiffThreadSide::Left => original_line.or(line),
+        DiffThreadSide::Right => line.or(original_line),
+    };
+
+    if let Some(line) = anchor_line {
         inline_threads
             .entry((side, line))
             .or_default()
             .push(thread_index);
-    }
-
-    if let Some(original_line) = original_line {
-        if Some(original_line) != line {
-            inline_threads
-                .entry((side, original_line))
-                .or_default()
-                .push(thread_index);
-        }
     }
 }
 
@@ -431,5 +427,190 @@ fn finalize_file(
             hunks: file.hunks,
             is_binary: file.is_binary,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::github::{
+        PullRequestDataCompleteness, PullRequestDetail, PullRequestReviewComment,
+        PullRequestReviewThread,
+    };
+
+    #[test]
+    fn renders_thread_once_when_current_and_original_right_lines_differ() {
+        let detail = detail_with_thread(review_thread("thread-copilot", "RIGHT", Some(5), Some(3)));
+
+        let rows = build_diff_render_rows(&detail, "src/lib.rs");
+        let inline_rows = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| match row {
+                DiffRenderRow::InlineThread { thread_index } => Some((index, *thread_index)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(inline_rows.len(), 1);
+        assert_eq!(inline_rows[0].1, 0);
+        assert_eq!(
+            preceding_right_line_number(&detail, &rows, inline_rows[0].0),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn falls_back_to_original_right_line_when_current_line_is_missing() {
+        let detail = detail_with_thread(review_thread(
+            "thread-original-only",
+            "RIGHT",
+            None,
+            Some(3),
+        ));
+
+        let rows = build_diff_render_rows(&detail, "src/lib.rs");
+        let inline_index = rows
+            .iter()
+            .position(|row| matches!(row, DiffRenderRow::InlineThread { .. }))
+            .expect("expected inline thread row");
+
+        assert_eq!(
+            preceding_right_line_number(&detail, &rows, inline_index),
+            Some(3)
+        );
+    }
+
+    fn preceding_right_line_number(
+        detail: &PullRequestDetail,
+        rows: &[DiffRenderRow],
+        inline_index: usize,
+    ) -> Option<i64> {
+        let previous = rows.get(inline_index.checked_sub(1)?)?;
+        let DiffRenderRow::Line {
+            hunk_index,
+            line_index,
+        } = previous
+        else {
+            return None;
+        };
+        detail
+            .parsed_diff
+            .first()?
+            .hunks
+            .get(*hunk_index)?
+            .lines
+            .get(*line_index)?
+            .right_line_number
+    }
+
+    fn detail_with_thread(thread: PullRequestReviewThread) -> PullRequestDetail {
+        PullRequestDetail {
+            id: "pr".to_string(),
+            repository: "org/repo".to_string(),
+            number: 1,
+            title: "Review comments".to_string(),
+            body: String::new(),
+            url: "https://example.com/pr".to_string(),
+            author_login: "alice".to_string(),
+            author_avatar_url: None,
+            state: "OPEN".to_string(),
+            is_draft: false,
+            review_decision: None,
+            base_ref_name: "main".to_string(),
+            head_ref_name: "feature".to_string(),
+            base_ref_oid: None,
+            head_ref_oid: None,
+            additions: 0,
+            deletions: 0,
+            changed_files: 1,
+            comments_count: 0,
+            commits_count: 1,
+            commits: Vec::new(),
+            created_at: "2026-05-21T00:00:00Z".to_string(),
+            updated_at: "2026-05-21T00:00:00Z".to_string(),
+            labels: Vec::new(),
+            reviewers: Vec::new(),
+            reviewer_avatar_urls: BTreeMap::new(),
+            comments: Vec::new(),
+            latest_reviews: Vec::new(),
+            review_threads: vec![thread],
+            viewer_pending_review: None,
+            files: Vec::new(),
+            raw_diff: String::new(),
+            parsed_diff: vec![ParsedDiffFile {
+                path: "src/lib.rs".to_string(),
+                previous_path: Some("src/lib.rs".to_string()),
+                is_binary: false,
+                hunks: vec![ParsedDiffHunk {
+                    header: "@@ -1,6 +1,6 @@".to_string(),
+                    lines: (1..=6)
+                        .map(|line| ParsedDiffLine {
+                            kind: DiffLineKind::Context,
+                            prefix: " ".to_string(),
+                            left_line_number: Some(line),
+                            right_line_number: Some(line),
+                            content: format!("line {line}"),
+                        })
+                        .collect(),
+                }],
+            }],
+            data_completeness: PullRequestDataCompleteness::default(),
+        }
+    }
+
+    fn review_thread(
+        id: &str,
+        diff_side: &str,
+        line: Option<i64>,
+        original_line: Option<i64>,
+    ) -> PullRequestReviewThread {
+        PullRequestReviewThread {
+            id: id.to_string(),
+            path: "src/lib.rs".to_string(),
+            line,
+            original_line,
+            start_line: None,
+            original_start_line: None,
+            diff_side: diff_side.to_string(),
+            start_diff_side: None,
+            is_collapsed: false,
+            is_outdated: false,
+            is_resolved: false,
+            subject_type: "LINE".to_string(),
+            resolved_by_login: None,
+            viewer_can_reply: true,
+            viewer_can_resolve: true,
+            viewer_can_unresolve: true,
+            comments: vec![review_comment(id, line, original_line)],
+        }
+    }
+
+    fn review_comment(
+        id: &str,
+        line: Option<i64>,
+        original_line: Option<i64>,
+    ) -> PullRequestReviewComment {
+        PullRequestReviewComment {
+            id: format!("{id}-comment"),
+            author_login: "copilot-pull-request-reviewer".to_string(),
+            author_avatar_url: None,
+            body: "Please check this edge case.".to_string(),
+            path: "src/lib.rs".to_string(),
+            line,
+            original_line,
+            start_line: None,
+            original_start_line: None,
+            state: "PUBLISHED".to_string(),
+            created_at: "2026-05-21T00:00:00Z".to_string(),
+            updated_at: "2026-05-21T00:00:00Z".to_string(),
+            published_at: Some("2026-05-21T00:00:00Z".to_string()),
+            reply_to_id: None,
+            viewer_can_update: false,
+            viewer_can_delete: false,
+            url: "https://example.com/comment".to_string(),
+        }
     }
 }

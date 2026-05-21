@@ -1015,7 +1015,8 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let lane_count = usize::from(has_my_items) + repo_groups.len();
     let lane_strip_width = lane_count as f32 * KANBAN_LANE_WIDTH
         + lane_count.saturating_sub(1) as f32 * KANBAN_LANE_GAP;
-    let muted_list: Vec<String> = muted_repos.iter().cloned().collect::<Vec<_>>();
+    let mut muted_list: Vec<String> = muted_repos.iter().cloned().collect::<Vec<_>>();
+    muted_list.sort();
     let has_muted = !muted_list.is_empty();
 
     div()
@@ -1097,7 +1098,7 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                     muted_repo_pill(&repo, move |_, _, cx| {
                                         let r = repo_for_unmute.clone();
                                         state.update(cx, |s, cx| {
-                                            s.muted_repos.remove(&r);
+                                            s.unmute_repository(&r);
                                             cx.notify();
                                         });
                                     })
@@ -2109,7 +2110,7 @@ fn kanban_lane(
                                 .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                                     cx.stop_propagation();
                                     mute_state.update(cx, |s, cx| {
-                                        s.muted_repos.insert(mute_repo.clone());
+                                        s.mute_repository(&mute_repo);
                                         cx.notify();
                                     });
                                 })

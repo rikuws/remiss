@@ -45,6 +45,56 @@ use gpui::{
 };
 use serde::{Deserialize, Serialize};
 
+const MUTED_REPOSITORIES_CACHE_KEY: &str = "muted-repositories-v1";
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MutedRepositoriesSettings {
+    #[serde(default)]
+    repositories: Vec<String>,
+}
+
+impl MutedRepositoriesSettings {
+    fn from_repositories(repositories: &HashSet<String>) -> Self {
+        let mut repositories = repositories.iter().cloned().collect::<Vec<_>>();
+        repositories.sort();
+        repositories.dedup();
+        Self { repositories }
+    }
+}
+
+fn load_muted_repositories(cache: &CacheStore) -> Result<HashSet<String>, String> {
+    Ok(cache
+        .get::<MutedRepositoriesSettings>(MUTED_REPOSITORIES_CACHE_KEY)?
+        .map(|document| {
+            document
+                .value
+                .repositories
+                .into_iter()
+                .filter(|repository| !repository.trim().is_empty())
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+fn save_muted_repositories(
+    cache: &CacheStore,
+    repositories: &HashSet<String>,
+) -> Result<(), String> {
+    cache.put(
+        MUTED_REPOSITORIES_CACHE_KEY,
+        &MutedRepositoriesSettings::from_repositories(repositories),
+        state_now_ms(),
+    )
+}
+
+fn state_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or_default()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SectionId {
     Overview,
@@ -1136,6 +1186,13 @@ impl AppState {
         };
         let local_review_repositories =
             local_review::load_remembered_repositories(&cache).unwrap_or_default();
+        let muted_repos = match load_muted_repositories(&cache) {
+            Ok(repositories) => repositories,
+            Err(error) => {
+                eprintln!("Failed to load muted repositories: {error}");
+                HashSet::new()
+            }
+        };
         let (project_shader_settings, project_shader_settings_error) =
             match load_project_shader_settings(&cache) {
                 Ok(settings) => (settings, None),
@@ -1161,7 +1218,7 @@ impl AppState {
             local_review_repositories,
             local_review_loading: false,
             local_review_error: None,
-            muted_repos: std::collections::HashSet::new(),
+            muted_repos,
             project_shader_settings,
             project_shader_settings_error,
             project_shader_picker: None,
@@ -1473,6 +1530,24 @@ impl AppState {
 
     pub fn close_project_shader_picker(&mut self) {
         self.project_shader_picker = None;
+    }
+
+    pub fn mute_repository(&mut self, repository: &str) {
+        if self.muted_repos.insert(repository.to_string()) {
+            self.persist_muted_repositories();
+        }
+    }
+
+    pub fn unmute_repository(&mut self, repository: &str) {
+        if self.muted_repos.remove(repository) {
+            self.persist_muted_repositories();
+        }
+    }
+
+    fn persist_muted_repositories(&self) {
+        if let Err(error) = save_muted_repositories(self.cache.as_ref(), &self.muted_repos) {
+            eprintln!("Failed to save muted repositories: {error}");
+        }
     }
 
     pub fn set_project_shader(&mut self, project: &str, variant: OverviewShaderVariant) {
@@ -2535,7 +2610,7 @@ fn parse_debug_pull_request_target(target: &str) -> Option<(String, i64)> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashSet};
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2550,9 +2625,10 @@ mod tests {
     use crate::tutorial_pr::TUTORIAL_PR_KEY;
 
     use super::{
-        diff_anchor_for_line, first_review_comment_after_focus_index,
-        review_comment_navigation_items, summary_key, AppState, DiffScrollbarActivity,
-        PullRequestSurface, ReviewModeFocus, SectionId, StructuralDiffWarmupState,
+        diff_anchor_for_line, first_review_comment_after_focus_index, load_muted_repositories,
+        review_comment_navigation_items, save_muted_repositories, summary_key, AppState,
+        DiffScrollbarActivity, MutedRepositoriesSettings, PullRequestSurface, ReviewModeFocus,
+        SectionId, StructuralDiffWarmupState, MUTED_REPOSITORIES_CACHE_KEY,
     };
 
     fn temp_cache_store(name: &str) -> CacheStore {
@@ -2564,6 +2640,49 @@ mod tests {
             "/tmp/remiss-state-test-{name}-{suffix}/cache.sqlite"
         ));
         CacheStore::new(path).expect("cache")
+    }
+
+    #[test]
+    fn muted_repository_settings_round_trip_in_stable_order() {
+        let cache = temp_cache_store("muted-repositories");
+        let repositories = HashSet::from([
+            "zeta/project".to_string(),
+            "alpha/project".to_string(),
+            "alpha/project".to_string(),
+        ]);
+
+        save_muted_repositories(&cache, &repositories).expect("save muted repositories");
+
+        let loaded = load_muted_repositories(&cache).expect("load muted repositories");
+        assert_eq!(loaded, repositories);
+
+        let document = cache
+            .get::<MutedRepositoriesSettings>(MUTED_REPOSITORIES_CACHE_KEY)
+            .expect("read muted repositories document")
+            .expect("muted repositories document exists");
+        assert_eq!(
+            document.value.repositories,
+            vec!["alpha/project".to_string(), "zeta/project".to_string()]
+        );
+    }
+
+    #[test]
+    fn app_state_mute_unmute_persists_over_restart() {
+        let cache = temp_cache_store("muted-state");
+        let cache_path = cache.path().to_path_buf();
+        let mut state = AppState::new(cache, StartupWizardOptions::force_welcome());
+
+        state.mute_repository("owner/repo");
+
+        let restarted_cache = CacheStore::new(cache_path.clone()).expect("reopen cache");
+        let mut restarted = AppState::new(restarted_cache, StartupWizardOptions::force_welcome());
+        assert!(restarted.muted_repos.contains("owner/repo"));
+
+        restarted.unmute_repository("owner/repo");
+
+        let final_cache = CacheStore::new(cache_path).expect("reopen cache");
+        let final_state = AppState::new(final_cache, StartupWizardOptions::force_welcome());
+        assert!(!final_state.muted_repos.contains("owner/repo"));
     }
 
     #[test]
