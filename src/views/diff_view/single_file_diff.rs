@@ -740,6 +740,7 @@ pub(super) struct DiffFileLspContext {
     pub(super) file_path: String,
     pub(super) reference: String,
     pub(super) document_text: Arc<str>,
+    pub(super) references_supported: bool,
 }
 
 pub(super) fn build_diff_file_lsp_context(
@@ -763,6 +764,7 @@ pub(super) fn build_diff_file_lsp_context(
 
     let repo_root = PathBuf::from(local_repo_status.path.as_ref()?);
     let lsp_status = detail_state.lsp_statuses.get(file_path)?;
+    let references_supported = lsp_status.capabilities.references_supported;
     if !lsp_status.is_ready()
         || (!lsp_status.capabilities.hover_supported
             && !lsp_status.capabilities.signature_help_supported
@@ -779,6 +781,7 @@ pub(super) fn build_diff_file_lsp_context(
         file_path: file_path.to_string(),
         reference: prepared_file.reference.clone(),
         document_text: prepared_file.text.clone(),
+        references_supported,
     })
 }
 
@@ -796,6 +799,7 @@ pub(super) struct DiffLineLspQuery {
     pub(super) repo_root: PathBuf,
     pub(super) query_key: String,
     pub(super) token_label: String,
+    pub(super) references_supported: bool,
     pub(super) request: lsp::LspTextDocumentRequest,
 }
 
@@ -834,6 +838,7 @@ impl DiffLineLspContext {
                 self.file.file_path, self.file.reference, self.line_number, token.column_start
             ),
             token_label: display_lsp_token_label(&token.text),
+            references_supported: self.file.references_supported,
             request: lsp::LspTextDocumentRequest {
                 file_path: self.file.file_path.clone(),
                 document_text: self.file.document_text.clone(),
@@ -891,6 +896,9 @@ pub(super) fn request_diff_line_lsp_details(
         symbol_state.loading = true;
         symbol_state.details = None;
         symbol_state.error = None;
+        symbol_state.references_loading = false;
+        symbol_state.references_loaded = false;
+        symbol_state.references_error = None;
         cx.notify();
     });
 
@@ -905,7 +913,9 @@ pub(super) fn request_diff_line_lsp_details(
             async move |cx: &mut AsyncWindowContext| {
                 let result = cx
                     .background_executor()
-                    .spawn(async move { lsp_session_manager.symbol_details(&repo_root, &request) })
+                    .spawn(async move {
+                        lsp_session_manager.symbol_preview_details(&repo_root, &request)
+                    })
                     .await;
 
                 state

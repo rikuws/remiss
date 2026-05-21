@@ -55,6 +55,8 @@ pub async fn load_pull_request_file_content_flow(
                 detail,
                 selected_file,
                 request,
+                file_content_loaded,
+                lsp_loaded,
                 already_loaded,
                 existing_local_repo_status,
             ))
@@ -69,6 +71,8 @@ pub async fn load_pull_request_file_content_flow(
         detail,
         selected_file,
         request,
+        file_content_loaded,
+        lsp_loaded,
         already_loaded,
         existing_local_repo_status,
     )) = request
@@ -99,26 +103,33 @@ pub async fn load_pull_request_file_content_flow(
         return;
     }
 
+    let need_file_content = !file_content_loaded;
+    let need_lsp_status = !lsp_loaded;
+
     model
         .update(cx, |state, cx| {
             if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
-                let file_state = detail_state
-                    .file_content_states
-                    .entry(request.path.clone())
-                    .or_default();
-                file_state.request_key = Some(request.request_key.clone());
-                file_state.document = None;
-                file_state.prepared = None;
-                file_state.loading = true;
-                file_state.error = None;
+                if need_file_content {
+                    let file_state = detail_state
+                        .file_content_states
+                        .entry(request.path.clone())
+                        .or_default();
+                    file_state.request_key = Some(request.request_key.clone());
+                    file_state.document = None;
+                    file_state.prepared = None;
+                    file_state.loading = true;
+                    file_state.error = None;
+                }
                 detail_state.local_repository_loading = existing_local_repo_status
                     .as_ref()
                     .map(|status| !status.ready_for_snapshot_features())
                     .unwrap_or(true);
                 detail_state.local_repository_error = None;
-                detail_state
-                    .lsp_loading_paths
-                    .insert(selected_file.path.clone());
+                if need_lsp_status {
+                    detail_state
+                        .lsp_loading_paths
+                        .insert(selected_file.path.clone());
+                }
             }
 
             cx.notify();
@@ -163,180 +174,187 @@ pub async fn load_pull_request_file_content_flow(
         })
         .or_else(|| local_repo_result.as_ref().err().cloned());
 
-    let local_load_result = if let Some(status) = local_repo_status.as_ref() {
-        if status.ready_for_snapshot_features() {
-            if let Some(root) = status.path.as_deref() {
-                log_checkout_flow_event(
-                    &detail,
-                    format!(
-                        "diff file-content local document load start; root={root}; path={}; local_reference={}; prefer_worktree={}",
-                        request.path,
-                        request.local_reference,
-                        request.prefer_worktree && status.should_prefer_worktree_contents(),
-                    ),
-                );
-                cx.background_executor()
-                    .spawn({
-                        let cache = cache.clone();
-                        let repository = detail.repository.clone();
-                        let path = request.path.clone();
-                        let reference = request.local_reference.clone();
-                        let prefer_worktree =
-                            request.prefer_worktree && status.should_prefer_worktree_contents();
-                        let root = std::path::PathBuf::from(root);
-                        async move {
-                            local_documents::load_local_repository_file_content(
-                                &cache,
-                                &repository,
-                                &root,
-                                &reference,
-                                &path,
-                                prefer_worktree,
-                            )
-                        }
-                    })
-                    .await
+    let load_result = if need_file_content {
+        let local_load_result = if let Some(status) = local_repo_status.as_ref() {
+            if status.ready_for_snapshot_features() {
+                if let Some(root) = status.path.as_deref() {
+                    log_checkout_flow_event(
+                        &detail,
+                        format!(
+                            "diff file-content local document load start; root={root}; path={}; local_reference={}; prefer_worktree={}",
+                            request.path,
+                            request.local_reference,
+                            request.prefer_worktree && status.should_prefer_worktree_contents(),
+                        ),
+                    );
+                    cx.background_executor()
+                        .spawn({
+                            let cache = cache.clone();
+                            let repository = detail.repository.clone();
+                            let path = request.path.clone();
+                            let reference = request.local_reference.clone();
+                            let prefer_worktree =
+                                request.prefer_worktree && status.should_prefer_worktree_contents();
+                            let root = std::path::PathBuf::from(root);
+                            async move {
+                                local_documents::load_local_repository_file_content(
+                                    &cache,
+                                    &repository,
+                                    &root,
+                                    &reference,
+                                    &path,
+                                    prefer_worktree,
+                                )
+                            }
+                        })
+                        .await
+                } else {
+                    Err(status.message.clone())
+                }
             } else {
-                Err(status.message.clone())
+                Err(local_repo_error
+                    .clone()
+                    .unwrap_or_else(|| "Local checkout is not ready yet.".to_string()))
             }
         } else {
             Err(local_repo_error
                 .clone()
                 .unwrap_or_else(|| "Local checkout is not ready yet.".to_string()))
-        }
-    } else {
-        Err(local_repo_error
-            .clone()
-            .unwrap_or_else(|| "Local checkout is not ready yet.".to_string()))
-    };
-    log_document_result(
-        &detail,
-        "diff file-content local document",
-        &request.path,
-        &request.local_reference,
-        &local_load_result,
-    );
+        };
+        log_document_result(
+            &detail,
+            "diff file-content local document",
+            &request.path,
+            &request.local_reference,
+            &local_load_result,
+        );
 
-    let load_result = match local_load_result {
-        Ok(document) => Ok(document),
-        Err(local_error) => {
-            log_checkout_flow_event(
-                &detail,
-                format!(
-                    "diff file-content GitHub fallback start; path={}; reference={}; local_error={}",
-                    request.path,
-                    request.reference,
-                    sanitize_checkout_log_text(&local_error),
-                ),
-            );
-            cx.background_executor()
-                .spawn({
-                let cache = cache.clone();
-                let repository = detail.repository.clone();
-                let path = request.path.clone();
-                let reference = request.reference.clone();
-                async move {
-                    github::load_pull_request_file_content(&cache, &repository, &reference, &path)
-                        .map_err(|github_error| {
-                            format!(
-                                "{local_error}\nGitHub fallback also failed for {repository}@{reference}:{path}: {github_error}"
-                            )
-                        })
-                }
-            })
-            .await
-        }
-    };
-    log_document_result(
-        &detail,
-        "diff file-content final document",
-        &request.path,
-        &request.reference,
-        &load_result,
-    );
-    let lsp_status = if let Some(status) = local_repo_status.as_ref() {
-        if status.ready_for_snapshot_features() {
-            if let Some(root) = status.path.as_deref() {
+        let load_result = match local_load_result {
+            Ok(document) => Ok(document),
+            Err(local_error) => {
                 log_checkout_flow_event(
                     &detail,
                     format!(
-                        "diff file-content lsp status start; root={root}; path={}",
-                        selected_file.path
+                        "diff file-content GitHub fallback start; path={}; reference={}; local_error={}",
+                        request.path,
+                        request.reference,
+                        sanitize_checkout_log_text(&local_error),
                     ),
                 );
                 cx.background_executor()
                     .spawn({
-                        let lsp_session_manager = lsp_session_manager.clone();
-                        let root = std::path::PathBuf::from(root);
-                        let file_path = selected_file.path.clone();
-                        async move { lsp_session_manager.status_for_file(&root, &file_path) }
-                    })
-                    .await
-            } else {
-                lsp::LspServerStatus::checkout_unavailable(status.message.clone())
+                    let cache = cache.clone();
+                    let repository = detail.repository.clone();
+                    let path = request.path.clone();
+                    let reference = request.reference.clone();
+                    async move {
+                        github::load_pull_request_file_content(&cache, &repository, &reference, &path)
+                            .map_err(|github_error| {
+                                format!(
+                                    "{local_error}\nGitHub fallback also failed for {repository}@{reference}:{path}: {github_error}"
+                                )
+                            })
+                    }
+                })
+                .await
             }
-        } else {
-            lsp::LspServerStatus::checkout_unavailable(
-                local_repo_error
-                    .clone()
-                    .unwrap_or_else(|| "Local checkout is not ready yet.".to_string()),
-            )
-        }
+        };
+        log_document_result(
+            &detail,
+            "diff file-content final document",
+            &request.path,
+            &request.reference,
+            &load_result,
+        );
+        Some(load_result)
     } else {
-        lsp::LspServerStatus::checkout_unavailable(
-            local_repo_error
-                .clone()
-                .unwrap_or_else(|| "Local checkout is not ready yet.".to_string()),
-        )
+        log_checkout_flow_event(
+            &detail,
+            format!(
+                "diff file-content document skipped; path={}; request_key already loaded",
+                request.path
+            ),
+        );
+        None
     };
-    log_lsp_result(
-        &detail,
-        "diff file-content",
-        &selected_file.path,
-        &lsp_status,
-    );
 
-    let prepared_result = load_result.map(|document| {
-        let prepared = prepare_file_content(&selected_file.path, &request.reference, &document);
-        (document, prepared)
+    let prepared_result = load_result.map(|load_result| {
+        load_result.map(|document| {
+            let prepared = prepare_file_content(&selected_file.path, &request.reference, &document);
+            (document, prepared)
+        })
     });
 
-    model
-        .update(cx, |state, cx| {
-            let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
-                return;
-            };
-            let Some(file_state) = detail_state.file_content_states.get_mut(&request.path) else {
-                return;
-            };
-            if file_state.request_key.as_deref() != Some(&request.request_key) {
-                return;
-            }
-
-            file_state.loading = false;
-            detail_state.local_repository_loading = false;
-            detail_state.local_repository_status = local_repo_status.clone();
-            detail_state.local_repository_error = local_repo_error.clone();
-            detail_state.lsp_loading_paths.remove(&selected_file.path);
-            detail_state
-                .lsp_statuses
-                .insert(selected_file.path.clone(), lsp_status.clone());
-            match prepared_result {
-                Ok((document, prepared)) => {
-                    file_state.document = Some(document);
-                    file_state.prepared = Some(prepared);
-                    file_state.error = None;
+    if let Some(prepared_result) = prepared_result {
+        model
+            .update(cx, |state, cx| {
+                let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
+                    return;
+                };
+                let Some(file_state) = detail_state.file_content_states.get_mut(&request.path)
+                else {
+                    return;
+                };
+                if file_state.request_key.as_deref() != Some(&request.request_key) {
+                    return;
                 }
-                Err(error) => {
-                    file_state.document = None;
-                    file_state.prepared = None;
-                    file_state.error = Some(error);
-                }
-            }
 
-            cx.notify();
-        })
-        .ok();
+                file_state.loading = false;
+                detail_state.local_repository_loading = false;
+                detail_state.local_repository_status = local_repo_status.clone();
+                detail_state.local_repository_error = local_repo_error.clone();
+                match prepared_result {
+                    Ok((document, prepared)) => {
+                        file_state.document = Some(document);
+                        file_state.prepared = Some(prepared);
+                        file_state.error = None;
+                    }
+                    Err(error) => {
+                        file_state.document = None;
+                        file_state.prepared = None;
+                        file_state.error = Some(error);
+                    }
+                }
+
+                cx.notify();
+            })
+            .ok();
+    }
+
+    if need_lsp_status {
+        let lsp_status = load_lsp_status_for_path(
+            &detail,
+            local_repo_status.as_ref(),
+            local_repo_error.as_deref(),
+            lsp_session_manager,
+            &selected_file.path,
+            "diff file-content",
+            cx,
+        )
+        .await;
+        log_lsp_result(
+            &detail,
+            "diff file-content",
+            &selected_file.path,
+            &lsp_status,
+        );
+
+        model
+            .update(cx, |state, cx| {
+                let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
+                    return;
+                };
+                detail_state.local_repository_loading = false;
+                detail_state.local_repository_status = local_repo_status.clone();
+                detail_state.local_repository_error = local_repo_error.clone();
+                detail_state.lsp_loading_paths.remove(&selected_file.path);
+                detail_state
+                    .lsp_statuses
+                    .insert(selected_file.path.clone(), lsp_status.clone());
+                cx.notify();
+            })
+            .ok();
+    }
 }
 
 pub async fn load_structural_diff_flow(
@@ -1222,6 +1240,49 @@ fn log_lsp_result(
     );
 }
 
+async fn load_lsp_status_for_path(
+    detail: &PullRequestDetail,
+    local_repo_status: Option<&local_repo::LocalRepositoryStatus>,
+    local_repo_error: Option<&str>,
+    lsp_session_manager: Arc<lsp::LspSessionManager>,
+    path: &str,
+    stage: &str,
+    cx: &mut AsyncWindowContext,
+) -> lsp::LspServerStatus {
+    if let Some(status) = local_repo_status {
+        if status.ready_for_snapshot_features() {
+            if let Some(root) = status.path.as_deref() {
+                log_checkout_flow_event(
+                    detail,
+                    format!("{stage} lsp status start; root={root}; path={path}"),
+                );
+                return cx
+                    .background_executor()
+                    .spawn({
+                        let root = std::path::PathBuf::from(root);
+                        let file_path = path.to_string();
+                        async move { lsp_session_manager.status_for_file(&root, &file_path) }
+                    })
+                    .await;
+            }
+
+            return lsp::LspServerStatus::checkout_unavailable(status.message.clone());
+        }
+
+        return lsp::LspServerStatus::checkout_unavailable(
+            local_repo_error
+                .map(str::to_string)
+                .unwrap_or_else(|| "Local checkout is not ready yet.".to_string()),
+        );
+    }
+
+    lsp::LspServerStatus::checkout_unavailable(
+        local_repo_error
+            .map(str::to_string)
+            .unwrap_or_else(|| "Local checkout is not ready yet.".to_string()),
+    )
+}
+
 fn sanitize_checkout_log_text(value: &str) -> String {
     value.replace('\r', "\\r").replace('\n', "\\n")
 }
@@ -1255,6 +1316,8 @@ pub async fn load_local_source_file_content_flow(
                 detail_key,
                 detail,
                 request,
+                file_content_loaded,
+                lsp_loaded,
                 already_loaded,
                 existing_local_repo_status,
             ))
@@ -1268,6 +1331,8 @@ pub async fn load_local_source_file_content_flow(
         detail_key,
         detail,
         request,
+        file_content_loaded,
+        lsp_loaded,
         already_loaded,
         existing_local_repo_status,
     )) = request
@@ -1298,24 +1363,31 @@ pub async fn load_local_source_file_content_flow(
         return;
     }
 
+    let need_file_content = !file_content_loaded;
+    let need_lsp_status = !lsp_loaded;
+
     model
         .update(cx, |state, cx| {
             if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
-                let file_state = detail_state
-                    .file_content_states
-                    .entry(request.path.clone())
-                    .or_default();
-                file_state.request_key = Some(request.request_key.clone());
-                file_state.document = None;
-                file_state.prepared = None;
-                file_state.loading = true;
-                file_state.error = None;
+                if need_file_content {
+                    let file_state = detail_state
+                        .file_content_states
+                        .entry(request.path.clone())
+                        .or_default();
+                    file_state.request_key = Some(request.request_key.clone());
+                    file_state.document = None;
+                    file_state.prepared = None;
+                    file_state.loading = true;
+                    file_state.error = None;
+                }
                 detail_state.local_repository_loading = existing_local_repo_status
                     .as_ref()
                     .map(|status| !status.ready_for_snapshot_features())
                     .unwrap_or(true);
                 detail_state.local_repository_error = None;
-                detail_state.lsp_loading_paths.insert(request.path.clone());
+                if need_lsp_status {
+                    detail_state.lsp_loading_paths.insert(request.path.clone());
+                }
             }
 
             cx.notify();
@@ -1360,175 +1432,182 @@ pub async fn load_local_source_file_content_flow(
         })
         .or_else(|| local_repo_result.as_ref().err().cloned());
 
-    let local_load_result = if let Some(status) = local_repo_status.as_ref() {
-        if status.ready_for_snapshot_features() {
-            if let Some(root) = status.path.as_deref() {
-                log_checkout_flow_event(
-                    &detail,
-                    format!(
-                        "source content local document load start; root={root}; path={}; local_reference={}; prefer_worktree={}",
-                        request.path,
-                        request.local_reference,
-                        request.prefer_worktree && status.should_prefer_worktree_contents(),
-                    ),
-                );
-                cx.background_executor()
-                    .spawn({
-                        let cache = cache.clone();
-                        let repository = detail.repository.clone();
-                        let path = request.path.clone();
-                        let reference = request.local_reference.clone();
-                        let prefer_worktree =
-                            request.prefer_worktree && status.should_prefer_worktree_contents();
-                        let root = std::path::PathBuf::from(root);
-                        async move {
-                            local_documents::load_local_repository_file_content(
-                                &cache,
-                                &repository,
-                                &root,
-                                &reference,
-                                &path,
-                                prefer_worktree,
-                            )
-                        }
-                    })
-                    .await
+    let load_result = if need_file_content {
+        let local_load_result = if let Some(status) = local_repo_status.as_ref() {
+            if status.ready_for_snapshot_features() {
+                if let Some(root) = status.path.as_deref() {
+                    log_checkout_flow_event(
+                        &detail,
+                        format!(
+                            "source content local document load start; root={root}; path={}; local_reference={}; prefer_worktree={}",
+                            request.path,
+                            request.local_reference,
+                            request.prefer_worktree && status.should_prefer_worktree_contents(),
+                        ),
+                    );
+                    cx.background_executor()
+                        .spawn({
+                            let cache = cache.clone();
+                            let repository = detail.repository.clone();
+                            let path = request.path.clone();
+                            let reference = request.local_reference.clone();
+                            let prefer_worktree =
+                                request.prefer_worktree && status.should_prefer_worktree_contents();
+                            let root = std::path::PathBuf::from(root);
+                            async move {
+                                local_documents::load_local_repository_file_content(
+                                    &cache,
+                                    &repository,
+                                    &root,
+                                    &reference,
+                                    &path,
+                                    prefer_worktree,
+                                )
+                            }
+                        })
+                        .await
+                } else {
+                    Err(status.message.clone())
+                }
             } else {
-                Err(status.message.clone())
+                Err(local_repo_error
+                    .clone()
+                    .unwrap_or_else(|| "Local checkout is not ready yet.".to_string()))
             }
         } else {
             Err(local_repo_error
                 .clone()
                 .unwrap_or_else(|| "Local checkout is not ready yet.".to_string()))
-        }
-    } else {
-        Err(local_repo_error
-            .clone()
-            .unwrap_or_else(|| "Local checkout is not ready yet.".to_string()))
-    };
-    log_document_result(
-        &detail,
-        "source content local document",
-        &request.path,
-        &request.local_reference,
-        &local_load_result,
-    );
+        };
+        log_document_result(
+            &detail,
+            "source content local document",
+            &request.path,
+            &request.local_reference,
+            &local_load_result,
+        );
 
-    let load_result = match local_load_result {
-        Ok(document) => Ok(document),
-        Err(local_error) => {
-            log_checkout_flow_event(
-                &detail,
-                format!(
-                    "source content GitHub fallback start; path={}; reference={}; local_error={}",
-                    request.path,
-                    request.reference,
-                    sanitize_checkout_log_text(&local_error),
-                ),
-            );
-            cx.background_executor()
-                .spawn({
-                let cache = cache.clone();
-                let repository = detail.repository.clone();
-                let path = request.path.clone();
-                let reference = request.reference.clone();
-                async move {
-                    github::load_pull_request_file_content(&cache, &repository, &reference, &path)
-                        .map_err(|github_error| {
-                            format!(
-                                "{local_error}\nGitHub fallback also failed for {repository}@{reference}:{path}: {github_error}"
-                            )
-                        })
-                }
-            })
-            .await
-        }
-    };
-    log_document_result(
-        &detail,
-        "source content final document",
-        &request.path,
-        &request.reference,
-        &load_result,
-    );
-    let lsp_status = if let Some(status) = local_repo_status.as_ref() {
-        if status.ready_for_snapshot_features() {
-            if let Some(root) = status.path.as_deref() {
+        let load_result = match local_load_result {
+            Ok(document) => Ok(document),
+            Err(local_error) => {
                 log_checkout_flow_event(
                     &detail,
                     format!(
-                        "source content lsp status start; root={root}; path={}",
-                        request.path
+                        "source content GitHub fallback start; path={}; reference={}; local_error={}",
+                        request.path,
+                        request.reference,
+                        sanitize_checkout_log_text(&local_error),
                     ),
                 );
                 cx.background_executor()
                     .spawn({
-                        let lsp_session_manager = lsp_session_manager.clone();
-                        let root = std::path::PathBuf::from(root);
-                        let file_path = request.path.clone();
-                        async move { lsp_session_manager.status_for_file(&root, &file_path) }
-                    })
-                    .await
-            } else {
-                lsp::LspServerStatus::checkout_unavailable(status.message.clone())
+                    let cache = cache.clone();
+                    let repository = detail.repository.clone();
+                    let path = request.path.clone();
+                    let reference = request.reference.clone();
+                    async move {
+                        github::load_pull_request_file_content(&cache, &repository, &reference, &path)
+                            .map_err(|github_error| {
+                                format!(
+                                    "{local_error}\nGitHub fallback also failed for {repository}@{reference}:{path}: {github_error}"
+                                )
+                            })
+                    }
+                })
+                .await
             }
-        } else {
-            lsp::LspServerStatus::checkout_unavailable(
-                local_repo_error
-                    .clone()
-                    .unwrap_or_else(|| "Local checkout is not ready yet.".to_string()),
-            )
-        }
+        };
+        log_document_result(
+            &detail,
+            "source content final document",
+            &request.path,
+            &request.reference,
+            &load_result,
+        );
+        Some(load_result)
     } else {
-        lsp::LspServerStatus::checkout_unavailable(
-            local_repo_error
-                .clone()
-                .unwrap_or_else(|| "Local checkout is not ready yet.".to_string()),
-        )
+        log_checkout_flow_event(
+            &detail,
+            format!(
+                "source content document skipped; path={}; request_key already loaded",
+                request.path
+            ),
+        );
+        None
     };
-    log_lsp_result(&detail, "source content", &request.path, &lsp_status);
 
-    let prepared_result = load_result.map(|document| {
-        let prepared = prepare_file_content(&request.path, &request.reference, &document);
-        (document, prepared)
+    let prepared_result = load_result.map(|load_result| {
+        load_result.map(|document| {
+            let prepared = prepare_file_content(&request.path, &request.reference, &document);
+            (document, prepared)
+        })
     });
 
-    model
-        .update(cx, |state, cx| {
-            let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
-                return;
-            };
-            let Some(file_state) = detail_state.file_content_states.get_mut(&request.path) else {
-                return;
-            };
-            if file_state.request_key.as_deref() != Some(&request.request_key) {
-                return;
-            }
-
-            file_state.loading = false;
-            detail_state.local_repository_loading = false;
-            detail_state.local_repository_status = local_repo_status.clone();
-            detail_state.local_repository_error = local_repo_error.clone();
-            detail_state.lsp_loading_paths.remove(&request.path);
-            detail_state
-                .lsp_statuses
-                .insert(request.path.clone(), lsp_status.clone());
-            match prepared_result {
-                Ok((document, prepared)) => {
-                    file_state.document = Some(document);
-                    file_state.prepared = Some(prepared);
-                    file_state.error = None;
+    if let Some(prepared_result) = prepared_result {
+        model
+            .update(cx, |state, cx| {
+                let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
+                    return;
+                };
+                let Some(file_state) = detail_state.file_content_states.get_mut(&request.path)
+                else {
+                    return;
+                };
+                if file_state.request_key.as_deref() != Some(&request.request_key) {
+                    return;
                 }
-                Err(error) => {
-                    file_state.document = None;
-                    file_state.prepared = None;
-                    file_state.error = Some(error);
-                }
-            }
 
-            cx.notify();
-        })
-        .ok();
+                file_state.loading = false;
+                detail_state.local_repository_loading = false;
+                detail_state.local_repository_status = local_repo_status.clone();
+                detail_state.local_repository_error = local_repo_error.clone();
+                match prepared_result {
+                    Ok((document, prepared)) => {
+                        file_state.document = Some(document);
+                        file_state.prepared = Some(prepared);
+                        file_state.error = None;
+                    }
+                    Err(error) => {
+                        file_state.document = None;
+                        file_state.prepared = None;
+                        file_state.error = Some(error);
+                    }
+                }
+
+                cx.notify();
+            })
+            .ok();
+    }
+
+    if need_lsp_status {
+        let lsp_status = load_lsp_status_for_path(
+            &detail,
+            local_repo_status.as_ref(),
+            local_repo_error.as_deref(),
+            lsp_session_manager,
+            &request.path,
+            "source content",
+            cx,
+        )
+        .await;
+        log_lsp_result(&detail, "source content", &request.path, &lsp_status);
+
+        model
+            .update(cx, |state, cx| {
+                let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
+                    return;
+                };
+                detail_state.local_repository_loading = false;
+                detail_state.local_repository_status = local_repo_status.clone();
+                detail_state.local_repository_error = local_repo_error.clone();
+                detail_state.lsp_loading_paths.remove(&request.path);
+                detail_state
+                    .lsp_statuses
+                    .insert(request.path.clone(), lsp_status.clone());
+                cx.notify();
+            })
+            .ok();
+    }
 }
 
 pub async fn load_temp_source_file_content_flow(

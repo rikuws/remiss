@@ -70,6 +70,7 @@ pub struct PreparedFileLspContext {
     file_path: String,
     reference: String,
     document_text: Arc<str>,
+    references_supported: bool,
 }
 
 #[derive(Clone)]
@@ -100,6 +101,7 @@ struct PreparedFileLspQuery {
     repo_root: PathBuf,
     query_key: String,
     token_label: String,
+    references_supported: bool,
     request: lsp::LspTextDocumentRequest,
 }
 
@@ -250,6 +252,7 @@ pub fn build_prepared_file_lsp_context(
 
     let repo_root = PathBuf::from(local_repo_status.path.as_ref()?);
     let lsp_status = detail_state.lsp_statuses.get(file_path)?;
+    let references_supported = lsp_status.capabilities.references_supported;
     if !lsp_status.is_ready()
         || (!lsp_status.capabilities.hover_supported
             && !lsp_status.capabilities.signature_help_supported)
@@ -265,6 +268,7 @@ pub fn build_prepared_file_lsp_context(
         file_path: file_path.to_string(),
         reference: prepared_file.reference.clone(),
         document_text: prepared_file.text.clone(),
+        references_supported,
     })
 }
 
@@ -830,6 +834,10 @@ fn render_prepared_code_line_content(
                     query.query_key.clone(),
                     query.token_label.clone(),
                     query.request.file_path.clone(),
+                    query.lsp_session_manager.clone(),
+                    query.repo_root.clone(),
+                    query.request.clone(),
+                    query.references_supported,
                     cx,
                 ),
             ))
@@ -871,6 +879,7 @@ impl PreparedFileLineLspContext {
                 self.file.file_path, self.file.reference, self.line_number, token.column_start
             ),
             token_label: display_lsp_token_label(&token.text),
+            references_supported: self.file.references_supported,
             request: lsp::LspTextDocumentRequest {
                 file_path: self.file.file_path.clone(),
                 document_text: self.file.document_text.clone(),
@@ -984,6 +993,9 @@ fn request_prepared_file_lsp_details(
         symbol_state.loading = true;
         symbol_state.details = None;
         symbol_state.error = None;
+        symbol_state.references_loading = false;
+        symbol_state.references_loaded = false;
+        symbol_state.references_error = None;
         cx.notify();
     });
 
@@ -998,7 +1010,9 @@ fn request_prepared_file_lsp_details(
             async move |cx: &mut AsyncWindowContext| {
                 let result = cx
                     .background_executor()
-                    .spawn(async move { lsp_session_manager.symbol_details(&repo_root, &request) })
+                    .spawn(async move {
+                        lsp_session_manager.symbol_preview_details(&repo_root, &request)
+                    })
                     .await;
 
                 state
@@ -1101,10 +1115,25 @@ pub fn build_lsp_hover_tooltip_view(
     query_key: String,
     token_label: String,
     source_hint: String,
+    lsp_session_manager: Arc<lsp::LspSessionManager>,
+    repo_root: PathBuf,
+    request: lsp::LspTextDocumentRequest,
+    references_supported: bool,
     cx: &mut App,
 ) -> AnyView {
     AnyView::from(cx.new(move |cx| {
-        SharedLspHoverTooltipView::new(state, detail_key, query_key, token_label, source_hint, cx)
+        SharedLspHoverTooltipView::new(
+            state,
+            detail_key,
+            query_key,
+            token_label,
+            source_hint,
+            lsp_session_manager,
+            repo_root,
+            request,
+            references_supported,
+            cx,
+        )
     }))
 }
 
@@ -1114,6 +1143,10 @@ struct SharedLspHoverTooltipView {
     query_key: String,
     token_label: String,
     source_hint: String,
+    lsp_session_manager: Arc<lsp::LspSessionManager>,
+    repo_root: PathBuf,
+    request: lsp::LspTextDocumentRequest,
+    references_supported: bool,
     scroll_handle: ScrollHandle,
     references_expanded: bool,
 }
@@ -1125,6 +1158,10 @@ impl SharedLspHoverTooltipView {
         query_key: String,
         token_label: String,
         source_hint: String,
+        lsp_session_manager: Arc<lsp::LspSessionManager>,
+        repo_root: PathBuf,
+        request: lsp::LspTextDocumentRequest,
+        references_supported: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&state, |_, _, cx| {
@@ -1138,6 +1175,10 @@ impl SharedLspHoverTooltipView {
             query_key,
             token_label,
             source_hint,
+            lsp_session_manager,
+            repo_root,
+            request,
+            references_supported,
             scroll_handle: ScrollHandle::new(),
             references_expanded: false,
         }
@@ -1146,12 +1187,99 @@ impl SharedLspHoverTooltipView {
     fn toggle_references(
         &mut self,
         _event: &MouseDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.references_expanded = !self.references_expanded;
+        if self.references_expanded {
+            self.request_references_if_needed(window, cx);
+        }
         cx.notify();
         cx.stop_propagation();
+    }
+
+    fn request_references_if_needed(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.references_supported {
+            return;
+        }
+
+        let should_request = self
+            .state
+            .read(cx)
+            .detail_states
+            .get(&self.detail_key)
+            .and_then(|detail_state| detail_state.lsp_symbol_states.get(&self.query_key))
+            .map(|state| !state.references_loading && !state.references_loaded)
+            .unwrap_or(false);
+
+        if !should_request {
+            return;
+        }
+
+        let state = self.state.clone();
+        let detail_key = self.detail_key.clone();
+        let query_key = self.query_key.clone();
+
+        state.update(cx, |state, cx| {
+            let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
+                return;
+            };
+            let symbol_state = detail_state
+                .lsp_symbol_states
+                .entry(query_key.clone())
+                .or_default();
+            if symbol_state.references_loading || symbol_state.references_loaded {
+                return;
+            }
+            symbol_state.references_loading = true;
+            symbol_state.references_error = None;
+            cx.notify();
+        });
+
+        window
+            .spawn(cx, {
+                let state = state.clone();
+                let detail_key = detail_key.clone();
+                let query_key = query_key.clone();
+                let lsp_session_manager = self.lsp_session_manager.clone();
+                let repo_root = self.repo_root.clone();
+                let request = self.request.clone();
+                async move |cx: &mut AsyncWindowContext| {
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move { lsp_session_manager.references(&repo_root, &request) })
+                        .await;
+
+                    state
+                        .update(cx, |state, cx| {
+                            let Some(detail_state) = state.detail_states.get_mut(&detail_key)
+                            else {
+                                return;
+                            };
+                            let symbol_state = detail_state
+                                .lsp_symbol_states
+                                .entry(query_key.clone())
+                                .or_default();
+                            symbol_state.references_loading = false;
+                            match result {
+                                Ok(targets) => {
+                                    let details =
+                                        symbol_state.details.get_or_insert_with(Default::default);
+                                    details.reference_targets = targets;
+                                    symbol_state.references_loaded = true;
+                                    symbol_state.references_error = None;
+                                }
+                                Err(error) => {
+                                    symbol_state.references_loaded = false;
+                                    symbol_state.references_error = Some(error);
+                                }
+                            }
+                            cx.notify();
+                        })
+                        .ok();
+                }
+            })
+            .detach();
     }
 }
 
@@ -1249,10 +1377,15 @@ impl Render for SharedLspHoverTooltipView {
                                     .into_any_element()
                             } else if let Some(details) = state.details.as_ref() {
                                 let toggle_references = cx.listener(Self::toggle_references);
+                                let references = LspReferenceDisclosureState::from_symbol_state(
+                                    self.references_supported,
+                                    state,
+                                );
                                 render_lsp_symbol_details(
                                     details,
                                     &format!("lsp-symbol-details-{}", self.query_key),
                                     self.references_expanded,
+                                    references,
                                     toggle_references,
                                 )
                                 .into_any_element()
@@ -1510,13 +1643,54 @@ fn compact_lsp_declaration_code(code: &str) -> Option<String> {
     (!compact.is_empty()).then_some(compact)
 }
 
+#[derive(Clone, Debug, Default)]
+struct LspReferenceDisclosureState {
+    supported: bool,
+    loading: bool,
+    loaded: bool,
+    error: Option<String>,
+}
+
+impl LspReferenceDisclosureState {
+    fn from_symbol_state(supported: bool, state: &crate::state::LspSymbolState) -> Self {
+        Self {
+            supported,
+            loading: state.references_loading,
+            loaded: state.references_loaded,
+            error: state.references_error.clone(),
+        }
+    }
+
+    fn is_available(&self, reference_count: usize) -> bool {
+        self.supported || self.loading || self.loaded || self.error.is_some() || reference_count > 0
+    }
+
+    fn label(&self, reference_count: usize) -> String {
+        if self.loading {
+            return "Loading references...".to_string();
+        }
+        if self.error.is_some() {
+            return "References unavailable".to_string();
+        }
+        if reference_count > 0 {
+            return lsp_reference_count_label(reference_count);
+        }
+        if self.loaded {
+            return lsp_reference_count_label(reference_count);
+        }
+        "Find references".to_string()
+    }
+}
+
 fn render_lsp_symbol_details(
     details: &lsp::LspSymbolDetails,
     id_prefix: &str,
     references_expanded: bool,
+    references: LspReferenceDisclosureState,
     toggle_references: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    if details.is_empty() {
+    let reference_count = details.reference_targets.len();
+    if details.is_empty() && !references.is_available(reference_count) {
         return div()
             .text_size(px(12.0))
             .text_color(fg_muted())
@@ -1612,13 +1786,16 @@ fn render_lsp_symbol_details(
                     }),
             )
         })
-        .when(!details.reference_targets.is_empty(), |el| {
-            let reference_count = details.reference_targets.len();
+        .when(references.is_available(reference_count), |el| {
             let icon = if references_expanded {
                 LucideIcon::ChevronDown
             } else {
                 LucideIcon::ChevronRight
             };
+            let references_label = references.label(reference_count);
+            let references_error = references.error.clone();
+            let references_loaded = references.loaded;
+            let references_loading = references.loading;
             el.child(
                 div()
                     .w_full()
@@ -1647,11 +1824,29 @@ fn render_lsp_symbol_details(
                                     .font_family(mono_font_family())
                                     .text_size(px(11.0))
                                     .text_color(accent())
-                                    .child(lsp_reference_count_label(reference_count)),
+                                    .child(references_label),
                             ),
                     )
                     .when(references_expanded, |el| {
-                        el.children(details.reference_targets.iter().map(render_lsp_target_row))
+                        if references_loading {
+                            el.child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(fg_muted())
+                                    .child("Loading references from the language server..."),
+                            )
+                        } else if let Some(error) = references_error {
+                            el.child(div().text_size(px(12.0)).text_color(danger()).child(error))
+                        } else if references_loaded && reference_count == 0 {
+                            el.child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(fg_muted())
+                                    .child("No references found."),
+                            )
+                        } else {
+                            el.children(details.reference_targets.iter().map(render_lsp_target_row))
+                        }
                     }),
             )
         })
@@ -1728,7 +1923,7 @@ mod tests {
     use super::{
         build_interactive_code_tokens, code_text_runs, lsp_hover_body_markdown,
         lsp_hover_header_snippet, lsp_reference_count_label, prepared_code_block_element_id,
-        prepared_excerpt_range, prepared_lsp_text_id,
+        prepared_excerpt_range, prepared_lsp_text_id, LspReferenceDisclosureState,
     };
 
     fn total_run_len(runs: &[TextRun]) -> usize {
@@ -1829,6 +2024,31 @@ mod tests {
     fn lsp_reference_count_label_pluralizes_count() {
         assert_eq!(lsp_reference_count_label(1), "1 reference");
         assert_eq!(lsp_reference_count_label(3), "3 references");
+    }
+
+    #[test]
+    fn lsp_reference_disclosure_labels_lazy_states() {
+        let initial = LspReferenceDisclosureState {
+            supported: true,
+            ..Default::default()
+        };
+        assert!(initial.is_available(0));
+        assert_eq!(initial.label(0), "Find references");
+
+        let loading = LspReferenceDisclosureState {
+            supported: true,
+            loading: true,
+            ..Default::default()
+        };
+        assert_eq!(loading.label(0), "Loading references...");
+
+        let loaded = LspReferenceDisclosureState {
+            supported: true,
+            loaded: true,
+            ..Default::default()
+        };
+        assert_eq!(loaded.label(0), "0 references");
+        assert_eq!(loaded.label(2), "2 references");
     }
 
     #[test]

@@ -261,6 +261,23 @@ impl LspSessionManager {
         repo_root: &Path,
         request: &LspTextDocumentRequest,
     ) -> Result<LspSymbolDetails, String> {
+        self.symbol_details_with_options(repo_root, request, true)
+    }
+
+    pub fn symbol_preview_details(
+        &self,
+        repo_root: &Path,
+        request: &LspTextDocumentRequest,
+    ) -> Result<LspSymbolDetails, String> {
+        self.symbol_details_with_options(repo_root, request, false)
+    }
+
+    fn symbol_details_with_options(
+        &self,
+        repo_root: &Path,
+        request: &LspTextDocumentRequest,
+        include_references: bool,
+    ) -> Result<LspSymbolDetails, String> {
         let config = resolve_server_configuration_for_path(repo_root, &request.file_path)
             .map_err(|status| status.message.clone())?;
         let session = self.session_for(repo_root, &config)?;
@@ -271,12 +288,13 @@ impl LspSessionManager {
                 details.definition_targets = targets;
             }
         }
-        if capabilities.references_supported {
+        if include_references && capabilities.references_supported {
             if let Ok(targets) = session.reference_targets(request, &capabilities) {
                 details.reference_targets = targets;
             }
         }
-        let warnings = lsp_analysis_warnings(&config.language_id, request, &details);
+        let warnings =
+            lsp_analysis_warnings(&config.language_id, request, &details, include_references);
         details.warnings.extend(warnings);
         Ok(details)
     }
@@ -291,6 +309,18 @@ impl LspSessionManager {
         let session = self.session_for(repo_root, &config)?;
         let capabilities = session.capabilities()?;
         session.definition_targets(request, &capabilities)
+    }
+
+    pub fn references(
+        &self,
+        repo_root: &Path,
+        request: &LspTextDocumentRequest,
+    ) -> Result<Vec<LspReferenceTarget>, String> {
+        let config = resolve_server_configuration_for_path(repo_root, &request.file_path)
+            .map_err(|status| status.message.clone())?;
+        let session = self.session_for(repo_root, &config)?;
+        let capabilities = session.capabilities()?;
+        session.reference_targets(request, &capabilities)
     }
 
     pub fn shutdown_all(&self) {
@@ -1315,9 +1345,10 @@ fn lsp_analysis_warnings(
     language_id: &str,
     request: &LspTextDocumentRequest,
     details: &LspSymbolDetails,
+    references_requested: bool,
 ) -> Vec<String> {
     if language_id == "kotlin" {
-        kotlin_lsp_analysis_warnings(request, details)
+        kotlin_lsp_analysis_warnings(request, details, references_requested)
     } else {
         Vec::new()
     }
@@ -1326,12 +1357,18 @@ fn lsp_analysis_warnings(
 fn kotlin_lsp_analysis_warnings(
     request: &LspTextDocumentRequest,
     details: &LspSymbolDetails,
+    references_requested: bool,
 ) -> Vec<String> {
     if details.is_empty() {
+        let missing_details = if references_requested {
+            "hover, definition, or reference"
+        } else {
+            "hover or definition"
+        };
         return word_at_text_position(request.document_text.as_ref(), request.line, request.column)
             .map(|symbol| {
                 vec![format!(
-                    "Kotlin LSP returned no hover, definition, or reference data for `{symbol}`. If this is an imported dependency symbol, the current LSP workspace may be missing its Gradle/classpath model."
+                    "Kotlin LSP returned no {missing_details} data for `{symbol}`. If this is an imported dependency symbol, the current LSP workspace may be missing its Gradle/classpath model."
                 )]
             })
             .unwrap_or_default();
@@ -2265,7 +2302,7 @@ mod tests {
             ..Default::default()
         };
 
-        let warnings = lsp_analysis_warnings("kotlin", &request, &details);
+        let warnings = lsp_analysis_warnings("kotlin", &request, &details, true);
 
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("Gradle/classpath model"));
@@ -2283,7 +2320,8 @@ mod tests {
             column: 22,
         };
 
-        let warnings = lsp_analysis_warnings("kotlin", &request, &LspSymbolDetails::default());
+        let warnings =
+            lsp_analysis_warnings("kotlin", &request, &LspSymbolDetails::default(), true);
 
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("coroutineScope"));

@@ -428,6 +428,9 @@ pub struct LspSymbolState {
     pub loading: bool,
     pub details: Option<LspSymbolDetails>,
     pub error: Option<String>,
+    pub references_loading: bool,
+    pub references_loaded: bool,
+    pub references_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
