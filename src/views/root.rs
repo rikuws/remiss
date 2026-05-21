@@ -63,6 +63,7 @@ const APP_TITLEBAR_CONTROL_SIZE: f32 = 30.0;
 const APP_TITLEBAR_CONTROL_TOP: f32 = 2.0;
 const APP_TITLEBAR_CONTROL_ICON_SIZE: f32 = 15.0;
 const APP_CHROME_HIDDEN_LEFT_INSET: f32 = 206.0;
+const REVIEW_BOARD_SHADER_CANVAS_LAZY_DELAY_MS: u64 = 350;
 const APP_SIDEBAR_ANIMATION_MS: u64 = 220;
 const NOTIFICATION_DRAWER_ANIMATION_MS: u64 = 160;
 const WORKSPACE_ROUTE_ANIMATION_MS: u64 = 160;
@@ -223,6 +224,48 @@ impl RootView {
             workspace_route_key: None,
             workspace_route_animation_started_at: None,
         }
+    }
+
+    fn ensure_review_board_shader_canvases_lazily_enabled(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let should_schedule = {
+            let state = self.state.read(cx);
+            state.active_pr_key.is_none()
+                && matches!(state.active_section, SectionId::Pulls | SectionId::Reviews)
+                && !state.workspace_loading
+                && !state.review_board_shader_canvases_ready
+                && !state.review_board_shader_canvases_scheduled
+        };
+
+        if !should_schedule {
+            return;
+        }
+
+        self.state.update(cx, |state, _| {
+            state.review_board_shader_canvases_scheduled = true;
+        });
+
+        let model = self.state.clone();
+        window
+            .spawn(cx, async move |cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(
+                        REVIEW_BOARD_SHADER_CANVAS_LAZY_DELAY_MS,
+                    ))
+                    .await;
+
+                model
+                    .update(cx, |state, cx| {
+                        state.review_board_shader_canvases_ready = true;
+                        state.review_board_shader_canvases_scheduled = false;
+                        cx.notify();
+                    })
+                    .ok();
+            })
+            .detach();
     }
 
     fn workspace_route_transition(
@@ -782,6 +825,8 @@ fn mark_local_review_path_inspecting(state: &Entity<AppState>, path: &PathBuf, c
 
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_review_board_shader_canvases_lazily_enabled(window, cx);
+
         let workspace_route_transition = self.workspace_route_transition(window, cx);
         let (
             palette_visible,
@@ -1631,6 +1676,14 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                 highlight_review_surface,
                 chrome_segmented_control(vec![
                     chrome_segment(
+                        "Review",
+                        active_surface == PullRequestSurface::Files,
+                        false,
+                        move |_, window, cx| {
+                            enter_files_surface(&state_for_review, window, cx);
+                        },
+                    ),
+                    chrome_segment(
                         "Briefing",
                         active_surface == PullRequestSurface::Overview,
                         false,
@@ -1653,14 +1706,6 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                                 cx,
                                 true,
                             );
-                        },
-                    ),
-                    chrome_segment(
-                        "Review",
-                        active_surface == PullRequestSurface::Files,
-                        false,
-                        move |_, window, cx| {
-                            enter_files_surface(&state_for_review, window, cx);
                         },
                     ),
                 ]),

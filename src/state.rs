@@ -24,6 +24,11 @@ use crate::review_ai::{
 };
 use crate::review_anchors::review_thread_anchor;
 use crate::review_brief::ReviewBrief;
+use crate::review_filters::{
+    load_muted_repositories, load_pull_request_filter_settings, save_muted_repositories,
+    save_pull_request_filter_settings, PullRequestFilterScope, PullRequestFilterSettings,
+    PullRequestFilterToggle,
+};
 use crate::review_partner::{GeneratedReviewPartnerContext, ReviewPartnerFocusTarget};
 use crate::review_queue::{default_review_file, ReviewQueue};
 use crate::review_session::{
@@ -44,56 +49,6 @@ use gpui::{
     px, AnyWindowHandle, ListAlignment, ListState, Pixels, Point, ScrollHandle, WindowAppearance,
 };
 use serde::{Deserialize, Serialize};
-
-const MUTED_REPOSITORIES_CACHE_KEY: &str = "muted-repositories-v1";
-
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct MutedRepositoriesSettings {
-    #[serde(default)]
-    repositories: Vec<String>,
-}
-
-impl MutedRepositoriesSettings {
-    fn from_repositories(repositories: &HashSet<String>) -> Self {
-        let mut repositories = repositories.iter().cloned().collect::<Vec<_>>();
-        repositories.sort();
-        repositories.dedup();
-        Self { repositories }
-    }
-}
-
-fn load_muted_repositories(cache: &CacheStore) -> Result<HashSet<String>, String> {
-    Ok(cache
-        .get::<MutedRepositoriesSettings>(MUTED_REPOSITORIES_CACHE_KEY)?
-        .map(|document| {
-            document
-                .value
-                .repositories
-                .into_iter()
-                .filter(|repository| !repository.trim().is_empty())
-                .collect()
-        })
-        .unwrap_or_default())
-}
-
-fn save_muted_repositories(
-    cache: &CacheStore,
-    repositories: &HashSet<String>,
-) -> Result<(), String> {
-    cache.put(
-        MUTED_REPOSITORIES_CACHE_KEY,
-        &MutedRepositoriesSettings::from_repositories(repositories),
-        state_now_ms(),
-    )
-}
-
-fn state_now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as i64)
-        .unwrap_or_default()
-}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SectionId {
@@ -1041,9 +996,12 @@ pub struct AppState {
     pub local_review_loading: bool,
     pub local_review_error: Option<String>,
     pub muted_repos: std::collections::HashSet<String>,
+    pub pull_request_filter_settings: PullRequestFilterSettings,
     pub project_shader_settings: ProjectShaderSettings,
     pub project_shader_settings_error: Option<String>,
     pub project_shader_picker: Option<ProjectShaderPickerState>,
+    pub review_board_shader_canvases_ready: bool,
+    pub review_board_shader_canvases_scheduled: bool,
 
     // Workspace data
     pub workspace: Option<WorkspaceSnapshot>,
@@ -1193,6 +1151,13 @@ impl AppState {
                 HashSet::new()
             }
         };
+        let pull_request_filter_settings = match load_pull_request_filter_settings(&cache) {
+            Ok(settings) => settings,
+            Err(error) => {
+                eprintln!("Failed to load pull request filters: {error}");
+                PullRequestFilterSettings::default()
+            }
+        };
         let (project_shader_settings, project_shader_settings_error) =
             match load_project_shader_settings(&cache) {
                 Ok(settings) => (settings, None),
@@ -1219,9 +1184,12 @@ impl AppState {
             local_review_loading: false,
             local_review_error: None,
             muted_repos,
+            pull_request_filter_settings,
             project_shader_settings,
             project_shader_settings_error,
             project_shader_picker: None,
+            review_board_shader_canvases_ready: false,
+            review_board_shader_canvases_scheduled: false,
             workspace: None,
             workspace_loading: true,
             workspace_syncing: false,
@@ -1547,6 +1515,34 @@ impl AppState {
     fn persist_muted_repositories(&self) {
         if let Err(error) = save_muted_repositories(self.cache.as_ref(), &self.muted_repos) {
             eprintln!("Failed to save muted repositories: {error}");
+        }
+    }
+
+    pub fn set_pull_request_filter_preset(
+        &mut self,
+        scope: PullRequestFilterScope,
+        preset_id: &str,
+    ) {
+        self.pull_request_filter_settings
+            .set_active_preset(scope, preset_id);
+        self.persist_pull_request_filter_settings();
+    }
+
+    pub fn toggle_pull_request_filter(
+        &mut self,
+        scope: PullRequestFilterScope,
+        toggle: PullRequestFilterToggle,
+    ) {
+        self.pull_request_filter_settings.toggle(scope, toggle);
+        self.persist_pull_request_filter_settings();
+    }
+
+    fn persist_pull_request_filter_settings(&self) {
+        if let Err(error) = save_pull_request_filter_settings(
+            self.cache.as_ref(),
+            &self.pull_request_filter_settings,
+        ) {
+            eprintln!("Failed to save pull request filters: {error}");
         }
     }
 
@@ -2610,7 +2606,7 @@ fn parse_debug_pull_request_target(target: &str) -> Option<(String, i64)> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, HashSet};
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2625,10 +2621,9 @@ mod tests {
     use crate::tutorial_pr::TUTORIAL_PR_KEY;
 
     use super::{
-        diff_anchor_for_line, first_review_comment_after_focus_index, load_muted_repositories,
-        review_comment_navigation_items, save_muted_repositories, summary_key, AppState,
-        DiffScrollbarActivity, MutedRepositoriesSettings, PullRequestSurface, ReviewModeFocus,
-        SectionId, StructuralDiffWarmupState, MUTED_REPOSITORIES_CACHE_KEY,
+        diff_anchor_for_line, first_review_comment_after_focus_index,
+        review_comment_navigation_items, summary_key, AppState, DiffScrollbarActivity,
+        PullRequestSurface, ReviewModeFocus, SectionId, StructuralDiffWarmupState,
     };
 
     fn temp_cache_store(name: &str) -> CacheStore {
@@ -2640,30 +2635,6 @@ mod tests {
             "/tmp/remiss-state-test-{name}-{suffix}/cache.sqlite"
         ));
         CacheStore::new(path).expect("cache")
-    }
-
-    #[test]
-    fn muted_repository_settings_round_trip_in_stable_order() {
-        let cache = temp_cache_store("muted-repositories");
-        let repositories = HashSet::from([
-            "zeta/project".to_string(),
-            "alpha/project".to_string(),
-            "alpha/project".to_string(),
-        ]);
-
-        save_muted_repositories(&cache, &repositories).expect("save muted repositories");
-
-        let loaded = load_muted_repositories(&cache).expect("load muted repositories");
-        assert_eq!(loaded, repositories);
-
-        let document = cache
-            .get::<MutedRepositoriesSettings>(MUTED_REPOSITORIES_CACHE_KEY)
-            .expect("read muted repositories document")
-            .expect("muted repositories document exists");
-        assert_eq!(
-            document.value.repositories,
-            vec!["alpha/project".to_string(), "zeta/project".to_string()]
-        );
     }
 
     #[test]

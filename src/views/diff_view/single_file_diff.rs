@@ -1815,7 +1815,7 @@ pub(super) fn render_virtualized_diff_row(
             if parsed_file.map(|parsed| parsed.is_binary).unwrap_or(false) {
                 "Binary file not displayed in the unified diff."
             } else {
-                "No textual hunks available for this file."
+                "No textual hunks available from GitHub for this file."
             },
         )
         .into_any_element(),

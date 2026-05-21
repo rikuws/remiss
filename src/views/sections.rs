@@ -2,6 +2,11 @@ use gpui::prelude::*;
 use gpui::*;
 
 use crate::icons::{lucide_icon, LucideIcon};
+use crate::review_filters::{
+    current_epoch_days, filter_pull_requests, ActivityFilter, DraftFilter, FreshnessFilter,
+    PullRequestFilterContext, PullRequestFilterScope, PullRequestFilterToggle,
+    ReviewDecisionFilter, SizeFilter,
+};
 use crate::review_session::{load_review_session, location_label};
 use crate::shader_surface::{
     opengl_shader_surface_variant_with_corner_mask, OverviewShaderVariant, ShaderCornerMask,
@@ -13,7 +18,11 @@ use crate::{github, notifications, review_memory};
 use super::diff_view::{ensure_structural_diff_warmup_started, warm_structural_diffs_flow};
 use super::settings::render_settings_view;
 use super::workspace_sync::trigger_sync_workspace;
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    time::Duration,
+};
 
 const DETAIL_AUTO_REFRESH_TTL_MS: i64 = 5 * 60 * 1000;
 const OVERVIEW_CONTENT_MAX_WIDTH: f32 = 1440.0;
@@ -48,6 +57,28 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
         .review_queue()
         .map(|q| q.items.clone())
         .unwrap_or_default();
+    let overview_filter_scope = PullRequestFilterScope::Overview;
+    let overview_filter = s
+        .pull_request_filter_settings
+        .current_filter(overview_filter_scope);
+    let overview_active_preset_id = s
+        .pull_request_filter_settings
+        .active_preset_id(overview_filter_scope)
+        .map(str::to_string);
+    let overview_presets = s
+        .pull_request_filter_settings
+        .presets(overview_filter_scope);
+    let unread_pr_keys = unread_pull_request_keys_for_filter(s, &overview_filter);
+    let overview_filter_context = PullRequestFilterContext {
+        muted_repositories: &s.muted_repos,
+        unread_pr_keys: &unread_pr_keys,
+        now_epoch_days: current_epoch_days(),
+    };
+    let filtered_review_items =
+        filter_pull_requests(&review_items, &overview_filter, &overview_filter_context);
+    let filtered_review_count = filtered_review_items.len();
+    let overview_filter_labels = overview_filter.active_labels();
+    let overview_hidden_count = review_items.len().saturating_sub(filtered_review_count);
     let workspace_loading = s.workspace_loading;
     let workspace_error = s.workspace_error.clone();
     let authored_comment_items =
@@ -63,7 +94,7 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let show_empty_state = is_auth
         && !workspace_loading
         && workspace_error.is_none()
-        && review_items.is_empty()
+        && filtered_review_count == 0
         && authored_comment_items.is_empty()
         && other_comment_items.is_empty();
 
@@ -146,6 +177,18 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                     },
                                 )),
                         )
+                        .child(render_pull_request_filter_bar(
+                            state,
+                            overview_filter_scope,
+                            overview_presets,
+                            overview_active_preset_id,
+                            &overview_filter,
+                            overview_filter_labels,
+                            filtered_review_count,
+                            review_items.len(),
+                            overview_hidden_count,
+                            !s.muted_repos.is_empty(),
+                        ))
                         .when(show_empty_state, |el| {
                             el.child(overview_empty_state_panel())
                         })
@@ -159,8 +202,8 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                     .gap(px(18.0))
                                     .child(div().flex_1().min_w(px(640.0)).child(
                                         overview_review_requests_panel(
-                                            review_items,
-                                            review_count,
+                                            filtered_review_items,
+                                            filtered_review_count as i64,
                                             workspace_loading,
                                             workspace_error.clone(),
                                             is_auth,
@@ -951,6 +994,22 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
         .as_ref()
         .map(|q| q.items.clone())
         .unwrap_or_default();
+    let filter_scope = pull_request_filter_scope_for_section(s.active_section);
+    let current_filter = s.pull_request_filter_settings.current_filter(filter_scope);
+    let active_preset_id = s
+        .pull_request_filter_settings
+        .active_preset_id(filter_scope)
+        .map(str::to_string);
+    let filter_presets = s.pull_request_filter_settings.presets(filter_scope);
+    let unread_pr_keys = unread_pull_request_keys_for_filter(s, &current_filter);
+    let filter_context = PullRequestFilterContext {
+        muted_repositories: &s.muted_repos,
+        unread_pr_keys: &unread_pr_keys,
+        now_epoch_days: current_epoch_days(),
+    };
+    let filtered_queue_items = filter_pull_requests(&queue_items, &current_filter, &filter_context);
+    let active_filter_labels = current_filter.active_labels();
+    let hidden_by_filter_count = queue_items.len().saturating_sub(filtered_queue_items.len());
     let queue_label = current_queue
         .as_ref()
         .map(|q| q.label.clone())
@@ -976,6 +1035,7 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let shader_picker = s.project_shader_picker.clone();
     let shader_settings_error = s.project_shader_settings_error.clone();
     let project_shader_settings = s.project_shader_settings.clone();
+    let shader_canvases_ready = s.review_board_shader_canvases_ready;
 
     let sync_state = state.clone();
     let state_for_lanes = state.clone();
@@ -996,10 +1056,7 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     // Group items into kanban lanes by repository
     let mut my_items: Vec<github::PullRequestSummary> = Vec::new();
     let mut repo_groups: BTreeMap<String, Vec<github::PullRequestSummary>> = BTreeMap::new();
-    for item in &queue_items {
-        if muted_repos.contains(&item.repository) {
-            continue;
-        }
+    for item in &filtered_queue_items {
         if !is_authored_queue && !viewer_login.is_empty() && item.author_login == viewer_login {
             my_items.push(item.clone());
         } else {
@@ -1157,6 +1214,18 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                             },
                         ))),
                 )
+                .child(render_pull_request_filter_bar(
+                    state,
+                    filter_scope,
+                    filter_presets,
+                    active_preset_id,
+                    &current_filter,
+                    active_filter_labels,
+                    filtered_queue_items.len(),
+                    queue_items.len(),
+                    hidden_by_filter_count,
+                    has_muted,
+                ))
                 .when(workspace_loading, |el| {
                     el.child(
                         div()
@@ -1210,6 +1279,7 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                         accent(),
                                         true,
                                         shader_variant,
+                                        shader_canvases_ready,
                                         state,
                                     ))
                                 })
@@ -1230,6 +1300,7 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                         accent_color,
                                         false,
                                         shader_variant,
+                                        shader_canvases_ready,
                                         state,
                                     )
                                 })),
@@ -1404,6 +1475,7 @@ fn project_shader_choice_row(
                         ShaderCornerMask::ALL,
                         bg_surface(),
                         radius_sm(),
+                        true,
                     )
                     .w(px(76.0))
                     .h(px(40.0))
@@ -1514,7 +1586,7 @@ fn shader_material_surface(
 ) -> Div {
     let seed = seed.to_string();
     let variant = material_shader_variant(&seed, variant_offset);
-    shader_material_surface_variant(&seed, variant, corners, mask_color, corner_radius)
+    shader_material_surface_variant(&seed, variant, corners, mask_color, corner_radius, true)
 }
 
 fn shader_material_surface_variant(
@@ -1523,15 +1595,102 @@ fn shader_material_surface_variant(
     corners: ShaderCornerMask,
     mask_color: Rgba,
     corner_radius: Pixels,
+    use_shader_canvas: bool,
 ) -> Div {
-    let shader_seed = format!("review-material-{seed}");
-    opengl_shader_surface_variant_with_corner_mask(
-        shader_seed,
-        variant,
-        corner_radius,
-        mask_color,
-        corners,
-    )
+    if use_shader_canvas {
+        let shader_seed = format!("review-material-{seed}");
+        return opengl_shader_surface_variant_with_corner_mask(
+            shader_seed,
+            variant,
+            corner_radius,
+            mask_color,
+            corners,
+        );
+    }
+
+    static_material_surface_variant(seed, variant, corner_radius)
+}
+
+fn static_material_surface_variant(
+    seed: &str,
+    variant: OverviewShaderVariant,
+    corner_radius: Pixels,
+) -> Div {
+    div()
+        .relative()
+        .overflow_hidden()
+        .rounded(corner_radius)
+        .bg(material_surface_base(variant))
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .bg(material_surface_wash(variant)),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(px(0.0))
+                .top(px(0.0))
+                .bottom(px(0.0))
+                .w(px(material_surface_accent_width(seed)))
+                .bg(material_surface_accent(variant)),
+        )
+        .child(
+            div()
+                .absolute()
+                .right(px(0.0))
+                .top(px(0.0))
+                .bottom(px(0.0))
+                .w(px(1.0))
+                .bg(material_surface_edge(variant)),
+        )
+}
+
+fn material_surface_base(variant: OverviewShaderVariant) -> Rgba {
+    match active_theme() {
+        ActiveTheme::Light => match variant {
+            OverviewShaderVariant::Bands => rgb(0xf3f6f8),
+            OverviewShaderVariant::Ember => rgb(0xf8f4f1),
+            OverviewShaderVariant::Ribbon => rgb(0xf3f7f3),
+            OverviewShaderVariant::Interference => rgb(0xf5f3f8),
+        },
+        ActiveTheme::Dark => match variant {
+            OverviewShaderVariant::Bands => rgb(0x17202a),
+            OverviewShaderVariant::Ember => rgb(0x241a17),
+            OverviewShaderVariant::Ribbon => rgb(0x172116),
+            OverviewShaderVariant::Interference => rgb(0x1e1a26),
+        },
+    }
+}
+
+fn material_surface_wash(variant: OverviewShaderVariant) -> Rgba {
+    let alpha = match active_theme() {
+        ActiveTheme::Light => 0.10,
+        ActiveTheme::Dark => 0.18,
+    };
+    with_alpha(material_surface_accent(variant), alpha)
+}
+
+fn material_surface_accent(variant: OverviewShaderVariant) -> Rgba {
+    match variant {
+        OverviewShaderVariant::Bands => rgb(0x4f7d95),
+        OverviewShaderVariant::Ember => rgb(0xb6684c),
+        OverviewShaderVariant::Ribbon => rgb(0x5f8b5d),
+        OverviewShaderVariant::Interference => rgb(0x7a6aa7),
+    }
+}
+
+fn material_surface_edge(variant: OverviewShaderVariant) -> Rgba {
+    let alpha = match active_theme() {
+        ActiveTheme::Light => 0.18,
+        ActiveTheme::Dark => 0.28,
+    };
+    with_alpha(material_surface_accent(variant), alpha)
+}
+
+fn material_surface_accent_width(seed: &str) -> f32 {
+    3.0 + material_seed_index(seed) as f32
 }
 
 fn material_shader_variant(seed: &str, offset: usize) -> OverviewShaderVariant {
@@ -1873,6 +2032,232 @@ fn filter_pill(
         )
 }
 
+fn pull_request_filter_scope_for_section(section: SectionId) -> PullRequestFilterScope {
+    match section {
+        SectionId::Overview => PullRequestFilterScope::Overview,
+        SectionId::Reviews => PullRequestFilterScope::Reviews,
+        _ => PullRequestFilterScope::Pulls,
+    }
+}
+
+fn unread_pull_request_keys(state: &AppState) -> BTreeSet<String> {
+    state
+        .detail_states
+        .iter()
+        .filter_map(|(key, detail_state)| {
+            let detail = detail_state.snapshot.as_ref()?.detail.as_ref()?;
+            (!state
+                .unread_review_comment_ids_for_detail(detail)
+                .is_empty())
+            .then(|| key.clone())
+        })
+        .collect()
+}
+
+fn unread_pull_request_keys_for_filter(
+    state: &AppState,
+    filter: &crate::review_filters::PullRequestFilter,
+) -> BTreeSet<String> {
+    if filter.needs_unread_context() {
+        unread_pull_request_keys(state)
+    } else {
+        BTreeSet::new()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_pull_request_filter_bar(
+    state: &Entity<AppState>,
+    scope: PullRequestFilterScope,
+    presets: Vec<crate::review_filters::PullRequestFilterPreset>,
+    active_preset_id: Option<String>,
+    filter: &crate::review_filters::PullRequestFilter,
+    active_labels: Vec<String>,
+    visible_count: usize,
+    total_count: usize,
+    hidden_count: usize,
+    has_muted: bool,
+) -> impl IntoElement {
+    let state_for_ready = state.clone();
+    let state_for_draft = state.clone();
+    let state_for_unread = state.clone();
+    let state_for_fresh = state.clone();
+    let state_for_stale = state.clone();
+    let state_for_large = state.clone();
+    let state_for_needs_review = state.clone();
+    let state_for_muted = state.clone();
+    let mut status = format!("{visible_count}/{total_count}");
+    if hidden_count > 0 {
+        status.push_str(&format!(" visible, {hidden_count} hidden"));
+    } else {
+        status.push_str(" visible");
+    }
+
+    div()
+        .px(px(28.0))
+        .pb(px(12.0))
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .flex_wrap()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(5.0))
+                        .mr(px(4.0))
+                        .text_size(px(11.0))
+                        .font_family(mono_font_family())
+                        .text_color(fg_subtle())
+                        .child(lucide_icon(LucideIcon::ListFilter, 12.0, fg_subtle()))
+                        .child(status),
+                )
+                .children(presets.into_iter().map(|preset| {
+                    let preset_id = preset.id.clone();
+                    let active = active_preset_id.as_deref() == Some(preset.id.as_str());
+                    let state = state.clone();
+                    filter_chip(&preset.label, active, move |_, _, cx| {
+                        state.update(cx, |state, cx| {
+                            state.set_pull_request_filter_preset(scope, &preset_id);
+                            cx.notify();
+                        });
+                    })
+                }))
+                .child(filter_chip(
+                    "Ready",
+                    filter.draft == DraftFilter::Ready,
+                    move |_, _, cx| {
+                        state_for_ready.update(cx, |state, cx| {
+                            state.toggle_pull_request_filter(scope, PullRequestFilterToggle::Ready);
+                            cx.notify();
+                        });
+                    },
+                ))
+                .child(filter_chip(
+                    "Draft",
+                    filter.draft == DraftFilter::Draft,
+                    move |_, _, cx| {
+                        state_for_draft.update(cx, |state, cx| {
+                            state.toggle_pull_request_filter(scope, PullRequestFilterToggle::Draft);
+                            cx.notify();
+                        });
+                    },
+                ))
+                .child(filter_chip(
+                    "Unread",
+                    filter.activity == ActivityFilter::Unread,
+                    move |_, _, cx| {
+                        state_for_unread.update(cx, |state, cx| {
+                            state
+                                .toggle_pull_request_filter(scope, PullRequestFilterToggle::Unread);
+                            cx.notify();
+                        });
+                    },
+                ))
+                .child(filter_chip(
+                    "Fresh",
+                    filter.freshness == FreshnessFilter::Fresh,
+                    move |_, _, cx| {
+                        state_for_fresh.update(cx, |state, cx| {
+                            state.toggle_pull_request_filter(scope, PullRequestFilterToggle::Fresh);
+                            cx.notify();
+                        });
+                    },
+                ))
+                .child(filter_chip(
+                    "Stale",
+                    filter.freshness == FreshnessFilter::Stale,
+                    move |_, _, cx| {
+                        state_for_stale.update(cx, |state, cx| {
+                            state.toggle_pull_request_filter(scope, PullRequestFilterToggle::Stale);
+                            cx.notify();
+                        });
+                    },
+                ))
+                .child(filter_chip(
+                    "Large",
+                    filter.size == SizeFilter::Large,
+                    move |_, _, cx| {
+                        state_for_large.update(cx, |state, cx| {
+                            state.toggle_pull_request_filter(scope, PullRequestFilterToggle::Large);
+                            cx.notify();
+                        });
+                    },
+                ))
+                .child(filter_chip(
+                    "Needs review",
+                    filter.review_decision == ReviewDecisionFilter::ReviewRequired,
+                    move |_, _, cx| {
+                        state_for_needs_review.update(cx, |state, cx| {
+                            state.toggle_pull_request_filter(
+                                scope,
+                                PullRequestFilterToggle::NeedsReview,
+                            );
+                            cx.notify();
+                        });
+                    },
+                ))
+                .when(has_muted || filter.include_muted, |el| {
+                    el.child(filter_chip(
+                        "Muted",
+                        filter.include_muted,
+                        move |_, _, cx| {
+                            state_for_muted.update(cx, |state, cx| {
+                                state.toggle_pull_request_filter(
+                                    scope,
+                                    PullRequestFilterToggle::IncludeMuted,
+                                );
+                                cx.notify();
+                            });
+                        },
+                    ))
+                }),
+        )
+        .when(!active_labels.is_empty(), |el| {
+            el.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .flex_wrap()
+                    .children(active_labels.into_iter().map(|label| subtle_pill(&label))),
+            )
+        })
+}
+
+fn filter_chip(
+    label: &str,
+    active: bool,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .px(px(9.0))
+        .py(px(4.0))
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(if active {
+            focus_border()
+        } else {
+            transparent()
+        })
+        .bg(if active { bg_selected() } else { bg_overlay() })
+        .text_size(px(11.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(if active { fg_emphasis() } else { fg_muted() })
+        .hover(move |style| {
+            style
+                .bg(if active { bg_selected() } else { hover_bg() })
+                .text_color(fg_emphasis())
+        })
+        .on_mouse_down(MouseButton::Left, on_click)
+        .child(label.to_string())
+}
+
 fn pill_badge(label: &str, fg: Rgba, bg: Rgba, _border: Rgba) -> impl IntoElement {
     div()
         .px(px(8.0))
@@ -2002,6 +2387,7 @@ fn kanban_lane(
     _accent: Rgba,
     is_mine: bool,
     shader_variant: OverviewShaderVariant,
+    shader_canvases_ready: bool,
     state: Entity<AppState>,
 ) -> impl IntoElement {
     let label = label.to_string();
@@ -2039,6 +2425,7 @@ fn kanban_lane(
                         ShaderCornerMask::TOP,
                         bg_canvas(),
                         lane_radius,
+                        shader_canvases_ready,
                     )
                     .h(shader_backplate_height)
                     .flex()
@@ -2357,21 +2744,11 @@ pub fn open_pull_request(
     let key = pr_key(&summary.repository, summary.number);
     let repository = summary.repository.clone();
     let number = summary.number;
-    let opens_new_tab = {
-        let s = state.read(cx);
-        !s.open_tabs
-            .iter()
-            .any(|t| pr_key(&t.repository, t.number) == key)
-    };
-    let initial_surface = if opens_new_tab && summary.local_key.is_none() {
-        PullRequestSurface::Overview
-    } else {
-        PullRequestSurface::Files
-    };
     let cached_review_session = {
         let cache = state.read(cx).cache.clone();
         load_review_session(cache.as_ref(), &key).ok().flatten()
     };
+    let initial_surface = PullRequestSurface::Files;
     let load_plan = {
         let s = state.read(cx);
         plan_pull_request_open(&s, &key)
@@ -2408,10 +2785,6 @@ pub fn open_pull_request(
     });
 
     ensure_structural_diff_warmup_started(state, window, cx);
-    if initial_surface == PullRequestSurface::Overview {
-        crate::review_intelligence::refresh_active_review_brief(state, window, cx, true);
-        crate::review_intelligence::refresh_active_review_partner(state, window, cx, true);
-    }
 
     if !load_plan.load_cached_snapshot && !load_plan.sync_live {
         return;
