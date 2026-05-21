@@ -66,6 +66,8 @@ pub struct ReviewMemoryEntry {
     pub created_at: String,
     pub updated_at: String,
     #[serde(default)]
+    pub source_head_ref_name: Option<String>,
+    #[serde(default)]
     pub first_seen_pr: Option<i64>,
     #[serde(default)]
     pub last_seen_pr: Option<i64>,
@@ -484,7 +486,7 @@ pub fn review_memory_prompt_context(
         .entries
         .iter()
         .filter(|entry| entry.repository == detail.repository)
-        .filter(|entry| !entry_seen_in_current_pr(entry, detail.number))
+        .filter(|entry| !entry_seen_in_current_review_context(entry, detail))
         .filter(|entry| {
             !matches!(
                 entry.status,
@@ -514,7 +516,7 @@ pub fn review_memory_prompt_context(
         vec!["Only locally cached review history was searched; no prior review memory exists for this repository yet.".to_string()]
     } else if signals.is_empty() {
         vec![
-            "Only locally cached review history was searched; current-pull-request memory is excluded from history signals.".to_string(),
+            "Only locally cached review history was searched; current-pull-request and same-branch memory is excluded from history signals.".to_string(),
         ]
     } else {
         vec!["Only locally cached review history was searched.".to_string()]
@@ -630,6 +632,71 @@ fn entry_seen_in_current_pr(entry: &ReviewMemoryEntry, current_pr_number: i64) -
     entry.first_seen_pr == Some(current_pr_number) || entry.last_seen_pr == Some(current_pr_number)
 }
 
+fn entry_seen_in_current_review_context(
+    entry: &ReviewMemoryEntry,
+    detail: &PullRequestDetail,
+) -> bool {
+    entry_seen_in_current_pr(entry, detail.number) || entry_seen_on_current_branch(entry, detail)
+}
+
+fn entry_seen_on_current_branch(entry: &ReviewMemoryEntry, detail: &PullRequestDetail) -> bool {
+    let current_branch = normalize_head_ref_name(&detail.head_ref_name);
+    if current_branch.is_empty() {
+        return false;
+    }
+
+    entry
+        .source_head_ref_name
+        .as_deref()
+        .map(normalize_head_ref_name)
+        .filter(|branch| !branch.is_empty())
+        .or_else(|| legacy_local_review_branch_from_entry(entry))
+        .map(|branch| branch == current_branch)
+        .unwrap_or(false)
+}
+
+fn non_empty_source_head_ref_name(detail: &PullRequestDetail) -> Option<String> {
+    let branch = normalize_head_ref_name(&detail.head_ref_name);
+    (!branch.is_empty()).then_some(branch)
+}
+
+fn normalize_head_ref_name(value: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches("refs/heads/")
+        .trim_start_matches("heads/")
+        .to_string()
+}
+
+fn legacy_local_review_branch_from_entry(entry: &ReviewMemoryEntry) -> Option<String> {
+    let branch = entry.evidence.iter().find_map(|evidence| match evidence {
+        ReviewMemoryEvidence::PullRequest { number, title, .. } if *number == 0 => {
+            legacy_local_review_branch_from_title(title)
+        }
+        _ => None,
+    })?;
+    let branch = normalize_head_ref_name(&branch);
+    (!branch.is_empty()).then_some(branch)
+}
+
+fn legacy_local_review_branch_from_title(title: &str) -> Option<String> {
+    let title = title.trim();
+    let branch = title
+        .strip_prefix("Local review blocked: ")
+        .or_else(|| title.strip_prefix("Local Review blocked: "))
+        .or_else(|| title.strip_prefix("Local changes blocked: "))
+        .or_else(|| title.strip_prefix("Local Changes blocked: "))
+        .or_else(|| title.strip_prefix("Local review: "))
+        .or_else(|| title.strip_prefix("Local Review: "))
+        .or_else(|| title.strip_prefix("Local changes: "))
+        .or_else(|| title.strip_prefix("Local Changes: "))?;
+    let branch = branch
+        .strip_suffix(" has no local changes")
+        .unwrap_or(branch)
+        .trim();
+    (!branch.is_empty()).then_some(branch.to_string())
+}
+
 fn llm_extraction_cache_key(detail: &PullRequestDetail, provider: ReviewAiProvider) -> String {
     format!(
         "{}:{}:{}:{}:{}",
@@ -664,6 +731,7 @@ fn upsert_entries(document: &mut ReviewMemoryDocument, entries: Vec<ReviewMemory
             existing.confidence = entry.confidence;
             existing.status = entry.status;
             existing.updated_at = entry.updated_at;
+            existing.source_head_ref_name = entry.source_head_ref_name;
             existing.last_seen_pr = entry.last_seen_pr;
             existing.valid_from_oid = entry.valid_from_oid;
             existing.valid_until_oid = entry.valid_until_oid;
@@ -991,6 +1059,7 @@ fn entry_from_llm_candidate(
         status: ReviewMemoryStatus::Candidate,
         created_at: detail.updated_at.clone(),
         updated_at: detail.updated_at.clone(),
+        source_head_ref_name: non_empty_source_head_ref_name(detail),
         first_seen_pr: Some(detail.number),
         last_seen_pr: Some(detail.number),
         valid_from_oid: detail.head_ref_oid.clone(),
@@ -1117,6 +1186,7 @@ fn entry_from_review_thread(
         status,
         created_at,
         updated_at,
+        source_head_ref_name: non_empty_source_head_ref_name(detail),
         first_seen_pr: Some(detail.number),
         last_seen_pr: Some(detail.number),
         valid_from_oid: detail.head_ref_oid.clone(),
@@ -1866,6 +1936,7 @@ mod tests {
         let mut entry = extract_review_memory_entries(&detail).pop().expect("entry");
         entry.first_seen_pr = Some(122);
         entry.last_seen_pr = Some(122);
+        entry.source_head_ref_name = Some("prior-prompt-work".to_string());
         let document = ReviewMemoryDocument {
             version: REVIEW_MEMORY_DOCUMENT_VERSION.to_string(),
             repository: detail.repository.clone(),
@@ -1891,7 +1962,70 @@ mod tests {
         let context = review_memory_prompt_context(&document, &detail, &[], 3);
 
         assert!(context.signals.is_empty());
-        assert!(context.limitations[0].contains("current-pull-request memory is excluded"));
+        assert!(context.limitations[0]
+            .contains("current-pull-request and same-branch memory is excluded"));
+    }
+
+    #[test]
+    fn excludes_local_review_memory_from_same_branch_pull_request() {
+        let detail = detail_with_thread(true);
+        let mut local_detail = detail.clone();
+        local_detail.id = "local:rikuws/remiss:prompt-memory:base:head".to_string();
+        local_detail.number = 0;
+        local_detail.title = "Local review: prompt-memory".to_string();
+        let document = ReviewMemoryDocument {
+            version: REVIEW_MEMORY_DOCUMENT_VERSION.to_string(),
+            repository: detail.repository.clone(),
+            entries: extract_review_memory_entries(&local_detail),
+        };
+
+        let context = review_memory_prompt_context(&document, &detail, &[], 3);
+
+        assert!(context.signals.is_empty());
+        assert!(context.limitations[0]
+            .contains("current-pull-request and same-branch memory is excluded"));
+    }
+
+    #[test]
+    fn keeps_local_review_memory_from_other_branch() {
+        let detail = detail_with_thread(true);
+        let mut local_detail = detail.clone();
+        local_detail.id = "local:rikuws/remiss:other-branch:base:head".to_string();
+        local_detail.number = 0;
+        local_detail.title = "Local review: other-branch".to_string();
+        local_detail.head_ref_name = "other-branch".to_string();
+        let document = ReviewMemoryDocument {
+            version: REVIEW_MEMORY_DOCUMENT_VERSION.to_string(),
+            repository: detail.repository.clone(),
+            entries: extract_review_memory_entries(&local_detail),
+        };
+
+        let context = review_memory_prompt_context(&document, &detail, &[], 3);
+
+        assert_eq!(context.signals.len(), 1);
+        assert_eq!(context.signals[0].status, ReviewMemoryStatus::Resolved);
+    }
+
+    #[test]
+    fn excludes_legacy_local_review_memory_from_same_branch_title() {
+        let detail = detail_with_thread(true);
+        let mut local_detail = detail.clone();
+        local_detail.id = "local:rikuws/remiss:prompt-memory:base:head".to_string();
+        local_detail.number = 0;
+        local_detail.title = "Local review: prompt-memory".to_string();
+        let mut entry = extract_review_memory_entries(&local_detail)
+            .pop()
+            .expect("entry");
+        entry.source_head_ref_name = None;
+        let document = ReviewMemoryDocument {
+            version: REVIEW_MEMORY_DOCUMENT_VERSION.to_string(),
+            repository: detail.repository.clone(),
+            entries: vec![entry],
+        };
+
+        let context = review_memory_prompt_context(&document, &detail, &[], 3);
+
+        assert!(context.signals.is_empty());
     }
 
     #[test]
