@@ -12,6 +12,7 @@ actions!(
         SyncWorkspace,
         AddLocalRepository,
         RefreshLocalRepositories,
+        ToggleFileChooser,
         ShowPullRequestBriefing,
         OpenReviewFiles,
         SwitchToCode,
@@ -49,6 +50,7 @@ pub fn install(cx: &mut App) {
 fn bind_menu_key_equivalents(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("secondary-k", ToggleCommandPalette, None),
+        KeyBinding::new("secondary-p", ToggleFileChooser, None),
         KeyBinding::new("secondary-,", ShowSettings, None),
         KeyBinding::new("secondary-shift-u", CheckForUpdates, None),
         KeyBinding::new("secondary-r", SyncWorkspace, None),
@@ -107,6 +109,7 @@ fn review_menu() -> Menu {
         items: vec![
             MenuItem::action("Show PR Briefing", ShowPullRequestBriefing),
             MenuItem::action("Open Review Files", OpenReviewFiles),
+            MenuItem::action("Open Repository File...", ToggleFileChooser),
             MenuItem::separator(),
             MenuItem::action("Switch to Code", SwitchToCode),
             MenuItem::action("Switch to Diff", SwitchToDiff),

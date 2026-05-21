@@ -243,6 +243,12 @@ pub fn open_palette(state: &Entity<AppState>, cx: &mut App) {
         reset_palette_scroll(s);
         s.palette_code_theme_expanded = false;
         clear_code_theme_preview(s);
+        s.file_chooser_open = false;
+        s.file_chooser_query.clear();
+        s.file_chooser_selected_index = 0;
+        s.waypoint_spotlight_open = false;
+        s.waypoint_spotlight_query.clear();
+        s.waypoint_spotlight_selected_index = 0;
         cx.notify();
     });
 }
@@ -762,7 +768,7 @@ fn push_lowercase(output: &mut String, text: &str) {
     }
 }
 
-fn fuzzy_query_chars(query: &str) -> Vec<char> {
+pub(super) fn fuzzy_query_chars(query: &str) -> Vec<char> {
     query
         .chars()
         .filter(|ch| !ch.is_whitespace())
@@ -790,7 +796,7 @@ fn ranked_command_items(items: Vec<CommandItem>, query_chars: &[char]) -> Vec<Co
     ranked.into_iter().map(|(_, _, item)| item).collect()
 }
 
-fn fuzzy_match_score(search_text: &str, query_chars: &[char]) -> Option<i64> {
+pub(super) fn fuzzy_match_score(search_text: &str, query_chars: &[char]) -> Option<i64> {
     if query_chars.is_empty() {
         return Some(0);
     }

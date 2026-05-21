@@ -1978,6 +1978,7 @@ fn markdown_field_text(state: &AppState, field: AppTextFieldKind) -> &str {
         AppTextFieldKind::InlineCommentDraft => state.inline_comment_draft.as_str(),
         AppTextFieldKind::WaymarkDraft => state.waymark_draft.as_str(),
         AppTextFieldKind::PaletteQuery => state.palette_query.as_str(),
+        AppTextFieldKind::FileChooserQuery => state.file_chooser_query.as_str(),
         AppTextFieldKind::WaypointSpotlightQuery => state.waypoint_spotlight_query.as_str(),
     }
 }
@@ -1988,6 +1989,7 @@ fn markdown_field_text_mut(state: &mut AppState, field: AppTextFieldKind) -> &mu
         AppTextFieldKind::InlineCommentDraft => &mut state.inline_comment_draft,
         AppTextFieldKind::WaymarkDraft => &mut state.waymark_draft,
         AppTextFieldKind::PaletteQuery => &mut state.palette_query,
+        AppTextFieldKind::FileChooserQuery => &mut state.file_chooser_query,
         AppTextFieldKind::WaypointSpotlightQuery => &mut state.waypoint_spotlight_query,
     }
 }

@@ -1,4 +1,5 @@
 pub(crate) mod diff_view;
+mod file_chooser;
 mod file_tree;
 mod motion;
 mod palette;
@@ -15,6 +16,10 @@ pub use diff_view::{
     execute_waypoint_spotlight_selection, move_waypoint_spotlight_selection,
     toggle_waypoint_spotlight, trigger_add_waypoint_shortcut, trigger_submit_inline_comment,
     trigger_submit_review_from_review_mode,
+};
+pub use file_chooser::{
+    close_file_chooser, execute_file_chooser_selection, move_file_chooser_selection,
+    toggle_file_chooser,
 };
 pub use palette::{
     close_palette, execute_palette_selection, move_palette_selection, toggle_palette,

@@ -109,14 +109,15 @@ use temp_source_window::{
     open_temp_source_window_for_selected_diff_line,
 };
 use views::{
-    blur_review_editor, close_palette, close_review_finish_modal, close_review_line_action,
-    close_waypoint_spotlight, cycle_diff_color_theme_preference,
-    decrease_code_font_size_preference, execute_palette_selection,
+    blur_review_editor, close_file_chooser, close_palette, close_review_finish_modal,
+    close_review_line_action, close_waypoint_spotlight, cycle_diff_color_theme_preference,
+    decrease_code_font_size_preference, execute_file_chooser_selection, execute_palette_selection,
     execute_waypoint_spotlight_selection, increase_code_font_size_preference,
-    move_palette_selection, move_waypoint_spotlight_selection, reset_code_font_size_preference,
-    toggle_palette, toggle_waypoint_spotlight, trigger_add_waypoint_shortcut,
-    trigger_software_update_check, trigger_submit_inline_comment, trigger_submit_review,
-    trigger_submit_review_from_review_mode, RootView,
+    move_file_chooser_selection, move_palette_selection, move_waypoint_spotlight_selection,
+    reset_code_font_size_preference, toggle_file_chooser, toggle_palette,
+    toggle_waypoint_spotlight, trigger_add_waypoint_shortcut, trigger_software_update_check,
+    trigger_submit_inline_comment, trigger_submit_review, trigger_submit_review_from_review_mode,
+    RootView,
 };
 
 fn main() {
@@ -252,6 +253,11 @@ fn start_app(
             return;
         }
 
+        if is_secondary_plain && keystroke.key == "p" {
+            toggle_file_chooser(&app_state_for_keys, window, cx);
+            return;
+        }
+
         let palette_open = app_state_for_keys.read(cx).palette_open;
         if palette_open {
             match keystroke.key.as_str() {
@@ -259,6 +265,18 @@ fn start_app(
                 "up" => move_palette_selection(&app_state_for_keys, -1, cx),
                 "down" => move_palette_selection(&app_state_for_keys, 1, cx),
                 "enter" => execute_palette_selection(&app_state_for_keys, window, cx),
+                _ => {}
+            }
+            return;
+        }
+
+        let file_chooser_open = app_state_for_keys.read(cx).file_chooser_open;
+        if file_chooser_open {
+            match keystroke.key.as_str() {
+                "escape" => close_file_chooser(&app_state_for_keys, cx),
+                "up" => move_file_chooser_selection(&app_state_for_keys, -1, cx),
+                "down" => move_file_chooser_selection(&app_state_for_keys, 1, cx),
+                "enter" => execute_file_chooser_selection(&app_state_for_keys, window, cx),
                 _ => {}
             }
             return;

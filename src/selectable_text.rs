@@ -10,8 +10,8 @@ use std::{
 use gpui::{
     fill, point, px, size, AnyTooltip, AnyView, App, Bounds, ClipboardItem, DispatchPhase, Element,
     ElementId, FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
-    IntoElement, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PaintQuad, Pixels, SharedString, StyledText, Task, TextLayout, TextRun, Window,
+    IntoElement, KeyDownEvent, LayoutId, ListOffset, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PaintQuad, Pixels, SharedString, StyledText, Task, TextLayout, TextRun, Window,
     WrappedLineLayout,
 };
 
@@ -31,6 +31,7 @@ const TEXT_TOOLTIP_SHOW_DELAY: Duration = Duration::from_millis(500);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppTextFieldKind {
     PaletteQuery,
+    FileChooserQuery,
     ReviewBody,
     WaymarkDraft,
     InlineCommentDraft,
@@ -846,6 +847,7 @@ impl AppTextInput {
             let app_state = self.state.read(cx);
             match self.field {
                 AppTextFieldKind::PaletteQuery => app_state.palette_query.clone(),
+                AppTextFieldKind::FileChooserQuery => app_state.file_chooser_query.clone(),
                 AppTextFieldKind::ReviewBody => app_state.review_body.clone(),
                 AppTextFieldKind::WaymarkDraft => app_state.waymark_draft.clone(),
                 AppTextFieldKind::InlineCommentDraft => app_state.inline_comment_draft.clone(),
@@ -1308,6 +1310,7 @@ fn move_input_selection(
 fn input_text_for_field<'a>(state: &'a AppState, field: AppTextFieldKind) -> &'a str {
     match field {
         AppTextFieldKind::PaletteQuery => state.palette_query.as_str(),
+        AppTextFieldKind::FileChooserQuery => state.file_chooser_query.as_str(),
         AppTextFieldKind::ReviewBody => state.review_body.as_str(),
         AppTextFieldKind::WaymarkDraft => state.waymark_draft.as_str(),
         AppTextFieldKind::InlineCommentDraft => state.inline_comment_draft.as_str(),
@@ -1327,6 +1330,14 @@ fn set_input_text_for_field(state: &mut AppState, field: AppTextFieldKind, value
             state
                 .palette_scroll_handle
                 .set_offset(point(px(0.0), px(0.0)));
+        }
+        AppTextFieldKind::FileChooserQuery => {
+            state.file_chooser_query = value;
+            state.file_chooser_selected_index = 0;
+            state.file_chooser_list_state.scroll_to(ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.0),
+            });
         }
         AppTextFieldKind::ReviewBody => {
             state.review_body = value;
@@ -1426,6 +1437,7 @@ fn apply_replacement(
 fn normalize_paste(field: AppTextFieldKind, text: &str) -> String {
     match field {
         AppTextFieldKind::PaletteQuery => text.replace('\n', " "),
+        AppTextFieldKind::FileChooserQuery => text.replace('\n', " "),
         AppTextFieldKind::ReviewBody => text.to_string(),
         AppTextFieldKind::WaymarkDraft => text.replace('\n', " "),
         AppTextFieldKind::InlineCommentDraft => text.to_string(),

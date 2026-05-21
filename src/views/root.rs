@@ -12,7 +12,8 @@ use crate::app_menu::{
     IncreaseCodeFontSize, JumpToNextReviewComment, OpenReviewFiles, OpenSelectedLineInSource,
     RefreshLocalRepositories, ResetCodeFontSize, ShowPullRequestBriefing, ShowSettings,
     SubmitReview, SwitchToCode, SwitchToDiff, SwitchToGuidedReview, SwitchToSource, SwitchToStack,
-    SwitchToStructuralDiff, SyncWorkspace, ToggleCommandPalette, ToggleWaypointSpotlight,
+    SwitchToStructuralDiff, SyncWorkspace, ToggleCommandPalette, ToggleFileChooser,
+    ToggleWaypointSpotlight,
 };
 use crate::branding::APP_NAME;
 use crate::deep_link::{self, DeepLinkRequest};
@@ -86,6 +87,7 @@ struct WorkspaceRouteTransition {
 struct AppMenuAvailability {
     has_active_detail: bool,
     has_active_remote_detail: bool,
+    has_review_mode: bool,
     has_local_repositories: bool,
     has_next_review_comment: bool,
     has_selected_diff_line: bool,
@@ -796,6 +798,8 @@ impl Render for RootView {
                     has_active_detail: state.active_detail().is_some(),
                     has_active_remote_detail: state.active_detail().is_some()
                         && !state.active_is_local_review(),
+                    has_review_mode: state.active_detail().is_some()
+                        && state.active_surface == PullRequestSurface::Files,
                     has_local_repositories: !state.local_review_repositories.is_empty(),
                     has_next_review_comment: state.next_review_comment_location().is_some(),
                     has_selected_diff_line: state.selected_diff_line_target().is_some(),
@@ -843,6 +847,14 @@ fn attach_app_menu_action_handlers(
     let element = element.on_action(move |_: &ToggleCommandPalette, _, cx| {
         toggle_palette(&state_for_palette, cx);
         cx.stop_propagation();
+    });
+
+    let state_for_file_chooser = state.clone();
+    let element = element.when(availability.has_review_mode, move |element| {
+        element.on_action(move |_: &ToggleFileChooser, window, cx| {
+            super::file_chooser::toggle_file_chooser(&state_for_file_chooser, window, cx);
+            cx.stop_propagation();
+        })
     });
 
     let state_for_settings = state.clone();

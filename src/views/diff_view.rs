@@ -74,6 +74,7 @@ use crate::temp_source_window::{
 use crate::theme::*;
 use crate::{github, notifications, review_intelligence};
 
+use super::file_chooser::render_file_chooser;
 use super::file_tree::{
     render_file_tree_directory_row, render_file_tree_file_row, render_file_tree_header,
     render_file_tree_state_message, render_structural_warmup_status, ReviewFileRowOpenHandler,
@@ -471,6 +472,9 @@ pub fn open_waypoint_spotlight(state: &Entity<AppState>, cx: &mut App) {
         state.waypoint_spotlight_open = true;
         state.waypoint_spotlight_query.clear();
         state.waypoint_spotlight_selected_index = 0;
+        state.file_chooser_open = false;
+        state.file_chooser_query.clear();
+        state.file_chooser_selected_index = 0;
         state.active_review_line_action = None;
         state.active_review_line_action_position = None;
         state.review_line_action_mode = ReviewLineActionMode::Menu;
@@ -893,6 +897,7 @@ pub fn render_files_view(
     let files = &detail.files;
     let selected_anchor = s.selected_diff_anchor.clone();
     let waypoint_spotlight_open = s.waypoint_spotlight_open;
+    let file_chooser_open = s.file_chooser_open;
     let line_action_target = s.active_review_line_action.clone();
     let line_action_position = s.active_review_line_action_position;
     let line_action_mode = s.review_line_action_mode.clone();
@@ -989,6 +994,9 @@ pub fn render_files_view(
         )
         .when(waypoint_spotlight_open, |el| {
             el.child(render_waypoint_spotlight(state, cx))
+        })
+        .when(file_chooser_open, |el| {
+            el.child(render_file_chooser(state, cx))
         })
         .when(review_finish_modal_open && !is_local_review, |el| {
             el.child(render_finish_review_modal(state, detail, cx))
