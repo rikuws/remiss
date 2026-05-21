@@ -1,5 +1,6 @@
 use gpui::prelude::*;
 use gpui::*;
+use std::{fs, path::PathBuf, rc::Rc};
 
 use crate::code_display::{
     build_prepared_file_lsp_context,
@@ -14,7 +15,20 @@ use crate::state::{AppState, ReviewLineActionTarget, TempSourceSide, TempSourceT
 use crate::theme::*;
 use crate::views::diff_view::load_temp_source_file_content_flow;
 
-actions!(temp_source_window, [CloseTempSourceWindow]);
+actions!(
+    temp_source_window,
+    [
+        CloseTempSourceWindow,
+        MoveTempSourceLineUp,
+        MoveTempSourceLineDown,
+        MoveTempSourceHalfPageUp,
+        MoveTempSourceHalfPageDown,
+        MoveTempSourcePageUp,
+        MoveTempSourcePageDown,
+        MoveTempSourceStart,
+        MoveTempSourceEnd
+    ]
+);
 
 const TEMP_SOURCE_WINDOW_WIDTH: f32 = 920.0;
 const TEMP_SOURCE_WINDOW_HEIGHT: f32 = 720.0;
@@ -71,6 +85,135 @@ impl TempSourceWindow {
             last_scrolled_focus_key: None,
         }
     }
+
+    fn move_line_up(
+        &mut self,
+        _: &MoveTempSourceLineUp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_focus_line(-1, window, cx);
+    }
+
+    fn move_line_down(
+        &mut self,
+        _: &MoveTempSourceLineDown,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_focus_line(1, window, cx);
+    }
+
+    fn move_focus_line(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(current_line) = self.current_focus_line(cx) else {
+            cx.stop_propagation();
+            return;
+        };
+
+        let line_count = self.loaded_line_count(cx).unwrap_or(0);
+        let next_line = temp_source_line_after_delta(current_line, delta, line_count);
+        self.set_focus_line(next_line, window, cx);
+    }
+
+    fn move_half_page_up(
+        &mut self,
+        _: &MoveTempSourceHalfPageUp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_focus_line(-(temp_source_half_page_rows(window) as isize), window, cx);
+    }
+
+    fn move_half_page_down(
+        &mut self,
+        _: &MoveTempSourceHalfPageDown,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_focus_line(temp_source_half_page_rows(window) as isize, window, cx);
+    }
+
+    fn move_page_up(
+        &mut self,
+        _: &MoveTempSourcePageUp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_focus_line(-(temp_source_page_rows(window) as isize), window, cx);
+    }
+
+    fn move_page_down(
+        &mut self,
+        _: &MoveTempSourcePageDown,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_focus_line(temp_source_page_rows(window) as isize, window, cx);
+    }
+
+    fn move_to_start(
+        &mut self,
+        _: &MoveTempSourceStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_focus_line(1, window, cx);
+    }
+
+    fn move_to_end(&mut self, _: &MoveTempSourceEnd, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(line_count) = self.loaded_line_count(cx) else {
+            cx.stop_propagation();
+            return;
+        };
+
+        self.set_focus_line(line_count, window, cx);
+    }
+
+    fn current_focus_line(&self, cx: &App) -> Option<usize> {
+        self.state
+            .read(cx)
+            .temp_source_window
+            .target
+            .as_ref()
+            .map(|target| target.line)
+    }
+
+    fn loaded_line_count(&self, cx: &App) -> Option<usize> {
+        self.state
+            .read(cx)
+            .temp_source_window
+            .prepared
+            .as_ref()
+            .map(|prepared| prepared.lines.len())
+    }
+
+    fn set_focus_line(&mut self, line: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let movement = self.state.update(cx, |state, cx| {
+            let line_count = state
+                .temp_source_window
+                .prepared
+                .as_ref()
+                .map(|prepared| prepared.lines.len())?;
+            let target = state.temp_source_window.target.as_mut()?;
+            let next_line = temp_source_line_after_delta(line, 0, line_count);
+
+            if next_line == target.line {
+                return None;
+            }
+
+            target.line = next_line;
+            cx.notify();
+            Some((target.focus_key(), next_line.saturating_sub(1)))
+        });
+
+        if let Some((focus_key, item_ix)) = movement {
+            self.last_scrolled_focus_key = Some(focus_key);
+            self.list_state.scroll_to_reveal_item(item_ix);
+            window.refresh();
+        }
+
+        cx.stop_propagation();
+    }
 }
 
 impl Render for TempSourceWindow {
@@ -108,6 +251,14 @@ impl Render for TempSourceWindow {
                 close_temp_source_window(&state_for_close, window, cx);
                 cx.stop_propagation();
             })
+            .on_action(cx.listener(Self::move_line_up))
+            .on_action(cx.listener(Self::move_line_down))
+            .on_action(cx.listener(Self::move_half_page_up))
+            .on_action(cx.listener(Self::move_half_page_down))
+            .on_action(cx.listener(Self::move_page_up))
+            .on_action(cx.listener(Self::move_page_down))
+            .on_action(cx.listener(Self::move_to_start))
+            .on_action(cx.listener(Self::move_to_end))
             .size_full()
             .min_w(px(560.0))
             .min_h(px(360.0))
@@ -306,11 +457,85 @@ fn paint_corner_mask_path(window: &mut Window, builder: PathBuilder, color: Rgba
 }
 
 pub fn install_temp_source_window_key_bindings(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new(
-        "escape",
-        CloseTempSourceWindow,
-        Some(TEMP_SOURCE_WINDOW_KEY_CONTEXT),
-    )]);
+    let mut bindings = vec![
+        KeyBinding::new(
+            "escape",
+            CloseTempSourceWindow,
+            Some(TEMP_SOURCE_WINDOW_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "up",
+            MoveTempSourceLineUp,
+            Some(TEMP_SOURCE_WINDOW_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "k",
+            MoveTempSourceLineUp,
+            Some(TEMP_SOURCE_WINDOW_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "down",
+            MoveTempSourceLineDown,
+            Some(TEMP_SOURCE_WINDOW_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "j",
+            MoveTempSourceLineDown,
+            Some(TEMP_SOURCE_WINDOW_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "ctrl-u",
+            MoveTempSourceHalfPageUp,
+            Some(TEMP_SOURCE_WINDOW_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "ctrl-d",
+            MoveTempSourceHalfPageDown,
+            Some(TEMP_SOURCE_WINDOW_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "pageup",
+            MoveTempSourcePageUp,
+            Some(TEMP_SOURCE_WINDOW_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "ctrl-b",
+            MoveTempSourcePageUp,
+            Some(TEMP_SOURCE_WINDOW_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "pagedown",
+            MoveTempSourcePageDown,
+            Some(TEMP_SOURCE_WINDOW_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "ctrl-f",
+            MoveTempSourcePageDown,
+            Some(TEMP_SOURCE_WINDOW_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "home",
+            MoveTempSourceStart,
+            Some(TEMP_SOURCE_WINDOW_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "g g",
+            MoveTempSourceStart,
+            Some(TEMP_SOURCE_WINDOW_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "end",
+            MoveTempSourceEnd,
+            Some(TEMP_SOURCE_WINDOW_KEY_CONTEXT),
+        ),
+        KeyBinding::new(
+            "shift-g",
+            MoveTempSourceEnd,
+            Some(TEMP_SOURCE_WINDOW_KEY_CONTEXT),
+        ),
+    ];
+    bindings.extend(load_temp_source_vim_config_key_bindings());
+    cx.bind_keys(bindings);
 }
 
 pub fn open_temp_source_window_for_selected_diff_line(
@@ -554,10 +779,386 @@ fn centered_source_visible_rows(window: &Window) -> usize {
         .max(1.0) as usize
 }
 
+fn temp_source_half_page_rows(window: &Window) -> usize {
+    (centered_source_visible_rows(window) / 2).max(1)
+}
+
+fn temp_source_page_rows(window: &Window) -> usize {
+    centered_source_visible_rows(window)
+        .saturating_sub(2)
+        .max(1)
+}
+
 fn centered_source_item_ix(target_line: usize, visible_rows: usize) -> usize {
     target_line
         .saturating_sub(1)
         .saturating_sub(visible_rows / 2)
+}
+
+fn temp_source_line_after_delta(current_line: usize, delta: isize, line_count: usize) -> usize {
+    if line_count == 0 {
+        return 0;
+    }
+
+    let next = if delta < 0 {
+        current_line.saturating_sub((-delta) as usize)
+    } else {
+        current_line.saturating_add(delta as usize)
+    };
+
+    next.clamp(1, line_count)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TempSourceMovement {
+    LineUp,
+    LineDown,
+    HalfPageUp,
+    HalfPageDown,
+    PageUp,
+    PageDown,
+    Start,
+    End,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TempSourceVimRemap {
+    keystrokes: String,
+    movement: TempSourceMovement,
+}
+
+fn load_temp_source_vim_config_key_bindings() -> Vec<KeyBinding> {
+    let mut leader = "\\".to_string();
+    let mut remaps = Vec::new();
+
+    for path in temp_source_vim_config_paths() {
+        let Ok(contents) = fs::read_to_string(path) else {
+            continue;
+        };
+        let parsed = temp_source_vim_remaps_from_config(&contents, leader.as_str());
+        leader = parsed.leader;
+        remaps.extend(parsed.remaps);
+    }
+
+    remaps
+        .into_iter()
+        .filter_map(|remap| temp_source_key_binding_for_movement(&remap.keystrokes, remap.movement))
+        .collect()
+}
+
+fn temp_source_vim_config_paths() -> Vec<PathBuf> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+
+    vec![
+        home.join(".vimrc"),
+        home.join(".config").join("nvim").join("init.vim"),
+        home.join(".config").join("nvim").join("init.lua"),
+    ]
+}
+
+fn temp_source_key_binding_for_movement(
+    keystrokes: &str,
+    movement: TempSourceMovement,
+) -> Option<KeyBinding> {
+    let context: Rc<KeyBindingContextPredicate> =
+        KeyBindingContextPredicate::parse(TEMP_SOURCE_WINDOW_KEY_CONTEXT)
+            .ok()?
+            .into();
+    let action: Box<dyn Action> = match movement {
+        TempSourceMovement::LineUp => Box::new(MoveTempSourceLineUp),
+        TempSourceMovement::LineDown => Box::new(MoveTempSourceLineDown),
+        TempSourceMovement::HalfPageUp => Box::new(MoveTempSourceHalfPageUp),
+        TempSourceMovement::HalfPageDown => Box::new(MoveTempSourceHalfPageDown),
+        TempSourceMovement::PageUp => Box::new(MoveTempSourcePageUp),
+        TempSourceMovement::PageDown => Box::new(MoveTempSourcePageDown),
+        TempSourceMovement::Start => Box::new(MoveTempSourceStart),
+        TempSourceMovement::End => Box::new(MoveTempSourceEnd),
+    };
+
+    KeyBinding::load(
+        keystrokes,
+        action,
+        Some(context),
+        false,
+        None,
+        &DummyKeyboardMapper,
+    )
+    .ok()
+}
+
+#[derive(Clone, Debug)]
+struct ParsedTempSourceVimConfig {
+    leader: String,
+    remaps: Vec<TempSourceVimRemap>,
+}
+
+fn temp_source_vim_remaps_from_config(
+    contents: &str,
+    initial_leader: &str,
+) -> ParsedTempSourceVimConfig {
+    let mut leader = initial_leader.to_string();
+    let mut remaps = Vec::new();
+
+    for line in contents.lines() {
+        if let Some(next_leader) = temp_source_vimscript_leader_assignment(line)
+            .or_else(|| temp_source_lua_leader_assignment(line))
+        {
+            leader = next_leader;
+            continue;
+        }
+
+        if let Some(remap) = temp_source_vimscript_remap(line, leader.as_str())
+            .or_else(|| temp_source_lua_remap(line, leader.as_str()))
+        {
+            remaps.push(remap);
+        }
+    }
+
+    ParsedTempSourceVimConfig { leader, remaps }
+}
+
+fn temp_source_vimscript_leader_assignment(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('"') || !trimmed.starts_with("let ") {
+        return None;
+    }
+
+    let (_, value) = trimmed.split_once('=')?;
+    let name = trimmed
+        .strip_prefix("let ")?
+        .split('=')
+        .next()?
+        .trim()
+        .trim_start_matches("g:");
+    if name != "mapleader" {
+        return None;
+    }
+
+    temp_source_first_quoted_string(value)
+}
+
+fn temp_source_lua_leader_assignment(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("--") || !trimmed.contains("mapleader") {
+        return None;
+    }
+
+    let (name, value) = trimmed.split_once('=')?;
+    if !name.contains("vim.g.mapleader") {
+        return None;
+    }
+
+    temp_source_first_quoted_string(value)
+}
+
+fn temp_source_vimscript_remap(line: &str, leader: &str) -> Option<TempSourceVimRemap> {
+    let trimmed = line.trim_start().trim_start_matches(':');
+    if trimmed.starts_with('"') {
+        return None;
+    }
+
+    let tokens = trimmed.split_whitespace().collect::<Vec<_>>();
+    let command = *tokens.first()?;
+    if !matches!(command, "nmap" | "nnoremap" | "noremap" | "map") {
+        return None;
+    }
+
+    let mut index = 1;
+    while tokens
+        .get(index)
+        .is_some_and(|token| temp_source_vim_map_option(token))
+    {
+        if tokens[index].eq_ignore_ascii_case("<expr>") {
+            return None;
+        }
+        index += 1;
+    }
+
+    let lhs = *tokens.get(index)?;
+    let rhs = *tokens.get(index + 1)?;
+    temp_source_vim_remap_from_parts(lhs, rhs, leader)
+}
+
+fn temp_source_lua_remap(line: &str, leader: &str) -> Option<TempSourceVimRemap> {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("--")
+        || !(trimmed.contains("keymap.set")
+            || trimmed.contains("nvim_set_keymap")
+            || trimmed.starts_with("keymap("))
+        || trimmed.contains("expr = true")
+        || trimmed.contains("expr=true")
+    {
+        return None;
+    }
+
+    let quoted = temp_source_quoted_strings(trimmed);
+    let mode = quoted.first()?;
+    if !mode.contains('n') {
+        return None;
+    }
+
+    temp_source_vim_remap_from_parts(quoted.get(1)?, quoted.get(2)?, leader)
+}
+
+fn temp_source_vim_remap_from_parts(
+    lhs: &str,
+    rhs: &str,
+    leader: &str,
+) -> Option<TempSourceVimRemap> {
+    let movement = temp_source_movement_from_vim_rhs(rhs)?;
+    let keystrokes = temp_source_vim_key_sequence_to_gpui(lhs, leader)?;
+
+    Some(TempSourceVimRemap {
+        keystrokes,
+        movement,
+    })
+}
+
+fn temp_source_movement_from_vim_rhs(rhs: &str) -> Option<TempSourceMovement> {
+    let normalized = temp_source_vim_key_sequence_to_gpui(rhs, "\\")?;
+    match normalized.as_str() {
+        "up" | "k" => Some(TempSourceMovement::LineUp),
+        "down" | "j" => Some(TempSourceMovement::LineDown),
+        "ctrl-u" => Some(TempSourceMovement::HalfPageUp),
+        "ctrl-d" => Some(TempSourceMovement::HalfPageDown),
+        "pageup" | "ctrl-b" => Some(TempSourceMovement::PageUp),
+        "pagedown" | "ctrl-f" => Some(TempSourceMovement::PageDown),
+        "home" | "g g" => Some(TempSourceMovement::Start),
+        "end" | "shift-g" => Some(TempSourceMovement::End),
+        _ => None,
+    }
+}
+
+fn temp_source_vim_key_sequence_to_gpui(sequence: &str, leader: &str) -> Option<String> {
+    let mut keys = Vec::new();
+    let characters = sequence.chars().collect::<Vec<_>>();
+    let mut index = 0;
+
+    while index < characters.len() {
+        let character = characters[index];
+        if character == '<' {
+            let end = characters[index + 1..]
+                .iter()
+                .position(|candidate| *candidate == '>')?
+                + index
+                + 1;
+            let token = characters[index + 1..end].iter().collect::<String>();
+            keys.extend(temp_source_vim_special_key_to_gpui(&token, leader)?);
+            index = end + 1;
+        } else {
+            keys.push(temp_source_vim_literal_key(&character.to_string()));
+            index += 1;
+        }
+    }
+
+    (!keys.is_empty()).then(|| keys.join(" "))
+}
+
+fn temp_source_vim_special_key_to_gpui(token: &str, leader: &str) -> Option<Vec<String>> {
+    let lower = token.to_ascii_lowercase();
+    if lower == "leader" {
+        return temp_source_vim_key_sequence_to_gpui(leader, "\\")
+            .map(|sequence| sequence.split_whitespace().map(str::to_string).collect());
+    }
+
+    if let Some(key) = temp_source_vim_named_key_to_gpui(lower.as_str()) {
+        return Some(vec![key]);
+    }
+
+    let mut modifiers = Vec::new();
+    let mut parts = token.split('-').collect::<Vec<_>>();
+    let key = parts.pop()?;
+    for modifier in parts {
+        match modifier.to_ascii_lowercase().as_str() {
+            "c" | "ctrl" | "control" => modifiers.push("ctrl"),
+            "a" | "m" | "alt" | "meta" => modifiers.push("alt"),
+            "s" | "shift" => modifiers.push("shift"),
+            "d" | "cmd" | "command" => modifiers.push("cmd"),
+            _ => return None,
+        }
+    }
+
+    let key = temp_source_vim_named_key_to_gpui(&key.to_ascii_lowercase())
+        .unwrap_or_else(|| temp_source_vim_literal_key(key));
+    modifiers.push(key.as_str());
+    Some(vec![modifiers.join("-")])
+}
+
+fn temp_source_vim_named_key_to_gpui(key: &str) -> Option<String> {
+    Some(
+        match key {
+            "space" => "space",
+            "cr" | "enter" | "return" => "enter",
+            "esc" | "escape" => "escape",
+            "tab" => "tab",
+            "bs" | "backspace" => "backspace",
+            "del" | "delete" => "delete",
+            "up" => "up",
+            "down" => "down",
+            "left" => "left",
+            "right" => "right",
+            "pageup" | "page-up" => "pageup",
+            "pagedown" | "page-down" => "pagedown",
+            "home" => "home",
+            "end" => "end",
+            _ => return None,
+        }
+        .to_string(),
+    )
+}
+
+fn temp_source_vim_literal_key(value: &str) -> String {
+    let mut chars = value.chars();
+    match (chars.next(), chars.next()) {
+        (Some(' '), None) => "space".to_string(),
+        (Some(character), None) if character.is_ascii_uppercase() => {
+            format!("shift-{}", character.to_ascii_lowercase())
+        }
+        _ => value.to_string(),
+    }
+}
+
+fn temp_source_vim_map_option(token: &str) -> bool {
+    matches!(
+        token.to_ascii_lowercase().as_str(),
+        "<silent>" | "<buffer>" | "<nowait>" | "<unique>" | "<script>" | "<special>" | "<expr>"
+    )
+}
+
+fn temp_source_first_quoted_string(value: &str) -> Option<String> {
+    temp_source_quoted_strings(value).into_iter().next()
+}
+
+fn temp_source_quoted_strings(value: &str) -> Vec<String> {
+    let mut strings = Vec::new();
+    let mut chars = value.char_indices().peekable();
+
+    while let Some((_, character)) = chars.next() {
+        if character != '"' && character != '\'' {
+            continue;
+        }
+
+        let quote = character;
+        let mut text = String::new();
+        let mut escaped = false;
+        for (_, next) in chars.by_ref() {
+            if escaped {
+                text.push(next);
+                escaped = false;
+            } else if next == '\\' {
+                escaped = true;
+            } else if next == quote {
+                break;
+            } else {
+                text.push(next);
+            }
+        }
+        strings.push(text);
+    }
+
+    strings
 }
 
 pub(crate) fn temp_source_target_for_diff_line_with_refs(
@@ -753,8 +1354,10 @@ fn head_reference(detail: &PullRequestDetail) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        centered_source_item_ix, temp_source_diff_lines_for_target,
+        centered_source_item_ix, temp_source_diff_lines_for_target, temp_source_line_after_delta,
         temp_source_target_for_current_diff_selection, temp_source_target_for_diff_line_with_refs,
+        temp_source_vim_key_sequence_to_gpui, temp_source_vim_remaps_from_config,
+        TempSourceMovement, TempSourceVimRemap,
     };
     use crate::diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk, ParsedDiffLine};
     use crate::github::{PullRequestDataCompleteness, PullRequestDetail};
@@ -986,6 +1589,95 @@ mod tests {
     fn centered_source_scroll_places_target_near_middle() {
         assert_eq!(centered_source_item_ix(1, 20), 0);
         assert_eq!(centered_source_item_ix(30, 20), 19);
+    }
+
+    #[test]
+    fn temp_source_line_movement_clamps_to_loaded_file_bounds() {
+        assert_eq!(temp_source_line_after_delta(1, -1, 20), 1);
+        assert_eq!(temp_source_line_after_delta(10, -1, 20), 9);
+        assert_eq!(temp_source_line_after_delta(10, 1, 20), 11);
+        assert_eq!(temp_source_line_after_delta(20, 1, 20), 20);
+        assert_eq!(temp_source_line_after_delta(1, 1, 0), 0);
+    }
+
+    #[test]
+    fn temp_source_vim_key_sequence_translates_common_notation() {
+        assert_eq!(
+            temp_source_vim_key_sequence_to_gpui("<C-d>", "\\").as_deref(),
+            Some("ctrl-d")
+        );
+        assert_eq!(
+            temp_source_vim_key_sequence_to_gpui("gg", "\\").as_deref(),
+            Some("g g")
+        );
+        assert_eq!(
+            temp_source_vim_key_sequence_to_gpui("G", "\\").as_deref(),
+            Some("shift-g")
+        );
+        assert_eq!(
+            temp_source_vim_key_sequence_to_gpui("<leader>u", " ").as_deref(),
+            Some("space u")
+        );
+    }
+
+    #[test]
+    fn temp_source_vim_config_imports_simple_normal_mode_movement_remaps() {
+        let parsed = temp_source_vim_remaps_from_config(
+            r#"
+let mapleader = ","
+nnoremap <silent> <leader>u <C-u>
+nnoremap K k
+vim.keymap.set("n", "<leader>d", "<C-d>")
+vim.api.nvim_set_keymap('n', 'J', '<PageDown>', {})
+nnoremap <leader>e G
+nnoremap <expr> Y k
+inoremap xx <C-d>
+"#,
+            "\\",
+        );
+
+        assert_eq!(parsed.leader, ",");
+        assert_eq!(
+            parsed.remaps,
+            vec![
+                TempSourceVimRemap {
+                    keystrokes: ", u".to_string(),
+                    movement: TempSourceMovement::HalfPageUp,
+                },
+                TempSourceVimRemap {
+                    keystrokes: "shift-k".to_string(),
+                    movement: TempSourceMovement::LineUp,
+                },
+                TempSourceVimRemap {
+                    keystrokes: ", d".to_string(),
+                    movement: TempSourceMovement::HalfPageDown,
+                },
+                TempSourceVimRemap {
+                    keystrokes: "shift-j".to_string(),
+                    movement: TempSourceMovement::PageDown,
+                },
+                TempSourceVimRemap {
+                    keystrokes: ", e".to_string(),
+                    movement: TempSourceMovement::End,
+                },
+            ]
+        );
+
+        let parsed = temp_source_vim_remaps_from_config(
+            r#"
+let mapleader = " "
+nnoremap <leader>u <C-u>
+"#,
+            "\\",
+        );
+        assert_eq!(parsed.leader, " ");
+        assert_eq!(
+            parsed.remaps,
+            vec![TempSourceVimRemap {
+                keystrokes: "space u".to_string(),
+                movement: TempSourceMovement::HalfPageUp,
+            }]
+        );
     }
 
     #[test]
