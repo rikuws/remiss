@@ -168,6 +168,14 @@ fn start_app(
         .map_err(|error| format!("Failed to initialize cache: {error}"))?;
     let initial_window_size = window_settings::load_window_size(&cache);
     let app_state = cx.new(move |_| AppState::new(cache, startup_wizard_options));
+    let lsp_session_manager_for_quit = app_state.read(cx).lsp_session_manager.clone();
+    cx.on_app_quit(move |_| {
+        let lsp_session_manager = lsp_session_manager_for_quit.clone();
+        async move {
+            lsp_session_manager.shutdown_all();
+        }
+    })
+    .detach();
     app_menu::install(cx);
     let app_state_for_updates = app_state.clone();
     cx.on_action(move |_: &app_menu::CheckForUpdates, cx| {

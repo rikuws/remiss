@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use serde_json::{json, Map, Value};
 use sha1::{Digest, Sha1};
@@ -21,9 +21,9 @@ use super::super::{
     dependencies::{build_atom_dependencies, dependency_depths, AtomDependency, DependencyKind},
     model::{
         normalize_stack_layer_title, stack_now_ms, ChangeAtom, ChangeAtomId, ChangeAtomSource,
-        ChangeRole, Confidence, LayerMetrics, LayerReviewStatus, RepoContext, ReviewStack,
-        ReviewStackLayer, StackDiscoveryError, StackKind, StackProviderMetadata, StackSource,
-        StackWarning, VirtualLayerRef, VirtualStackSizing, STACK_GENERATOR_VERSION,
+        ChangeRole, Confidence, LayerReviewStatus, RepoContext, ReviewStack, ReviewStackLayer,
+        StackDiscoveryError, StackKind, StackProviderMetadata, StackSource, StackWarning,
+        VirtualLayerRef, VirtualStackSizing, STACK_GENERATOR_VERSION,
     },
     validation::{
         atom_is_substantive, atom_noise_kind, requires_manual_review, validate_ai_stack_plan,
@@ -31,6 +31,7 @@ use super::super::{
     },
 };
 
+use super::shared::{dominant_role, metrics_for_atoms};
 use super::virtual_commits::{self, CommitContext, CommitSuitability, CommitSummary};
 
 const MAX_AI_STACK_ATOMS: usize = 180;
@@ -1516,39 +1517,6 @@ fn atom_refs_for_ids<'a>(
         .collect()
 }
 
-fn metrics_for_atoms(atoms: &[&ChangeAtom]) -> LayerMetrics {
-    let file_count = atoms
-        .iter()
-        .map(|atom| atom.path.as_str())
-        .collect::<BTreeSet<_>>()
-        .len();
-
-    LayerMetrics {
-        file_count,
-        atom_count: atoms.len(),
-        additions: atoms.iter().map(|atom| atom.additions).sum(),
-        deletions: atoms.iter().map(|atom| atom.deletions).sum(),
-        changed_lines: atoms
-            .iter()
-            .map(|atom| atom.additions + atom.deletions)
-            .sum(),
-        unresolved_thread_count: atoms.iter().map(|atom| atom.review_thread_ids.len()).sum(),
-        risk_score: atoms.iter().map(|atom| atom.risk_score).sum(),
-    }
-}
-
-fn dominant_role(atoms: &[&ChangeAtom]) -> ChangeRole {
-    let mut counts = BTreeMap::<ChangeRole, usize>::new();
-    for atom in atoms {
-        *counts.entry(atom.role).or_default() += atom.additions + atom.deletions + 1;
-    }
-    counts
-        .into_iter()
-        .max_by_key(|(_, count)| *count)
-        .map(|(role, _)| role)
-        .unwrap_or(ChangeRole::Unknown)
-}
-
 fn review_priority_label(priority: &AiReviewPriority) -> &'static str {
     match priority {
         AiReviewPriority::StartHere => "start_here",
@@ -1639,6 +1607,8 @@ fn virtual_layer_id(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use crate::{
         github::{PullRequestDataCompleteness, PullRequestFile},

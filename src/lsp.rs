@@ -8,11 +8,19 @@ use std::{
         atomic::{AtomicI64, Ordering},
         Arc, Mutex, OnceLock,
     },
+    thread,
+    time::Duration,
 };
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 use serde_json::{json, Value};
 
 use crate::managed_lsp::{self, ManagedServerKind};
+
+const LSP_SHUTDOWN_GRACE: Duration = Duration::from_millis(40);
+const LSP_DROP_SHUTDOWN_GRACE: Duration = Duration::from_millis(200);
 
 #[derive(Clone, Debug, Default)]
 pub struct LspServerCapabilities {
@@ -285,6 +293,23 @@ impl LspSessionManager {
         session.definition_targets(request, &capabilities)
     }
 
+    pub fn shutdown_all(&self) {
+        let sessions = self
+            .sessions
+            .lock()
+            .map(|mut sessions| {
+                sessions
+                    .drain()
+                    .map(|(_, session)| session)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        for session in sessions {
+            session.shutdown(LSP_SHUTDOWN_GRACE);
+        }
+    }
+
     fn session_for(
         &self,
         repo_root: &Path,
@@ -318,6 +343,7 @@ struct LspSession {
     repo_root: PathBuf,
     language_id: String,
     command: String,
+    child_process_id: u32,
     next_request_id: AtomicI64,
     io: Mutex<LspIo>,
     capabilities: Mutex<Option<LspServerCapabilities>>,
@@ -350,20 +376,22 @@ impl LspSession {
             "name": root_name,
         })];
 
-        let mut child = Command::new(&config.command)
+        let mut command = Command::new(&config.command);
+        command
             .args(&config.args)
             .current_dir(&repo_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| {
-                format!(
-                    "Failed to start {} in {}: {error}",
-                    config.command,
-                    repo_root.display()
-                )
-            })?;
+            .stderr(Stdio::null());
+        configure_lsp_child_process(&mut command);
+        let mut child = command.spawn().map_err(|error| {
+            format!(
+                "Failed to start {} in {}: {error}",
+                config.command,
+                repo_root.display()
+            )
+        })?;
+        let child_process_id = child.id();
 
         let stdin = child
             .stdin
@@ -378,6 +406,7 @@ impl LspSession {
             repo_root,
             language_id: config.language_id,
             command: config.command,
+            child_process_id,
             next_request_id: AtomicI64::new(1),
             io: Mutex::new(LspIo {
                 child,
@@ -388,6 +417,13 @@ impl LspSession {
             capabilities: Mutex::new(None),
             documents: Mutex::new(HashMap::new()),
         })
+    }
+
+    fn shutdown(&self, grace: Duration) {
+        match self.io.try_lock() {
+            Ok(mut io) => shutdown_lsp_io(&mut io, &self.next_request_id, grace),
+            Err(_) => terminate_lsp_process_tree_by_id(self.child_process_id, grace),
+        }
     }
 
     fn is_running(&self) -> Result<bool, String> {
@@ -669,6 +705,120 @@ impl LspSession {
         }
 
         Ok(())
+    }
+}
+
+impl Drop for LspSession {
+    fn drop(&mut self) {
+        self.shutdown(LSP_DROP_SHUTDOWN_GRACE);
+    }
+}
+
+#[cfg(unix)]
+fn configure_lsp_child_process(command: &mut Command) {
+    // SAFETY: `pre_exec` runs in the child process after fork and before exec.
+    // The closure only calls async-signal-safe `setpgid` and reports errno.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn configure_lsp_child_process(_command: &mut Command) {}
+
+fn shutdown_lsp_io(io: &mut LspIo, next_request_id: &AtomicI64, grace: Duration) {
+    if child_has_exited(&mut io.child) {
+        return;
+    }
+
+    let _ = send_lsp_shutdown_messages(io, next_request_id);
+    if wait_for_child_exit(&mut io.child, grace) {
+        return;
+    }
+
+    terminate_lsp_child_tree(&mut io.child, grace);
+}
+
+fn child_has_exited(child: &mut Child) -> bool {
+    child.try_wait().ok().flatten().is_some()
+}
+
+fn send_lsp_shutdown_messages(io: &mut LspIo, next_request_id: &AtomicI64) -> Result<(), String> {
+    let request_id = next_request_id.fetch_add(1, Ordering::Relaxed);
+    write_message_to(
+        &mut io.stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "shutdown",
+        }),
+    )?;
+    write_message_to(
+        &mut io.stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "exit",
+        }),
+    )
+}
+
+fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> bool {
+    let started_at = std::time::Instant::now();
+    loop {
+        if child.try_wait().ok().flatten().is_some() {
+            return true;
+        }
+        if started_at.elapsed() >= timeout {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[cfg(unix)]
+fn terminate_lsp_child_tree(child: &mut Child, grace: Duration) {
+    signal_lsp_process_group(child.id(), libc::SIGTERM);
+    if wait_for_child_exit(child, grace) {
+        return;
+    }
+    signal_lsp_process_group(child.id(), libc::SIGKILL);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(not(unix))]
+fn terminate_lsp_child_tree(child: &mut Child, _grace: Duration) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(unix)]
+fn terminate_lsp_process_tree_by_id(process_id: u32, grace: Duration) {
+    signal_lsp_process_group(process_id, libc::SIGTERM);
+    thread::sleep(grace);
+    signal_lsp_process_group(process_id, libc::SIGKILL);
+}
+
+#[cfg(not(unix))]
+fn terminate_lsp_process_tree_by_id(_process_id: u32, _grace: Duration) {}
+
+#[cfg(unix)]
+fn signal_lsp_process_group(process_id: u32, signal: libc::c_int) {
+    let process_group_id = process_id as libc::pid_t;
+    if process_group_id <= 0 {
+        return;
+    }
+
+    // SAFETY: LSP commands are launched into their own process group with pgid
+    // equal to child pid. A negative pid signals that whole process group.
+    unsafe {
+        let _ = libc::kill(-process_group_id, signal);
     }
 }
 
@@ -2319,5 +2469,43 @@ mod tests {
             resolve_server_command(&[candidate.to_str().expect("utf-8 path")]),
             Some(candidate.to_str().expect("utf-8 path").to_string())
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lsp_session_shutdown_terminates_child_process_group() {
+        let dir = unique_test_directory("shutdown-process-group");
+        let server = dir.join("test-lsp");
+        write_executable_script(
+            &server,
+            "#!/bin/sh\ntrap '' TERM\nwhile true; do sleep 1; done\n",
+        );
+        let config = ResolvedServerConfiguration {
+            language_id: "test".to_string(),
+            command: server.to_string_lossy().to_string(),
+            args: Vec::new(),
+        };
+        let session = LspSession::spawn(dir.clone(), config).expect("spawn test LSP");
+
+        assert_eq!(
+            process_group_id(session.child_process_id),
+            Some(session.child_process_id as libc::pid_t)
+        );
+
+        session.shutdown(std::time::Duration::from_millis(20));
+
+        assert!(!process_is_running(session.child_process_id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    fn process_group_id(process_id: u32) -> Option<libc::pid_t> {
+        let pgid = unsafe { libc::getpgid(process_id as libc::pid_t) };
+        (pgid >= 0).then_some(pgid)
+    }
+
+    #[cfg(unix)]
+    fn process_is_running(process_id: u32) -> bool {
+        unsafe { libc::kill(process_id as libc::pid_t, 0) == 0 }
     }
 }
