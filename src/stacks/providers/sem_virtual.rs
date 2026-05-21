@@ -15,13 +15,14 @@ use super::super::{
     dependencies::{build_atom_dependencies, DependencyKind},
     model::{
         normalize_stack_layer_title, stack_layer_title_quality_error, stack_now_ms, ChangeAtom,
-        ChangeAtomId, ChangeRole, Confidence, LayerMetrics, LayerReviewStatus, RepoContext,
-        ReviewStack, ReviewStackLayer, StackDiscoveryError, StackKind, StackProviderMetadata,
-        StackSource, StackWarning, VirtualLayerRef, VirtualStackSizing, STACK_GENERATOR_VERSION,
+        ChangeAtomId, ChangeRole, Confidence, LayerReviewStatus, RepoContext, ReviewStack,
+        ReviewStackLayer, StackDiscoveryError, StackKind, StackProviderMetadata, StackSource,
+        StackWarning, VirtualLayerRef, VirtualStackSizing, STACK_GENERATOR_VERSION,
     },
     validation::{atom_is_substantive, atom_noise_kind, requires_manual_review},
 };
 
+use super::shared::{dominant_role, metrics_for_atoms};
 use super::virtual_semantic;
 
 const SEM_VIRTUAL_PROVIDER_VERSION: &str = "sem-virtual-stack-v1";
@@ -748,38 +749,6 @@ fn atom_refs_for_ids<'a>(
         .iter()
         .filter_map(|atom_id| atoms_by_id.get(atom_id).copied())
         .collect()
-}
-
-fn metrics_for_atoms(atoms: &[&ChangeAtom]) -> LayerMetrics {
-    let file_count = atoms
-        .iter()
-        .map(|atom| atom.path.as_str())
-        .collect::<BTreeSet<_>>()
-        .len();
-    LayerMetrics {
-        file_count,
-        atom_count: atoms.len(),
-        additions: atoms.iter().map(|atom| atom.additions).sum(),
-        deletions: atoms.iter().map(|atom| atom.deletions).sum(),
-        changed_lines: atoms
-            .iter()
-            .map(|atom| atom.additions + atom.deletions)
-            .sum(),
-        unresolved_thread_count: atoms.iter().map(|atom| atom.review_thread_ids.len()).sum(),
-        risk_score: atoms.iter().map(|atom| atom.risk_score).sum(),
-    }
-}
-
-fn dominant_role(atoms: &[&ChangeAtom]) -> ChangeRole {
-    let mut counts = BTreeMap::<ChangeRole, usize>::new();
-    for atom in atoms {
-        *counts.entry(atom.role).or_default() += atom.additions + atom.deletions + 1;
-    }
-    counts
-        .into_iter()
-        .max_by_key(|(_, count)| *count)
-        .map(|(role, _)| role)
-        .unwrap_or(ChangeRole::Unknown)
 }
 
 fn dominant_role_for_ids(atom_ids: &[ChangeAtomId], atoms: &[ChangeAtom]) -> ChangeRole {
