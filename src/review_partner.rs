@@ -1426,7 +1426,7 @@ fn merge_focus_record(
         .unwrap_or(fallback_summary);
     let history_signals = merge_history_signals(
         review_memory_history_items_for_target(target, stack, review_memory),
-        normalize_items(response.history_signals),
+        normalize_history_items(response.history_signals),
     );
 
     ReviewPartnerFocusRecord {
@@ -2845,6 +2845,27 @@ fn normalize_items(values: Vec<ReviewPartnerItemResponse>) -> Vec<ReviewPartnerI
                 detail,
                 item.path,
                 item.line,
+            ))
+        })
+        .take(MAX_SECTION_ITEMS)
+        .collect()
+}
+
+fn normalize_history_items(values: Vec<ReviewPartnerItemResponse>) -> Vec<ReviewPartnerItem> {
+    values
+        .into_iter()
+        .filter_map(|item| {
+            let title = item.title.trim();
+            let detail = item.detail.trim();
+            if title.is_empty() && detail.is_empty() {
+                return None;
+            }
+            Some(ReviewPartnerItem::new_with_limits(
+                if title.is_empty() { detail } else { title },
+                detail,
+                item.path,
+                item.line,
+                MAX_HISTORY_ITEM_TEXT_CHARS,
             ))
         })
         .take(MAX_SECTION_ITEMS)

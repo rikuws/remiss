@@ -801,6 +801,7 @@ fn render_guided_review_partner_status(
     activity_phase: Option<f32>,
 ) -> impl IntoElement {
     div()
+        .flex_shrink_0()
         .rounded(px(6.0))
         .bg(with_alpha(bg_overlay(), 0.62))
         .p(px(12.0))
@@ -869,6 +870,9 @@ fn render_guided_review_focus_record(
     cx: &App,
 ) -> impl IntoElement {
     div()
+        .w_full()
+        .min_w_0()
+        .flex_shrink_0()
         .flex()
         .flex_col()
         .gap(px(14.0))
@@ -1038,6 +1042,9 @@ fn render_review_partner_summary(
     };
 
     div()
+        .w_full()
+        .min_w_0()
+        .flex_shrink_0()
         .flex()
         .flex_col()
         .gap(px(9.0))
@@ -1209,6 +1216,9 @@ fn render_review_partner_flat_section(
     body: Vec<AnyElement>,
 ) -> impl IntoElement {
     div()
+        .w_full()
+        .min_w_0()
+        .flex_shrink_0()
         .pt(px(12.0))
         .border_t(px(1.0))
         .border_color(with_alpha(diff_annotation_border(), 0.8))
@@ -1299,7 +1309,9 @@ fn render_review_partner_disclosure(
 
     div()
         .id(ElementId::Name(key.into()))
+        .w_full()
         .min_w_0()
+        .flex_shrink_0()
         .flex()
         .flex_col()
         .child(
@@ -1412,6 +1424,7 @@ fn render_review_partner_item_row(
     div()
         .w_full()
         .min_w_0()
+        .flex_shrink_0()
         .rounded(px(4.0))
         .px(px(7.0))
         .py(px(6.0))
@@ -1483,6 +1496,7 @@ fn render_review_partner_usage_item_row(
     div()
         .w_full()
         .min_w_0()
+        .flex_shrink_0()
         .rounded(px(4.0))
         .px(px(7.0))
         .py(px(6.0))
@@ -1560,10 +1574,7 @@ fn render_review_partner_location_link(
     line: Option<usize>,
     side: TempSourceSide,
 ) -> impl IntoElement {
-    let location_label = match line {
-        Some(line) => format!("{path}:{line}"),
-        None => path.clone(),
-    };
+    let location_label = review_partner_location_link_label(&path, line);
     let state_for_open = state.clone();
     let path_for_open = path.clone();
 
@@ -1599,6 +1610,18 @@ fn render_review_partner_location_link(
                 .text_ellipsis()
                 .child(location_label),
         )
+}
+
+fn review_partner_location_link_label(path: &str, line: Option<usize>) -> String {
+    let file_name = path
+        .rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or(path);
+
+    match line.filter(|line| *line > 0) {
+        Some(line) => format!("{file_name}:{line}"),
+        None => file_name.to_string(),
+    }
 }
 
 fn open_review_partner_source_window(
@@ -1911,8 +1934,9 @@ mod tests {
     use super::{
         guided_review_overlay_phrase_transition, guided_review_partner_ready,
         guided_review_preparation_state_from_inputs, guided_review_stack_ready,
-        GuidedReviewPreparationInputs, GuidedReviewPreparationState,
-        GUIDED_REVIEW_OVERLAY_PHRASE_MS, GUIDED_REVIEW_OVERLAY_PHRASE_TRANSITION_MS,
+        review_partner_location_link_label, GuidedReviewPreparationInputs,
+        GuidedReviewPreparationState, GUIDED_REVIEW_OVERLAY_PHRASE_MS,
+        GUIDED_REVIEW_OVERLAY_PHRASE_TRANSITION_MS,
     };
 
     #[test]
@@ -2057,5 +2081,21 @@ mod tests {
         assert_eq!(start.progress, 0.0);
         assert!(mid.progress > 0.0 && mid.progress < 1.0);
         assert_eq!(done.progress, 1.0);
+    }
+
+    #[test]
+    fn review_partner_location_link_label_uses_file_name_and_line() {
+        assert_eq!(
+            review_partner_location_link_label("src/views/diff_view/guided_review.rs", Some(1571)),
+            "guided_review.rs:1571"
+        );
+    }
+
+    #[test]
+    fn review_partner_location_link_label_uses_file_name_without_line() {
+        assert_eq!(
+            review_partner_location_link_label("src/review_partner.rs", None),
+            "review_partner.rs"
+        );
     }
 }

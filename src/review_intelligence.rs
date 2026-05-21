@@ -1748,7 +1748,7 @@ async fn generate_or_load_brief(
                             request_key,
                             false,
                             true,
-                            &progress_status_text(&progress),
+                            &review_brief_loading_status_text(provider, &progress),
                         );
                     }
                     cx.notify();
@@ -2080,6 +2080,18 @@ fn progress_detail_text(progress: &ReviewAiProgressUpdate) -> String {
         .to_string()
 }
 
+fn review_brief_loading_status_text(
+    provider: ReviewAiProvider,
+    progress: &ReviewAiProgressUpdate,
+) -> String {
+    match progress.stage.as_str() {
+        "command" | "tool" => "Reading the local checkout for the review brief.".to_string(),
+        "command_failed" => "Retrying checkout inspection for the review brief.".to_string(),
+        "finalizing" => "Finalizing the review brief.".to_string(),
+        _ => format!("{} is generating the review brief.", provider.label()),
+    }
+}
+
 fn set_review_brief_progress(
     detail_state: &mut DetailState,
     request_key: &str,
@@ -2187,10 +2199,15 @@ fn guided_review_stack_for_error(detail: &PullRequestDetail, message: &str) -> R
 #[cfg(test)]
 mod tests {
     use super::{
-        guided_review_stack_discovery_options, review_intelligence_request_key,
-        set_review_brief_error, set_review_brief_progress, ReviewIntelligenceScope,
+        guided_review_stack_discovery_options, review_brief_loading_status_text,
+        review_intelligence_request_key, set_review_brief_error, set_review_brief_progress,
+        ReviewIntelligenceScope,
     };
-    use crate::{github::PullRequestDetail, review_ai::ReviewAiProvider, state::DetailState};
+    use crate::{
+        github::PullRequestDetail,
+        review_ai::{ReviewAiProgressUpdate, ReviewAiProvider},
+        state::DetailState,
+    };
 
     #[test]
     fn review_intelligence_request_key_ignores_metadata_updates_when_head_matches() {
@@ -2295,6 +2312,22 @@ mod tests {
         assert_eq!(
             detail_state.review_brief_state.progress_text.as_deref(),
             Some("Regenerating review brief.")
+        );
+    }
+
+    #[test]
+    fn review_brief_loading_status_hides_streamed_response_text() {
+        let progress = ReviewAiProgressUpdate {
+            stage: "drafting".to_string(),
+            summary: "GitHub Copilot is drafting the response".to_string(),
+            detail: Some("{\"briefParagraph\":\"Partial generated brief".to_string()),
+            log: Some("Drafting Copilot response".to_string()),
+            log_file_path: None,
+        };
+
+        assert_eq!(
+            review_brief_loading_status_text(ReviewAiProvider::Copilot, &progress),
+            "Copilot is generating the review brief."
         );
     }
 

@@ -324,7 +324,16 @@ fn render_review_brief_panel(
                 }),
         );
 
-    let body = if let Some(brief) = brief_state.document.as_ref() {
+    let body = if busy {
+        render_review_brief_progress(
+            provider,
+            provider_status.as_ref(),
+            provider_error.as_deref(),
+            local_repository_loading,
+            brief_state.progress_text.as_deref(),
+        )
+        .into_any_element()
+    } else if let Some(brief) = brief_state.document.as_ref() {
         render_review_brief_document(brief).into_any_element()
     } else if provider_needs_setup {
         render_review_brief_setup_needed(
@@ -336,15 +345,6 @@ fn render_review_brief_panel(
         .into_any_element()
     } else if let Some(error) = brief_state.error.as_deref() {
         render_review_brief_error(error, state).into_any_element()
-    } else if busy {
-        render_review_brief_progress(
-            provider,
-            provider_status.as_ref(),
-            provider_error.as_deref(),
-            local_repository_loading,
-            brief_state.progress_text.as_deref(),
-        )
-        .into_any_element()
     } else if !settings_loaded {
         render_review_brief_progress(
             provider,

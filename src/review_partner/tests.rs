@@ -306,6 +306,54 @@ fn fallback_focus_record_includes_review_memory_history_signal() {
 }
 
 #[test]
+fn merge_preserves_long_history_signal_details() {
+    let input = input(ReviewPartnerContextPack::empty());
+    let long_history = format!(
+        "{} FINAL_HISTORY_MARKER",
+        "Prior review context needs the whole note visible in the Review Partner history section. "
+            .repeat(5)
+    );
+    assert!(long_history.chars().count() > MAX_ITEM_TEXT_CHARS);
+    assert!(long_history.chars().count() <= MAX_HISTORY_ITEM_TEXT_CHARS);
+
+    let response = ReviewPartnerResponse {
+        stack_brief: "brief".to_string(),
+        stack_concerns: Vec::new(),
+        limitations: Vec::new(),
+        warnings: Vec::new(),
+        layers: Vec::new(),
+        focus_records: vec![ReviewPartnerFocusRecordResponse {
+            key: "layer:layer-1".to_string(),
+            title: "Focus record".to_string(),
+            subtitle: None,
+            summary: Some("Explain the layer without abbreviating history.".to_string()),
+            codebase_fit: Some(ReviewPartnerCodebaseFitResponse {
+                follows: true,
+                summary: "follows codebase style".to_string(),
+                evidence: Vec::new(),
+            }),
+            sections: Vec::new(),
+            understanding_checkpoints: Vec::new(),
+            assumptions: Vec::new(),
+            history_signals: vec![ReviewPartnerItemResponse {
+                title: "Prior review".to_string(),
+                detail: long_history.clone(),
+                path: Some("src/lib.rs".to_string()),
+                line: Some(12),
+            }],
+            limitations: Vec::new(),
+        }],
+    };
+
+    let partner = merge_review_partner(response, &input, None).expect("partner context");
+    let history = &partner.focus_records[0].history_signals[0];
+
+    assert_eq!(history.detail, long_history);
+    assert!(history.detail.contains("FINAL_HISTORY_MARKER"));
+    assert!(!history.detail.ends_with("..."));
+}
+
+#[test]
 fn repo_path_normalization_uses_git_style_separators() {
     assert_eq!(normalize_repo_path(r".\src\lib.rs"), "src/lib.rs");
 }

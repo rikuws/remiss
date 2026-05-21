@@ -139,7 +139,7 @@ pub struct GenerateReviewBriefInput {
     pub review_memory: ReviewMemoryPromptContext,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ReviewBriefResponse {
     confidence: ReviewBriefConfidence,
@@ -202,15 +202,7 @@ pub fn generate_review_brief_with_progress(
         Err(error) if is_review_brief_budget_error(&error) => {
             let (retry_parsed, retry_model) =
                 request_review_brief_response(&input, true, on_progress)?;
-            merge_review_brief(retry_parsed, &input, retry_model).map_err(|retry_error| {
-                if is_review_brief_budget_error(&retry_error) {
-                    format!(
-                        "Review brief response still exceeded compact limits after retry. {retry_error}"
-                    )
-                } else {
-                    retry_error
-                }
-            })?
+            merge_retry_review_brief(retry_parsed, &input, retry_model)?
         }
         Err(error) => return Err(error),
     };
@@ -664,6 +656,102 @@ fn merge_review_brief(
     })
 }
 
+fn merge_retry_review_brief(
+    response: ReviewBriefResponse,
+    input: &GenerateReviewBriefInput,
+    model: Option<String>,
+) -> Result<ReviewBrief, String> {
+    match merge_review_brief(response.clone(), input, model.clone()) {
+        Ok(brief) => Ok(brief),
+        Err(error) if is_review_brief_budget_error(&error) => {
+            merge_abbreviated_review_brief(response, input, model).map_err(|fallback_error| {
+                format!(
+                    "Review brief response still exceeded compact limits after retry and could not be abbreviated. {fallback_error}"
+                )
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn merge_abbreviated_review_brief(
+    response: ReviewBriefResponse,
+    input: &GenerateReviewBriefInput,
+    model: Option<String>,
+) -> Result<ReviewBrief, String> {
+    let brief_paragraph = abbreviate_required_limited_text(
+        response.brief_paragraph,
+        "briefParagraph",
+        REVIEW_BRIEF_PARAGRAPH_MAX_CHARS,
+    )?;
+    let likely_intent = abbreviate_required_limited_text(
+        response.likely_intent,
+        "likelyIntent",
+        REVIEW_BRIEF_INTENT_MAX_CHARS,
+    )?;
+    let changed_summary = abbreviate_text_items(
+        response.changed_summary,
+        "changedSummary",
+        REVIEW_BRIEF_CHANGED_MIN_ITEMS,
+        REVIEW_BRIEF_CHANGED_MAX_ITEMS,
+        REVIEW_BRIEF_ITEM_MAX_CHARS,
+    )?;
+    let risks_questions = abbreviate_text_items(
+        response.risks_questions,
+        "risksQuestions",
+        REVIEW_BRIEF_RISKS_REQUIRED_ITEMS,
+        REVIEW_BRIEF_RISKS_REQUIRED_ITEMS,
+        REVIEW_BRIEF_ITEM_MAX_CHARS,
+    )?;
+    let next_best_reading_action = abbreviate_required_limited_text(
+        response.next_best_reading_action,
+        "nextBestReadingAction",
+        REVIEW_BRIEF_READING_ACTION_MAX_CHARS,
+    )?;
+    let confidence_reason = abbreviate_required_limited_text(
+        response.confidence_reason,
+        "confidenceReason",
+        REVIEW_BRIEF_CONFIDENCE_REASON_MAX_CHARS,
+    )?;
+    let understanding_warnings = abbreviate_optional_text_items(
+        response.understanding_warnings,
+        REVIEW_BRIEF_UNDERSTANDING_WARNING_MAX_CHARS,
+    )
+    .into_iter()
+    .take(REVIEW_BRIEF_UNDERSTANDING_WARNINGS_MAX_ITEMS)
+    .collect();
+    let warnings = abbreviate_optional_text_items(response.warnings, REVIEW_BRIEF_ITEM_MAX_CHARS)
+        .into_iter()
+        .filter(|warning| !is_missing_author_body_warning(warning))
+        .take(REVIEW_BRIEF_WARNINGS_MAX_ITEMS)
+        .collect();
+    let related_file_paths = response
+        .related_file_paths
+        .into_iter()
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+        .take(12)
+        .collect();
+
+    Ok(ReviewBrief {
+        provider: input.provider,
+        generated_at_ms: now_ms(),
+        code_version_key: input.code_version_key.clone(),
+        confidence: response.confidence,
+        reading_mode: response.reading_mode,
+        brief_paragraph,
+        likely_intent,
+        changed_summary,
+        risks_questions,
+        next_best_reading_action,
+        confidence_reason,
+        understanding_warnings,
+        warnings,
+        related_file_paths,
+        model,
+    })
+}
+
 fn normalized_required_text(value: String, field: &str) -> Result<String, String> {
     let value = value.trim().to_string();
     if value.is_empty() {
@@ -823,6 +911,91 @@ fn normalize_optional_text_items(
 
 fn compact_budget_error(message: String) -> String {
     format!("{REVIEW_BRIEF_BUDGET_ERROR_PREFIX}: {message}")
+}
+
+fn abbreviate_required_limited_text(
+    value: String,
+    field: &str,
+    max_chars: usize,
+) -> Result<String, String> {
+    let value = normalized_required_text(value, field)?;
+    let value = sanitize_abbreviated_text(&value);
+    if value.is_empty() {
+        return Err(format!("Review brief response omitted {field}."));
+    }
+    Ok(trim_text(&value, max_chars))
+}
+
+fn abbreviate_text_items(
+    values: Vec<String>,
+    field: &str,
+    min_items: usize,
+    max_items: usize,
+    max_chars: usize,
+) -> Result<Vec<String>, String> {
+    let normalized = abbreviate_optional_text_items(values, max_chars);
+    if normalized.len() < min_items {
+        Err(format!("Review brief response omitted {field}."))
+    } else {
+        Ok(normalized.into_iter().take(max_items).collect())
+    }
+}
+
+fn abbreviate_optional_text_items(values: Vec<String>, max_chars: usize) -> Vec<String> {
+    values
+        .into_iter()
+        .filter_map(|value| {
+            let value = sanitize_abbreviated_text(&value);
+            (!value.is_empty()).then(|| trim_text(&value, max_chars))
+        })
+        .collect()
+}
+
+fn sanitize_abbreviated_text(value: &str) -> String {
+    let mut value = normalize_review_brief_whitespace(value);
+    value = remove_review_brief_section_labels(value);
+    value = strip_compact_markdown_markers(value);
+    normalize_review_brief_whitespace(&value)
+}
+
+fn normalize_review_brief_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn remove_review_brief_section_labels(mut value: String) -> String {
+    for label in [
+        "likely intent:",
+        "changes:",
+        "watch:",
+        "risk:",
+        "risks/questions:",
+    ] {
+        loop {
+            let lower = value.to_ascii_lowercase();
+            let Some(index) = lower.find(label) else {
+                break;
+            };
+            value.replace_range(index..index + label.len(), "");
+        }
+    }
+    value
+}
+
+fn strip_compact_markdown_markers(mut value: String) -> String {
+    loop {
+        let trimmed = value.trim_start();
+        if let Some(stripped) = trimmed.strip_prefix("- ") {
+            value = stripped.to_string();
+        } else if let Some(stripped) = trimmed.strip_prefix("* ") {
+            value = stripped.to_string();
+        } else if trimmed.starts_with('#') {
+            value = trimmed.trim_start_matches('#').trim_start().to_string();
+        } else {
+            break;
+        }
+    }
+
+    value.replace("**", "")
 }
 
 fn is_review_brief_budget_error(error: &str) -> bool {
@@ -1220,5 +1393,78 @@ mod tests {
 
         assert!(is_review_brief_budget_error(&error));
         assert!(error.contains("changedSummary"));
+    }
+
+    #[test]
+    fn review_brief_retry_fallback_abbreviates_overlong_fields() {
+        let input = build_review_brief_generation_input(
+            &detail(
+                "2026-04-17T10:00:00Z",
+                Some("head123"),
+                "diff --git a/a b/a\n+one\n",
+            ),
+            ReviewAiProvider::Codex,
+            "/tmp/acme-api",
+        );
+        let long = "This generated sentence keeps explaining the same review context with more detail than the compact Review Brief allows. ".repeat(5);
+
+        let brief = merge_retry_review_brief(
+            ReviewBriefResponse {
+                confidence: ReviewBriefConfidence::High,
+                reading_mode: ReviewBriefReadingMode::Scan,
+                brief_paragraph: format!("Likely intent: {long}"),
+                likely_intent: long.clone(),
+                changed_summary: vec![long.clone(), long.clone(), long.clone()],
+                risks_questions: vec![long.clone(), long.clone()],
+                next_best_reading_action: long.clone(),
+                confidence_reason: long.clone(),
+                understanding_warnings: vec![
+                    long.clone(),
+                    long.clone(),
+                    long.clone(),
+                    long.clone(),
+                ],
+                warnings: vec![
+                    "Missing PR description.".to_string(),
+                    long.clone(),
+                    long.clone(),
+                ],
+                related_file_paths: vec!["src/session.rs".to_string()],
+            },
+            &input,
+            Some("model".to_string()),
+        )
+        .expect("retry fallback should abbreviate compact-budget overages");
+
+        assert!(brief.brief_paragraph.chars().count() <= REVIEW_BRIEF_PARAGRAPH_MAX_CHARS);
+        assert!(!brief
+            .brief_paragraph
+            .to_ascii_lowercase()
+            .contains("likely intent:"));
+        assert!(brief.likely_intent.chars().count() <= REVIEW_BRIEF_INTENT_MAX_CHARS);
+        assert_eq!(brief.changed_summary.len(), REVIEW_BRIEF_CHANGED_MAX_ITEMS);
+        assert!(brief
+            .changed_summary
+            .iter()
+            .all(|item| item.chars().count() <= REVIEW_BRIEF_ITEM_MAX_CHARS));
+        assert_eq!(
+            brief.risks_questions.len(),
+            REVIEW_BRIEF_RISKS_REQUIRED_ITEMS
+        );
+        assert!(brief
+            .risks_questions
+            .iter()
+            .all(|item| item.chars().count() <= REVIEW_BRIEF_ITEM_MAX_CHARS));
+        assert!(
+            brief.next_best_reading_action.chars().count() <= REVIEW_BRIEF_READING_ACTION_MAX_CHARS
+        );
+        assert!(
+            brief.confidence_reason.chars().count() <= REVIEW_BRIEF_CONFIDENCE_REASON_MAX_CHARS
+        );
+        assert_eq!(
+            brief.understanding_warnings.len(),
+            REVIEW_BRIEF_UNDERSTANDING_WARNINGS_MAX_ITEMS
+        );
+        assert_eq!(brief.warnings.len(), REVIEW_BRIEF_WARNINGS_MAX_ITEMS);
     }
 }
