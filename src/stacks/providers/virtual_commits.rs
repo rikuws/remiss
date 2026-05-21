@@ -10,11 +10,13 @@ use serde::{Deserialize, Serialize};
 use super::super::{
     atoms::{classify_change_role, extract_change_atoms},
     model::{
-        stack_now_ms, ChangeAtom, ChangeRole, Confidence, LayerMetrics, LayerReviewStatus,
-        RepoContext, ReviewStack, ReviewStackLayer, StackDiscoveryError, StackKind,
-        StackProviderMetadata, StackSource, StackWarning, VirtualLayerRef, STACK_GENERATOR_VERSION,
+        stack_now_ms, ChangeAtom, ChangeRole, Confidence, LayerReviewStatus, RepoContext,
+        ReviewStack, ReviewStackLayer, StackDiscoveryError, StackKind, StackProviderMetadata,
+        StackSource, StackWarning, VirtualLayerRef, STACK_GENERATOR_VERSION,
     },
 };
+
+use super::shared::{dominant_role, metrics_for_atoms};
 
 pub fn discover(
     selected_pr: &PullRequestDetail,
@@ -618,39 +620,6 @@ fn clean_subject(subject: &str) -> String {
 
 fn short_oid(oid: &str) -> String {
     oid.chars().take(8).collect()
-}
-
-fn metrics_for_atoms(atoms: &[&ChangeAtom]) -> LayerMetrics {
-    let file_count = atoms
-        .iter()
-        .map(|atom| atom.path.as_str())
-        .collect::<std::collections::BTreeSet<_>>()
-        .len();
-
-    LayerMetrics {
-        file_count,
-        atom_count: atoms.len(),
-        additions: atoms.iter().map(|atom| atom.additions).sum(),
-        deletions: atoms.iter().map(|atom| atom.deletions).sum(),
-        changed_lines: atoms
-            .iter()
-            .map(|atom| atom.additions + atom.deletions)
-            .sum(),
-        unresolved_thread_count: atoms.iter().map(|atom| atom.review_thread_ids.len()).sum(),
-        risk_score: atoms.iter().map(|atom| atom.risk_score).sum(),
-    }
-}
-
-fn dominant_role(atoms: &[&ChangeAtom]) -> ChangeRole {
-    let mut counts = BTreeMap::<ChangeRole, usize>::new();
-    for atom in atoms {
-        *counts.entry(atom.role).or_default() += atom.additions + atom.deletions + 1;
-    }
-    counts
-        .into_iter()
-        .max_by_key(|(_, count)| *count)
-        .map(|(role, _)| role)
-        .unwrap_or(ChangeRole::Unknown)
 }
 
 #[cfg(test)]

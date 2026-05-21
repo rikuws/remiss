@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use sha1::{Digest, Sha1};
 
@@ -14,6 +14,8 @@ use super::super::{
         VirtualStackSizing, STACK_GENERATOR_VERSION,
     },
 };
+
+use super::shared::metrics_for_atoms;
 
 pub fn discover(
     selected_pr: &PullRequestDetail,
@@ -353,27 +355,6 @@ fn merge_excess_layers<'a>(
         }
     }
     groups
-}
-
-fn metrics_for_atoms(atoms: &[&ChangeAtom]) -> LayerMetrics {
-    let file_count = atoms
-        .iter()
-        .map(|atom| atom.path.as_str())
-        .collect::<BTreeSet<_>>()
-        .len();
-
-    LayerMetrics {
-        file_count,
-        atom_count: atoms.len(),
-        additions: atoms.iter().map(|atom| atom.additions).sum(),
-        deletions: atoms.iter().map(|atom| atom.deletions).sum(),
-        changed_lines: atoms
-            .iter()
-            .map(|atom| atom.additions + atom.deletions)
-            .sum(),
-        unresolved_thread_count: atoms.iter().map(|atom| atom.review_thread_ids.len()).sum(),
-        risk_score: atoms.iter().map(|atom| atom.risk_score).sum(),
-    }
 }
 
 fn semantic_confidence(
