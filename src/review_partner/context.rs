@@ -675,6 +675,7 @@ fn references_for_symbol(
     let document_text: Arc<str> = Arc::from(document.as_str());
     let request = LspTextDocumentRequest {
         file_path: atom.path.clone(),
+        document_identity: None,
         document_text,
         line,
         column,

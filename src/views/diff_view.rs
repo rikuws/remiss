@@ -146,13 +146,15 @@ pub fn enter_files_surface(state: &Entity<AppState>, window: &mut Window, cx: &m
 
     ensure_active_review_focus_loaded(state, window, cx);
     ensure_active_stack_refs_loaded(state, window, cx);
-    review_intelligence::trigger_review_intelligence(
-        state,
-        window,
-        cx,
-        review_intelligence::ReviewIntelligenceScope::All,
-        false,
-    );
+    if state.read(cx).review_ai_background_jobs_enabled() {
+        review_intelligence::trigger_review_intelligence(
+            state,
+            window,
+            cx,
+            review_intelligence::ReviewIntelligenceScope::All,
+            false,
+        );
+    }
     ensure_structural_diff_warmup_started(state, window, cx);
 }
 
@@ -162,6 +164,10 @@ pub fn switch_review_code_mode(
     window: &mut Window,
     cx: &mut App,
 ) {
+    if mode == ReviewCenterMode::GuidedReview && !state.read(cx).review_ai_features_enabled() {
+        return;
+    }
+
     state.update(cx, |state, cx| {
         state.set_review_center_mode_preserving_focus(mode);
         state.persist_active_review_session();
@@ -172,6 +178,10 @@ pub fn switch_review_code_mode(
 }
 
 pub fn enter_stack_review_mode(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
+    if !state.read(cx).review_ai_features_enabled() {
+        return;
+    }
+
     let stack_defaults = {
         let app_state = state.read(cx);
         app_state.active_detail().map(|detail| {
@@ -905,7 +915,8 @@ pub fn render_files_view(
     let is_local_review = crate::local_review::is_local_review_detail(detail);
     let review_stack = prepare_review_stack(&s, detail);
     let review_queue = prepare_review_queue(&s, detail);
-    let review_session = s.active_review_session().cloned().unwrap_or_default();
+    let mut review_session = s.active_review_session().cloned().unwrap_or_default();
+    review_session.center_mode = s.effective_review_center_mode();
     let show_file_tree = review_session.show_file_tree;
     let file_tree_hidden = !show_file_tree;
     let file_tree_animation_key = ("review-file-tree", usize::from(file_tree_hidden));
@@ -1095,10 +1106,11 @@ fn render_diff_panel(
     let local_repo_error = app_state
         .active_detail_state()
         .and_then(|detail_state| detail_state.local_repository_error.as_deref());
-    let review_session = app_state
+    let mut review_session = app_state
         .active_review_session()
         .cloned()
         .unwrap_or_default();
+    review_session.center_mode = app_state.effective_review_center_mode();
     let center_mode = review_session.center_mode;
     let normal_diff_layout = review_session.normal_diff_layout;
     let structural_diff_layout = review_session.structural_diff_layout;

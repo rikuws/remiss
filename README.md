@@ -23,8 +23,8 @@ provider setup, and distribution are still being hardened.
 - Provides diff navigation, structural diff views, and a read-only source
   browser for nearby code.
 - Keeps review comments, status, and submission actions inside the review flow.
-- Generates Review Briefs and Guided Review routes when an AI provider is
-  configured.
+- Can generate Review Briefs and Guided Review routes when experimental AI
+  features are explicitly enabled and a provider is configured.
 - Uses managed language servers where available for richer source context.
 
 ## Review Workflow
@@ -48,9 +48,10 @@ workspace, not a browser tab or a prompt box.
 
 ## AI and Privacy
 
-AI features are optional and provider-dependent. Review Briefs and Guided Review
-may send pull request metadata, changed file lists, review comments, snippets,
-and local checkout paths to the selected provider.
+AI features are experimental, off by default, and provider-dependent. Review
+Briefs and Guided Review may send pull request metadata, changed file lists,
+review comments, snippets, and local checkout paths to the selected provider.
+Codex/Copilot background jobs have a separate opt-in setting.
 
 Codex-backed flows run with a read-only sandbox and no network access. Copilot
 flows are constrained to read/search/glob tools. Provider setup and unavailable

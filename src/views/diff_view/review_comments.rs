@@ -699,7 +699,7 @@ pub(super) fn open_review_line_action(
     position: Point<Pixels>,
     cx: &mut App,
 ) {
-    open_review_line_action_with_navigation(state, target, position, true, cx);
+    open_review_line_action_preserving_view(state, target, position, cx);
 }
 
 fn open_review_line_action_preserving_view(
@@ -708,21 +708,8 @@ fn open_review_line_action_preserving_view(
     position: Point<Pixels>,
     cx: &mut App,
 ) {
-    open_review_line_action_with_navigation(state, target, position, false, cx);
-}
-
-fn open_review_line_action_with_navigation(
-    state: &Entity<AppState>,
-    target: ReviewLineActionTarget,
-    position: Point<Pixels>,
-    navigate: bool,
-    cx: &mut App,
-) {
     state.update(cx, |state, cx| {
         state.active_surface = PullRequestSurface::Files;
-        if navigate {
-            state.navigate_to_review_location(target.review_location(), true);
-        }
         state.active_review_line_action = Some(target);
         state.active_review_line_action_position = Some(position);
         state.review_line_action_mode = ReviewLineActionMode::Comment;
@@ -747,7 +734,15 @@ pub(super) fn review_line_action_target_with_range(
         return target;
     }
 
-    let Some(current_anchor) = state.read(cx).selected_diff_anchor.clone() else {
+    let current_anchor = {
+        let app_state = state.read(cx);
+        app_state
+            .active_review_line_action
+            .as_ref()
+            .map(|target| target.anchor.clone())
+            .or_else(|| app_state.selected_diff_anchor.clone())
+    };
+    let Some(current_anchor) = current_anchor else {
         return target;
     };
     if current_anchor.file_path != target.anchor.file_path
@@ -1129,24 +1124,37 @@ pub(super) fn render_review_line_action_overlay(
     mode: ReviewLineActionMode,
     cx: &App,
 ) -> impl IntoElement {
+    let close_state = state.clone();
     let has_waypoint = state
         .read(cx)
         .active_review_session()
         .and_then(|session| session.waymark_for_location(&target.review_location()))
         .is_some();
 
-    anchored()
-        .position(position)
-        .anchor(Corner::TopLeft)
-        .offset(point(px(12.0), px(10.0)))
-        .snap_to_window_with_margin(px(12.0))
-        .child(render_review_line_action_popup(
-            state,
-            Some(target),
-            mode,
-            has_waypoint,
-            cx,
+    div()
+        .absolute()
+        .inset_0()
+        .occlude()
+        .child(div().absolute().inset_0().occlude().on_mouse_down(
+            MouseButton::Left,
+            move |_, _, cx| {
+                close_review_line_action(&close_state, cx);
+            },
         ))
+        .child(
+            anchored()
+                .position(position)
+                .anchor(Corner::TopLeft)
+                .offset(point(px(12.0), px(10.0)))
+                .snap_to_window_with_margin(px(12.0))
+                .child(render_review_line_action_popup(
+                    state,
+                    Some(target),
+                    mode,
+                    has_waypoint,
+                    cx,
+                )),
+        )
 }
 
 pub(super) fn render_finish_review_modal(
@@ -1631,19 +1639,44 @@ fn render_review_line_action_popup(
                                 .when(!has_waypoint, |el| {
                                     el.child(ghost_button("Add waypoint", {
                                         let state = state.clone();
+                                        let location =
+                                            target.map(|target| target.review_location());
                                         move |_, _, cx| {
                                             let default_name = {
-                                                let app_state = state.read(cx);
-                                                default_waymark_name(
-                                                    app_state.selected_file_path.as_deref(),
-                                                    None,
-                                                    app_state.selected_diff_anchor.as_ref(),
-                                                )
+                                                location
+                                                    .as_ref()
+                                                    .map(|location| {
+                                                        default_waymark_name(
+                                                            Some(location.file_path.as_str()),
+                                                            None,
+                                                            location.anchor.as_ref(),
+                                                        )
+                                                    })
+                                                    .unwrap_or_else(|| {
+                                                        let app_state = state.read(cx);
+                                                        default_waymark_name(
+                                                            app_state.selected_file_path.as_deref(),
+                                                            None,
+                                                            app_state.selected_diff_anchor.as_ref(),
+                                                        )
+                                                    })
                                             };
                                             state.update(cx, |state, cx| {
-                                                state.add_waymark_for_current_review_location(
-                                                    default_name.clone(),
-                                                );
+                                                if let Some(location) = location.clone() {
+                                                    if let Some(session) =
+                                                        state.active_review_session_mut()
+                                                    {
+                                                        crate::review_session::add_waymark(
+                                                            &mut session.waymarks,
+                                                            location,
+                                                            default_name.clone(),
+                                                        );
+                                                    }
+                                                } else {
+                                                    state.add_waymark_for_current_review_location(
+                                                        default_name.clone(),
+                                                    );
+                                                }
                                                 state.persist_active_review_session();
                                                 cx.notify();
                                             });

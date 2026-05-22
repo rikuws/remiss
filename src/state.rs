@@ -24,6 +24,11 @@ use crate::review_ai::{
 };
 use crate::review_anchors::review_thread_anchor;
 use crate::review_brief::ReviewBrief;
+use crate::review_filters::{
+    load_muted_repositories, load_pull_request_filter_settings, save_muted_repositories,
+    save_pull_request_filter_settings, PullRequestFilterScope, PullRequestFilterSettings,
+    PullRequestFilterToggle,
+};
 use crate::review_partner::{GeneratedReviewPartnerContext, ReviewPartnerFocusTarget};
 use crate::review_queue::{default_review_file, ReviewQueue};
 use crate::review_session::{
@@ -44,56 +49,6 @@ use gpui::{
     px, AnyWindowHandle, ListAlignment, ListState, Pixels, Point, ScrollHandle, WindowAppearance,
 };
 use serde::{Deserialize, Serialize};
-
-const MUTED_REPOSITORIES_CACHE_KEY: &str = "muted-repositories-v1";
-
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct MutedRepositoriesSettings {
-    #[serde(default)]
-    repositories: Vec<String>,
-}
-
-impl MutedRepositoriesSettings {
-    fn from_repositories(repositories: &HashSet<String>) -> Self {
-        let mut repositories = repositories.iter().cloned().collect::<Vec<_>>();
-        repositories.sort();
-        repositories.dedup();
-        Self { repositories }
-    }
-}
-
-fn load_muted_repositories(cache: &CacheStore) -> Result<HashSet<String>, String> {
-    Ok(cache
-        .get::<MutedRepositoriesSettings>(MUTED_REPOSITORIES_CACHE_KEY)?
-        .map(|document| {
-            document
-                .value
-                .repositories
-                .into_iter()
-                .filter(|repository| !repository.trim().is_empty())
-                .collect()
-        })
-        .unwrap_or_default())
-}
-
-fn save_muted_repositories(
-    cache: &CacheStore,
-    repositories: &HashSet<String>,
-) -> Result<(), String> {
-    cache.put(
-        MUTED_REPOSITORIES_CACHE_KEY,
-        &MutedRepositoriesSettings::from_repositories(repositories),
-        state_now_ms(),
-    )
-}
-
-fn state_now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as i64)
-        .unwrap_or_default()
-}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SectionId {
@@ -126,6 +81,31 @@ impl SectionId {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AppSidebarMode {
+    Open,
+    Icons,
+    Closed,
+}
+
+impl AppSidebarMode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Open => Self::Icons,
+            Self::Icons => Self::Closed,
+            Self::Closed => Self::Open,
+        }
+    }
+
+    pub fn is_icons(self) -> bool {
+        self == Self::Icons
+    }
+
+    pub fn is_closed(self) -> bool {
+        self == Self::Closed
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PullRequestSurface {
     Overview,
@@ -135,7 +115,7 @@ pub enum PullRequestSurface {
 impl PullRequestSurface {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Overview => "Briefing",
+            Self::Overview => "Overview",
             Self::Files => "Review",
         }
     }
@@ -473,6 +453,9 @@ pub struct LspSymbolState {
     pub loading: bool,
     pub details: Option<LspSymbolDetails>,
     pub error: Option<String>,
+    pub references_loading: bool,
+    pub references_loaded: bool,
+    pub references_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1041,9 +1024,12 @@ pub struct AppState {
     pub local_review_loading: bool,
     pub local_review_error: Option<String>,
     pub muted_repos: std::collections::HashSet<String>,
+    pub pull_request_filter_settings: PullRequestFilterSettings,
     pub project_shader_settings: ProjectShaderSettings,
     pub project_shader_settings_error: Option<String>,
     pub project_shader_picker: Option<ProjectShaderPickerState>,
+    pub review_board_shader_canvases_ready: bool,
+    pub review_board_shader_canvases_scheduled: bool,
 
     // Workspace data
     pub workspace: Option<WorkspaceSnapshot>,
@@ -1067,7 +1053,8 @@ pub struct AppState {
     pub code_font_size_preference: CodeFontSizePreference,
     pub diff_color_theme_preference: DiffColorThemePreference,
     pub window_appearance: WindowAppearance,
-    pub app_sidebar_collapsed: bool,
+    pub app_sidebar_mode: AppSidebarMode,
+    pub previous_app_sidebar_mode: AppSidebarMode,
     pub notification_drawer_open: bool,
     pub software_update_message: Option<String>,
     pub software_update_error: Option<String>,
@@ -1193,6 +1180,13 @@ impl AppState {
                 HashSet::new()
             }
         };
+        let pull_request_filter_settings = match load_pull_request_filter_settings(&cache) {
+            Ok(settings) => settings,
+            Err(error) => {
+                eprintln!("Failed to load pull request filters: {error}");
+                PullRequestFilterSettings::default()
+            }
+        };
         let (project_shader_settings, project_shader_settings_error) =
             match load_project_shader_settings(&cache) {
                 Ok(settings) => (settings, None),
@@ -1219,9 +1213,12 @@ impl AppState {
             local_review_loading: false,
             local_review_error: None,
             muted_repos,
+            pull_request_filter_settings,
             project_shader_settings,
             project_shader_settings_error,
             project_shader_picker: None,
+            review_board_shader_canvases_ready: false,
+            review_board_shader_canvases_scheduled: false,
             workspace: None,
             workspace_loading: true,
             workspace_syncing: false,
@@ -1239,7 +1236,8 @@ impl AppState {
             code_font_size_preference,
             diff_color_theme_preference,
             window_appearance: WindowAppearance::Light,
-            app_sidebar_collapsed: false,
+            app_sidebar_mode: AppSidebarMode::Open,
+            previous_app_sidebar_mode: AppSidebarMode::Open,
             notification_drawer_open: false,
             software_update_message: None,
             software_update_error: None,
@@ -1334,6 +1332,19 @@ impl AppState {
         self.active_section = section;
     }
 
+    pub fn set_app_sidebar_mode(&mut self, mode: AppSidebarMode) {
+        if self.app_sidebar_mode == mode {
+            return;
+        }
+
+        self.previous_app_sidebar_mode = self.app_sidebar_mode;
+        self.app_sidebar_mode = mode;
+    }
+
+    pub fn cycle_app_sidebar_mode(&mut self) {
+        self.set_app_sidebar_mode(self.app_sidebar_mode.next());
+    }
+
     pub fn next_onboarding_step(&mut self) {
         let Some(session) = self.active_onboarding_wizard.as_mut() else {
             return;
@@ -1343,6 +1354,7 @@ impl AppState {
             self.complete_active_onboarding_wizard();
         } else {
             session.step_index += 1;
+            self.skip_hidden_onboarding_steps(true);
             self.apply_active_onboarding_step();
         }
     }
@@ -1353,6 +1365,7 @@ impl AppState {
         };
 
         session.step_index = session.step_index.saturating_sub(1);
+        self.skip_hidden_onboarding_steps(false);
         self.apply_active_onboarding_step();
     }
 
@@ -1362,6 +1375,7 @@ impl AppState {
         };
 
         session.step_index = step_index.min(session.step_count().saturating_sub(1));
+        self.skip_hidden_onboarding_steps(true);
         self.apply_active_onboarding_step();
     }
 
@@ -1374,6 +1388,7 @@ impl AppState {
         onboarding::mark_wizard_completed(&mut self.onboarding_progress, &session.definition);
         self.persist_onboarding_progress();
         self.active_onboarding_wizard = onboarding::next_pending_wizard(&self.onboarding_progress);
+        self.skip_hidden_onboarding_steps(true);
         self.apply_active_onboarding_step();
     }
 
@@ -1385,6 +1400,28 @@ impl AppState {
 
     pub fn is_onboarding_target(&self, target: WizardStepTarget) -> bool {
         self.active_onboarding_target() == Some(target)
+    }
+
+    fn active_onboarding_step_hidden(&self) -> bool {
+        self.active_onboarding_target() == Some(WizardStepTarget::GuidedReview)
+            && !self.review_ai_features_enabled()
+    }
+
+    fn skip_hidden_onboarding_steps(&mut self, forward: bool) {
+        while self.active_onboarding_step_hidden() {
+            let Some(session) = self.active_onboarding_wizard.as_mut() else {
+                return;
+            };
+            if forward && session.step_index + 1 < session.step_count() {
+                session.step_index += 1;
+            } else if !forward && session.step_index > 0 {
+                session.step_index -= 1;
+            } else if session.step_index + 1 < session.step_count() {
+                session.step_index += 1;
+            } else {
+                return;
+            }
+        }
     }
 
     pub fn set_onboarding_gh_status(&mut self, status: GhSetupStatus) {
@@ -1404,7 +1441,12 @@ impl AppState {
                 self.open_onboarding_tutorial_pr(ReviewCenterMode::SemanticDiff);
             }
             WizardStepTarget::GuidedReview => {
-                self.open_onboarding_tutorial_pr(ReviewCenterMode::GuidedReview);
+                let mode = if self.review_ai_features_enabled() {
+                    ReviewCenterMode::GuidedReview
+                } else {
+                    ReviewCenterMode::SemanticDiff
+                };
+                self.open_onboarding_tutorial_pr(mode);
             }
             WizardStepTarget::LocalReview => {
                 if self.active_pr_key.as_deref() == Some(crate::tutorial_pr::TUTORIAL_PR_KEY) {
@@ -1547,6 +1589,34 @@ impl AppState {
     fn persist_muted_repositories(&self) {
         if let Err(error) = save_muted_repositories(self.cache.as_ref(), &self.muted_repos) {
             eprintln!("Failed to save muted repositories: {error}");
+        }
+    }
+
+    pub fn set_pull_request_filter_preset(
+        &mut self,
+        scope: PullRequestFilterScope,
+        preset_id: &str,
+    ) {
+        self.pull_request_filter_settings
+            .set_active_preset(scope, preset_id);
+        self.persist_pull_request_filter_settings();
+    }
+
+    pub fn toggle_pull_request_filter(
+        &mut self,
+        scope: PullRequestFilterScope,
+        toggle: PullRequestFilterToggle,
+    ) {
+        self.pull_request_filter_settings.toggle(scope, toggle);
+        self.persist_pull_request_filter_settings();
+    }
+
+    fn persist_pull_request_filter_settings(&self) {
+        if let Err(error) = save_pull_request_filter_settings(
+            self.cache.as_ref(),
+            &self.pull_request_filter_settings,
+        ) {
+            eprintln!("Failed to save pull request filters: {error}");
         }
     }
 
@@ -1744,6 +1814,28 @@ impl AppState {
         self.review_ai_settings.settings.provider
     }
 
+    pub fn review_ai_features_enabled(&self) -> bool {
+        self.review_ai_settings
+            .settings
+            .experimental_features_enabled()
+    }
+
+    pub fn review_ai_background_jobs_enabled(&self) -> bool {
+        self.review_ai_settings.settings.background_jobs_enabled()
+    }
+
+    pub fn effective_review_center_mode(&self) -> ReviewCenterMode {
+        let mode = self
+            .active_review_session()
+            .map(|session| session.center_mode)
+            .unwrap_or(ReviewCenterMode::SemanticDiff);
+        if mode == ReviewCenterMode::GuidedReview && !self.review_ai_features_enabled() {
+            self.active_code_lens_mode()
+        } else {
+            mode
+        }
+    }
+
     pub fn section_count(&self, section: SectionId) -> i64 {
         match section {
             SectionId::Overview => 0,
@@ -1865,8 +1957,16 @@ impl AppState {
         if let Some(document) = document {
             self.selected_file_path = document.selected_file_path.clone();
             self.selected_diff_anchor = document.selected_diff_anchor.clone();
+            let review_ai_enabled = self.review_ai_features_enabled();
             if let Some(detail_state) = self.detail_states.get_mut(detail_key) {
-                detail_state.review_session = ReviewSessionState::from_document(document);
+                let mut review_session = ReviewSessionState::from_document(document);
+                if !review_ai_enabled
+                    && review_session.center_mode == ReviewCenterMode::GuidedReview
+                {
+                    review_session.center_mode =
+                        sanitize_code_lens_mode(review_session.code_lens_mode);
+                }
+                detail_state.review_session = review_session;
             }
         } else {
             self.selected_file_path = None;
@@ -1880,6 +1980,10 @@ impl AppState {
     }
 
     pub fn navigate_to_review_location(&mut self, location: ReviewLocation, push_history: bool) {
+        let mut location = location;
+        if location.mode == ReviewCenterMode::GuidedReview && !self.review_ai_features_enabled() {
+            location.mode = self.active_code_lens_mode();
+        }
         let previous = if push_history {
             self.current_review_location()
         } else {
@@ -2317,6 +2421,11 @@ impl AppState {
     }
 
     pub fn set_review_center_mode(&mut self, mode: ReviewCenterMode) {
+        let mode = if mode == ReviewCenterMode::GuidedReview && !self.review_ai_features_enabled() {
+            self.active_code_lens_mode()
+        } else {
+            mode
+        };
         if let Some(session) = self.active_review_session_mut() {
             session.center_mode = mode;
             if matches!(
@@ -2331,6 +2440,36 @@ impl AppState {
                 session.source_target = None;
             }
         }
+    }
+
+    pub fn hide_experimental_review_ai(&mut self) {
+        if self.review_ai_features_enabled() {
+            return;
+        }
+
+        for detail_state in self.detail_states.values_mut() {
+            if detail_state.review_session.center_mode == ReviewCenterMode::GuidedReview {
+                detail_state.review_session.center_mode =
+                    sanitize_code_lens_mode(detail_state.review_session.code_lens_mode);
+            }
+            detail_state.review_intelligence_loading = false;
+            detail_state.ai_stack_state.loading = false;
+            detail_state.ai_stack_state.generating = false;
+            detail_state.review_partner_state.loading = false;
+            detail_state.review_partner_state.generating = false;
+            detail_state.review_partner_state.loading_focus_keys.clear();
+            detail_state.review_brief_state.loading = false;
+            detail_state.review_brief_state.generating = false;
+        }
+
+        self.review_ai_provider_loading = false;
+        self.review_ai_provider_error = None;
+        self.review_ai_settings.background_syncing = false;
+        self.review_ai_settings.background_message = None;
+        self.review_ai_settings.background_error = None;
+        self.automatic_brief_request_keys.clear();
+        self.automatic_partner_request_keys.clear();
+        self.skip_hidden_onboarding_steps(true);
     }
 
     pub fn reset_review_focus_scroll(&mut self) {
@@ -2610,7 +2749,7 @@ fn parse_debug_pull_request_target(target: &str) -> Option<(String, i64)> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, HashSet};
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2620,15 +2759,14 @@ mod tests {
         PullRequestComment, PullRequestDataCompleteness, PullRequestDetail, PullRequestFile,
         PullRequestReview, PullRequestReviewComment, PullRequestReviewThread,
     };
-    use crate::onboarding::StartupWizardOptions;
+    use crate::onboarding::{StartupWizardOptions, WizardStepTarget};
     use crate::review_session::ReviewCenterMode;
     use crate::tutorial_pr::TUTORIAL_PR_KEY;
 
     use super::{
-        diff_anchor_for_line, first_review_comment_after_focus_index, load_muted_repositories,
-        review_comment_navigation_items, save_muted_repositories, summary_key, AppState,
-        DiffScrollbarActivity, MutedRepositoriesSettings, PullRequestSurface, ReviewModeFocus,
-        SectionId, StructuralDiffWarmupState, MUTED_REPOSITORIES_CACHE_KEY,
+        diff_anchor_for_line, first_review_comment_after_focus_index,
+        review_comment_navigation_items, summary_key, AppState, DiffScrollbarActivity,
+        PullRequestSurface, ReviewModeFocus, SectionId, StructuralDiffWarmupState,
     };
 
     fn temp_cache_store(name: &str) -> CacheStore {
@@ -2640,30 +2778,6 @@ mod tests {
             "/tmp/remiss-state-test-{name}-{suffix}/cache.sqlite"
         ));
         CacheStore::new(path).expect("cache")
-    }
-
-    #[test]
-    fn muted_repository_settings_round_trip_in_stable_order() {
-        let cache = temp_cache_store("muted-repositories");
-        let repositories = HashSet::from([
-            "zeta/project".to_string(),
-            "alpha/project".to_string(),
-            "alpha/project".to_string(),
-        ]);
-
-        save_muted_repositories(&cache, &repositories).expect("save muted repositories");
-
-        let loaded = load_muted_repositories(&cache).expect("load muted repositories");
-        assert_eq!(loaded, repositories);
-
-        let document = cache
-            .get::<MutedRepositoriesSettings>(MUTED_REPOSITORIES_CACHE_KEY)
-            .expect("read muted repositories document")
-            .expect("muted repositories document exists");
-        assert_eq!(
-            document.value.repositories,
-            vec!["alpha/project".to_string(), "zeta/project".to_string()]
-        );
     }
 
     #[test]
@@ -2766,6 +2880,27 @@ mod tests {
         assert!(state.detail_states.contains_key(TUTORIAL_PR_KEY));
         assert!(state.workspace.is_none());
 
+        state.set_onboarding_step(2);
+        assert_eq!(
+            state.active_onboarding_target(),
+            Some(WizardStepTarget::LocalReview)
+        );
+        assert_eq!(state.active_section, SectionId::Overview);
+        assert_eq!(state.active_pr_key, None);
+
+        state.set_onboarding_step(1);
+        assert_eq!(
+            state
+                .detail_states
+                .get(TUTORIAL_PR_KEY)
+                .map(|detail| detail.review_session.center_mode),
+            Some(ReviewCenterMode::SemanticDiff)
+        );
+
+        state
+            .review_ai_settings
+            .settings
+            .experimental_features_enabled = true;
         state.set_onboarding_step(2);
         assert_eq!(
             state

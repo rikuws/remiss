@@ -107,7 +107,9 @@ pub fn parse_unified_diff(diff: &str) -> Vec<ParsedDiffFile> {
 
         if let Some(path) = line.strip_prefix("--- ") {
             let normalized = normalize_diff_path(path);
-            if !normalized.is_empty() && normalized != "/dev/null" {
+            if normalized == "/dev/null" {
+                file.previous_path = None;
+            } else if !normalized.is_empty() {
                 file.previous_path = Some(normalized);
             }
             continue;

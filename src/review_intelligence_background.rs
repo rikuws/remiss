@@ -102,6 +102,10 @@ pub fn sync_workspace_review_intelligence(
     workspace: &WorkspaceSnapshot,
     settings: &ReviewAiSettings,
 ) -> Result<ReviewIntelligenceSyncOutcome, String> {
+    if !settings.background_jobs_enabled() {
+        return Ok(ReviewIntelligenceSyncOutcome::default());
+    }
+
     let pull_requests = enabled_pull_requests(workspace, settings);
     let mut outcome = ReviewIntelligenceSyncOutcome {
         enabled_repositories: settings.automatic_repositories.len(),
@@ -294,6 +298,8 @@ mod tests {
         automatic_repositories.insert("acme/api".to_string());
         let settings = ReviewAiSettings {
             provider: ReviewAiProvider::Copilot,
+            experimental_features_enabled: true,
+            background_jobs_enabled: true,
             automatic_repositories,
         };
 

@@ -677,7 +677,7 @@ pub fn apply_fixture_to_detail_state(detail_state: &mut crate::state::DetailStat
         generating: false,
         progress_text: None,
         error: None,
-        message: Some("Tutorial briefing loaded locally.".to_string()),
+        message: Some("Tutorial overview loaded locally.".to_string()),
         success: true,
     };
     detail_state.review_partner_state = crate::state::ReviewPartnerState {

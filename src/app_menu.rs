@@ -13,7 +13,7 @@ actions!(
         AddLocalRepository,
         RefreshLocalRepositories,
         ToggleFileChooser,
-        ShowPullRequestBriefing,
+        ShowPullRequestOverview,
         OpenReviewFiles,
         SwitchToCode,
         SwitchToDiff,
@@ -107,7 +107,7 @@ fn review_menu() -> Menu {
     Menu {
         name: "Review".into(),
         items: vec![
-            MenuItem::action("Show PR Briefing", ShowPullRequestBriefing),
+            MenuItem::action("Show PR Overview", ShowPullRequestOverview),
             MenuItem::action("Open Review Files", OpenReviewFiles),
             MenuItem::action("Open Repository File...", ToggleFileChooser),
             MenuItem::separator(),
@@ -115,7 +115,6 @@ fn review_menu() -> Menu {
             MenuItem::action("Switch to Diff", SwitchToDiff),
             MenuItem::action("Switch to Structural Diff", SwitchToStructuralDiff),
             MenuItem::action("Switch to Source", SwitchToSource),
-            MenuItem::action("Switch to Guided Review", SwitchToGuidedReview),
             MenuItem::separator(),
             MenuItem::action("Submit Review", SubmitReview),
         ],

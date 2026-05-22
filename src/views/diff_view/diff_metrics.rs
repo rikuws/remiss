@@ -268,6 +268,7 @@ pub(super) fn render_diff_line(
     let hover_source_action = source_action.clone();
     let row_drag_action = line_action.clone();
     let row_drop_action = line_action.clone();
+    let row_click_action = line_action.clone();
 
     let left_num = line
         .left_line_number
@@ -283,6 +284,21 @@ pub(super) fn render_diff_line(
     } else {
         line.prefix.clone()
     };
+    let row_id = (
+        ElementId::named_usize(
+            "diff-line-action-row",
+            line.right_line_number
+                .or(line.left_line_number)
+                .unwrap_or_default() as usize,
+        ),
+        SharedString::from(format!(
+            "{}:{}:{}:{}",
+            file_path,
+            line.left_line_number.unwrap_or_default(),
+            line.right_line_number.unwrap_or_default(),
+            marker
+        )),
+    );
 
     let (row_bg, gutter_bg, marker_color, fallback_text_color) = match line.kind {
         DiffLineKind::Addition => (diff_add_bg(), diff_add_gutter_bg(), success(), fg_default()),
@@ -313,6 +329,7 @@ pub(super) fn render_diff_line(
     };
 
     div()
+        .id(row_id)
         .flex()
         .w_full()
         .min_w(px(diff_line_min_width(
@@ -357,6 +374,21 @@ pub(super) fn render_diff_line(
             el.on_drop::<DiffCommentDrag>(move |drag, window, cx| {
                 cx.stop_propagation();
                 finish_review_line_drag(&drag.state, target.clone(), window.mouse_position(), cx);
+            })
+        })
+        .when_some(row_click_action, |el, (state, target)| {
+            el.on_click(move |event, _, cx| {
+                if !event.standard_click() {
+                    return;
+                }
+                cx.stop_propagation();
+                let target = review_line_action_target_with_range(
+                    &state,
+                    target.clone(),
+                    event.modifiers().shift,
+                    cx,
+                );
+                open_review_line_action(&state, target, event.position(), cx);
             })
         })
         .child(
@@ -439,6 +471,9 @@ pub(super) fn render_diff_line(
                                                 window,
                                                 cx,
                                             );
+                                        })
+                                        .on_click(move |_, _, cx| {
+                                            cx.stop_propagation();
                                         })
                                         .child(render_diff_open_source_icon(icon_visible)),
                                 )
@@ -718,8 +753,6 @@ pub(super) fn render_syntax_content(
     let token_ranges = Arc::new(build_interactive_code_tokens(content));
 
     if let Some(lsp_context) = lsp_context.filter(|_| !token_ranges.is_empty()) {
-        let hover_context = lsp_context.clone();
-        let hover_tokens = token_ranges.clone();
         let tooltip_context = lsp_context.clone();
         let tooltip_tokens = token_ranges.clone();
         let click_context = lsp_context.clone();
@@ -752,19 +785,9 @@ pub(super) fn render_syntax_content(
                 navigate_to_diff_lsp_definition(query, window, cx);
             })
             .require_platform_modifier_for_click()
-            .on_hover(move |index, _event, window, cx| {
-                let Some(index) = index else {
-                    return;
-                };
-                let Some(query) = hover_context.query_for_index(index, hover_tokens.as_ref())
-                else {
-                    return;
-                };
-                request_diff_line_lsp_details(query, window, cx);
-            })
-            .tooltip_with_key(move |index, window, cx| {
+            .track_hover()
+            .tooltip_with_key(move |index, _window, cx| {
                 let query = tooltip_context.query_for_index(index, tooltip_tokens.as_ref())?;
-                request_diff_line_lsp_details(query.clone(), window, cx);
                 Some((
                     query.query_key.clone(),
                     build_lsp_hover_tooltip_view(
@@ -773,6 +796,10 @@ pub(super) fn render_syntax_content(
                         query.query_key.clone(),
                         query.token_label.clone(),
                         query.request.file_path.clone(),
+                        query.lsp_session_manager.clone(),
+                        query.repo_root.clone(),
+                        query.request.clone(),
+                        query.references_supported,
                         cx,
                     ),
                 ))

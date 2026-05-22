@@ -679,7 +679,7 @@ fn push_review_navigation_items(items: &mut Vec<CommandItem>, state: &AppState) 
 
     if !state.active_is_local_review() {
         items.push(CommandItem::normal_with_keywords(
-            "Show PR briefing",
+            "Show PR overview",
             CommandAction::ShowPullRequestSurface(PullRequestSurface::Overview),
             &["overview", "summary", "pull request"],
         ));
@@ -717,19 +717,21 @@ fn push_review_navigation_items(items: &mut Vec<CommandItem>, state: &AppState) 
         CommandAction::EnterCodeLens(ReviewCenterMode::SourceBrowser),
         &["source browser", "repository", "full tree", "files", "code"],
     ));
-    items.push(CommandItem::normal_with_keywords(
-        "Switch to Guided Review",
-        CommandAction::EnterStack,
-        &[
-            "ai",
-            "guide",
-            "generated review",
-            "ai stack",
-            "virtual stack",
-            "layers",
-            "review plan",
-        ],
-    ));
+    if state.review_ai_features_enabled() {
+        items.push(CommandItem::normal_with_keywords(
+            "Switch to Guided Review",
+            CommandAction::EnterStack,
+            &[
+                "ai",
+                "guide",
+                "generated review",
+                "ai stack",
+                "virtual stack",
+                "layers",
+                "review plan",
+            ],
+        ));
+    }
 }
 
 fn push_code_theme_items(items: &mut Vec<CommandItem>, state: &AppState, query: &str) {
@@ -946,11 +948,15 @@ fn apply_command_action(
         }
         CommandAction::EnterGuidedReview => {
             close_palette(state, cx);
-            enter_stack_review_mode(state, window, cx);
+            if state.read(cx).review_ai_features_enabled() {
+                enter_stack_review_mode(state, window, cx);
+            }
         }
         CommandAction::EnterStack => {
             close_palette(state, cx);
-            enter_stack_review_mode(state, window, cx);
+            if state.read(cx).review_ai_features_enabled() {
+                enter_stack_review_mode(state, window, cx);
+            }
         }
         CommandAction::SyncWorkspace => {
             trigger_sync_workspace(state, window, cx);

@@ -41,11 +41,27 @@ pub struct ReviewAiSettings {
     #[serde(default)]
     pub provider: ReviewAiProvider,
     #[serde(default)]
+    pub experimental_features_enabled: bool,
+    #[serde(default)]
+    pub background_jobs_enabled: bool,
+    #[serde(default)]
     pub automatic_repositories: BTreeSet<String>,
 }
 
 impl ReviewAiSettings {
+    pub fn experimental_features_enabled(&self) -> bool {
+        self.experimental_features_enabled
+    }
+
+    pub fn background_jobs_enabled(&self) -> bool {
+        self.experimental_features_enabled && self.background_jobs_enabled
+    }
+
     pub fn automatically_generates_for(&self, repository: &str) -> bool {
+        self.background_jobs_enabled() && self.repository_background_enabled(repository)
+    }
+
+    pub fn repository_background_enabled(&self, repository: &str) -> bool {
         self.automatic_repositories.contains(repository)
     }
 
@@ -141,4 +157,51 @@ fn hash_text(value: &str) -> String {
     let mut hasher = Sha1::new();
     hasher.update(value.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn default_review_ai_settings_keep_experimental_features_off() {
+        let settings = ReviewAiSettings::default();
+
+        assert!(!settings.experimental_features_enabled());
+        assert!(!settings.background_jobs_enabled());
+        assert!(!settings.automatically_generates_for("acme/api"));
+    }
+
+    #[test]
+    fn legacy_review_ai_settings_do_not_enable_agent_jobs() {
+        let settings: ReviewAiSettings = serde_json::from_value(json!({
+            "provider": "copilot",
+            "automaticRepositories": ["acme/api"]
+        }))
+        .expect("legacy settings should deserialize");
+
+        assert_eq!(settings.provider, ReviewAiProvider::Copilot);
+        assert!(!settings.experimental_features_enabled());
+        assert!(!settings.background_jobs_enabled());
+        assert!(settings.repository_background_enabled("acme/api"));
+        assert!(!settings.automatically_generates_for("acme/api"));
+    }
+
+    #[test]
+    fn background_jobs_require_the_experimental_feature_gate() {
+        let mut settings = ReviewAiSettings {
+            background_jobs_enabled: true,
+            ..ReviewAiSettings::default()
+        };
+        settings.set_automatic_generation_for("acme/api", true);
+
+        assert!(!settings.background_jobs_enabled());
+        assert!(!settings.automatically_generates_for("acme/api"));
+
+        settings.experimental_features_enabled = true;
+
+        assert!(settings.background_jobs_enabled());
+        assert!(settings.automatically_generates_for("acme/api"));
+    }
 }

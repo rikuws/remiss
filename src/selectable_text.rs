@@ -9,10 +9,10 @@ use std::{
 
 use gpui::{
     fill, point, px, size, AnyTooltip, AnyView, App, Bounds, ClipboardItem, DispatchPhase, Element,
-    ElementId, FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
-    IntoElement, KeyDownEvent, LayoutId, ListOffset, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, SharedString, StyledText, Task, TextLayout, TextRun, Window,
-    WrappedLineLayout,
+    ElementId, FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InputHandler,
+    InspectorElementId, IntoElement, KeyDownEvent, LayoutId, ListOffset, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, SharedString, StyledText,
+    Task, TextLayout, TextRun, UTF16Selection, Window, WrappedLineLayout,
 };
 
 use crate::{
@@ -97,6 +97,13 @@ impl TextSelectionState {
         Some(anchor.min(head)..anchor.max(head))
     }
 
+    fn selection_reversed(&self) -> bool {
+        match (self.anchor_index, self.head_index) {
+            (Some(anchor), Some(head)) => head < anchor,
+            _ => false,
+        }
+    }
+
     fn cursor_index(&self) -> usize {
         self.head_index.or(self.anchor_index).unwrap_or(0)
     }
@@ -116,6 +123,11 @@ impl TextSelectionState {
     fn select_all(&mut self, len: usize) {
         self.anchor_index = Some(0);
         self.head_index = Some(len);
+    }
+
+    fn set_range(&mut self, range: Range<usize>) {
+        self.anchor_index = Some(range.start);
+        self.head_index = Some(range.end);
     }
 
     fn clear(&mut self) {
@@ -241,6 +253,11 @@ impl SelectableText {
         listener: impl Fn(Option<usize>, MouseMoveEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.hover_listener = Some(Box::new(listener));
+        self
+    }
+
+    pub fn track_hover(mut self) -> Self {
+        self.hover_listener = Some(Box::new(|_, _, _, _| {}));
         self
     }
 
@@ -792,6 +809,171 @@ impl IntoElement for SelectableText {
 pub struct AppTextInputState {
     focus_handle: Option<FocusHandle>,
     selection: Rc<RefCell<TextSelectionState>>,
+    marked_range: Rc<RefCell<Option<Range<usize>>>>,
+}
+
+struct AppTextInputPlatformHandler {
+    state: gpui::Entity<AppState>,
+    field: AppTextFieldKind,
+    selection: Rc<RefCell<TextSelectionState>>,
+    marked_range: Rc<RefCell<Option<Range<usize>>>>,
+    text_layout: TextLayout,
+}
+
+impl AppTextInputPlatformHandler {
+    fn current_text(&self, cx: &App) -> String {
+        input_text_for_field(self.state.read(cx), self.field).to_string()
+    }
+
+    fn replacement_range(&self, text: &str, range_utf16: Option<Range<usize>>) -> Range<usize> {
+        if let Some(range_utf16) = range_utf16 {
+            return utf16_range_to_utf8(text, &range_utf16);
+        }
+
+        if let Some(range) = self.marked_range.borrow().clone() {
+            return clamp_byte_range(text, range);
+        }
+
+        let mut selection = self.selection.borrow_mut();
+        selection.clamp(text.len());
+        selection.selection_range().unwrap_or_else(|| {
+            let cursor = selection.cursor_index();
+            cursor..cursor
+        })
+    }
+}
+
+impl InputHandler for AppTextInputPlatformHandler {
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Option<UTF16Selection> {
+        let text = self.current_text(cx);
+        let mut selection = self.selection.borrow_mut();
+        selection.clamp(text.len());
+        let range = selection.selection_range().unwrap_or_else(|| {
+            let cursor = selection.cursor_index();
+            cursor..cursor
+        });
+        Some(UTF16Selection {
+            range: utf8_range_to_utf16(&text, &range),
+            reversed: selection.selection_reversed(),
+        })
+    }
+
+    fn marked_text_range(&mut self, _window: &mut Window, cx: &mut App) -> Option<Range<usize>> {
+        let text = self.current_text(cx);
+        let range = self
+            .marked_range
+            .borrow()
+            .as_ref()
+            .map(|range| clamp_byte_range(&text, range.clone()))?;
+        Some(utf8_range_to_utf16(&text, &range))
+    }
+
+    fn text_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        adjusted_range: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Option<String> {
+        let text = self.current_text(cx);
+        let range = utf16_range_to_utf8(&text, &range_utf16);
+        adjusted_range.replace(utf8_range_to_utf16(&text, &range));
+        text.get(range).map(str::to_string)
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        replacement_range: Option<Range<usize>>,
+        text: &str,
+        _window: &mut Window,
+        cx: &mut App,
+    ) {
+        let current_text = self.current_text(cx);
+        let range = self.replacement_range(&current_text, replacement_range);
+        let replacement = normalize_paste(self.field, text);
+        self.marked_range.borrow_mut().take();
+        self.state.update(cx, |app_state, cx| {
+            apply_replacement(app_state, self.field, &self.selection, range, &replacement);
+            cx.notify();
+        });
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        new_selected_range_utf16: Option<Range<usize>>,
+        _window: &mut Window,
+        cx: &mut App,
+    ) {
+        let current_text = self.current_text(cx);
+        let range = self.replacement_range(&current_text, range_utf16);
+        let replacement = normalize_paste(self.field, new_text);
+        let selected_after = new_selected_range_utf16
+            .as_ref()
+            .map(|range| utf16_range_to_utf8(&replacement, range));
+        self.state.update(cx, |app_state, cx| {
+            let inserted =
+                replace_input_range(app_state, self.field, &self.selection, range, &replacement);
+            let mut selection = self.selection.borrow_mut();
+            let selected = selected_after
+                .as_ref()
+                .map(|range| inserted.start + range.start..inserted.start + range.end)
+                .unwrap_or_else(|| inserted.end..inserted.end);
+            selection.set_range(selected);
+            selection.clamp(input_text_for_field(app_state, self.field).len());
+            *self.marked_range.borrow_mut() = (!replacement.is_empty()).then_some(inserted);
+            cx.notify();
+        });
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut App) {
+        self.marked_range.borrow_mut().take();
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Bounds<Pixels>> {
+        let text = self.current_text(cx);
+        let range = utf16_range_to_utf8(&text, &range_utf16);
+        let start = cursor_quad_for_index(&self.text_layout, range.start)?;
+        let end = cursor_quad_for_index(&self.text_layout, range.end)?;
+        let left = start.bounds.left();
+        let right = if range.is_empty() {
+            left + px(2.0)
+        } else {
+            end.bounds.left().max(left + px(1.0))
+        };
+        Some(Bounds::from_corners(
+            point(left, start.bounds.top()),
+            point(right, start.bounds.top() + self.text_layout.line_height()),
+        ))
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        point: gpui::Point<Pixels>,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Option<usize> {
+        let text = self.current_text(cx);
+        if text.is_empty() {
+            return Some(0);
+        }
+        let index = self
+            .text_layout
+            .index_for_position(point)
+            .unwrap_or_else(|index| index);
+        Some(utf8_to_utf16_offset(&text, index))
+    }
 }
 
 pub struct AppTextInput {
@@ -943,6 +1125,7 @@ impl Element for AppTextInput {
                 let input_state = input_state.unwrap_or_default();
                 let focus_handle = input_state.focus_handle.clone();
                 let selection_state = input_state.selection.clone();
+                let marked_range = input_state.marked_range.clone();
                 selection_state.borrow_mut().clamp(raw_text.len());
 
                 if autofocus {
@@ -955,6 +1138,7 @@ impl Element for AppTextInput {
                 let clear_hitbox = hitbox.clone();
                 let clear_selection_state = selection_state.clone();
                 let clear_selection_id = selection_id.clone();
+                let clear_marked_range = marked_range.clone();
                 window.on_mouse_event(move |_event: &MouseDownEvent, phase, window, _cx| {
                     if phase != DispatchPhase::Capture {
                         return;
@@ -967,6 +1151,7 @@ impl Element for AppTextInput {
 
                     clear_active_text_target(&clear_selection_id);
                     clear_selection_state.borrow_mut().clear();
+                    clear_marked_range.borrow_mut().take();
                     window.refresh();
                 });
 
@@ -977,6 +1162,7 @@ impl Element for AppTextInput {
                 let mouse_down_id = selection_id.clone();
                 let mouse_down_text = raw_text.clone();
                 let mouse_down_focus = focus_handle.clone();
+                let mouse_down_marked_range = marked_range.clone();
                 window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                     if phase != DispatchPhase::Capture
                         || event.button != MouseButton::Left
@@ -1012,6 +1198,7 @@ impl Element for AppTextInput {
                             selection.collapse_to(index);
                         }
                     }
+                    mouse_down_marked_range.borrow_mut().take();
 
                     if let Some(focus_handle) = mouse_down_focus.as_ref() {
                         focus_handle.focus(window);
@@ -1064,98 +1251,184 @@ impl Element for AppTextInput {
                     let key_selection = selection_state.clone();
                     let key_id = selection_id.clone();
                     let key_text = raw_text.clone();
+                    let key_marked_range = marked_range.clone();
                     move |event: &KeyDownEvent, phase, window, cx| {
                         if phase != DispatchPhase::Bubble || !is_active_text_target(&key_id) {
                             return;
                         }
 
                         let modifiers = event.keystroke.modifiers;
-                        let platform_only = platform_primary_modifier(modifiers);
+                        let shortcut_only = platform_primary_modifier(modifiers);
+                        let line_modifier = platform_line_navigation_modifier(modifiers);
+                        let word_modifier = platform_word_navigation_modifier(modifiers);
                         let key = event.keystroke.key.as_str();
 
                         let mut handled = true;
                         match key {
                             "left" => {
+                                let movement = if line_modifier {
+                                    TextMovement::LineStart
+                                } else if word_modifier {
+                                    TextMovement::PreviousWord
+                                } else {
+                                    TextMovement::Left
+                                };
                                 key_state.update(cx, |app_state, cx| {
                                     move_input_selection(
                                         input_text_for_field(app_state, field),
                                         &key_selection,
-                                        MoveDirection::Left,
+                                        movement,
                                         modifiers.shift,
                                     );
+                                    key_marked_range.borrow_mut().take();
                                     cx.notify();
                                 });
                             }
                             "right" => {
+                                let movement = if line_modifier {
+                                    TextMovement::LineEnd
+                                } else if word_modifier {
+                                    TextMovement::NextWord
+                                } else {
+                                    TextMovement::Right
+                                };
                                 key_state.update(cx, |app_state, cx| {
                                     move_input_selection(
                                         input_text_for_field(app_state, field),
                                         &key_selection,
-                                        MoveDirection::Right,
+                                        movement,
                                         modifiers.shift,
                                     );
+                                    key_marked_range.borrow_mut().take();
+                                    cx.notify();
+                                });
+                            }
+                            "up" if multiline => {
+                                let movement = if line_modifier {
+                                    TextMovement::DocumentStart
+                                } else {
+                                    TextMovement::PreviousLine
+                                };
+                                key_state.update(cx, |app_state, cx| {
+                                    move_input_selection(
+                                        input_text_for_field(app_state, field),
+                                        &key_selection,
+                                        movement,
+                                        modifiers.shift,
+                                    );
+                                    key_marked_range.borrow_mut().take();
+                                    cx.notify();
+                                });
+                            }
+                            "down" if multiline => {
+                                let movement = if line_modifier {
+                                    TextMovement::DocumentEnd
+                                } else {
+                                    TextMovement::NextLine
+                                };
+                                key_state.update(cx, |app_state, cx| {
+                                    move_input_selection(
+                                        input_text_for_field(app_state, field),
+                                        &key_selection,
+                                        movement,
+                                        modifiers.shift,
+                                    );
+                                    key_marked_range.borrow_mut().take();
                                     cx.notify();
                                 });
                             }
                             "home" => {
+                                let target = line_start_boundary(
+                                    &key_text,
+                                    key_selection.borrow().cursor_index(),
+                                );
                                 key_selection
                                     .borrow_mut()
-                                    .select_to_or_collapse(0, modifiers.shift);
+                                    .select_to_or_collapse(target, modifiers.shift);
+                                key_marked_range.borrow_mut().take();
                                 window.refresh();
                             }
                             "end" => {
-                                let len = key_text.len();
+                                let len = line_end_boundary(
+                                    &key_text,
+                                    key_selection.borrow().cursor_index(),
+                                );
                                 key_selection
                                     .borrow_mut()
                                     .select_to_or_collapse(len, modifiers.shift);
+                                key_marked_range.borrow_mut().take();
                                 window.refresh();
                             }
                             "backspace" => {
+                                let unit = if line_modifier {
+                                    DeleteUnit::Line
+                                } else if word_modifier {
+                                    DeleteUnit::Word
+                                } else {
+                                    DeleteUnit::Character
+                                };
                                 key_state.update(cx, |app_state, cx| {
+                                    key_marked_range.borrow_mut().take();
                                     edit_input_text(
                                         app_state,
                                         field,
                                         &key_selection,
-                                        EditCommand::Backspace,
+                                        EditCommand::Backspace(unit),
                                     );
                                     cx.notify();
                                 });
                             }
                             "delete" => {
+                                let unit = if line_modifier {
+                                    DeleteUnit::Line
+                                } else if word_modifier {
+                                    DeleteUnit::Word
+                                } else {
+                                    DeleteUnit::Character
+                                };
                                 key_state.update(cx, |app_state, cx| {
+                                    key_marked_range.borrow_mut().take();
                                     edit_input_text(
                                         app_state,
                                         field,
                                         &key_selection,
-                                        EditCommand::Delete,
+                                        EditCommand::Delete(unit),
                                     );
                                     cx.notify();
                                 });
                             }
-                            "a" if platform_only => {
-                                key_selection.borrow_mut().select_all(key_text.len());
+                            "a" if shortcut_only => {
+                                let len = input_text_for_field(key_state.read(cx), field).len();
+                                key_selection.borrow_mut().select_all(len);
+                                key_marked_range.borrow_mut().take();
                                 window.refresh();
                             }
-                            "c" if platform_only => {
+                            "c" if shortcut_only => {
                                 if let Some(range) = key_selection.borrow().selection_range() {
+                                    let text =
+                                        input_text_for_field(key_state.read(cx), field).to_string();
                                     if !range.is_empty() {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            key_text[range].to_string(),
-                                        ));
+                                        if let Some(selected) = text.get(range) {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                selected.to_string(),
+                                            ));
+                                        }
                                     }
                                 }
                             }
-                            "x" if platform_only => {
+                            "x" if shortcut_only => {
                                 key_state.update(cx, |app_state, cx| {
+                                    key_marked_range.borrow_mut().take();
                                     cut_input_text(app_state, field, &key_selection, cx);
                                     cx.notify();
                                 });
                             }
-                            "v" if platform_only => {
+                            "v" if shortcut_only => {
                                 if let Some(text) =
                                     cx.read_from_clipboard().and_then(|item| item.text())
                                 {
                                     key_state.update(cx, |app_state, cx| {
+                                        key_marked_range.borrow_mut().take();
                                         edit_input_text(
                                             app_state,
                                             field,
@@ -1166,8 +1439,9 @@ impl Element for AppTextInput {
                                     });
                                 }
                             }
-                            "enter" if !platform_only && multiline => {
+                            "enter" if text_input_return_modifier(modifiers) && multiline => {
                                 key_state.update(cx, |app_state, cx| {
+                                    key_marked_range.borrow_mut().take();
                                     edit_input_text(
                                         app_state,
                                         field,
@@ -1177,27 +1451,9 @@ impl Element for AppTextInput {
                                     cx.notify();
                                 });
                             }
+                            "tab" => {}
                             _ => {
                                 handled = false;
-                                if let Some(input) = event.keystroke.key_char.as_ref() {
-                                    if should_insert_text(input, multiline) {
-                                        let input = if multiline {
-                                            input.to_string()
-                                        } else {
-                                            input.replace('\n', " ")
-                                        };
-                                        key_state.update(cx, |app_state, cx| {
-                                            edit_input_text(
-                                                app_state,
-                                                field,
-                                                &key_selection,
-                                                EditCommand::Insert(input.clone()),
-                                            );
-                                            cx.notify();
-                                        });
-                                        handled = true;
-                                    }
-                                }
                             }
                         }
 
@@ -1206,6 +1462,22 @@ impl Element for AppTextInput {
                         }
                     }
                 });
+
+                if is_active_text_target(&selection_id) {
+                    if let Some(focus_handle) = focus_handle.as_ref() {
+                        window.handle_input(
+                            focus_handle,
+                            AppTextInputPlatformHandler {
+                                state: state.clone(),
+                                field,
+                                selection: selection_state.clone(),
+                                marked_range: marked_range.clone(),
+                                text_layout: text_layout.clone(),
+                            },
+                            cx,
+                        );
+                    }
+                }
 
                 if hitbox.is_hovered(window) || is_active_text_target(&selection_id) {
                     window.set_cursor_style(gpui::CursorStyle::IBeam, hitbox);
@@ -1260,50 +1532,59 @@ impl TextSelectionState {
 }
 
 #[derive(Clone, Copy)]
-enum MoveDirection {
+enum TextMovement {
     Left,
     Right,
+    PreviousWord,
+    NextWord,
+    LineStart,
+    LineEnd,
+    PreviousLine,
+    NextLine,
+    DocumentStart,
+    DocumentEnd,
 }
 
 enum EditCommand {
     Insert(String),
-    Backspace,
-    Delete,
+    Backspace(DeleteUnit),
+    Delete(DeleteUnit),
+}
+
+#[derive(Clone, Copy)]
+enum DeleteUnit {
+    Character,
+    Word,
+    Line,
 }
 
 fn move_input_selection(
     text: &str,
     selection: &Rc<RefCell<TextSelectionState>>,
-    direction: MoveDirection,
+    movement: TextMovement,
     extend: bool,
 ) {
     let mut selection = selection.borrow_mut();
     selection.clamp(text.len());
 
-    let target = if extend {
-        match direction {
-            MoveDirection::Left => previous_boundary(text, selection.cursor_index()),
-            MoveDirection::Right => next_boundary(text, selection.cursor_index()),
-        }
-    } else if let Some(range) = selection.selection_range() {
-        if !range.is_empty() {
-            match direction {
-                MoveDirection::Left => range.start,
-                MoveDirection::Right => range.end,
-            }
-        } else {
-            match direction {
-                MoveDirection::Left => previous_boundary(text, selection.cursor_index()),
-                MoveDirection::Right => next_boundary(text, selection.cursor_index()),
-            }
-        }
+    let cursor = if !extend {
+        selection
+            .selection_range()
+            .filter(|range| !range.is_empty())
+            .map(|range| match movement {
+                TextMovement::Left | TextMovement::PreviousWord | TextMovement::LineStart => {
+                    range.start
+                }
+                TextMovement::Right | TextMovement::NextWord | TextMovement::LineEnd => range.end,
+                TextMovement::PreviousLine | TextMovement::DocumentStart => range.start,
+                TextMovement::NextLine | TextMovement::DocumentEnd => range.end,
+            })
+            .unwrap_or_else(|| selection.cursor_index())
     } else {
-        match direction {
-            MoveDirection::Left => previous_boundary(text, selection.cursor_index()),
-            MoveDirection::Right => next_boundary(text, selection.cursor_index()),
-        }
+        selection.cursor_index()
     };
 
+    let target = movement_target(text, cursor, movement);
     selection.select_to_or_collapse(target, extend);
 }
 
@@ -1391,20 +1672,20 @@ fn edit_input_text(
             drop(selection_state);
             apply_replacement(state, field, selection, selection_range, &new_text);
         }
-        EditCommand::Backspace => {
+        EditCommand::Backspace(unit) => {
             let delete_range = if selection_range.is_empty() {
                 let cursor = selection_range.end;
-                previous_boundary(&text, cursor)..cursor
+                backward_delete_start(&text, cursor, unit)..cursor
             } else {
                 selection_range
             };
             drop(selection_state);
             apply_replacement(state, field, selection, delete_range, "");
         }
-        EditCommand::Delete => {
+        EditCommand::Delete(unit) => {
             let delete_range = if selection_range.is_empty() {
                 let cursor = selection_range.end;
-                cursor..next_boundary(&text, cursor)
+                cursor..forward_delete_end(&text, cursor, unit)
             } else {
                 selection_range
             };
@@ -1421,17 +1702,32 @@ fn apply_replacement(
     range: Range<usize>,
     replacement: &str,
 ) {
+    let inserted = replace_input_range(state, field, selection, range, replacement);
+    let mut selection_state = selection.borrow_mut();
+    selection_state.collapse_to(inserted.end);
+    selection_state.clamp(input_text_for_field(state, field).len());
+}
+
+fn replace_input_range(
+    state: &mut AppState,
+    field: AppTextFieldKind,
+    selection: &Rc<RefCell<TextSelectionState>>,
+    range: Range<usize>,
+    replacement: &str,
+) -> Range<usize> {
     let text = input_text_for_field(state, field).to_string();
+    let range = clamp_byte_range(&text, range);
     let mut next = String::with_capacity(text.len() + replacement.len());
     next.push_str(&text[..range.start]);
     next.push_str(replacement);
     next.push_str(&text[range.end..]);
     set_input_text_for_field(state, field, next);
 
-    let cursor = range.start + replacement.len();
-    let mut selection_state = selection.borrow_mut();
-    selection_state.collapse_to(cursor);
-    selection_state.clamp(input_text_for_field(state, field).len());
+    let inserted = range.start..range.start + replacement.len();
+    selection
+        .borrow_mut()
+        .clamp(input_text_for_field(state, field).len());
+    inserted
 }
 
 fn normalize_paste(field: AppTextFieldKind, text: &str) -> String {
@@ -1445,14 +1741,226 @@ fn normalize_paste(field: AppTextFieldKind, text: &str) -> String {
     }
 }
 
-fn should_insert_text(input: &str, multiline: bool) -> bool {
-    if input == "\t" {
-        return false;
+fn movement_target(text: &str, cursor: usize, movement: TextMovement) -> usize {
+    match movement {
+        TextMovement::Left => previous_boundary(text, cursor),
+        TextMovement::Right => next_boundary(text, cursor),
+        TextMovement::PreviousWord => previous_word_boundary(text, cursor),
+        TextMovement::NextWord => next_word_boundary(text, cursor),
+        TextMovement::LineStart => line_start_boundary(text, cursor),
+        TextMovement::LineEnd => line_end_boundary(text, cursor),
+        TextMovement::PreviousLine => previous_line_boundary(text, cursor),
+        TextMovement::NextLine => next_line_boundary(text, cursor),
+        TextMovement::DocumentStart => 0,
+        TextMovement::DocumentEnd => text.len(),
     }
-    if input == "\n" {
-        return multiline;
+}
+
+fn backward_delete_start(text: &str, cursor: usize, unit: DeleteUnit) -> usize {
+    match unit {
+        DeleteUnit::Character => previous_boundary(text, cursor),
+        DeleteUnit::Word => previous_word_boundary(text, cursor),
+        DeleteUnit::Line => line_start_boundary(text, cursor),
     }
-    !input.chars().all(|character| character.is_control())
+}
+
+fn forward_delete_end(text: &str, cursor: usize, unit: DeleteUnit) -> usize {
+    match unit {
+        DeleteUnit::Character => next_boundary(text, cursor),
+        DeleteUnit::Word => next_word_boundary(text, cursor),
+        DeleteUnit::Line => line_end_boundary(text, cursor),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WordBoundaryClass {
+    Word,
+    Punctuation,
+}
+
+fn previous_word_boundary(text: &str, offset: usize) -> usize {
+    let mut cursor = clamp_byte_index(text, offset);
+    while cursor > 0 {
+        let previous = previous_boundary(text, cursor);
+        let Some(character) = text[previous..cursor].chars().next() else {
+            return previous;
+        };
+        if !character.is_whitespace() {
+            break;
+        }
+        cursor = previous;
+    }
+
+    if cursor == 0 {
+        return 0;
+    }
+
+    let previous = previous_boundary(text, cursor);
+    let Some(character) = text[previous..cursor].chars().next() else {
+        return previous;
+    };
+    let class = word_boundary_class(character);
+    let mut start = previous;
+    while start > 0 {
+        let earlier = previous_boundary(text, start);
+        let Some(character) = text[earlier..start].chars().next() else {
+            break;
+        };
+        if character.is_whitespace() || word_boundary_class(character) != class {
+            break;
+        }
+        start = earlier;
+    }
+    start
+}
+
+fn next_word_boundary(text: &str, offset: usize) -> usize {
+    let mut cursor = clamp_byte_index(text, offset);
+    while cursor < text.len() {
+        let next = next_boundary(text, cursor);
+        let Some(character) = text[cursor..next].chars().next() else {
+            return next;
+        };
+        if !character.is_whitespace() {
+            break;
+        }
+        cursor = next;
+    }
+
+    if cursor >= text.len() {
+        return text.len();
+    }
+
+    let next = next_boundary(text, cursor);
+    let Some(character) = text[cursor..next].chars().next() else {
+        return next;
+    };
+    let class = word_boundary_class(character);
+    let mut end = next;
+    while end < text.len() {
+        let next = next_boundary(text, end);
+        let Some(character) = text[end..next].chars().next() else {
+            break;
+        };
+        if character.is_whitespace() || word_boundary_class(character) != class {
+            break;
+        }
+        end = next;
+    }
+    end
+}
+
+fn word_boundary_class(character: char) -> WordBoundaryClass {
+    if character.is_alphanumeric() || character == '_' {
+        WordBoundaryClass::Word
+    } else {
+        WordBoundaryClass::Punctuation
+    }
+}
+
+fn line_start_boundary(text: &str, offset: usize) -> usize {
+    let offset = clamp_byte_index(text, offset);
+    text[..offset]
+        .rfind('\n')
+        .map(|index| index + 1)
+        .unwrap_or(0)
+}
+
+fn line_end_boundary(text: &str, offset: usize) -> usize {
+    let offset = clamp_byte_index(text, offset);
+    text[offset..]
+        .find('\n')
+        .map(|index| offset + index)
+        .unwrap_or(text.len())
+}
+
+fn previous_line_boundary(text: &str, offset: usize) -> usize {
+    let offset = clamp_byte_index(text, offset);
+    let current_start = line_start_boundary(text, offset);
+    if current_start == 0 {
+        return 0;
+    }
+    let previous_end = current_start.saturating_sub(1);
+    let previous_start = line_start_boundary(text, previous_end);
+    let column = text[current_start..offset].chars().count();
+    byte_index_for_line_column(text, previous_start, previous_end, column)
+}
+
+fn next_line_boundary(text: &str, offset: usize) -> usize {
+    let offset = clamp_byte_index(text, offset);
+    let current_start = line_start_boundary(text, offset);
+    let current_end = line_end_boundary(text, offset);
+    if current_end >= text.len() {
+        return text.len();
+    }
+    let next_start = current_end + 1;
+    let next_end = line_end_boundary(text, next_start);
+    let column = text[current_start..offset].chars().count();
+    byte_index_for_line_column(text, next_start, next_end, column)
+}
+
+fn byte_index_for_line_column(
+    text: &str,
+    line_start: usize,
+    line_end: usize,
+    column: usize,
+) -> usize {
+    text[line_start..line_end]
+        .char_indices()
+        .nth(column)
+        .map(|(index, _)| line_start + index)
+        .unwrap_or(line_end)
+}
+
+fn clamp_byte_range(text: &str, range: Range<usize>) -> Range<usize> {
+    let start = clamp_byte_index(text, range.start);
+    let end = clamp_byte_index(text, range.end);
+    start.min(end)..start.max(end)
+}
+
+fn clamp_byte_index(text: &str, offset: usize) -> usize {
+    let mut offset = offset.min(text.len());
+    while offset > 0 && !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
+}
+
+fn utf16_to_utf8_offset(text: &str, offset: usize) -> usize {
+    let mut utf16_count = 0;
+    for (byte_index, character) in text.char_indices() {
+        if utf16_count >= offset {
+            return byte_index;
+        }
+        utf16_count += character.len_utf16();
+        if utf16_count > offset {
+            return byte_index + character.len_utf8();
+        }
+    }
+    text.len()
+}
+
+fn utf8_to_utf16_offset(text: &str, offset: usize) -> usize {
+    let offset = clamp_byte_index(text, offset);
+    let mut utf16_count = 0;
+    for (byte_index, character) in text.char_indices() {
+        if byte_index >= offset {
+            break;
+        }
+        utf16_count += character.len_utf16();
+    }
+    utf16_count
+}
+
+fn utf16_range_to_utf8(text: &str, range: &Range<usize>) -> Range<usize> {
+    let start = utf16_to_utf8_offset(text, range.start);
+    let end = utf16_to_utf8_offset(text, range.end);
+    start.min(end)..start.max(end)
+}
+
+fn utf8_range_to_utf16(text: &str, range: &Range<usize>) -> Range<usize> {
+    let range = clamp_byte_range(text, range.clone());
+    utf8_to_utf16_offset(text, range.start)..utf8_to_utf16_offset(text, range.end)
 }
 
 fn selection_quads_for_range(
@@ -1558,6 +2066,26 @@ fn next_boundary(text: &str, offset: usize) -> usize {
 
 fn platform_primary_modifier(modifiers: gpui::Modifiers) -> bool {
     shortcuts::secondary_text_modifier(modifiers)
+}
+
+fn platform_line_navigation_modifier(modifiers: gpui::Modifiers) -> bool {
+    if cfg!(target_os = "macos") {
+        modifiers.platform && !modifiers.alt && !modifiers.control && !modifiers.function
+    } else {
+        false
+    }
+}
+
+fn platform_word_navigation_modifier(modifiers: gpui::Modifiers) -> bool {
+    if cfg!(target_os = "macos") {
+        modifiers.alt && !modifiers.platform && !modifiers.control && !modifiers.function
+    } else {
+        modifiers.control && !modifiers.platform && !modifiers.alt && !modifiers.function
+    }
+}
+
+fn text_input_return_modifier(modifiers: gpui::Modifiers) -> bool {
+    !modifiers.platform && !modifiers.control && !modifiers.alt && !modifiers.function
 }
 
 fn platform_click_modifier(modifiers: gpui::Modifiers) -> bool {
@@ -1783,5 +2311,52 @@ mod tests {
         finish_group_text_selection(&last);
 
         assert_eq!(selected_group_text(&first), Some("oo\nbar\nba".to_string()));
+    }
+
+    #[test]
+    fn word_boundaries_skip_whitespace_and_group_words() {
+        let text = "alpha beta.gamma";
+
+        assert_eq!(previous_word_boundary(text, text.len()), 11);
+        assert_eq!(previous_word_boundary(text, 10), 6);
+        assert_eq!(next_word_boundary(text, 0), 5);
+        assert_eq!(next_word_boundary(text, 5), 10);
+        assert_eq!(next_word_boundary(text, 10), 11);
+    }
+
+    #[test]
+    fn line_movement_preserves_column_across_hard_lines() {
+        let text = "one\nabcdef\nxy";
+
+        assert_eq!(line_start_boundary(text, 8), 4);
+        assert_eq!(line_end_boundary(text, 8), 10);
+        assert_eq!(previous_line_boundary(text, 10), 3);
+        assert_eq!(next_line_boundary(text, 2), 6);
+        assert_eq!(next_line_boundary(text, 10), 13);
+    }
+
+    #[test]
+    fn input_selection_supports_command_style_line_jumps() {
+        let text = "first line\nsecond line";
+        let selection = Rc::new(RefCell::new(TextSelectionState::default()));
+        selection.borrow_mut().collapse_to(text.len());
+
+        move_input_selection(text, &selection, TextMovement::LineStart, false);
+        assert_eq!(selection.borrow().cursor_index(), 11);
+
+        move_input_selection(text, &selection, TextMovement::DocumentStart, true);
+        assert_eq!(selection.borrow().selection_range(), Some(0..11));
+        assert!(selection.borrow().selection_reversed());
+    }
+
+    #[test]
+    fn utf16_offsets_round_trip_surrogate_pairs() {
+        let text = "a😄b";
+        let after_emoji = "a😄".len();
+
+        assert_eq!(utf8_to_utf16_offset(text, after_emoji), 3);
+        assert_eq!(utf16_to_utf8_offset(text, 3), after_emoji);
+        assert_eq!(utf16_range_to_utf8(text, &(1..3)), 1..after_emoji);
+        assert_eq!(utf8_range_to_utf16(text, &(1..after_emoji)), 1..3);
     }
 }

@@ -13,7 +13,7 @@ const WORKSPACE_CACHE_KEY: &str = "workspace-snapshot-v3";
 const AUTH_STATE_CACHE_KEY: &str = "auth-state-v1";
 const GITHUB_GRAPHQL_PAGE_SIZE: i64 = 100;
 const GITHUB_SEARCH_RESULT_LIMIT: usize = 1_000;
-const OVERSIZED_DIFF_UNAVAILABLE_REASON: &str = "GitHub did not return the unified diff because this pull request is too large; automatic review intelligence will wait until the pull request changes.";
+const OVERSIZED_DIFF_UNAVAILABLE_REASON: &str = "GitHub did not return the unified diff because this pull request is too large; Remiss loaded the file list and will fetch file-level review context on demand.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthState {
@@ -1594,6 +1594,28 @@ fn fetch_pull_request_diff(
         &format!("Failed to fetch diff for {repository}#{number}"),
     );
     if is_non_retryable_diff_unavailable_error(&message) {
+        if let Ok(files_diff) =
+            crate::github_files_diff::fetch_pull_request_diff_from_files_endpoint(
+                repository, number,
+            )
+        {
+            if !files_diff.parsed_diff.is_empty() {
+                let completeness = if files_diff.loaded_files as i64 >= changed_files.max(0) {
+                    complete_connection_for_count(changed_files)
+                } else {
+                    ConnectionCompleteness::from_counts(
+                        files_diff.loaded_files,
+                        changed_files.max(0),
+                        Some(OVERSIZED_DIFF_UNAVAILABLE_REASON.to_string()),
+                    )
+                };
+                return Ok(PullRequestDiffFetch {
+                    raw_diff: files_diff.raw_diff,
+                    parsed_diff: files_diff.parsed_diff,
+                    completeness,
+                });
+            }
+        }
         return Ok(PullRequestDiffFetch {
             raw_diff: String::new(),
             parsed_diff: Vec::new(),
@@ -2543,7 +2565,7 @@ fn default_queues() -> Vec<PullRequestQueue> {
 }
 
 fn pull_request_detail_cache_key(repository: &str, number: i64) -> String {
-    format!("pr-detail-v4:{}#{}", repository, number)
+    format!("pr-detail-v5:{}#{}", repository, number)
 }
 
 fn pull_request_file_content_cache_key(repository: &str, reference: &str, path: &str) -> String {

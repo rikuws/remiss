@@ -43,7 +43,9 @@ pub fn ensure_review_ai_settings_loaded(
 
     let should_refresh_statuses = {
         let state = state.read(cx);
-        !state.review_ai_provider_statuses_loaded && !state.review_ai_provider_loading
+        state.review_ai_features_enabled()
+            && !state.review_ai_provider_statuses_loaded
+            && !state.review_ai_provider_loading
     };
     if should_refresh_statuses {
         trigger_review_ai_provider_status_refresh(state, window, cx);
@@ -209,6 +211,9 @@ pub fn trigger_review_ai_settings_refresh(
                             state.review_ai_settings.settings = settings;
                             state.review_ai_settings.loaded = true;
                             state.review_ai_settings.error = None;
+                            if !state.review_ai_features_enabled() {
+                                state.hide_experimental_review_ai();
+                            }
                         }
                         Err(error) => {
                             state.review_ai_settings.loaded = false;
@@ -229,6 +234,12 @@ pub fn trigger_review_ai_provider_status_refresh(
 ) {
     let mut should_spawn = false;
     state.update(cx, |state, cx| {
+        if !state.review_ai_features_enabled() {
+            state.review_ai_provider_loading = false;
+            state.review_ai_provider_error = None;
+            cx.notify();
+            return;
+        }
         if state.review_ai_provider_loading {
             return;
         }
@@ -505,15 +516,24 @@ fn update_review_ai_settings(
     update: impl FnOnce(&mut crate::review_ai::ReviewAiSettings),
 ) {
     let cache = state.read(cx).cache.clone();
+    let features_enabled_before = state.read(cx).review_ai_features_enabled();
     let mut next_settings = state.read(cx).review_ai_settings.settings.clone();
     update(&mut next_settings);
+    let features_enabled_after = next_settings.experimental_features_enabled();
 
     state.update(cx, |state, cx| {
         state.review_ai_settings.settings = next_settings.clone();
         state.review_ai_settings.loaded = true;
         state.review_ai_settings.error = None;
+        if !state.review_ai_features_enabled() {
+            state.hide_experimental_review_ai();
+        }
         cx.notify();
     });
+
+    if !features_enabled_before && features_enabled_after {
+        trigger_review_ai_provider_status_refresh(state, window, cx);
+    }
 
     let model = state.clone();
     window
@@ -984,6 +1004,8 @@ fn render_review_intelligence_settings_panel(
 ) -> impl IntoElement {
     let settings_state = s.review_ai_settings.clone();
     let configured_provider = settings_state.settings.provider;
+    let experimental_enabled = settings_state.settings.experimental_features_enabled();
+    let background_jobs_enabled = settings_state.settings.background_jobs_enabled();
     let provider_statuses = s.review_ai_provider_statuses.clone();
     let provider_status = s.selected_review_ai_provider_status().cloned();
     let provider_loading = s.review_ai_provider_loading;
@@ -1003,7 +1025,7 @@ fn render_review_intelligence_settings_panel(
                     .text_size(px(24.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(fg_emphasis())
-                    .child("Review Partner and briefs"),
+                    .child("Experimental AI features"),
             )
             .child(
                 div()
@@ -1011,7 +1033,7 @@ fn render_review_intelligence_settings_panel(
                     .text_color(fg_muted())
                     .max_w(px(760.0))
                     .child(
-                        "Choose the provider Remiss uses for Review Partner and Review Brief. Guided Review stacks are built locally from repository structure when GitHub does not provide a real stack.",
+                        "Review Brief, Guided Review, Review Partner, and Codex/Copilot provider flows are experimental. Structural diffs stay available separately and are not controlled by this setting.",
                     ),
             )
             .child(
@@ -1033,127 +1055,258 @@ fn render_review_intelligence_settings_panel(
                             }
                         },
                     ))
-                    .child(ghost_button(
-                        if provider_loading {
-                            "Refreshing providers..."
-                        } else {
-                            "Refresh providers"
-                        },
-                        {
-                            let state = state.clone();
-                            move |_, window, cx| {
-                                trigger_review_ai_provider_status_refresh(&state, window, cx);
-                            }
-                        },
-                    ))
+                    .when(experimental_enabled, |el| {
+                        el.child(ghost_button(
+                            if provider_loading {
+                                "Refreshing providers..."
+                            } else {
+                                "Refresh providers"
+                            },
+                            {
+                                let state = state.clone();
+                                move |_, window, cx| {
+                                    trigger_review_ai_provider_status_refresh(&state, window, cx);
+                                }
+                            },
+                        ))
+                    })
                     .when(settings_state.loading, |el| {
                         el.child(panel_state_text(
                             "Loading saved review intelligence settings...",
                         ))
                     })
-                    .when(provider_loading, |el| {
+                    .when(experimental_enabled && provider_loading, |el| {
                         el.child(panel_state_text("Checking available providers..."))
                     })
-                    .when(settings_state.background_syncing, |el| {
-                        el.child(panel_state_text(
-                            "Refreshing automatic review intelligence...",
-                        ))
-                    }),
+                    .when(
+                        experimental_enabled
+                            && background_jobs_enabled
+                            && settings_state.background_syncing,
+                        |el| {
+                            el.child(panel_state_text(
+                                "Refreshing automatic review intelligence...",
+                            ))
+                        },
+                    ),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(10.0))
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(fg_emphasis())
-                            .child("AI provider"),
-                    )
-                    .child(
-                        div().flex().gap(px(4.0)).flex_wrap().children(
-                            ReviewAiProvider::all().iter().map(|candidate| {
-                                let candidate = *candidate;
-                                let label = provider_tab_label(candidate, &provider_statuses);
-                                let state = state.clone();
-                                surface_tab(
-                                    &label,
-                                    configured_provider == candidate,
-                                    move |_, window, cx| {
-                                        update_review_ai_settings(
-                                            &state,
-                                            window,
-                                            cx,
-                                            move |settings| {
-                                                settings.provider = candidate;
-                                            },
-                                        );
-                                    },
-                                )
-                            }),
-                        ),
-                    )
-                    .when_some(provider_status, |el, status| {
-                        let primary = if status.available && status.authenticated {
-                            success_text(&status.message).into_any_element()
-                        } else {
-                            error_text(&status.message).into_any_element()
-                        };
-
-                        el.child(primary).child(
+            .child(settings_toggle_row(
+                "Experimental AI features",
+                "Shows Review Brief, Guided Review, Review Partner, provider controls, and manual Codex/Copilot generation.",
+                experimental_enabled,
+                "enabled",
+                "disabled",
+                if experimental_enabled {
+                    "Disable experimental AI"
+                } else {
+                    "Enable experimental AI"
+                },
+                {
+                    let state = state.clone();
+                    move |_, window, cx| {
+                        update_review_ai_settings(&state, window, cx, move |settings| {
+                            settings.experimental_features_enabled = !experimental_enabled;
+                            if !settings.experimental_features_enabled {
+                                settings.background_jobs_enabled = false;
+                            }
+                        });
+                    }
+                },
+            ))
+            .when(!experimental_enabled, |el| {
+                el.child(panel_state_text(
+                    "AI review UI and agent generation are hidden until experimental AI is enabled.",
+                ))
+            })
+            .when(experimental_enabled, |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.0))
+                        .child(
                             div()
-                                .text_size(px(12.0))
-                                .text_color(fg_subtle())
-                                .child(status.detail),
+                                .text_size(px(13.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(fg_emphasis())
+                                .child("AI provider"),
                         )
-                    }),
-            )
+                        .child(
+                            div().flex().gap(px(4.0)).flex_wrap().children(
+                                ReviewAiProvider::all().iter().map(|candidate| {
+                                    let candidate = *candidate;
+                                    let label = provider_tab_label(candidate, &provider_statuses);
+                                    let state = state.clone();
+                                    surface_tab(
+                                        &label,
+                                        configured_provider == candidate,
+                                        move |_, window, cx| {
+                                            update_review_ai_settings(
+                                                &state,
+                                                window,
+                                                cx,
+                                                move |settings| {
+                                                    settings.provider = candidate;
+                                                },
+                                            );
+                                        },
+                                    )
+                                }),
+                            ),
+                        )
+                        .when_some(provider_status, |el, status| {
+                            let primary = if status.available && status.authenticated {
+                                success_text(&status.message).into_any_element()
+                            } else {
+                                error_text(&status.message).into_any_element()
+                            };
+
+                            el.child(primary).child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(fg_subtle())
+                                    .child(status.detail),
+                            )
+                        }),
+                )
+            })
             .when_some(settings_state.error.clone(), |el, error| {
                 el.child(error_text(&error))
             })
-            .when_some(provider_error, |el, error| el.child(error_text(&error)))
-            .when_some(settings_state.background_error.clone(), |el, error| {
-                el.child(error_text(&error))
+            .when_some(
+                experimental_enabled.then_some(provider_error).flatten(),
+                |el, error| el.child(error_text(&error)),
+            )
+            .when_some(
+                (experimental_enabled && background_jobs_enabled)
+                    .then_some(settings_state.background_error.clone())
+                    .flatten(),
+                |el, error| el.child(error_text(&error)),
+            )
+            .when_some(
+                (experimental_enabled && background_jobs_enabled)
+                    .then_some(settings_state.background_message.clone())
+                    .flatten(),
+                |el, message| el.child(panel_state_text(&message)),
+            )
+            .when(experimental_enabled, |el| {
+                el.child(settings_toggle_row(
+                    "AI agent background jobs",
+                    "Allows Codex or Copilot to generate cached Review Brief and Review Partner context from workspace sync. Manual generation remains available when this is off.",
+                    background_jobs_enabled,
+                    "background on",
+                    "background off",
+                    if background_jobs_enabled {
+                        "Disable background jobs"
+                    } else {
+                        "Enable background jobs"
+                    },
+                    {
+                        let state = state.clone();
+                        move |_, window, cx| {
+                            update_review_ai_settings(&state, window, cx, move |settings| {
+                                settings.background_jobs_enabled = !background_jobs_enabled;
+                            });
+                        }
+                    },
+                ))
             })
-            .when_some(settings_state.background_message.clone(), |el, message| {
-                el.child(panel_state_text(&message))
+            .when(experimental_enabled && !background_jobs_enabled, |el| {
+                el.child(panel_state_text(
+                    "Background agent jobs are off. Repository automation controls are hidden.",
+                ))
             })
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(12.0))
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(fg_emphasis())
-                            .child("Automatic background generation"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(fg_muted())
-                            .max_w(px(760.0))
-                            .child(
-                                "Repositories stay disabled by default. When you enable one, Remiss refreshes the managed checkout for matching pull requests and caches review intelligence in the background.",
-                            ),
-                    )
-                    .when(repository_names.is_empty(), |el| {
-                        el.child(panel_state_text(
-                            "Workspace repositories will appear here after pull requests load. Previously enabled repositories stay listed so you can disable them later.",
-                        ))
-                    })
-                    .children(repository_names.into_iter().map(|repository| {
-                        let enabled = settings_state
-                            .settings
-                            .automatically_generates_for(&repository);
-                        render_review_intelligence_repository_row(state, &repository, enabled)
-                    })),
-            ),
+            .when(experimental_enabled && background_jobs_enabled, |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(12.0))
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(fg_emphasis())
+                                .child("Automatic background generation"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(fg_muted())
+                                .max_w(px(760.0))
+                                .child(
+                                    "Repositories stay disabled by default. When you enable one, Remiss refreshes the managed checkout for matching pull requests and caches review intelligence in the background.",
+                                ),
+                        )
+                        .when(repository_names.is_empty(), |el| {
+                            el.child(panel_state_text(
+                                "Workspace repositories will appear here after pull requests load. Previously enabled repositories stay listed so you can disable them later.",
+                            ))
+                        })
+                        .children(repository_names.into_iter().map(|repository| {
+                            let enabled = settings_state
+                                .settings
+                                .repository_background_enabled(&repository);
+                            render_review_intelligence_repository_row(state, &repository, enabled)
+                        })),
+                )
+            }),
     )
+}
+
+fn settings_toggle_row(
+    title: &'static str,
+    detail: &'static str,
+    enabled: bool,
+    enabled_badge: &'static str,
+    disabled_badge: &'static str,
+    button_label: &'static str,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .p(px(16.0))
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(transparent())
+        .bg(bg_surface())
+        .flex()
+        .justify_between()
+        .items_start()
+        .gap(px(16.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .min_w_0()
+                .child(
+                    div()
+                        .text_size(px(14.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg_emphasis())
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .line_height(px(18.0))
+                        .text_color(fg_muted())
+                        .child(detail),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_end()
+                .gap(px(8.0))
+                .flex_wrap()
+                .child(badge(if enabled {
+                    enabled_badge
+                } else {
+                    disabled_badge
+                }))
+                .child(ghost_button(button_label, on_click)),
+        )
 }
 
 fn render_managed_lsp_card(
