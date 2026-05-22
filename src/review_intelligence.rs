@@ -105,6 +105,10 @@ pub fn trigger_review_intelligence(
     scope: ReviewIntelligenceScope,
     force: bool,
 ) {
+    if !state.read(cx).review_ai_features_enabled() {
+        return;
+    }
+
     let model = state.clone();
     window
         .spawn(cx, async move |cx: &mut AsyncWindowContext| {
@@ -119,6 +123,10 @@ pub fn refresh_active_review_brief(
     cx: &mut App,
     allow_automatic_generation: bool,
 ) {
+    if !state.read(cx).review_ai_features_enabled() {
+        return;
+    }
+
     let model = state.clone();
     window
         .spawn(cx, async move |cx: &mut AsyncWindowContext| {
@@ -133,6 +141,10 @@ pub fn refresh_active_review_partner(
     cx: &mut App,
     allow_automatic_generation: bool,
 ) {
+    if !state.read(cx).review_ai_features_enabled() {
+        return;
+    }
+
     let model = state.clone();
     window
         .spawn(cx, async move |cx: &mut AsyncWindowContext| {
@@ -148,6 +160,9 @@ pub fn request_active_review_partner_focus(
 ) {
     let request = {
         let state = model.read(cx);
+        if !state.review_ai_features_enabled() {
+            return;
+        }
         let Some(detail_key) = state.active_pr_key.clone() else {
             return;
         };
@@ -353,6 +368,9 @@ pub(crate) async fn refresh_active_review_brief_flow(
 ) {
     let initial = model
         .read_with(cx, |state, _| {
+            if !state.review_ai_features_enabled() {
+                return None;
+            }
             let detail = state.active_detail()?.clone();
             let detail_key = state.active_pr_key.clone()?;
             Some((
@@ -423,6 +441,22 @@ pub(crate) async fn refresh_active_review_brief_flow(
     let settings = settings_result
         .clone()
         .unwrap_or_else(|_| existing_settings.clone());
+    if !settings.experimental_features_enabled() {
+        model
+            .update(cx, |state, cx| {
+                state.review_ai_settings.loading = false;
+                state.review_ai_provider_loading = false;
+                if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
+                    detail_state.review_brief_state.loading = false;
+                    detail_state.review_brief_state.generating = false;
+                    detail_state.review_brief_state.progress_text = None;
+                }
+                cx.notify();
+            })
+            .ok();
+        return;
+    }
+
     let provider = settings.provider;
     let request_key = build_review_brief_request_key(&detail, provider);
     let provider_statuses = provider_statuses_result.clone().unwrap_or_default();
@@ -555,6 +589,9 @@ pub(crate) async fn refresh_active_review_partner_flow(
 ) {
     let initial = model
         .read_with(cx, |state, _| {
+            if !state.review_ai_features_enabled() {
+                return None;
+            }
             let detail = state.active_detail()?.clone();
             let detail_key = state.active_pr_key.clone()?;
             Some((
@@ -625,6 +662,22 @@ pub(crate) async fn refresh_active_review_partner_flow(
     let settings = settings_result
         .clone()
         .unwrap_or_else(|_| existing_settings.clone());
+    if !settings.experimental_features_enabled() {
+        model
+            .update(cx, |state, cx| {
+                state.review_ai_settings.loading = false;
+                state.review_ai_provider_loading = false;
+                if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
+                    detail_state.review_partner_state.loading = false;
+                    detail_state.review_partner_state.generating = false;
+                    detail_state.review_partner_state.progress_text = None;
+                }
+                cx.notify();
+            })
+            .ok();
+        return;
+    }
+
     let provider = settings.provider;
     let request_key = build_review_partner_request_key(&detail, provider);
     let provider_statuses = provider_statuses_result.clone().unwrap_or_default();
@@ -688,6 +741,12 @@ pub(crate) async fn run_review_intelligence_flow(
 ) {
     let Some(initial) = model
         .read_with(cx, |state, _| {
+            if !state.review_ai_features_enabled() {
+                return None;
+            }
+            if automatic && !state.review_ai_background_jobs_enabled() {
+                return None;
+            }
             let detail = state.active_detail()?.clone();
             let detail_key = state.active_pr_key.clone()?;
             let provider = state.selected_review_ai_provider();

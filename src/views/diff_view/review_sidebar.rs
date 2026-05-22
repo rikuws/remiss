@@ -20,8 +20,13 @@ pub(super) fn prepare_review_stack(
     }
 
     let ai_stack_state = app_state
-        .active_detail_state()
-        .map(|detail_state| detail_state.ai_stack_state.clone())
+        .review_ai_features_enabled()
+        .then(|| {
+            app_state
+                .active_detail_state()
+                .map(|detail_state| detail_state.ai_stack_state.clone())
+                .unwrap_or_default()
+        })
         .unwrap_or_default();
 
     if let Some(stack) = ai_stack_state.stack.clone() {

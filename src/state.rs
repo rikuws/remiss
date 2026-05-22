@@ -81,6 +81,31 @@ impl SectionId {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AppSidebarMode {
+    Open,
+    Icons,
+    Closed,
+}
+
+impl AppSidebarMode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Open => Self::Icons,
+            Self::Icons => Self::Closed,
+            Self::Closed => Self::Open,
+        }
+    }
+
+    pub fn is_icons(self) -> bool {
+        self == Self::Icons
+    }
+
+    pub fn is_closed(self) -> bool {
+        self == Self::Closed
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PullRequestSurface {
     Overview,
@@ -90,7 +115,7 @@ pub enum PullRequestSurface {
 impl PullRequestSurface {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Overview => "Briefing",
+            Self::Overview => "Overview",
             Self::Files => "Review",
         }
     }
@@ -1028,7 +1053,8 @@ pub struct AppState {
     pub code_font_size_preference: CodeFontSizePreference,
     pub diff_color_theme_preference: DiffColorThemePreference,
     pub window_appearance: WindowAppearance,
-    pub app_sidebar_collapsed: bool,
+    pub app_sidebar_mode: AppSidebarMode,
+    pub previous_app_sidebar_mode: AppSidebarMode,
     pub notification_drawer_open: bool,
     pub software_update_message: Option<String>,
     pub software_update_error: Option<String>,
@@ -1210,7 +1236,8 @@ impl AppState {
             code_font_size_preference,
             diff_color_theme_preference,
             window_appearance: WindowAppearance::Light,
-            app_sidebar_collapsed: false,
+            app_sidebar_mode: AppSidebarMode::Open,
+            previous_app_sidebar_mode: AppSidebarMode::Open,
             notification_drawer_open: false,
             software_update_message: None,
             software_update_error: None,
@@ -1305,6 +1332,19 @@ impl AppState {
         self.active_section = section;
     }
 
+    pub fn set_app_sidebar_mode(&mut self, mode: AppSidebarMode) {
+        if self.app_sidebar_mode == mode {
+            return;
+        }
+
+        self.previous_app_sidebar_mode = self.app_sidebar_mode;
+        self.app_sidebar_mode = mode;
+    }
+
+    pub fn cycle_app_sidebar_mode(&mut self) {
+        self.set_app_sidebar_mode(self.app_sidebar_mode.next());
+    }
+
     pub fn next_onboarding_step(&mut self) {
         let Some(session) = self.active_onboarding_wizard.as_mut() else {
             return;
@@ -1314,6 +1354,7 @@ impl AppState {
             self.complete_active_onboarding_wizard();
         } else {
             session.step_index += 1;
+            self.skip_hidden_onboarding_steps(true);
             self.apply_active_onboarding_step();
         }
     }
@@ -1324,6 +1365,7 @@ impl AppState {
         };
 
         session.step_index = session.step_index.saturating_sub(1);
+        self.skip_hidden_onboarding_steps(false);
         self.apply_active_onboarding_step();
     }
 
@@ -1333,6 +1375,7 @@ impl AppState {
         };
 
         session.step_index = step_index.min(session.step_count().saturating_sub(1));
+        self.skip_hidden_onboarding_steps(true);
         self.apply_active_onboarding_step();
     }
 
@@ -1345,6 +1388,7 @@ impl AppState {
         onboarding::mark_wizard_completed(&mut self.onboarding_progress, &session.definition);
         self.persist_onboarding_progress();
         self.active_onboarding_wizard = onboarding::next_pending_wizard(&self.onboarding_progress);
+        self.skip_hidden_onboarding_steps(true);
         self.apply_active_onboarding_step();
     }
 
@@ -1356,6 +1400,28 @@ impl AppState {
 
     pub fn is_onboarding_target(&self, target: WizardStepTarget) -> bool {
         self.active_onboarding_target() == Some(target)
+    }
+
+    fn active_onboarding_step_hidden(&self) -> bool {
+        self.active_onboarding_target() == Some(WizardStepTarget::GuidedReview)
+            && !self.review_ai_features_enabled()
+    }
+
+    fn skip_hidden_onboarding_steps(&mut self, forward: bool) {
+        while self.active_onboarding_step_hidden() {
+            let Some(session) = self.active_onboarding_wizard.as_mut() else {
+                return;
+            };
+            if forward && session.step_index + 1 < session.step_count() {
+                session.step_index += 1;
+            } else if !forward && session.step_index > 0 {
+                session.step_index -= 1;
+            } else if session.step_index + 1 < session.step_count() {
+                session.step_index += 1;
+            } else {
+                return;
+            }
+        }
     }
 
     pub fn set_onboarding_gh_status(&mut self, status: GhSetupStatus) {
@@ -1375,7 +1441,12 @@ impl AppState {
                 self.open_onboarding_tutorial_pr(ReviewCenterMode::SemanticDiff);
             }
             WizardStepTarget::GuidedReview => {
-                self.open_onboarding_tutorial_pr(ReviewCenterMode::GuidedReview);
+                let mode = if self.review_ai_features_enabled() {
+                    ReviewCenterMode::GuidedReview
+                } else {
+                    ReviewCenterMode::SemanticDiff
+                };
+                self.open_onboarding_tutorial_pr(mode);
             }
             WizardStepTarget::LocalReview => {
                 if self.active_pr_key.as_deref() == Some(crate::tutorial_pr::TUTORIAL_PR_KEY) {
@@ -1743,6 +1814,28 @@ impl AppState {
         self.review_ai_settings.settings.provider
     }
 
+    pub fn review_ai_features_enabled(&self) -> bool {
+        self.review_ai_settings
+            .settings
+            .experimental_features_enabled()
+    }
+
+    pub fn review_ai_background_jobs_enabled(&self) -> bool {
+        self.review_ai_settings.settings.background_jobs_enabled()
+    }
+
+    pub fn effective_review_center_mode(&self) -> ReviewCenterMode {
+        let mode = self
+            .active_review_session()
+            .map(|session| session.center_mode)
+            .unwrap_or(ReviewCenterMode::SemanticDiff);
+        if mode == ReviewCenterMode::GuidedReview && !self.review_ai_features_enabled() {
+            self.active_code_lens_mode()
+        } else {
+            mode
+        }
+    }
+
     pub fn section_count(&self, section: SectionId) -> i64 {
         match section {
             SectionId::Overview => 0,
@@ -1864,8 +1957,16 @@ impl AppState {
         if let Some(document) = document {
             self.selected_file_path = document.selected_file_path.clone();
             self.selected_diff_anchor = document.selected_diff_anchor.clone();
+            let review_ai_enabled = self.review_ai_features_enabled();
             if let Some(detail_state) = self.detail_states.get_mut(detail_key) {
-                detail_state.review_session = ReviewSessionState::from_document(document);
+                let mut review_session = ReviewSessionState::from_document(document);
+                if !review_ai_enabled
+                    && review_session.center_mode == ReviewCenterMode::GuidedReview
+                {
+                    review_session.center_mode =
+                        sanitize_code_lens_mode(review_session.code_lens_mode);
+                }
+                detail_state.review_session = review_session;
             }
         } else {
             self.selected_file_path = None;
@@ -1879,6 +1980,10 @@ impl AppState {
     }
 
     pub fn navigate_to_review_location(&mut self, location: ReviewLocation, push_history: bool) {
+        let mut location = location;
+        if location.mode == ReviewCenterMode::GuidedReview && !self.review_ai_features_enabled() {
+            location.mode = self.active_code_lens_mode();
+        }
         let previous = if push_history {
             self.current_review_location()
         } else {
@@ -2316,6 +2421,11 @@ impl AppState {
     }
 
     pub fn set_review_center_mode(&mut self, mode: ReviewCenterMode) {
+        let mode = if mode == ReviewCenterMode::GuidedReview && !self.review_ai_features_enabled() {
+            self.active_code_lens_mode()
+        } else {
+            mode
+        };
         if let Some(session) = self.active_review_session_mut() {
             session.center_mode = mode;
             if matches!(
@@ -2330,6 +2440,36 @@ impl AppState {
                 session.source_target = None;
             }
         }
+    }
+
+    pub fn hide_experimental_review_ai(&mut self) {
+        if self.review_ai_features_enabled() {
+            return;
+        }
+
+        for detail_state in self.detail_states.values_mut() {
+            if detail_state.review_session.center_mode == ReviewCenterMode::GuidedReview {
+                detail_state.review_session.center_mode =
+                    sanitize_code_lens_mode(detail_state.review_session.code_lens_mode);
+            }
+            detail_state.review_intelligence_loading = false;
+            detail_state.ai_stack_state.loading = false;
+            detail_state.ai_stack_state.generating = false;
+            detail_state.review_partner_state.loading = false;
+            detail_state.review_partner_state.generating = false;
+            detail_state.review_partner_state.loading_focus_keys.clear();
+            detail_state.review_brief_state.loading = false;
+            detail_state.review_brief_state.generating = false;
+        }
+
+        self.review_ai_provider_loading = false;
+        self.review_ai_provider_error = None;
+        self.review_ai_settings.background_syncing = false;
+        self.review_ai_settings.background_message = None;
+        self.review_ai_settings.background_error = None;
+        self.automatic_brief_request_keys.clear();
+        self.automatic_partner_request_keys.clear();
+        self.skip_hidden_onboarding_steps(true);
     }
 
     pub fn reset_review_focus_scroll(&mut self) {
@@ -2619,7 +2759,7 @@ mod tests {
         PullRequestComment, PullRequestDataCompleteness, PullRequestDetail, PullRequestFile,
         PullRequestReview, PullRequestReviewComment, PullRequestReviewThread,
     };
-    use crate::onboarding::StartupWizardOptions;
+    use crate::onboarding::{StartupWizardOptions, WizardStepTarget};
     use crate::review_session::ReviewCenterMode;
     use crate::tutorial_pr::TUTORIAL_PR_KEY;
 
@@ -2740,6 +2880,27 @@ mod tests {
         assert!(state.detail_states.contains_key(TUTORIAL_PR_KEY));
         assert!(state.workspace.is_none());
 
+        state.set_onboarding_step(2);
+        assert_eq!(
+            state.active_onboarding_target(),
+            Some(WizardStepTarget::LocalReview)
+        );
+        assert_eq!(state.active_section, SectionId::Overview);
+        assert_eq!(state.active_pr_key, None);
+
+        state.set_onboarding_step(1);
+        assert_eq!(
+            state
+                .detail_states
+                .get(TUTORIAL_PR_KEY)
+                .map(|detail| detail.review_session.center_mode),
+            Some(ReviewCenterMode::SemanticDiff)
+        );
+
+        state
+            .review_ai_settings
+            .settings
+            .experimental_features_enabled = true;
         state.set_onboarding_step(2);
         assert_eq!(
             state

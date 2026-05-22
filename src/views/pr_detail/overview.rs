@@ -70,6 +70,7 @@ pub(super) fn render_overview_surface(state: &Entity<AppState>, cx: &App) -> imp
     let provider_status = s.selected_review_ai_provider_status().cloned();
     let provider_loading = s.review_ai_provider_loading;
     let provider_error = s.review_ai_provider_error.clone();
+    let review_ai_enabled = s.review_ai_features_enabled();
     let brief_automatic_enabled = s
         .review_ai_settings
         .settings
@@ -107,17 +108,19 @@ pub(super) fn render_overview_surface(state: &Entity<AppState>, cx: &App) -> imp
                     loaded_from_cache,
                     syncing,
                 ))
-                .child(render_review_brief_panel(
-                    review_brief_state,
-                    provider,
-                    provider_status,
-                    provider_loading,
-                    provider_error,
-                    local_repository_loading,
-                    brief_automatic_enabled,
-                    brief_settings_loaded,
-                    &state_for_brief,
-                ))
+                .when(review_ai_enabled, |el| {
+                    el.child(render_review_brief_panel(
+                        review_brief_state,
+                        provider,
+                        provider_status,
+                        provider_loading,
+                        provider_error,
+                        local_repository_loading,
+                        brief_automatic_enabled,
+                        brief_settings_loaded,
+                        &state_for_brief,
+                    ))
+                })
                 .child(render_review_snapshot_panel(
                     detail,
                     &review_status,
@@ -294,7 +297,7 @@ fn render_review_brief_panel(
                         .text_size(px(15.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(fg_emphasis())
-                        .child("Pre-diff briefing"),
+                        .child("Pre-review overview"),
                 ),
         )
         .child(
@@ -351,7 +354,7 @@ fn render_review_brief_panel(
             provider_status.as_ref(),
             provider_error.as_deref(),
             local_repository_loading,
-            Some("Preparing briefing for this pull request."),
+            Some("Preparing overview for this pull request."),
         )
         .into_any_element()
     } else {
@@ -376,7 +379,7 @@ fn review_brief_icon_button(
         .flex()
         .items_center()
         .justify_center()
-        .tooltip(|_, cx| build_review_brief_tooltip("Regenerate pre-diff briefing", cx))
+        .tooltip(|_, cx| build_review_brief_tooltip("Regenerate pre-review overview", cx))
         .hover(|style| style.bg(bg_selected()))
         .on_mouse_down(MouseButton::Left, on_click)
         .child(lucide_icon(LucideIcon::RefreshCw, 13.0, fg_subtle()))
@@ -429,7 +432,7 @@ fn render_review_brief_progress(
 ) -> impl IntoElement {
     let title = progress_text
         .map(str::to_string)
-        .unwrap_or_else(|| "Preparing briefing.".to_string());
+        .unwrap_or_else(|| "Preparing overview.".to_string());
 
     div()
         .p(px(14.0))
@@ -556,7 +559,7 @@ fn render_review_brief_setup_needed(
         .map(|status| status.message.clone())
         .or_else(|| provider_error.map(str::to_string))
         .unwrap_or_else(|| {
-            "The selected AI provider needs setup before briefing generation.".to_string()
+            "The selected AI provider needs setup before overview generation.".to_string()
         });
 
     div()
@@ -628,7 +631,7 @@ fn render_review_brief_idle(
     let copy = if automatic_enabled {
         "No cached review brief is available for this pull request head yet."
     } else {
-        "Automatic briefings use the Review Intelligence repository setting."
+        "Automatic overviews use the Review Intelligence repository setting."
     };
 
     div()

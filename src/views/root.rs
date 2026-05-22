@@ -10,7 +10,7 @@ use crate::app_assets::APP_LOGO_ASSET;
 use crate::app_menu::{
     AddLocalRepository, AddWaypoint, CheckForUpdates, CycleCodeTheme, DecreaseCodeFontSize,
     IncreaseCodeFontSize, JumpToNextReviewComment, OpenReviewFiles, OpenSelectedLineInSource,
-    RefreshLocalRepositories, ResetCodeFontSize, ShowPullRequestBriefing, ShowSettings,
+    RefreshLocalRepositories, ResetCodeFontSize, ShowPullRequestOverview, ShowSettings,
     SubmitReview, SwitchToCode, SwitchToDiff, SwitchToGuidedReview, SwitchToSource, SwitchToStack,
     SwitchToStructuralDiff, SyncWorkspace, ToggleCommandPalette, ToggleFileChooser,
     ToggleWaypointSpotlight,
@@ -40,7 +40,7 @@ use super::settings::{
     increase_code_font_size_preference, prepare_settings_view, reset_code_font_size_preference,
     trigger_software_update_check, update_theme_preference,
 };
-use super::tooltips::build_chrome_tooltip as build_static_tooltip;
+use super::tooltips::{build_chrome_tooltip as build_static_tooltip, build_text_tooltip};
 use super::welcome_wizard::{refresh_onboarding_gh_status, render_onboarding_wizard};
 use super::workspace_sync::{
     sync_workspace_flow, trigger_sync_workspace, wait_for_workspace_poll_interval,
@@ -53,6 +53,7 @@ pub struct RootView {
 }
 
 const APP_SIDEBAR_EXPANDED_WIDTH: f32 = 216.0;
+const APP_SIDEBAR_ICON_WIDTH: f32 = 58.0;
 const APP_SIDEBAR_HIDDEN_WIDTH: f32 = 0.0;
 const APP_SIDEBAR_TRAFFIC_LIGHT_CLEARANCE: f32 = 58.0;
 pub(crate) const APP_CHROME_HEIGHT: f32 = 64.0;
@@ -63,6 +64,7 @@ const APP_TITLEBAR_CONTROL_SIZE: f32 = 30.0;
 const APP_TITLEBAR_CONTROL_TOP: f32 = 2.0;
 const APP_TITLEBAR_CONTROL_ICON_SIZE: f32 = 15.0;
 const APP_CHROME_HIDDEN_LEFT_INSET: f32 = 206.0;
+const APP_CHROME_ICON_LEFT_INSET: f32 = 64.0;
 const REVIEW_BOARD_SHADER_CANVAS_LAZY_DELAY_MS: u64 = 350;
 const APP_SIDEBAR_ANIMATION_MS: u64 = 220;
 const NOTIFICATION_DRAWER_ANIMATION_MS: u64 = 160;
@@ -765,14 +767,20 @@ async fn inspect_and_open_local_review(
 
             super::diff_view::load_pull_request_file_content_flow(model.clone(), None, cx).await;
             warm_structural_diffs_flow(model.clone(), cx).await;
-            crate::review_intelligence::run_review_intelligence_flow(
-                model.clone(),
-                crate::review_intelligence::ReviewIntelligenceScope::StackOnly,
-                false,
-                false,
-                cx,
-            )
-            .await;
+            let should_run_background_review_intelligence = model
+                .read_with(cx, |state, _| state.review_ai_background_jobs_enabled())
+                .ok()
+                .unwrap_or(false);
+            if should_run_background_review_intelligence {
+                crate::review_intelligence::run_review_intelligence_flow(
+                    model.clone(),
+                    crate::review_intelligence::ReviewIntelligenceScope::StackOnly,
+                    false,
+                    true,
+                    cx,
+                )
+                .await;
+            }
         }
         Err(error) => {
             model
@@ -1038,12 +1046,12 @@ fn attach_app_menu_action_handlers(
             })
     });
 
-    let state_for_briefing = state.clone();
+    let state_for_overview = state.clone();
     let state_for_submit = state.clone();
     let element = element.when(availability.has_active_remote_detail, move |element| {
         element
-            .on_action(move |_: &ShowPullRequestBriefing, _, cx| {
-                show_pull_request_briefing_from_menu(&state_for_briefing, cx);
+            .on_action(move |_: &ShowPullRequestOverview, _, cx| {
+                show_pull_request_overview_from_menu(&state_for_overview, cx);
                 cx.stop_propagation();
             })
             .on_action(move |_: &SubmitReview, window, cx| {
@@ -1072,7 +1080,7 @@ fn show_settings_from_menu(state: &Entity<AppState>, window: &mut Window, cx: &m
     });
 }
 
-fn show_pull_request_briefing_from_menu(state: &Entity<AppState>, cx: &mut App) {
+fn show_pull_request_overview_from_menu(state: &Entity<AppState>, cx: &mut App) {
     state.update(cx, |state, cx| {
         if state.active_detail().is_none() || state.active_is_local_review() {
             return;
@@ -1154,16 +1162,21 @@ fn submit_review_from_menu(state: &Entity<AppState>, window: &mut Window, cx: &m
 
 fn render_app_sidebar(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let s = state.read(cx);
-    let hidden = s.app_sidebar_collapsed;
+    let sidebar_mode = s.app_sidebar_mode;
+    let previous_sidebar_mode = s.previous_app_sidebar_mode;
+    let icons_only = sidebar_mode.is_icons();
+    let closed = sidebar_mode.is_closed();
     let active_section = s.active_section;
     let is_authenticated = s.is_authenticated();
     let workspace_syncing = s.workspace_syncing;
     let workspace_error = s.workspace_error.clone();
     let theme_preference = s.theme_preference;
-    let sidebar_width = if hidden {
-        APP_SIDEBAR_HIDDEN_WIDTH
+    let sidebar_width = app_sidebar_width(sidebar_mode);
+    let previous_sidebar_width = app_sidebar_width(previous_sidebar_mode);
+    let sidebar_content_width = if closed {
+        app_sidebar_width(previous_sidebar_mode).max(APP_SIDEBAR_ICON_WIDTH)
     } else {
-        APP_SIDEBAR_EXPANDED_WIDTH
+        sidebar_width
     };
     let sync_label = if workspace_syncing {
         "Syncing workspace"
@@ -1183,28 +1196,28 @@ fn render_app_sidebar(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let state_for_nav = state.clone();
     let state_for_sync = state.clone();
     let state_for_theme = state.clone();
-    let animation_key = ("app-sidebar", usize::from(hidden));
+    let animation_key = ("app-sidebar", app_sidebar_animation_key(sidebar_mode));
 
     div()
         .w(px(sidebar_width))
         .flex_shrink_0()
         .min_h_0()
         .bg(bg_overlay())
-        .border_r(if hidden { px(0.0) } else { px(1.0) })
+        .border_r(if closed { px(0.0) } else { px(1.0) })
         .border_color(border_muted())
         .overflow_hidden()
         .child(
             div()
-                .w(px(APP_SIDEBAR_EXPANDED_WIDTH))
+                .w(px(sidebar_content_width))
                 .h_full()
                 .min_h_0()
                 .flex()
                 .flex_col()
-                .opacity(if hidden { 0.0 } else { 1.0 })
-                .child(render_sidebar_brand())
+                .opacity(if closed { 0.0 } else { 1.0 })
+                .child(render_sidebar_brand(icons_only))
                 .child(
                     div()
-                        .px(px(14.0))
+                        .px(if icons_only { px(10.0) } else { px(14.0) })
                         .pt(px(4.0))
                         .pb(px(10.0))
                         .flex()
@@ -1223,7 +1236,7 @@ fn render_app_sidebar(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                         sidebar_icon_for_section(section),
                                         count,
                                         active_section == section,
-                                        false,
+                                        icons_only,
                                         move |_, window, cx| {
                                             if section == SectionId::Settings {
                                                 prepare_settings_view(&state, window, cx);
@@ -1241,10 +1254,10 @@ fn render_app_sidebar(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                         ),
                 )
                 .child(div().flex_grow().min_h(px(16.0)))
-                .child(render_local_review_sidebar_section(state, cx))
+                .child(render_local_review_sidebar_section(state, cx, icons_only))
                 .child(
                     div()
-                        .px(px(14.0))
+                        .px(if icons_only { px(10.0) } else { px(14.0) })
                         .pb(px(14.0))
                         .pt(px(12.0))
                         .border_t(px(1.0))
@@ -1257,35 +1270,43 @@ fn render_app_sidebar(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                 .flex()
                                 .flex_col()
                                 .gap(px(6.0))
+                                .when(!icons_only, |el| {
+                                    el.child(
+                                        div()
+                                            .px(px(6.0))
+                                            .text_size(px(10.0))
+                                            .font_family(mono_font_family())
+                                            .text_color(fg_subtle())
+                                            .child("THEME"),
+                                    )
+                                })
                                 .child(
                                     div()
-                                        .px(px(6.0))
-                                        .text_size(px(10.0))
-                                        .font_family(mono_font_family())
-                                        .text_color(fg_subtle())
-                                        .child("THEME"),
-                                )
-                                .child(div().flex().gap(px(6.0)).flex_row().children(
-                                    ThemePreference::all().iter().map(|candidate| {
-                                        let candidate = *candidate;
-                                        let state = state_for_theme.clone();
-                                        sidebar_theme_button(
-                                            theme_icon(candidate),
-                                            theme_preference == candidate,
-                                            false,
-                                            move |_, window, cx| {
-                                                update_theme_preference(
-                                                    &state, candidate, window, cx,
-                                                );
-                                            },
-                                        )
-                                    }),
-                                )),
+                                        .flex()
+                                        .gap(px(6.0))
+                                        .when(icons_only, |el| el.flex_col())
+                                        .when(!icons_only, |el| el.flex_row())
+                                        .children(ThemePreference::all().iter().map(|candidate| {
+                                            let candidate = *candidate;
+                                            let state = state_for_theme.clone();
+                                            sidebar_theme_button(
+                                                theme_icon(candidate),
+                                                candidate.label(),
+                                                theme_preference == candidate,
+                                                icons_only,
+                                                move |_, window, cx| {
+                                                    update_theme_preference(
+                                                        &state, candidate, window, cx,
+                                                    );
+                                                },
+                                            )
+                                        })),
+                                ),
                         )
                         .child(sidebar_action_button(
                             LucideIcon::RefreshCw,
                             sync_label,
-                            false,
+                            icons_only,
                             sync_color,
                             move |_, window, cx| {
                                 trigger_sync_workspace(&state_for_sync, window, cx)
@@ -1297,43 +1318,44 @@ fn render_app_sidebar(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
             animation_key,
             Animation::new(Duration::from_millis(APP_SIDEBAR_ANIMATION_MS))
                 .with_easing(ease_in_out),
-            move |el, delta| {
-                let progress = sidebar_hidden_progress(hidden, delta);
-                el.w(lerp_px(
-                    APP_SIDEBAR_EXPANDED_WIDTH,
-                    APP_SIDEBAR_HIDDEN_WIDTH,
-                    progress,
-                ))
-            },
+            move |el, delta| el.w(lerp_px(previous_sidebar_width, sidebar_width, delta)),
         )
 }
 
-fn render_sidebar_brand() -> impl IntoElement {
+fn render_sidebar_brand(icons_only: bool) -> impl IntoElement {
     div()
-        .px(px(14.0))
+        .px(if icons_only { px(0.0) } else { px(14.0) })
         .pt(px(APP_SIDEBAR_TRAFFIC_LIGHT_CLEARANCE))
         .pb(px(8.0))
         .child(
             div()
                 .flex()
                 .items_center()
+                .justify_center()
+                .when(!icons_only, |el| el.justify_start())
                 .gap(px(9.0))
                 .child(
                     img(APP_LOGO_ASSET)
                         .size(px(28.0))
                         .object_fit(ObjectFit::Contain),
                 )
-                .child(
-                    div()
-                        .text_size(px(14.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(fg_emphasis())
-                        .child(APP_NAME),
-                ),
+                .when(!icons_only, |el| {
+                    el.child(
+                        div()
+                            .text_size(px(14.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(fg_emphasis())
+                            .child(APP_NAME),
+                    )
+                }),
         )
 }
 
-fn render_local_review_sidebar_section(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
+fn render_local_review_sidebar_section(
+    state: &Entity<AppState>,
+    cx: &App,
+    icons_only: bool,
+) -> impl IntoElement {
     let s = state.read(cx);
     let repositories = s.local_review_repositories.clone();
     let error = s.local_review_error.clone();
@@ -1344,14 +1366,73 @@ fn render_local_review_sidebar_section(state: &Entity<AppState>, cx: &App) -> im
         .filter(|detail| local_review::is_local_review_detail(detail))
         .map(|detail| detail.repository.clone());
     let state_for_add = state.clone();
-
-    div()
-        .px(px(14.0))
+    let base = div()
+        .px(if icons_only { px(10.0) } else { px(14.0) })
         .pb(px(10.0))
         .flex()
         .flex_col()
-        .gap(px(6.0))
-        .child(
+        .gap(px(6.0));
+
+    if icons_only {
+        base.items_center()
+            .child(onboarding_highlight_shell(
+                highlight_add,
+                sidebar_utility_button(
+                    if loading {
+                        LucideIcon::RefreshCw
+                    } else {
+                        LucideIcon::Plus
+                    },
+                    "Add local review",
+                    false,
+                    false,
+                    move |_, window, cx| {
+                        trigger_add_local_repository(&state_for_add, window, cx);
+                    },
+                ),
+            ))
+            .children(repositories.into_iter().map(|repository| {
+                let state = state.clone();
+                let state_for_close = state.clone();
+                let path = PathBuf::from(repository.path.clone());
+                let repository_key = repository.repository.clone();
+                let active =
+                    active_local_repository.as_deref() == Some(repository.repository.as_str());
+                local_review_sidebar_row(
+                    repository,
+                    active,
+                    true,
+                    move |_, window, cx| {
+                        open_local_review_from_path(&state, path.clone(), false, window, cx);
+                    },
+                    move |_, window, cx| {
+                        close_local_review_sidebar_repository(
+                            &state_for_close,
+                            repository_key.clone(),
+                            window,
+                            cx,
+                        );
+                    },
+                )
+            }))
+            .when_some(error, |el, error| {
+                let tooltip = SharedString::from(error);
+                el.child(
+                    div()
+                        .id("local-review-sidebar-error-icon")
+                        .w_full()
+                        .h(px(34.0))
+                        .rounded(radius_sm())
+                        .bg(danger_muted())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .tooltip(move |_, cx| build_text_tooltip(tooltip.clone(), cx))
+                        .child(lucide_icon(LucideIcon::AlertTriangle, 15.0, danger())),
+                )
+            })
+    } else {
+        base.child(
             div()
                 .px(px(6.0))
                 .flex()
@@ -1379,6 +1460,7 @@ fn render_local_review_sidebar_section(state: &Entity<AppState>, cx: &App) -> im
                                 } else {
                                     LucideIcon::Plus
                                 },
+                                "Add local review",
                                 false,
                                 false,
                                 move |_, window, cx| {
@@ -1412,6 +1494,7 @@ fn render_local_review_sidebar_section(state: &Entity<AppState>, cx: &App) -> im
             local_review_sidebar_row(
                 repository,
                 active,
+                false,
                 move |_, window, cx| {
                     open_local_review_from_path(&state, path.clone(), false, window, cx);
                 },
@@ -1438,11 +1521,13 @@ fn render_local_review_sidebar_section(state: &Entity<AppState>, cx: &App) -> im
                     .child(error),
             )
         })
+    }
 }
 
 fn local_review_sidebar_row(
     repository: RememberedLocalRepository,
     active: bool,
+    icons_only: bool,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
     on_close: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
@@ -1462,7 +1547,37 @@ fn local_review_sidebar_row(
         "local-review-sidebar-close-{}",
         repository.repository
     ));
+    let row_id = format!("local-review-sidebar-row-{}", repository.repository);
+
+    if icons_only {
+        let element_id = ElementId::Name(row_id.clone().into());
+        let tooltip = SharedString::from(format!(
+            "{} - {} - {}",
+            repository_label, branch, status_label
+        ));
+        return div()
+            .id(element_id)
+            .w_full()
+            .h(px(38.0))
+            .rounded(radius_sm())
+            .border_1()
+            .border_color(transparent())
+            .bg(if active { bg_emphasis() } else { bg_surface() })
+            .flex()
+            .items_center()
+            .justify_center()
+            .hover(move |style| {
+                style
+                    .bg(if active { bg_emphasis() } else { bg_selected() })
+                    .text_color(fg_emphasis())
+            })
+            .tooltip(move |_, cx| build_text_tooltip(tooltip.clone(), cx))
+            .on_mouse_down(MouseButton::Left, on_click)
+            .child(lucide_icon(LucideIcon::GitBranch, 15.0, status_color));
+    }
+
     div()
+        .id(ElementId::Name(row_id.into()))
         .h(px(48.0))
         .px(px(9.0))
         .py(px(7.0))
@@ -1576,17 +1691,16 @@ fn render_main_column(
 
 fn render_titlebar_sidebar_toggle(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let s = state.read(cx);
-    let sidebar_hidden = s.app_sidebar_collapsed;
+    let sidebar_mode = s.app_sidebar_mode;
     let state_for_sidebar = state.clone();
-    let sidebar_tooltip = if sidebar_hidden {
-        "Show sidebar"
-    } else {
-        "Hide sidebar"
+    let sidebar_tooltip = match sidebar_mode {
+        AppSidebarMode::Open => "Show sidebar icons",
+        AppSidebarMode::Icons => "Close sidebar",
+        AppSidebarMode::Closed => "Show sidebar",
     };
-    let sidebar_icon = if sidebar_hidden {
-        LucideIcon::PanelLeftOpen
-    } else {
-        LucideIcon::PanelLeftClose
+    let sidebar_icon = match sidebar_mode {
+        AppSidebarMode::Closed => LucideIcon::PanelLeftOpen,
+        AppSidebarMode::Open | AppSidebarMode::Icons => LucideIcon::PanelLeftClose,
     };
 
     div()
@@ -1601,7 +1715,7 @@ fn render_titlebar_sidebar_toggle(state: &Entity<AppState>, cx: &App) -> impl In
             false,
             move |_, _, cx| {
                 state_for_sidebar.update(cx, |state, cx| {
-                    state.app_sidebar_collapsed = !sidebar_hidden;
+                    state.cycle_app_sidebar_mode();
                     cx.notify();
                 });
             },
@@ -1612,11 +1726,9 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
     let s = state.read(cx);
     let active_pr_key = s.active_pr_key.clone();
     let active_surface = s.active_surface;
-    let active_center_mode = s
-        .active_review_session()
-        .map(|session| session.center_mode)
-        .unwrap_or(ReviewCenterMode::SemanticDiff);
+    let active_center_mode = s.effective_review_center_mode();
     let active_code_lens = s.active_code_lens_mode();
+    let review_ai_enabled = s.review_ai_features_enabled();
     let has_active_pr = active_pr_key.is_some();
     let active_is_local_review = s.active_is_local_review();
     let unread_count = s
@@ -1624,7 +1736,7 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
         .map(|detail| s.unread_review_comment_ids_for_detail(detail).len())
         .unwrap_or(0);
     let drawer_open = s.notification_drawer_open;
-    let sidebar_hidden = s.app_sidebar_collapsed;
+    let sidebar_mode = s.app_sidebar_mode;
     let file_tree_visible = s
         .active_review_session()
         .map(|session| session.show_file_tree)
@@ -1636,10 +1748,11 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
     let file_tree_icon = LucideIcon::PanelLeftOpen;
     let tabs: Vec<_> = s.open_tabs.clone();
     let highlight_review_surface = s.is_onboarding_target(WizardStepTarget::TutorialReview);
-    let highlight_guided_review = s.is_onboarding_target(WizardStepTarget::GuidedReview);
+    let highlight_guided_review =
+        review_ai_enabled && s.is_onboarding_target(WizardStepTarget::GuidedReview);
     let state_for_tabs = state.clone();
     let state_for_notifications = state.clone();
-    let state_for_briefing = state.clone();
+    let state_for_overview = state.clone();
     let state_for_review = state.clone();
     let state_for_code = state.clone();
     let state_for_stack = state.clone();
@@ -1660,11 +1773,7 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
         .bg(bg_canvas())
         .border_b(px(1.0))
         .border_color(border_muted())
-        .pl(if sidebar_hidden {
-            px(APP_CHROME_HIDDEN_LEFT_INSET)
-        } else {
-            px(14.0)
-        })
+        .pl(app_chrome_left_padding(sidebar_mode))
         .pr(px(14.0))
         .py(px(10.0))
         .flex()
@@ -1676,36 +1785,36 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                 highlight_review_surface,
                 chrome_segmented_control(vec![
                     chrome_segment(
-                        "Review",
-                        active_surface == PullRequestSurface::Files,
-                        false,
-                        move |_, window, cx| {
-                            enter_files_surface(&state_for_review, window, cx);
-                        },
-                    ),
-                    chrome_segment(
-                        "Briefing",
+                        "Overview",
                         active_surface == PullRequestSurface::Overview,
                         false,
                         move |_, window, cx| {
-                            state_for_briefing.update(cx, |state, cx| {
+                            state_for_overview.update(cx, |state, cx| {
                                 state.active_surface = PullRequestSurface::Overview;
                                 state.pr_header_compact = false;
                                 state.persist_active_review_session();
                                 cx.notify();
                             });
                             crate::review_intelligence::refresh_active_review_brief(
-                                &state_for_briefing,
+                                &state_for_overview,
                                 window,
                                 cx,
                                 true,
                             );
                             crate::review_intelligence::refresh_active_review_partner(
-                                &state_for_briefing,
+                                &state_for_overview,
                                 window,
                                 cx,
                                 true,
                             );
+                        },
+                    ),
+                    chrome_segment(
+                        "Review",
+                        active_surface == PullRequestSurface::Files,
+                        false,
+                        move |_, window, cx| {
+                            enter_files_surface(&state_for_review, window, cx);
                         },
                     ),
                 ]),
@@ -1772,7 +1881,7 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
                 },
             ))
         })
-        .when(has_active_pr, |el| {
+        .when(has_active_pr && review_ai_enabled, |el| {
             el.child(onboarding_highlight_shell(
                 highlight_guided_review,
                 chrome_segmented_control(vec![
@@ -2055,16 +2164,11 @@ fn close_local_review_sidebar_repository(
 }
 
 fn workspace_route_key(state: &AppState) -> WorkspaceRouteKey {
-    let active_center_mode = state
-        .active_review_session()
-        .map(|session| session.center_mode)
-        .unwrap_or(ReviewCenterMode::SemanticDiff);
-
     WorkspaceRouteKey {
         active_section: state.active_section,
         active_pr_key: state.active_pr_key.clone(),
         active_surface: state.active_surface,
-        active_center_mode,
+        active_center_mode: state.effective_review_center_mode(),
         active_code_lens_mode: state.active_code_lens_mode(),
     }
 }
@@ -2446,11 +2550,27 @@ fn truncate_drawer_text(text: &str, limit: usize) -> String {
     }
 }
 
-fn sidebar_hidden_progress(hidden: bool, delta: f32) -> f32 {
-    if hidden {
-        delta
-    } else {
-        1.0 - delta
+fn app_sidebar_width(mode: AppSidebarMode) -> f32 {
+    match mode {
+        AppSidebarMode::Open => APP_SIDEBAR_EXPANDED_WIDTH,
+        AppSidebarMode::Icons => APP_SIDEBAR_ICON_WIDTH,
+        AppSidebarMode::Closed => APP_SIDEBAR_HIDDEN_WIDTH,
+    }
+}
+
+fn app_sidebar_animation_key(mode: AppSidebarMode) -> usize {
+    match mode {
+        AppSidebarMode::Open => 0,
+        AppSidebarMode::Icons => 1,
+        AppSidebarMode::Closed => 2,
+    }
+}
+
+fn app_chrome_left_padding(sidebar_mode: AppSidebarMode) -> Pixels {
+    match sidebar_mode {
+        AppSidebarMode::Closed => px(APP_CHROME_HIDDEN_LEFT_INSET),
+        AppSidebarMode::Icons => px(APP_CHROME_ICON_LEFT_INSET),
+        AppSidebarMode::Open => px(14.0),
     }
 }
 
@@ -2484,8 +2604,11 @@ fn sidebar_nav_button(
         "sidebar-nav-button-{label}-{}",
         usize::from(active)
     ));
+    let element_id = ElementId::Name(format!("sidebar-nav-button-{label}").into());
+    let tooltip = SharedString::from(label.to_string());
 
     div()
+        .id(element_id)
         .h(px(38.0))
         .px(px(10.0))
         .when(collapsed, |el| el.px(px(0.0)))
@@ -2537,6 +2660,9 @@ fn sidebar_nav_button(
                     .child(count.to_string()),
             )
         })
+        .when(collapsed, |el| {
+            el.tooltip(move |_, cx| build_text_tooltip(tooltip.clone(), cx))
+        })
         .when(collapsed, |el| el.justify_center())
         .with_animation(
             animation_id,
@@ -2550,6 +2676,7 @@ fn sidebar_nav_button(
 
 fn sidebar_theme_button(
     icon: LucideIcon,
+    tooltip: &'static str,
     active: bool,
     collapsed: bool,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
@@ -2559,8 +2686,10 @@ fn sidebar_theme_button(
         icon.unicode(),
         usize::from(active)
     ));
+    let element_id = ElementId::Name(format!("sidebar-theme-button-{tooltip}").into());
 
     div()
+        .id(element_id)
         .h(px(34.0))
         .when(collapsed, |el| el.w_full())
         .when(!collapsed, |el| el.flex_1())
@@ -2576,6 +2705,9 @@ fn sidebar_theme_button(
         .items_center()
         .justify_center()
         .hover(move |style| style.bg(if active { bg_emphasis() } else { bg_selected() }))
+        .when(collapsed, |el| {
+            el.tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
+        })
         .on_mouse_down(MouseButton::Left, on_click)
         .child(lucide_icon(
             icon,
@@ -2594,11 +2726,15 @@ fn sidebar_theme_button(
 
 fn sidebar_utility_button(
     icon: LucideIcon,
+    tooltip: &'static str,
     active: bool,
     _bordered: bool,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let element_id = ElementId::Name(format!("sidebar-utility-button-{tooltip}").into());
+
     div()
+        .id(element_id)
         .w(px(30.0))
         .h(px(30.0))
         .rounded(radius_sm())
@@ -2613,6 +2749,7 @@ fn sidebar_utility_button(
         .items_center()
         .justify_center()
         .hover(move |style| style.bg(if active { bg_emphasis() } else { bg_selected() }))
+        .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
         .on_mouse_down(MouseButton::Left, on_click)
         .child(lucide_icon(
             icon,
@@ -2628,7 +2765,11 @@ fn sidebar_action_button(
     icon_color: Rgba,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let element_id = ElementId::Name(format!("sidebar-action-button-{label}").into());
+    let tooltip = SharedString::from(label.to_string());
+
     div()
+        .id(element_id)
         .h(px(36.0))
         .rounded(radius_sm())
         .border_1()
@@ -2641,6 +2782,9 @@ fn sidebar_action_button(
         .when(!collapsed, |el| el.px(px(10.0)).justify_start())
         .when(collapsed, |el| el.w_full())
         .hover(|style| style.bg(control_button_hover_bg()))
+        .when(collapsed, |el| {
+            el.tooltip(move |_, cx| build_text_tooltip(tooltip.clone(), cx))
+        })
         .on_mouse_down(MouseButton::Left, on_click)
         .child(lucide_icon(icon, 16.0, icon_color))
         .when(!collapsed, |el| {

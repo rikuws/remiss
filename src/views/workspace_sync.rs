@@ -80,16 +80,6 @@ pub async fn sync_workspace_flow(model: Entity<AppState>, cx: &mut AsyncWindowCo
                 .unwrap_or(false);
 
             if should_sync_background_tours {
-                model
-                    .update(cx, |state, cx| {
-                        state.review_ai_settings.background_syncing = true;
-                        state.review_ai_settings.background_error = None;
-                        state.review_ai_settings.background_message =
-                            Some("Refreshing automatic review intelligence...".to_string());
-                        cx.notify();
-                    })
-                    .ok();
-
                 let settings_result = cx
                     .background_executor()
                     .spawn({
@@ -100,47 +90,60 @@ pub async fn sync_workspace_flow(model: Entity<AppState>, cx: &mut AsyncWindowCo
 
                 match settings_result {
                     Ok(settings) => {
+                        let background_jobs_enabled = settings.background_jobs_enabled();
                         model
                             .update(cx, |state, cx| {
                                 state.review_ai_settings.settings = settings.clone();
                                 state.review_ai_settings.loaded = true;
                                 state.review_ai_settings.loading = false;
                                 state.review_ai_settings.error = None;
-                                cx.notify();
-                            })
-                            .ok();
-
-                        let sync_result = cx
-                            .background_executor()
-                            .spawn({
-                                let cache = cache.clone();
-                                let workspace = workspace.clone();
-                                let settings = settings.clone();
-                                async move {
-                                    review_intelligence_background::sync_workspace_review_intelligence(
-                                        &cache, &workspace, &settings,
-                                    )
-                                }
-                            })
-                            .await;
-
-                        model
-                            .update(cx, |state, cx| {
-                                state.review_ai_settings.background_syncing = false;
-                                match sync_result {
-                                    Ok(outcome) => {
-                                        state.review_ai_settings.background_message =
-                                            Some(outcome.summary());
-                                        state.review_ai_settings.background_error = None;
-                                    }
-                                    Err(error) => {
-                                        state.review_ai_settings.background_message = None;
-                                        state.review_ai_settings.background_error = Some(error);
-                                    }
+                                state.review_ai_settings.background_syncing =
+                                    background_jobs_enabled;
+                                state.review_ai_settings.background_error = None;
+                                state.review_ai_settings.background_message =
+                                    background_jobs_enabled.then(|| {
+                                        "Refreshing automatic review intelligence...".to_string()
+                                    });
+                                if !state.review_ai_features_enabled() {
+                                    state.hide_experimental_review_ai();
                                 }
                                 cx.notify();
                             })
                             .ok();
+
+                        if background_jobs_enabled {
+                            let sync_result = cx
+                                .background_executor()
+                                .spawn({
+                                    let cache = cache.clone();
+                                    let workspace = workspace.clone();
+                                    let settings = settings.clone();
+                                    async move {
+                                        review_intelligence_background::sync_workspace_review_intelligence(
+                                            &cache, &workspace, &settings,
+                                        )
+                                    }
+                                })
+                                .await;
+
+                            model
+                                .update(cx, |state, cx| {
+                                    state.review_ai_settings.background_syncing = false;
+                                    match sync_result {
+                                        Ok(outcome) => {
+                                            state.review_ai_settings.background_message =
+                                                Some(outcome.summary());
+                                            state.review_ai_settings.background_error = None;
+                                        }
+                                        Err(error) => {
+                                            state.review_ai_settings.background_message = None;
+                                            state.review_ai_settings.background_error = Some(error);
+                                        }
+                                    }
+                                    cx.notify();
+                                })
+                                .ok();
+                        }
                     }
                     Err(error) => {
                         model
