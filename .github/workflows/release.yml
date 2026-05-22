@@ -284,6 +284,7 @@ jobs:
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
@@ -292,8 +293,21 @@ jobs:
             gh release create "$RELEASE_TAG" \
               --title "Remiss ${RELEASE_TAG#v}" \
               --notes "Automated Remiss build for ${RELEASE_TAG}." \
+              --draft \
               --verify-tag \
               || gh release view "$RELEASE_TAG" >/dev/null
           fi
 
-          gh release upload "$RELEASE_TAG" release-assets/* --clobber
+          assets=()
+          while IFS= read -r -d '' asset; do
+            assets+=("$asset")
+          done < <(find release-assets -maxdepth 1 -type f ! -name appcast.xml -print0 | sort -z)
+
+          if ((${#assets[@]})); then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          fi
+          if [[ -f release-assets/appcast.xml ]]; then
+            gh release upload "$RELEASE_TAG" release-assets/appcast.xml --clobber
+          fi
+
+          gh release edit "$RELEASE_TAG" --draft=false --latest
