@@ -23,6 +23,7 @@ use crate::{
 
 thread_local! {
     static ACTIVE_TEXT_TARGET: RefCell<Option<String>> = const { RefCell::new(None) };
+    static ACTIVE_APP_TEXT_INPUT_TARGET: RefCell<Option<String>> = const { RefCell::new(None) };
     static TEXT_SELECTION_GROUPS: RefCell<HashMap<String, GroupTextSelectionState>> = RefCell::new(HashMap::new());
 }
 
@@ -1132,7 +1133,7 @@ impl Element for AppTextInput {
                     if let Some(focus_handle) = focus_handle.as_ref() {
                         focus_handle.focus(window);
                     }
-                    set_active_text_target(selection_id.clone());
+                    set_active_app_text_input_target(selection_id.clone());
                 }
 
                 let clear_hitbox = hitbox.clone();
@@ -1203,7 +1204,7 @@ impl Element for AppTextInput {
                     if let Some(focus_handle) = mouse_down_focus.as_ref() {
                         focus_handle.focus(window);
                     }
-                    set_active_text_target(mouse_down_id.clone());
+                    set_active_app_text_input_target(mouse_down_id.clone());
                     cx.stop_propagation();
                     window.refresh();
                 });
@@ -2259,10 +2260,28 @@ fn set_active_text_target(id: String) {
     ACTIVE_TEXT_TARGET.with(|active| {
         active.replace(Some(id));
     });
+    ACTIVE_APP_TEXT_INPUT_TARGET.with(|active| {
+        active.replace(None);
+    });
+}
+
+fn set_active_app_text_input_target(id: String) {
+    ACTIVE_TEXT_TARGET.with(|active| {
+        active.replace(Some(id.clone()));
+    });
+    ACTIVE_APP_TEXT_INPUT_TARGET.with(|active| {
+        active.replace(Some(id));
+    });
 }
 
 fn clear_active_text_target(id: &str) {
     ACTIVE_TEXT_TARGET.with(|active| {
+        let should_clear = active.borrow().as_deref() == Some(id);
+        if should_clear {
+            active.replace(None);
+        }
+    });
+    ACTIVE_APP_TEXT_INPUT_TARGET.with(|active| {
         let should_clear = active.borrow().as_deref() == Some(id);
         if should_clear {
             active.replace(None);
@@ -2274,9 +2293,33 @@ fn is_active_text_target(id: &str) -> bool {
     ACTIVE_TEXT_TARGET.with(|active| active.borrow().as_deref() == Some(id))
 }
 
+pub fn app_text_input_is_active() -> bool {
+    ACTIVE_APP_TEXT_INPUT_TARGET.with(|active| active.borrow().is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_text_input_active_tracks_input_targets_only() {
+        clear_active_text_target("input");
+        clear_active_text_target("selectable");
+        assert!(!app_text_input_is_active());
+
+        set_active_app_text_input_target("input".to_string());
+        assert!(app_text_input_is_active());
+
+        set_active_text_target("selectable".to_string());
+        assert!(!app_text_input_is_active());
+
+        set_active_app_text_input_target("input".to_string());
+        clear_active_text_target("selectable");
+        assert!(app_text_input_is_active());
+
+        clear_active_text_target("input");
+        assert!(!app_text_input_is_active());
+    }
 
     #[test]
     fn cursor_quad_uses_absolute_layout_position() {

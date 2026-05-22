@@ -501,6 +501,55 @@ pub fn fetch_open_pull_request_stack_refs(
     Ok(refs)
 }
 
+pub fn fetch_pull_request_summary(
+    repository: &str,
+    number: i64,
+) -> Result<PullRequestSummary, String> {
+    let (owner, name) = split_repository(repository)?;
+    let query = r#"
+        query($owner: String!, $name: String!, $number: Int!) {
+          repository(owner: $owner, name: $name) {
+            pullRequest(number: $number) {
+              number
+              title
+              url
+              state
+              isDraft
+              updatedAt
+              additions
+              deletions
+              changedFiles
+              reviewDecision
+              author { login avatarUrl }
+              comments { totalCount }
+              repository { nameWithOwner }
+            }
+          }
+        }
+    "#;
+
+    let response = gh::graphql(
+        query,
+        json!({
+            "owner": owner,
+            "name": name,
+            "number": number,
+        }),
+    )?;
+    if let Some(error_message) = graphql_error_message(&response) {
+        return Err(error_message);
+    }
+
+    let pr = response
+        .get("data")
+        .and_then(|v| v.get("repository"))
+        .and_then(|v| v.get("pullRequest"))
+        .ok_or_else(|| format!("Pull request {repository}#{number} was not found."))?;
+
+    map_pull_request_summary(pr)
+        .ok_or_else(|| format!("GitHub did not return summary data for {repository}#{number}."))
+}
+
 pub fn submit_pull_request_review(
     repository: &str,
     number: i64,
@@ -2642,6 +2691,37 @@ fn i64_field(value: &Value, key: &str) -> i64 {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn maps_pull_request_summary_for_fast_url_open() {
+        let node = json!({
+            "number": 42,
+            "title": "Improve PR loading",
+            "url": "https://github.com/acme/repo/pull/42",
+            "state": "OPEN",
+            "isDraft": false,
+            "updatedAt": "2026-05-22T08:00:00Z",
+            "additions": 120,
+            "deletions": 34,
+            "changedFiles": 9,
+            "reviewDecision": "REVIEW_REQUIRED",
+            "author": { "login": "rikuws", "avatarUrl": "https://example.com/avatar.png" },
+            "comments": { "totalCount": 6 },
+            "repository": { "nameWithOwner": "acme/repo" }
+        });
+
+        let summary = map_pull_request_summary(&node).expect("summary");
+
+        assert_eq!(summary.repository, "acme/repo");
+        assert_eq!(summary.number, 42);
+        assert_eq!(summary.title, "Improve PR loading");
+        assert_eq!(summary.author_login, "rikuws");
+        assert_eq!(summary.comments_count, 6);
+        assert_eq!(summary.additions, 120);
+        assert_eq!(summary.deletions, 34);
+        assert_eq!(summary.changed_files, 9);
+        assert_eq!(summary.review_decision.as_deref(), Some("REVIEW_REQUIRED"));
+    }
 
     #[test]
     fn maps_pull_request_commit_with_linked_user_author() {

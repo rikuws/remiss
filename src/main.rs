@@ -381,6 +381,13 @@ fn start_app(
             }
         }
 
+        if is_secondary_plain
+            && keystroke.key == "v"
+            && try_open_pasted_pull_request_url(&app_state_for_keys, window, cx)
+        {
+            return;
+        }
+
         let review_editor_active = app_state_for_keys.read(cx).review_editor_active;
         if !review_editor_active {
             return;
@@ -398,6 +405,42 @@ fn start_app(
     })
     .detach();
     Ok(())
+}
+
+fn try_open_pasted_pull_request_url(
+    state: &Entity<AppState>,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    if selectable_text::app_text_input_is_active() {
+        return false;
+    }
+
+    if !allows_global_pull_request_paste(state.read(cx)) {
+        return false;
+    }
+
+    let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+        return false;
+    };
+
+    let Ok(request) = deep_link::parse_github_pull_request_web_url(&text) else {
+        return false;
+    };
+
+    views::open_deep_link_request(state, request, window, cx);
+    cx.stop_propagation();
+    true
+}
+
+fn allows_global_pull_request_paste(state: &AppState) -> bool {
+    state.active_onboarding_wizard.is_none()
+        && !state.palette_open
+        && !state.file_chooser_open
+        && !state.waypoint_spotlight_open
+        && !state.review_finish_modal_open
+        && state.active_review_line_action.is_none()
+        && !state.review_editor_active
 }
 
 #[cfg(target_os = "macos")]

@@ -2744,11 +2744,7 @@ pub fn open_pull_request(
     let key = pr_key(&summary.repository, summary.number);
     let repository = summary.repository.clone();
     let number = summary.number;
-    let cached_review_session = {
-        let cache = state.read(cx).cache.clone();
-        load_review_session(cache.as_ref(), &key).ok().flatten()
-    };
-    let initial_surface = PullRequestSurface::Files;
+    let initial_surface = PullRequestSurface::Overview;
     let load_plan = {
         let s = state.read(cx);
         plan_pull_request_open(&s, &key)
@@ -2774,7 +2770,7 @@ pub fn open_pull_request(
         s.pr_header_compact = false;
 
         s.detail_states.entry(key.clone()).or_default();
-        s.apply_review_session_document(&key, cached_review_session.clone());
+        s.apply_review_session_document(&key, None);
         s.ensure_active_selected_file_is_valid();
         let detail_state = s.detail_states.entry(key.clone()).or_default();
         detail_state.loading = load_plan.show_loading;
@@ -2786,11 +2782,7 @@ pub fn open_pull_request(
 
     ensure_structural_diff_warmup_started(state, window, cx);
 
-    if !load_plan.load_cached_snapshot && !load_plan.sync_live {
-        return;
-    }
-
-    // Load PR detail in background
+    // Load saved review state and PR detail in background.
     let model = state.clone();
     window
         .spawn(cx, async move |cx: &mut AsyncWindowContext| {
@@ -2798,6 +2790,15 @@ pub fn open_pull_request(
             let Some(cache) = cache else { return };
             let detail_key = pr_key(&repository, number);
             let mut should_sync = load_plan.sync_live;
+            let cached_review_session_task = cx.background_executor().spawn({
+                let cache = cache.clone();
+                let detail_key = detail_key.clone();
+                async move {
+                    load_review_session(cache.as_ref(), &detail_key)
+                        .ok()
+                        .flatten()
+                }
+            });
 
             if load_plan.load_cached_snapshot {
                 let cached_result = cx
@@ -2834,12 +2835,28 @@ pub fn open_pull_request(
                     })
                     .ok();
 
+                let cached_review_session = cached_review_session_task.await;
+                model
+                    .update(cx, |s, cx| {
+                        s.apply_review_session_document(&detail_key, cached_review_session);
+                        cx.notify();
+                    })
+                    .ok();
+
                 if let Some(snapshot) = cached_memory_snapshot {
                     record_review_memory_snapshot(cache.clone(), snapshot, cx).await;
                 }
 
                 warm_structural_diffs_flow(model.clone(), cx).await;
                 refresh_brief_if_active_overview(model.clone(), &detail_key, cx).await;
+            } else {
+                let cached_review_session = cached_review_session_task.await;
+                model
+                    .update(cx, |s, cx| {
+                        s.apply_review_session_document(&detail_key, cached_review_session);
+                        cx.notify();
+                    })
+                    .ok();
             }
 
             if !should_sync {
@@ -2996,7 +3013,9 @@ fn plan_pull_request_open(state: &AppState, key: &str) -> PullRequestOpenPlan {
     }
 }
 
-fn detail_snapshot_needs_background_refresh(snapshot: &github::PullRequestDetailSnapshot) -> bool {
+pub(super) fn detail_snapshot_needs_background_refresh(
+    snapshot: &github::PullRequestDetailSnapshot,
+) -> bool {
     if snapshot.detail.is_none() {
         return true;
     }

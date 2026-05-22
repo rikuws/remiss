@@ -111,6 +111,48 @@ pub fn parse_url(url: &str) -> Result<DeepLinkRequest, String> {
     }
 }
 
+pub fn parse_github_pull_request_web_url(url: &str) -> Result<DeepLinkRequest, String> {
+    let trimmed = url.trim();
+    let rest = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .ok_or_else(|| {
+            "GitHub pull request links must start with http:// or https://".to_string()
+        })?;
+    let rest = rest
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(rest)
+        .trim_matches('/');
+    let parts = rest
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+
+    let github_host = parts
+        .first()
+        .map(|host| {
+            host.eq_ignore_ascii_case("github.com") || host.eq_ignore_ascii_case("www.github.com")
+        })
+        .unwrap_or(false);
+
+    if parts.len() < 5 || !github_host || parts[3] != "pull" {
+        return Err(format!("Unsupported GitHub pull request link '{trimmed}'."));
+    }
+
+    let number = parts[4]
+        .parse::<i64>()
+        .map_err(|_| format!("Invalid pull request number '{}'.", parts[4]))?;
+    if number <= 0 {
+        return Err("Pull request number must be positive.".to_string());
+    }
+
+    Ok(DeepLinkRequest::GitHubPullRequest {
+        repository: format!("{}/{}", parts[1], parts[2]),
+        number,
+    })
+}
+
 pub fn github_pull_request_web_url(repository: &str, number: i64) -> String {
     format!("https://github.com/{repository}/pull/{number}")
 }
@@ -139,7 +181,10 @@ fn deliver_urls(state: &mut DeepLinkDispatcherState, urls: Vec<String>) {
 mod tests {
     use std::{cell::RefCell, rc::Rc};
 
-    use super::{parse_url, remiss_urls_from_args, DeepLinkDispatcher, DeepLinkRequest};
+    use super::{
+        parse_github_pull_request_web_url, parse_url, remiss_urls_from_args, DeepLinkDispatcher,
+        DeepLinkRequest,
+    };
 
     #[test]
     fn parses_github_pull_request_links() {
@@ -167,6 +212,45 @@ mod tests {
     fn rejects_unsupported_routes() {
         assert!(parse_url("remiss://github/rikuws/remiss/issues/17").is_err());
         assert!(parse_url("https://github.com/rikuws/remiss/pull/17").is_err());
+    }
+
+    #[test]
+    fn parses_github_pull_request_web_links() {
+        assert_eq!(
+            parse_github_pull_request_web_url("https://github.com/rikuws/remiss/pull/17").unwrap(),
+            DeepLinkRequest::GitHubPullRequest {
+                repository: "rikuws/remiss".to_string(),
+                number: 17,
+            }
+        );
+    }
+
+    #[test]
+    fn accepts_github_pull_request_subpaths_and_ignores_query() {
+        assert_eq!(
+            parse_github_pull_request_web_url(
+                "https://github.com/rikuws/remiss/pull/17/files?diff=split#discussion"
+            )
+            .unwrap(),
+            DeepLinkRequest::GitHubPullRequest {
+                repository: "rikuws/remiss".to_string(),
+                number: 17,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_non_pull_request_web_links() {
+        assert!(
+            parse_github_pull_request_web_url("https://github.com/rikuws/remiss/issues/17")
+                .is_err()
+        );
+        assert!(
+            parse_github_pull_request_web_url("https://example.com/rikuws/remiss/pull/17").is_err()
+        );
+        assert!(
+            parse_github_pull_request_web_url("remiss://github/rikuws/remiss/pull/17").is_err()
+        );
     }
 
     #[test]

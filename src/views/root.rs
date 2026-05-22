@@ -345,6 +345,7 @@ pub(crate) fn open_deep_link_request(
 ) {
     match request {
         DeepLinkRequest::GitHubPullRequest { repository, number } => {
+            prefetch_remote_pull_request_summary(state, repository.clone(), number, window, cx);
             let model = state.clone();
             window
                 .spawn(cx, async move |cx: &mut AsyncWindowContext| {
@@ -352,7 +353,7 @@ pub(crate) fn open_deep_link_request(
                         model,
                         repository,
                         number,
-                        PullRequestSurface::Files,
+                        PullRequestSurface::Overview,
                         cx,
                     )
                     .await;
@@ -370,18 +371,6 @@ async fn open_remote_pull_request_flow(
     cx: &mut AsyncWindowContext,
 ) {
     let detail_key = pr_key(&repository, number);
-    let cached_review_session = model
-        .read_with(cx, |state, _| {
-            load_review_session(state.cache.as_ref(), &detail_key)
-                .ok()
-                .flatten()
-        })
-        .ok()
-        .flatten();
-    let cache = model.read_with(cx, |state, _| state.cache.clone()).ok();
-    let Some(cache) = cache else {
-        return;
-    };
 
     model
         .update(cx, |state, cx| {
@@ -411,7 +400,101 @@ async fn open_remote_pull_request_flow(
                 .is_none();
             detail_state.syncing = true;
             detail_state.error = None;
+            state.apply_review_session_document(&detail_key, None);
+            cx.notify();
+        })
+        .ok();
+
+    let cache = model.read_with(cx, |state, _| state.cache.clone()).ok();
+    let Some(cache) = cache else {
+        model
+            .update(cx, |state, cx| {
+                let detail_state = state.detail_states.entry(detail_key.clone()).or_default();
+                detail_state.loading = false;
+                detail_state.syncing = false;
+                detail_state.error = Some("Pull request cache is unavailable.".to_string());
+                cx.notify();
+            })
+            .ok();
+        return;
+    };
+
+    let cached_review_session_task = cx.background_executor().spawn({
+        let cache = cache.clone();
+        let detail_key = detail_key.clone();
+        async move {
+            load_review_session(cache.as_ref(), &detail_key)
+                .ok()
+                .flatten()
+        }
+    });
+
+    let cached_result = cx
+        .background_executor()
+        .spawn({
+            let cache = cache.clone();
+            let repository = repository.clone();
+            async move { github::load_pull_request_detail(&cache, &repository, number) }
+        })
+        .await;
+    let mut should_sync = true;
+    let mut showed_cached_detail = false;
+
+    if let Ok(snapshot) = &cached_result {
+        if let Some(detail) = snapshot.detail.as_ref() {
+            let summary = summary_from_detail(detail);
+            should_sync = super::sections::detail_snapshot_needs_background_refresh(snapshot);
+            showed_cached_detail = true;
+            model
+                .update(cx, |state, cx| {
+                    upsert_open_tab_summary(state, &detail_key, summary.clone());
+
+                    state.set_active_section(SectionId::Pulls);
+                    state.active_surface = initial_surface;
+                    state.active_pr_key = Some(detail_key.clone());
+                    state.pr_header_compact = false;
+                    state.review_body.clear();
+                    state.review_editor_active = false;
+                    state.review_message = None;
+                    state.review_success = false;
+
+                    let detail_state = state.detail_states.entry(detail_key.clone()).or_default();
+                    detail_state.snapshot = Some(snapshot.clone());
+                    detail_state.loading = false;
+                    detail_state.syncing = should_sync;
+                    detail_state.error = None;
+
+                    state.ensure_active_selected_file_is_valid();
+                    cx.notify();
+                })
+                .ok();
+        }
+    }
+
+    let cached_review_session = cached_review_session_task.await;
+    model
+        .update(cx, |state, cx| {
             state.apply_review_session_document(&detail_key, cached_review_session.clone());
+            cx.notify();
+        })
+        .ok();
+
+    if showed_cached_detail && !should_sync {
+        super::diff_view::load_pull_request_file_content_flow(model.clone(), None, cx).await;
+        warm_structural_diffs_flow(model.clone(), cx).await;
+        return;
+    }
+
+    model
+        .update(cx, |state, cx| {
+            let detail_state = state.detail_states.entry(detail_key.clone()).or_default();
+            detail_state.loading = detail_state
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.detail.as_ref())
+                .is_none();
+            detail_state.syncing = true;
+            detail_state.error = None;
             cx.notify();
         })
         .ok();
@@ -462,16 +545,7 @@ async fn open_remote_pull_request_flow(
 
     model
         .update(cx, |state, cx| {
-            if let Some(tab) = state
-                .open_tabs
-                .iter()
-                .position(|tab| pr_key(&tab.repository, tab.number) == detail_key)
-                .and_then(|index| state.open_tabs.get_mut(index))
-            {
-                *tab = summary.clone();
-            } else {
-                state.open_tabs.insert(0, summary);
-            }
+            upsert_open_tab_summary(state, &detail_key, summary);
 
             state.set_active_section(SectionId::Pulls);
             state.active_surface = initial_surface;
@@ -521,6 +595,54 @@ fn summary_from_detail(detail: &github::PullRequestDetail) -> github::PullReques
         review_decision: detail.review_decision.clone(),
         updated_at: detail.updated_at.clone(),
         url: detail.url.clone(),
+    }
+}
+
+fn prefetch_remote_pull_request_summary(
+    state: &Entity<AppState>,
+    repository: String,
+    number: i64,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let model = state.clone();
+    window
+        .spawn(cx, async move |cx: &mut AsyncWindowContext| {
+            let detail_key = pr_key(&repository, number);
+            let summary_result = cx
+                .background_executor()
+                .spawn({
+                    let repository = repository.clone();
+                    async move { github::fetch_pull_request_summary(&repository, number) }
+                })
+                .await;
+
+            if let Ok(summary) = summary_result {
+                model
+                    .update(cx, |state, cx| {
+                        upsert_open_tab_summary(state, &detail_key, summary);
+                        cx.notify();
+                    })
+                    .ok();
+            }
+        })
+        .detach();
+}
+
+fn upsert_open_tab_summary(
+    state: &mut AppState,
+    detail_key: &str,
+    summary: github::PullRequestSummary,
+) {
+    if let Some(tab) = state
+        .open_tabs
+        .iter()
+        .position(|tab| pr_key(&tab.repository, tab.number) == detail_key)
+        .and_then(|index| state.open_tabs.get_mut(index))
+    {
+        *tab = summary;
+    } else {
+        state.open_tabs.insert(0, summary);
     }
 }
 
