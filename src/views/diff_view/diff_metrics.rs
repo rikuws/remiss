@@ -753,8 +753,6 @@ pub(super) fn render_syntax_content(
     let token_ranges = Arc::new(build_interactive_code_tokens(content));
 
     if let Some(lsp_context) = lsp_context.filter(|_| !token_ranges.is_empty()) {
-        let hover_context = lsp_context.clone();
-        let hover_tokens = token_ranges.clone();
         let tooltip_context = lsp_context.clone();
         let tooltip_tokens = token_ranges.clone();
         let click_context = lsp_context.clone();
@@ -787,19 +785,9 @@ pub(super) fn render_syntax_content(
                 navigate_to_diff_lsp_definition(query, window, cx);
             })
             .require_platform_modifier_for_click()
-            .on_hover(move |index, _event, window, cx| {
-                let Some(index) = index else {
-                    return;
-                };
-                let Some(query) = hover_context.query_for_index(index, hover_tokens.as_ref())
-                else {
-                    return;
-                };
-                request_diff_line_lsp_details(query, window, cx);
-            })
-            .tooltip_with_key(move |index, window, cx| {
+            .track_hover()
+            .tooltip_with_key(move |index, _window, cx| {
                 let query = tooltip_context.query_for_index(index, tooltip_tokens.as_ref())?;
-                request_diff_line_lsp_details(query.clone(), window, cx);
                 Some((
                     query.query_key.clone(),
                     build_lsp_hover_tooltip_view(

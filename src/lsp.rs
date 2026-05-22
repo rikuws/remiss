@@ -21,6 +21,7 @@ use crate::managed_lsp::{self, ManagedServerKind};
 
 const LSP_SHUTDOWN_GRACE: Duration = Duration::from_millis(40);
 const LSP_DROP_SHUTDOWN_GRACE: Duration = Duration::from_millis(200);
+const LSP_DOCUMENT_SYNC_SETTLE: Duration = Duration::from_millis(75);
 
 #[derive(Clone, Debug, Default)]
 pub struct LspServerCapabilities {
@@ -136,9 +137,36 @@ impl LspServerStatus {
 #[derive(Clone, Debug)]
 pub struct LspTextDocumentRequest {
     pub file_path: String,
+    pub document_identity: Option<String>,
     pub document_text: Arc<str>,
     pub line: usize,
     pub column: usize,
+}
+
+pub fn document_identity_for_reference(reference: &str) -> Option<String> {
+    let reference = reference.trim();
+    if reference.is_empty() {
+        None
+    } else {
+        Some(format!("reference:{reference}"))
+    }
+}
+
+pub fn document_identity_for_reference_if_not_checkout(
+    reference: &str,
+    checkout_reference: Option<&str>,
+) -> Option<String> {
+    let reference = reference.trim();
+    if reference.is_empty()
+        || checkout_reference
+            .map(str::trim)
+            .filter(|checkout_reference| !checkout_reference.is_empty())
+            == Some(reference)
+    {
+        None
+    } else {
+        Some(format!("reference:{reference}"))
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -194,6 +222,7 @@ struct SessionKey {
     repo_root: PathBuf,
     language_id: String,
     command: String,
+    document_identity: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -228,7 +257,7 @@ impl LspSessionManager {
             Err(status) => return status,
         };
 
-        let session = match self.session_for(repo_root, &config) {
+        let session = match self.session_for(repo_root, &config, None) {
             Ok(session) => session,
             Err(error) => {
                 return LspServerStatus::error(
@@ -269,7 +298,14 @@ impl LspSessionManager {
         repo_root: &Path,
         request: &LspTextDocumentRequest,
     ) -> Result<LspSymbolDetails, String> {
-        self.symbol_details_with_options(repo_root, request, false)
+        let config = resolve_server_configuration_for_path(repo_root, &request.file_path)
+            .map_err(|status| status.message.clone())?;
+        let session = self.session_for_request(repo_root, &config, request)?;
+        let capabilities = session.capabilities()?;
+        let mut details = session.hover_details(request, &capabilities)?;
+        let warnings = lsp_analysis_warnings(&config.language_id, request, &details, "hover");
+        details.warnings.extend(warnings);
+        Ok(details)
     }
 
     fn symbol_details_with_options(
@@ -280,7 +316,7 @@ impl LspSessionManager {
     ) -> Result<LspSymbolDetails, String> {
         let config = resolve_server_configuration_for_path(repo_root, &request.file_path)
             .map_err(|status| status.message.clone())?;
-        let session = self.session_for(repo_root, &config)?;
+        let session = self.session_for_request(repo_root, &config, request)?;
         let capabilities = session.capabilities()?;
         let mut details = session.symbol_details(request, &capabilities)?;
         if capabilities.definition_supported {
@@ -293,8 +329,13 @@ impl LspSessionManager {
                 details.reference_targets = targets;
             }
         }
+        let missing_details = if include_references {
+            "hover, definition, or reference"
+        } else {
+            "hover or definition"
+        };
         let warnings =
-            lsp_analysis_warnings(&config.language_id, request, &details, include_references);
+            lsp_analysis_warnings(&config.language_id, request, &details, missing_details);
         details.warnings.extend(warnings);
         Ok(details)
     }
@@ -306,7 +347,7 @@ impl LspSessionManager {
     ) -> Result<Vec<LspDefinitionTarget>, String> {
         let config = resolve_server_configuration_for_path(repo_root, &request.file_path)
             .map_err(|status| status.message.clone())?;
-        let session = self.session_for(repo_root, &config)?;
+        let session = self.session_for_request(repo_root, &config, request)?;
         let capabilities = session.capabilities()?;
         session.definition_targets(request, &capabilities)
     }
@@ -318,7 +359,7 @@ impl LspSessionManager {
     ) -> Result<Vec<LspReferenceTarget>, String> {
         let config = resolve_server_configuration_for_path(repo_root, &request.file_path)
             .map_err(|status| status.message.clone())?;
-        let session = self.session_for(repo_root, &config)?;
+        let session = self.session_for_request(repo_root, &config, request)?;
         let capabilities = session.capabilities()?;
         session.reference_targets(request, &capabilities)
     }
@@ -340,15 +381,26 @@ impl LspSessionManager {
         }
     }
 
+    fn session_for_request(
+        &self,
+        repo_root: &Path,
+        config: &ResolvedServerConfiguration,
+        request: &LspTextDocumentRequest,
+    ) -> Result<Arc<LspSession>, String> {
+        self.session_for(repo_root, config, request.document_identity.as_deref())
+    }
+
     fn session_for(
         &self,
         repo_root: &Path,
         config: &ResolvedServerConfiguration,
+        document_identity: Option<&str>,
     ) -> Result<Arc<LspSession>, String> {
         let key = SessionKey {
             repo_root: repo_root.to_path_buf(),
             language_id: config.language_id.clone(),
             command: config.command.clone(),
+            document_identity: document_identity.map(str::to_string),
         };
 
         let mut sessions = self
@@ -571,7 +623,9 @@ impl LspSession {
             .io
             .lock()
             .map_err(|_| "LSP session IO is unavailable.".to_string())?;
-        self.ensure_document_open(&mut io, &document_path, request.document_text.as_ref())?;
+        if self.ensure_document_open(&mut io, &document_path, request.document_text.as_ref())? {
+            thread::sleep(LSP_DOCUMENT_SYNC_SETTLE);
+        }
 
         let hover = if capabilities.hover_supported {
             parse_hover_result(&send_request(
@@ -610,6 +664,47 @@ impl LspSession {
         })
     }
 
+    fn hover_details(
+        &self,
+        request: &LspTextDocumentRequest,
+        capabilities: &LspServerCapabilities,
+    ) -> Result<LspSymbolDetails, String> {
+        let document_path = resolve_repo_document_path(&self.repo_root, &request.file_path)?;
+        let document_uri = file_uri(&document_path)?;
+        let position =
+            lsp_position_for_text(request.document_text.as_ref(), request.line, request.column)?;
+
+        let mut io = self
+            .io
+            .lock()
+            .map_err(|_| "LSP session IO is unavailable.".to_string())?;
+        if self.ensure_document_open(&mut io, &document_path, request.document_text.as_ref())? {
+            thread::sleep(LSP_DOCUMENT_SYNC_SETTLE);
+        }
+
+        let hover = if capabilities.hover_supported {
+            parse_hover_result(&send_request(
+                &mut io,
+                &self.next_request_id,
+                "textDocument/hover",
+                json!({
+                    "textDocument": { "uri": document_uri },
+                    "position": position,
+                }),
+            )?)
+        } else {
+            None
+        };
+
+        Ok(LspSymbolDetails {
+            hover,
+            signature_help: None,
+            definition_targets: Vec::new(),
+            reference_targets: Vec::new(),
+            warnings: Vec::new(),
+        })
+    }
+
     fn definition_targets(
         &self,
         request: &LspTextDocumentRequest,
@@ -628,7 +723,9 @@ impl LspSession {
             .io
             .lock()
             .map_err(|_| "LSP session IO is unavailable.".to_string())?;
-        self.ensure_document_open(&mut io, &document_path, request.document_text.as_ref())?;
+        if self.ensure_document_open(&mut io, &document_path, request.document_text.as_ref())? {
+            thread::sleep(LSP_DOCUMENT_SYNC_SETTLE);
+        }
 
         let result = send_request(
             &mut io,
@@ -661,7 +758,9 @@ impl LspSession {
             .io
             .lock()
             .map_err(|_| "LSP session IO is unavailable.".to_string())?;
-        self.ensure_document_open(&mut io, &document_path, request.document_text.as_ref())?;
+        if self.ensure_document_open(&mut io, &document_path, request.document_text.as_ref())? {
+            thread::sleep(LSP_DOCUMENT_SYNC_SETTLE);
+        }
 
         let result = send_request(
             &mut io,
@@ -679,7 +778,12 @@ impl LspSession {
         Ok(parse_reference_targets(&self.repo_root, &result))
     }
 
-    fn ensure_document_open(&self, io: &mut LspIo, path: &Path, text: &str) -> Result<(), String> {
+    fn ensure_document_open(
+        &self,
+        io: &mut LspIo,
+        path: &Path,
+        text: &str,
+    ) -> Result<bool, String> {
         let uri = file_uri(path)?;
         let mut documents = self
             .documents
@@ -689,7 +793,7 @@ impl LspSession {
         match documents.get_mut(path) {
             Some(document) => {
                 if document.text.as_ref() == text {
-                    return Ok(());
+                    return Ok(false);
                 }
 
                 let version = document.version.saturating_add(1);
@@ -710,6 +814,7 @@ impl LspSession {
                 )?;
                 document.text = Arc::<str>::from(text);
                 document.version = version;
+                Ok(true)
             }
             None => {
                 send_notification(
@@ -731,10 +836,9 @@ impl LspSession {
                         version: 1,
                     },
                 );
+                Ok(true)
             }
         }
-
-        Ok(())
     }
 }
 
@@ -1345,10 +1449,10 @@ fn lsp_analysis_warnings(
     language_id: &str,
     request: &LspTextDocumentRequest,
     details: &LspSymbolDetails,
-    references_requested: bool,
+    missing_details: &str,
 ) -> Vec<String> {
     if language_id == "kotlin" {
-        kotlin_lsp_analysis_warnings(request, details, references_requested)
+        kotlin_lsp_analysis_warnings(request, details, missing_details)
     } else {
         Vec::new()
     }
@@ -1357,14 +1461,9 @@ fn lsp_analysis_warnings(
 fn kotlin_lsp_analysis_warnings(
     request: &LspTextDocumentRequest,
     details: &LspSymbolDetails,
-    references_requested: bool,
+    missing_details: &str,
 ) -> Vec<String> {
     if details.is_empty() {
-        let missing_details = if references_requested {
-            "hover, definition, or reference"
-        } else {
-            "hover or definition"
-        };
         return word_at_text_position(request.document_text.as_ref(), request.line, request.column)
             .map(|symbol| {
                 vec![format!(
@@ -2286,9 +2385,27 @@ mod tests {
     }
 
     #[test]
+    fn builds_stable_document_identity_from_reference() {
+        assert_eq!(
+            document_identity_for_reference("  abc123  ").as_deref(),
+            Some("reference:abc123")
+        );
+        assert_eq!(
+            document_identity_for_reference_if_not_checkout("  abc123  ", Some("abc123")),
+            None
+        );
+        assert_eq!(
+            document_identity_for_reference_if_not_checkout("abc123", Some("def456")).as_deref(),
+            Some("reference:abc123")
+        );
+        assert_eq!(document_identity_for_reference("  "), None);
+    }
+
+    #[test]
     fn warns_when_kotlin_variable_type_matches_initializer_call() {
         let request = LspTextDocumentRequest {
             file_path: "src/main/kotlin/demo/Demo.kt".to_string(),
+            document_identity: None,
             document_text: std::sync::Arc::<str>::from(
                 "package demo\n\nsuspend fun demo() {\n    val reittiData = coroutineScope {\n        42\n    }\n}\n",
             ),
@@ -2302,7 +2419,12 @@ mod tests {
             ..Default::default()
         };
 
-        let warnings = lsp_analysis_warnings("kotlin", &request, &details, true);
+        let warnings = lsp_analysis_warnings(
+            "kotlin",
+            &request,
+            &details,
+            "hover, definition, or reference",
+        );
 
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("Gradle/classpath model"));
@@ -2313,6 +2435,7 @@ mod tests {
     fn warns_when_kotlin_symbol_has_no_details() {
         let request = LspTextDocumentRequest {
             file_path: "src/main/kotlin/demo/Demo.kt".to_string(),
+            document_identity: None,
             document_text: std::sync::Arc::<str>::from(
                 "package demo\n\nsuspend fun demo() {\n    val reittiData = coroutineScope {\n        42\n    }\n}\n",
             ),
@@ -2320,8 +2443,12 @@ mod tests {
             column: 22,
         };
 
-        let warnings =
-            lsp_analysis_warnings("kotlin", &request, &LspSymbolDetails::default(), true);
+        let warnings = lsp_analysis_warnings(
+            "kotlin",
+            &request,
+            &LspSymbolDetails::default(),
+            "hover, definition, or reference",
+        );
 
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("coroutineScope"));

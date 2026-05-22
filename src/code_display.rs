@@ -69,6 +69,7 @@ pub struct PreparedFileLspContext {
     repo_root: PathBuf,
     file_path: String,
     reference: String,
+    document_identity: Option<String>,
     document_text: Arc<str>,
     references_supported: bool,
 }
@@ -267,6 +268,10 @@ pub fn build_prepared_file_lsp_context(
         repo_root,
         file_path: file_path.to_string(),
         reference: prepared_file.reference.clone(),
+        document_identity: lsp_document_identity_for_prepared_file(
+            local_repo_status,
+            prepared_file,
+        ),
         document_text: prepared_file.text.clone(),
         references_supported,
     })
@@ -787,8 +792,6 @@ fn render_prepared_code_line_content(
     let token_ranges = Arc::new(build_interactive_code_tokens(&line.text));
 
     if let Some(lsp_context) = lsp_context.filter(|_| !token_ranges.is_empty()) {
-        let hover_context = lsp_context.clone();
-        let hover_tokens = token_ranges.clone();
         let tooltip_context = lsp_context.clone();
         let tooltip_tokens = token_ranges.clone();
         let click_context = lsp_context.clone();
@@ -814,18 +817,9 @@ fn render_prepared_code_line_content(
             navigate_to_prepared_file_lsp_definition(query, window, cx);
         })
         .require_platform_modifier_for_click()
-        .on_hover(move |index, _event, window, cx| {
-            let Some(index) = index else {
-                return;
-            };
-            let Some(query) = hover_context.query_for_index(index, hover_tokens.as_ref()) else {
-                return;
-            };
-            request_prepared_file_lsp_details(query, window, cx);
-        })
-        .tooltip_with_key(move |index, window, cx| {
+        .track_hover()
+        .tooltip_with_key(move |index, _window, cx| {
             let query = tooltip_context.query_for_index(index, tooltip_tokens.as_ref())?;
-            request_prepared_file_lsp_details(query.clone(), window, cx);
             Some((
                 query.query_key.clone(),
                 build_lsp_hover_tooltip_view(
@@ -882,12 +876,32 @@ impl PreparedFileLineLspContext {
             references_supported: self.file.references_supported,
             request: lsp::LspTextDocumentRequest {
                 file_path: self.file.file_path.clone(),
+                document_identity: self.file.document_identity.clone(),
                 document_text: self.file.document_text.clone(),
                 line: self.line_number,
                 column: token.column_start,
             },
         })
     }
+}
+
+fn lsp_document_identity_for_prepared_file(
+    local_repo_status: &crate::local_repo::LocalRepositoryStatus,
+    prepared_file: &PreparedFileContent,
+) -> Option<String> {
+    let checkout_reference = local_repo_status
+        .should_prefer_worktree_contents()
+        .then(|| {
+            local_repo_status
+                .current_head_oid
+                .as_deref()
+                .or_else(|| local_repo_status.expected_head_oid.as_deref())
+        })
+        .flatten();
+    lsp::document_identity_for_reference_if_not_checkout(
+        &prepared_file.reference,
+        checkout_reference,
+    )
 }
 
 fn prepared_lsp_text_id(file_path: &str, reference: &str, line_number: usize) -> String {
@@ -955,92 +969,41 @@ fn display_lsp_token_label(text: &str) -> String {
     label
 }
 
-fn should_request_prepared_file_lsp_details(query: &PreparedFileLspQuery, cx: &App) -> bool {
-    query
-        .state
-        .read(cx)
-        .detail_states
-        .get(&query.detail_key)
-        .and_then(|detail_state| detail_state.lsp_symbol_states.get(&query.query_key))
-        .map(|state| !state.loading && state.details.is_none() && state.error.is_none())
-        .unwrap_or(true)
+fn lsp_hover_preview_with_transient_retry(
+    lsp_session_manager: &lsp::LspSessionManager,
+    repo_root: &std::path::Path,
+    request: &lsp::LspTextDocumentRequest,
+) -> Result<lsp::LspSymbolDetails, String> {
+    match lsp_session_manager.symbol_preview_details(repo_root, request) {
+        Ok(details) => Ok(details),
+        Err(error) if is_transient_lsp_hover_error(&error) => {
+            match lsp_session_manager.symbol_preview_details(repo_root, request) {
+                Ok(details) => Ok(details),
+                Err(retry_error) if is_transient_lsp_hover_error(&retry_error) => {
+                    Ok(transient_lsp_hover_details())
+                }
+                Err(retry_error) => Err(retry_error),
+            }
+        }
+        Err(error) => Err(error),
+    }
 }
 
-fn request_prepared_file_lsp_details(
-    query: PreparedFileLspQuery,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    if !should_request_prepared_file_lsp_details(&query, cx) {
-        return;
+fn is_transient_lsp_hover_error(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("content modified")
+        || error.contains("contentmodified")
+        || error.contains("request cancelled")
+        || error.contains("request canceled")
+}
+
+fn transient_lsp_hover_details() -> lsp::LspSymbolDetails {
+    lsp::LspSymbolDetails {
+        warnings: vec![
+            "The language server invalidated this hover because the document changed while it was answering.".to_string(),
+        ],
+        ..Default::default()
     }
-
-    let query_key = query.query_key.clone();
-    let detail_key = query.detail_key.clone();
-    let state = query.state.clone();
-
-    state.update(cx, |state, cx| {
-        let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
-            return;
-        };
-        let symbol_state = detail_state
-            .lsp_symbol_states
-            .entry(query_key.clone())
-            .or_default();
-        if symbol_state.loading || symbol_state.details.is_some() || symbol_state.error.is_some() {
-            return;
-        }
-        symbol_state.loading = true;
-        symbol_state.details = None;
-        symbol_state.error = None;
-        symbol_state.references_loading = false;
-        symbol_state.references_loaded = false;
-        symbol_state.references_error = None;
-        cx.notify();
-    });
-
-    window
-        .spawn(cx, {
-            let state = state.clone();
-            let detail_key = detail_key.clone();
-            let query_key = query_key.clone();
-            let lsp_session_manager = query.lsp_session_manager.clone();
-            let repo_root = query.repo_root.clone();
-            let request = query.request.clone();
-            async move |cx: &mut AsyncWindowContext| {
-                let result = cx
-                    .background_executor()
-                    .spawn(async move {
-                        lsp_session_manager.symbol_preview_details(&repo_root, &request)
-                    })
-                    .await;
-
-                state
-                    .update(cx, |state, cx| {
-                        let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
-                            return;
-                        };
-                        let symbol_state = detail_state
-                            .lsp_symbol_states
-                            .entry(query_key.clone())
-                            .or_default();
-                        symbol_state.loading = false;
-                        match result {
-                            Ok(details) => {
-                                symbol_state.details = Some(details);
-                                symbol_state.error = None;
-                            }
-                            Err(error) => {
-                                symbol_state.details = None;
-                                symbol_state.error = Some(error);
-                            }
-                        }
-                        cx.notify();
-                    })
-                    .ok();
-            }
-        })
-        .detach();
 }
 
 fn navigate_to_prepared_file_lsp_definition(
@@ -1184,6 +1147,96 @@ impl SharedLspHoverTooltipView {
         }
     }
 
+    fn request_hover_if_needed(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let should_request = self
+            .state
+            .read(cx)
+            .detail_states
+            .get(&self.detail_key)
+            .and_then(|detail_state| detail_state.lsp_symbol_states.get(&self.query_key))
+            .map(|state| !state.loading && state.details.is_none() && state.error.is_none())
+            .unwrap_or(true);
+
+        if !should_request {
+            return;
+        }
+
+        let state = self.state.clone();
+        let detail_key = self.detail_key.clone();
+        let query_key = self.query_key.clone();
+
+        state.update(cx, |state, cx| {
+            let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
+                return;
+            };
+            let symbol_state = detail_state
+                .lsp_symbol_states
+                .entry(query_key.clone())
+                .or_default();
+            if symbol_state.loading
+                || symbol_state.details.is_some()
+                || symbol_state.error.is_some()
+            {
+                return;
+            }
+            symbol_state.loading = true;
+            symbol_state.details = None;
+            symbol_state.error = None;
+            symbol_state.references_loading = false;
+            symbol_state.references_loaded = false;
+            symbol_state.references_error = None;
+            cx.notify();
+        });
+
+        window
+            .spawn(cx, {
+                let state = state.clone();
+                let detail_key = detail_key.clone();
+                let query_key = query_key.clone();
+                let lsp_session_manager = self.lsp_session_manager.clone();
+                let repo_root = self.repo_root.clone();
+                let request = self.request.clone();
+                async move |cx: &mut AsyncWindowContext| {
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move {
+                            lsp_hover_preview_with_transient_retry(
+                                &lsp_session_manager,
+                                &repo_root,
+                                &request,
+                            )
+                        })
+                        .await;
+
+                    state
+                        .update(cx, |state, cx| {
+                            let Some(detail_state) = state.detail_states.get_mut(&detail_key)
+                            else {
+                                return;
+                            };
+                            let symbol_state = detail_state
+                                .lsp_symbol_states
+                                .entry(query_key.clone())
+                                .or_default();
+                            symbol_state.loading = false;
+                            match result {
+                                Ok(details) => {
+                                    symbol_state.details = Some(details);
+                                    symbol_state.error = None;
+                                }
+                                Err(error) => {
+                                    symbol_state.details = None;
+                                    symbol_state.error = Some(error);
+                                }
+                            }
+                            cx.notify();
+                        })
+                        .ok();
+                }
+            })
+            .detach();
+    }
+
     fn toggle_references(
         &mut self,
         _event: &MouseDownEvent,
@@ -1284,7 +1337,9 @@ impl SharedLspHoverTooltipView {
 }
 
 impl Render for SharedLspHoverTooltipView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.request_hover_if_needed(window, cx);
+
         let app_state = self.state.read(cx);
         let symbol_state = app_state
             .detail_states
@@ -1921,9 +1976,10 @@ mod tests {
     use crate::syntax::SyntaxSpan;
 
     use super::{
-        build_interactive_code_tokens, code_text_runs, lsp_hover_body_markdown,
-        lsp_hover_header_snippet, lsp_reference_count_label, prepared_code_block_element_id,
-        prepared_excerpt_range, prepared_lsp_text_id, LspReferenceDisclosureState,
+        build_interactive_code_tokens, code_text_runs, is_transient_lsp_hover_error,
+        lsp_hover_body_markdown, lsp_hover_header_snippet, lsp_reference_count_label,
+        prepared_code_block_element_id, prepared_excerpt_range, prepared_lsp_text_id,
+        transient_lsp_hover_details, LspReferenceDisclosureState,
     };
 
     fn total_run_len(runs: &[TextRun]) -> usize {
@@ -2049,6 +2105,20 @@ mod tests {
         };
         assert_eq!(loaded.label(0), "0 references");
         assert_eq!(loaded.label(2), "2 references");
+    }
+
+    #[test]
+    fn lsp_hover_treats_content_modified_as_transient() {
+        assert!(is_transient_lsp_hover_error("Content modified"));
+        assert!(is_transient_lsp_hover_error("contentModified"));
+        assert!(is_transient_lsp_hover_error("Request cancelled"));
+        assert!(!is_transient_lsp_hover_error(
+            "No configured language server"
+        ));
+
+        let details = transient_lsp_hover_details();
+        assert!(!details.is_empty());
+        assert_eq!(details.warnings.len(), 1);
     }
 
     #[test]

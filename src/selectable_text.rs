@@ -256,6 +256,11 @@ impl SelectableText {
         self
     }
 
+    pub fn track_hover(mut self) -> Self {
+        self.hover_listener = Some(Box::new(|_, _, _, _| {}));
+        self
+    }
+
     pub fn tooltip(
         mut self,
         builder: impl Fn(usize, &mut Window, &mut App) -> Option<AnyView> + 'static,

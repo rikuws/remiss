@@ -739,6 +739,7 @@ pub(super) struct DiffFileLspContext {
     pub(super) repo_root: PathBuf,
     pub(super) file_path: String,
     pub(super) reference: String,
+    pub(super) document_identity: Option<String>,
     pub(super) document_text: Arc<str>,
     pub(super) references_supported: bool,
 }
@@ -780,6 +781,10 @@ pub(super) fn build_diff_file_lsp_context(
         repo_root,
         file_path: file_path.to_string(),
         reference: prepared_file.reference.clone(),
+        document_identity: lsp_document_identity_for_prepared_file(
+            local_repo_status,
+            prepared_file,
+        ),
         document_text: prepared_file.text.clone(),
         references_supported,
     })
@@ -841,6 +846,7 @@ impl DiffLineLspContext {
             references_supported: self.file.references_supported,
             request: lsp::LspTextDocumentRequest {
                 file_path: self.file.file_path.clone(),
+                document_identity: self.file.document_identity.clone(),
                 document_text: self.file.document_text.clone(),
                 line: self.line_number,
                 column: token.column_start,
@@ -858,92 +864,23 @@ fn display_lsp_token_label(text: &str) -> String {
     label
 }
 
-fn should_request_diff_line_lsp_details(query: &DiffLineLspQuery, cx: &App) -> bool {
-    query
-        .state
-        .read(cx)
-        .detail_states
-        .get(&query.detail_key)
-        .and_then(|detail_state| detail_state.lsp_symbol_states.get(&query.query_key))
-        .map(|state| !state.loading && state.details.is_none() && state.error.is_none())
-        .unwrap_or(true)
-}
-
-pub(super) fn request_diff_line_lsp_details(
-    query: DiffLineLspQuery,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    if !should_request_diff_line_lsp_details(&query, cx) {
-        return;
-    }
-
-    let query_key = query.query_key.clone();
-    let detail_key = query.detail_key.clone();
-    let state = query.state.clone();
-
-    state.update(cx, |state, cx| {
-        let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
-            return;
-        };
-        let symbol_state = detail_state
-            .lsp_symbol_states
-            .entry(query_key.clone())
-            .or_default();
-        if symbol_state.loading || symbol_state.details.is_some() || symbol_state.error.is_some() {
-            return;
-        }
-        symbol_state.loading = true;
-        symbol_state.details = None;
-        symbol_state.error = None;
-        symbol_state.references_loading = false;
-        symbol_state.references_loaded = false;
-        symbol_state.references_error = None;
-        cx.notify();
-    });
-
-    window
-        .spawn(cx, {
-            let state = state.clone();
-            let detail_key = detail_key.clone();
-            let query_key = query_key.clone();
-            let lsp_session_manager = query.lsp_session_manager.clone();
-            let repo_root = query.repo_root.clone();
-            let request = query.request.clone();
-            async move |cx: &mut AsyncWindowContext| {
-                let result = cx
-                    .background_executor()
-                    .spawn(async move {
-                        lsp_session_manager.symbol_preview_details(&repo_root, &request)
-                    })
-                    .await;
-
-                state
-                    .update(cx, |state, cx| {
-                        let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
-                            return;
-                        };
-                        let symbol_state = detail_state
-                            .lsp_symbol_states
-                            .entry(query_key.clone())
-                            .or_default();
-                        symbol_state.loading = false;
-                        match result {
-                            Ok(details) => {
-                                symbol_state.details = Some(details);
-                                symbol_state.error = None;
-                            }
-                            Err(error) => {
-                                symbol_state.details = None;
-                                symbol_state.error = Some(error);
-                            }
-                        }
-                        cx.notify();
-                    })
-                    .ok();
-            }
+fn lsp_document_identity_for_prepared_file(
+    local_repo_status: &crate::local_repo::LocalRepositoryStatus,
+    prepared_file: &PreparedFileContent,
+) -> Option<String> {
+    let checkout_reference = local_repo_status
+        .should_prefer_worktree_contents()
+        .then(|| {
+            local_repo_status
+                .current_head_oid
+                .as_deref()
+                .or_else(|| local_repo_status.expected_head_oid.as_deref())
         })
-        .detach();
+        .flatten();
+    lsp::document_identity_for_reference_if_not_checkout(
+        &prepared_file.reference,
+        checkout_reference,
+    )
 }
 
 pub(super) fn navigate_to_diff_lsp_definition(
