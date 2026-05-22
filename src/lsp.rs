@@ -12,12 +12,13 @@ use std::{
     time::Duration,
 };
 
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
-
 use serde_json::{json, Value};
 
 use crate::managed_lsp::{self, ManagedServerKind};
+use crate::process_group::{
+    configure_child_process_group, lookup_child_process_group_id,
+    terminate_child_process_group_with_id, terminate_process_group_by_id,
+};
 
 const LSP_SHUTDOWN_GRACE: Duration = Duration::from_millis(40);
 const LSP_DROP_SHUTDOWN_GRACE: Duration = Duration::from_millis(200);
@@ -490,7 +491,7 @@ impl LspSession {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        configure_lsp_child_process(&mut command);
+        configure_child_process_group(&mut command);
         let mut child = command.spawn().map_err(|error| {
             format!(
                 "Failed to start {} in {}: {error}",
@@ -536,7 +537,7 @@ impl LspSession {
                 self.child_process_group_id,
                 grace,
             ),
-            Err(_) => terminate_lsp_process_tree_by_id(
+            Err(_) => terminate_process_group_by_id(
                 self.child_process_id,
                 self.child_process_group_id,
                 grace,
@@ -552,7 +553,7 @@ impl LspSession {
                 }
                 let _ = send_lsp_shutdown_messages(&mut io, &self.next_request_id);
             }
-            Err(_) => terminate_lsp_process_tree_by_id(
+            Err(_) => terminate_process_group_by_id(
                 self.child_process_id,
                 self.child_process_group_id,
                 Duration::ZERO,
@@ -566,9 +567,13 @@ impl LspSession {
                 if child_has_exited(&mut io.child) {
                     return;
                 }
-                terminate_lsp_child_tree(&mut io.child, self.child_process_group_id, grace);
+                terminate_child_process_group_with_id(
+                    &mut io.child,
+                    self.child_process_group_id,
+                    grace,
+                );
             }
-            Err(_) => terminate_lsp_process_tree_by_id(
+            Err(_) => terminate_process_group_by_id(
                 self.child_process_id,
                 self.child_process_group_id,
                 grace,
@@ -916,24 +921,6 @@ impl Drop for LspSession {
     }
 }
 
-#[cfg(unix)]
-fn configure_lsp_child_process(command: &mut Command) {
-    // SAFETY: `pre_exec` runs in the child process after fork and before exec.
-    // The closure only calls async-signal-safe `setpgid` and reports errno.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setpgid(0, 0) == 0 {
-                Ok(())
-            } else {
-                Err(std::io::Error::last_os_error())
-            }
-        });
-    }
-}
-
-#[cfg(not(unix))]
-fn configure_lsp_child_process(_command: &mut Command) {}
-
 fn shutdown_lsp_io(
     io: &mut LspIo,
     next_request_id: &AtomicI64,
@@ -949,7 +936,7 @@ fn shutdown_lsp_io(
         return;
     }
 
-    terminate_lsp_child_tree(&mut io.child, child_process_group_id, grace);
+    terminate_child_process_group_with_id(&mut io.child, child_process_group_id, grace);
 }
 
 fn child_has_exited(child: &mut Child) -> bool {
@@ -985,81 +972,6 @@ fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> bool {
             return false;
         }
         thread::sleep(Duration::from_millis(5));
-    }
-}
-
-#[cfg(unix)]
-fn terminate_lsp_child_tree(
-    child: &mut Child,
-    child_process_group_id: Option<u32>,
-    grace: Duration,
-) {
-    signal_lsp_process_group(child.id(), child_process_group_id, libc::SIGTERM);
-    if wait_for_child_exit(child, grace) {
-        return;
-    }
-    signal_lsp_process_group(child.id(), child_process_group_id, libc::SIGKILL);
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-#[cfg(not(unix))]
-fn terminate_lsp_child_tree(
-    child: &mut Child,
-    _child_process_group_id: Option<u32>,
-    _grace: Duration,
-) {
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-#[cfg(unix)]
-fn terminate_lsp_process_tree_by_id(
-    process_id: u32,
-    process_group_id: Option<u32>,
-    grace: Duration,
-) {
-    signal_lsp_process_group(process_id, process_group_id, libc::SIGTERM);
-    thread::sleep(grace);
-    signal_lsp_process_group(process_id, process_group_id, libc::SIGKILL);
-}
-
-#[cfg(not(unix))]
-fn terminate_lsp_process_tree_by_id(
-    _process_id: u32,
-    _process_group_id: Option<u32>,
-    _grace: Duration,
-) {
-}
-
-#[cfg(unix)]
-fn lookup_child_process_group_id(process_id: u32) -> Option<u32> {
-    let process_group_id = unsafe { libc::getpgid(process_id as libc::pid_t) };
-    (process_group_id > 0).then_some(process_group_id as u32)
-}
-
-#[cfg(not(unix))]
-fn lookup_child_process_group_id(_process_id: u32) -> Option<u32> {
-    None
-}
-
-#[cfg(unix)]
-fn signal_lsp_process_group(process_id: u32, process_group_id: Option<u32>, signal: libc::c_int) {
-    let process_id = process_id as libc::pid_t;
-    let process_group_id = process_group_id.unwrap_or(process_id as u32) as libc::pid_t;
-    if process_group_id <= 0 {
-        return;
-    }
-
-    // SAFETY: LSP commands are launched into their own process group. When the
-    // recorded group unexpectedly matches the app's own group, fall back to the
-    // direct child pid so cleanup cannot signal unrelated app siblings.
-    unsafe {
-        if libc::getpgrp() == process_group_id {
-            let _ = libc::kill(process_id, signal);
-        } else {
-            let _ = libc::kill(-process_group_id, signal);
-        }
     }
 }
 

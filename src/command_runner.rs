@@ -1,16 +1,19 @@
 use std::{
     io::Read,
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
 
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
+use crate::process_group::{
+    configure_child_process_group, lookup_child_process_group_id,
+    terminate_child_process_group_with_id,
+};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 1_048_576;
+const TERMINATION_GRACE: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone)]
 pub struct CommandOutput {
@@ -81,7 +84,7 @@ impl CommandRunner {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        configure_child_process(&mut command);
+        configure_child_process_group(&mut command);
 
         if let Some(working_directory) = &self.working_directory {
             command.current_dir(working_directory);
@@ -94,6 +97,7 @@ impl CommandRunner {
                 working_directory_suffix(self.working_directory.as_deref())
             )
         })?;
+        let child_process_group_id = lookup_child_process_group_id(child.id());
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -110,13 +114,21 @@ impl CommandRunner {
                 Ok(None) => {
                     if started_at.elapsed() >= self.timeout {
                         timed_out = true;
-                        terminate_child_tree(&mut child);
+                        terminate_child_process_group_with_id(
+                            &mut child,
+                            child_process_group_id,
+                            TERMINATION_GRACE,
+                        );
                         break None;
                     }
                     thread::sleep(Duration::from_millis(20));
                 }
                 Err(error) => {
-                    terminate_child_tree(&mut child);
+                    terminate_child_process_group_with_id(
+                        &mut child,
+                        child_process_group_id,
+                        TERMINATION_GRACE,
+                    );
                     return Err(format!("Failed to poll {}: {error}", self.program));
                 }
             }
@@ -140,61 +152,6 @@ impl CommandRunner {
             stderr_truncated: stderr.truncated,
         })
     }
-}
-
-#[cfg(unix)]
-fn configure_child_process(command: &mut Command) {
-    // SAFETY: `pre_exec` runs after fork and before exec. The closure only calls
-    // the async-signal-safe libc `setpgid` and constructs an OS error from errno
-    // when that call fails.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setpgid(0, 0) == 0 {
-                Ok(())
-            } else {
-                Err(std::io::Error::last_os_error())
-            }
-        });
-    }
-}
-
-#[cfg(not(unix))]
-fn configure_child_process(_command: &mut Command) {}
-
-#[cfg(unix)]
-fn terminate_child_tree(child: &mut Child) {
-    signal_child_process_group(child, libc::SIGTERM);
-    for _ in 0..10 {
-        if child.try_wait().ok().flatten().is_some() {
-            return;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
-    signal_child_process_group(child, libc::SIGKILL);
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-#[cfg(unix)]
-fn signal_child_process_group(child: &Child, signal: libc::c_int) {
-    let process_group_id = child.id() as libc::pid_t;
-    if process_group_id <= 0 {
-        return;
-    }
-
-    // SAFETY: `configure_child_process` places launched commands in a process
-    // group with the child's pid as the pgid. Passing a negative pid asks POSIX
-    // `kill` to signal that process group. The signal value is one of libc's
-    // known constants supplied by this module.
-    unsafe {
-        let _ = libc::kill(-process_group_id, signal);
-    }
-}
-
-#[cfg(not(unix))]
-fn terminate_child_tree(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 #[derive(Debug, Default)]
