@@ -1164,10 +1164,11 @@ impl SharedLspHoverTooltipView {
         let state = self.state.clone();
         let detail_key = self.detail_key.clone();
         let query_key = self.query_key.clone();
+        let file_path = self.request.file_path.clone();
 
-        state.update(cx, |state, cx| {
+        let did_start = state.update(cx, |state, cx| {
             let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
-                return;
+                return false;
             };
             let symbol_state = detail_state
                 .lsp_symbol_states
@@ -1177,7 +1178,7 @@ impl SharedLspHoverTooltipView {
                 || symbol_state.details.is_some()
                 || symbol_state.error.is_some()
             {
-                return;
+                return false;
             }
             symbol_state.loading = true;
             symbol_state.details = None;
@@ -1185,14 +1186,20 @@ impl SharedLspHoverTooltipView {
             symbol_state.references_loading = false;
             symbol_state.references_loaded = false;
             symbol_state.references_error = None;
+            detail_state.begin_lsp_symbol_loading(&file_path);
             cx.notify();
+            true
         });
+        if !did_start {
+            return;
+        }
 
         window
             .spawn(cx, {
                 let state = state.clone();
                 let detail_key = detail_key.clone();
                 let query_key = query_key.clone();
+                let file_path = file_path.clone();
                 let lsp_session_manager = self.lsp_session_manager.clone();
                 let repo_root = self.repo_root.clone();
                 let request = self.request.clone();
@@ -1214,6 +1221,7 @@ impl SharedLspHoverTooltipView {
                             else {
                                 return;
                             };
+                            detail_state.finish_lsp_symbol_loading(&file_path);
                             let symbol_state = detail_state
                                 .lsp_symbol_states
                                 .entry(query_key.clone())

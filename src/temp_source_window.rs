@@ -9,9 +9,14 @@ use crate::code_display::{
 };
 use crate::diff::{DiffLineKind, ParsedDiffFile, ParsedDiffLine};
 use crate::github::PullRequestDetail;
+use crate::icons::{lucide_icon, LucideIcon};
+use crate::managed_lsp::{ManagedServerInstallState, ManagedServerKind};
 use crate::review_ai::DiffAnchor;
 use crate::source_browser::build_full_file_diff_lines;
-use crate::state::{AppState, ReviewLineActionTarget, TempSourceSide, TempSourceTarget};
+use crate::state::{
+    AppState, LspStatusNotice, ManagedLspSettingsState, ReviewLineActionTarget, TempSourceSide,
+    TempSourceTarget,
+};
 use crate::theme::*;
 use crate::views::diff_view::load_temp_source_file_content_flow;
 
@@ -225,6 +230,15 @@ impl Render for TempSourceWindow {
         let state_for_close = self.state.clone();
 
         let target = snapshot.target.clone();
+        let (managed_lsp_settings, lsp_notice) = {
+            let app_state = self.state.read(cx);
+            let managed_lsp_settings = app_state.managed_lsp_settings.clone();
+            let lsp_notice = target
+                .as_ref()
+                .filter(|target| target.side == TempSourceSide::Head)
+                .and_then(|target| app_state.active_lsp_status_notice_for_path(&target.path));
+            (managed_lsp_settings, lsp_notice)
+        };
 
         if let Some(prepared) = snapshot.prepared.as_ref() {
             if self.list_state.item_count() != prepared.lines.len() {
@@ -302,6 +316,7 @@ impl Render for TempSourceWindow {
                         });
 
                         div()
+                            .relative()
                             .flex()
                             .flex_col()
                             .flex_grow()
@@ -338,6 +353,14 @@ impl Render for TempSourceWindow {
                                 )
                                 .into_any_element()
                             }))
+                            .when_some(lsp_notice.clone(), |el, notice| {
+                                el.child(render_temp_source_lsp_status(
+                                    self.state.clone(),
+                                    target.clone(),
+                                    notice,
+                                    &managed_lsp_settings,
+                                ))
+                            })
                             .into_any_element()
                     })
                     .unwrap_or_else(|| {
@@ -349,6 +372,198 @@ impl Render for TempSourceWindow {
                     }),
             })
     }
+}
+
+fn render_temp_source_lsp_status(
+    state: Entity<AppState>,
+    target: TempSourceTarget,
+    notice: LspStatusNotice,
+    settings: &ManagedLspSettingsState,
+) -> impl IntoElement {
+    let dismissal_key = notice.dismissal_key.clone();
+    let icon = if notice.busy {
+        LucideIcon::RefreshCw
+    } else {
+        LucideIcon::AlertTriangle
+    };
+    let icon_color = if notice.busy { info() } else { warning() };
+
+    div()
+        .absolute()
+        .right(px(14.0))
+        .bottom(px(14.0))
+        .w(px(320.0))
+        .rounded(radius())
+        .border_1()
+        .border_color(diff_annotation_border())
+        .bg(bg_overlay())
+        .shadow(popover_shadow())
+        .occlude()
+        .p(px(12.0))
+        .flex()
+        .flex_col()
+        .gap(px(9.0))
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .gap(px(9.0))
+                .child(div().mt(px(1.0)).child(lucide_icon(icon, 14.0, icon_color)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.0))
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(fg_emphasis())
+                                .child(notice.title),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .line_height(px(16.0))
+                                .text_color(fg_muted())
+                                .child(compact_temp_lsp_notice_detail(&notice.detail)),
+                        ),
+                )
+                .child(render_temp_lsp_status_close_button(
+                    state.clone(),
+                    dismissal_key,
+                )),
+        )
+        .when_some(notice.install_kind, |el, kind| {
+            el.child(render_temp_lsp_install_action(
+                state.clone(),
+                target.clone(),
+                kind,
+                settings,
+            ))
+        })
+}
+
+fn render_temp_lsp_status_close_button(
+    state: Entity<AppState>,
+    dismissal_key: String,
+) -> impl IntoElement {
+    div()
+        .id("temp-lsp-status-dismiss")
+        .w(px(22.0))
+        .h(px(22.0))
+        .flex_shrink_0()
+        .rounded(px(5.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(fg_subtle())
+        .hover(|style| style.bg(bg_selected()).text_color(fg_emphasis()))
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            cx.stop_propagation();
+            state.update(cx, |state, cx| {
+                state.dismiss_lsp_status_notice_key(dismissal_key.clone());
+                cx.notify();
+            });
+        })
+        .child(lucide_icon(LucideIcon::X, 12.0, fg_subtle()))
+}
+
+fn render_temp_lsp_install_action(
+    state: Entity<AppState>,
+    target: TempSourceTarget,
+    kind: ManagedServerKind,
+    settings: &ManagedLspSettingsState,
+) -> AnyElement {
+    let installing = settings.installing.contains(&kind);
+    let install_state = settings
+        .statuses
+        .get(&kind)
+        .map(|status| status.state)
+        .unwrap_or(ManagedServerInstallState::NotInstalled);
+    let label = temp_lsp_install_action_label(install_state, installing);
+    let base = div()
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .px(px(8.0))
+        .py(px(5.0))
+        .rounded(radius_sm())
+        .text_size(px(11.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(if installing { fg_subtle() } else { info() })
+        .child(lucide_icon(
+            if installing {
+                LucideIcon::RefreshCw
+            } else {
+                LucideIcon::Plug
+            },
+            12.0,
+            if installing { fg_subtle() } else { info() },
+        ))
+        .child(label);
+
+    if installing {
+        return base.bg(bg_subtle()).into_any_element();
+    }
+
+    base.hover(|style| style.bg(info_muted()))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            let path = target.path.clone();
+            state.update(cx, |state, cx| {
+                let Some(detail_key) = state.active_pr_key.clone() else {
+                    return;
+                };
+                let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
+                    return;
+                };
+                detail_state.lsp_statuses.remove(&path);
+                detail_state.lsp_loading_paths.insert(path);
+                cx.notify();
+            });
+            crate::views::trigger_managed_lsp_install(&state, kind, window, cx);
+
+            let model = state.clone();
+            let target = target.clone();
+            window
+                .spawn(cx, async move |cx: &mut AsyncWindowContext| {
+                    load_temp_source_file_content_flow(model, target, cx).await;
+                })
+                .detach();
+        })
+        .into_any_element()
+}
+
+fn temp_lsp_install_action_label(
+    install_state: ManagedServerInstallState,
+    installing: bool,
+) -> &'static str {
+    if installing {
+        return "Installing...";
+    }
+
+    match install_state {
+        ManagedServerInstallState::NotInstalled => "Install",
+        ManagedServerInstallState::Installed => "Reinstall",
+        ManagedServerInstallState::Broken => "Repair",
+    }
+}
+
+fn compact_temp_lsp_notice_detail(detail: &str) -> String {
+    const MAX_LEN: usize = 180;
+    let normalized = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.len() <= MAX_LEN {
+        return normalized;
+    }
+
+    let mut compact = normalized
+        .chars()
+        .take(MAX_LEN.saturating_sub(3))
+        .collect::<String>();
+    compact.push_str("...");
+    compact
 }
 
 fn render_temp_source_code_surface(code: AnyElement) -> impl IntoElement {

@@ -132,6 +132,13 @@ impl LspServerStatus {
     pub fn is_ready(&self) -> bool {
         matches!(self.state, LspServerState::Ready)
     }
+
+    pub fn command_display_label(&self) -> Option<String> {
+        self.command
+            .as_deref()
+            .map(compact_command_label)
+            .map(str::to_string)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -376,8 +383,19 @@ impl LspSessionManager {
             })
             .unwrap_or_default();
 
-        for session in sessions {
-            session.shutdown(LSP_SHUTDOWN_GRACE);
+        if sessions.is_empty() {
+            return;
+        }
+
+        // GPUI quit observers only get a short global timeout. Start every LSP
+        // shutdown before waiting so several slow servers cannot consume it
+        // serially and survive app exit.
+        for session in &sessions {
+            session.request_shutdown();
+        }
+        thread::sleep(LSP_SHUTDOWN_GRACE);
+        for session in &sessions {
+            session.terminate_if_running(Duration::ZERO);
         }
     }
 
@@ -421,11 +439,18 @@ impl LspSessionManager {
     }
 }
 
+impl Drop for LspSessionManager {
+    fn drop(&mut self) {
+        self.shutdown_all();
+    }
+}
+
 struct LspSession {
     repo_root: PathBuf,
     language_id: String,
     command: String,
     child_process_id: u32,
+    child_process_group_id: Option<u32>,
     next_request_id: AtomicI64,
     io: Mutex<LspIo>,
     capabilities: Mutex<Option<LspServerCapabilities>>,
@@ -474,6 +499,7 @@ impl LspSession {
             )
         })?;
         let child_process_id = child.id();
+        let child_process_group_id = lookup_child_process_group_id(child_process_id);
 
         let stdin = child
             .stdin
@@ -489,6 +515,7 @@ impl LspSession {
             language_id: config.language_id,
             command: config.command,
             child_process_id,
+            child_process_group_id,
             next_request_id: AtomicI64::new(1),
             io: Mutex::new(LspIo {
                 child,
@@ -503,8 +530,49 @@ impl LspSession {
 
     fn shutdown(&self, grace: Duration) {
         match self.io.try_lock() {
-            Ok(mut io) => shutdown_lsp_io(&mut io, &self.next_request_id, grace),
-            Err(_) => terminate_lsp_process_tree_by_id(self.child_process_id, grace),
+            Ok(mut io) => shutdown_lsp_io(
+                &mut io,
+                &self.next_request_id,
+                self.child_process_group_id,
+                grace,
+            ),
+            Err(_) => terminate_lsp_process_tree_by_id(
+                self.child_process_id,
+                self.child_process_group_id,
+                grace,
+            ),
+        }
+    }
+
+    fn request_shutdown(&self) {
+        match self.io.try_lock() {
+            Ok(mut io) => {
+                if child_has_exited(&mut io.child) {
+                    return;
+                }
+                let _ = send_lsp_shutdown_messages(&mut io, &self.next_request_id);
+            }
+            Err(_) => terminate_lsp_process_tree_by_id(
+                self.child_process_id,
+                self.child_process_group_id,
+                Duration::ZERO,
+            ),
+        }
+    }
+
+    fn terminate_if_running(&self, grace: Duration) {
+        match self.io.try_lock() {
+            Ok(mut io) => {
+                if child_has_exited(&mut io.child) {
+                    return;
+                }
+                terminate_lsp_child_tree(&mut io.child, self.child_process_group_id, grace);
+            }
+            Err(_) => terminate_lsp_process_tree_by_id(
+                self.child_process_id,
+                self.child_process_group_id,
+                grace,
+            ),
         }
     }
 
@@ -866,7 +934,12 @@ fn configure_lsp_child_process(command: &mut Command) {
 #[cfg(not(unix))]
 fn configure_lsp_child_process(_command: &mut Command) {}
 
-fn shutdown_lsp_io(io: &mut LspIo, next_request_id: &AtomicI64, grace: Duration) {
+fn shutdown_lsp_io(
+    io: &mut LspIo,
+    next_request_id: &AtomicI64,
+    child_process_group_id: Option<u32>,
+    grace: Duration,
+) {
     if child_has_exited(&mut io.child) {
         return;
     }
@@ -876,7 +949,7 @@ fn shutdown_lsp_io(io: &mut LspIo, next_request_id: &AtomicI64, grace: Duration)
         return;
     }
 
-    terminate_lsp_child_tree(&mut io.child, grace);
+    terminate_lsp_child_tree(&mut io.child, child_process_group_id, grace);
 }
 
 fn child_has_exited(child: &mut Child) -> bool {
@@ -916,43 +989,77 @@ fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> bool {
 }
 
 #[cfg(unix)]
-fn terminate_lsp_child_tree(child: &mut Child, grace: Duration) {
-    signal_lsp_process_group(child.id(), libc::SIGTERM);
+fn terminate_lsp_child_tree(
+    child: &mut Child,
+    child_process_group_id: Option<u32>,
+    grace: Duration,
+) {
+    signal_lsp_process_group(child.id(), child_process_group_id, libc::SIGTERM);
     if wait_for_child_exit(child, grace) {
         return;
     }
-    signal_lsp_process_group(child.id(), libc::SIGKILL);
+    signal_lsp_process_group(child.id(), child_process_group_id, libc::SIGKILL);
     let _ = child.kill();
     let _ = child.wait();
 }
 
 #[cfg(not(unix))]
-fn terminate_lsp_child_tree(child: &mut Child, _grace: Duration) {
+fn terminate_lsp_child_tree(
+    child: &mut Child,
+    _child_process_group_id: Option<u32>,
+    _grace: Duration,
+) {
     let _ = child.kill();
     let _ = child.wait();
 }
 
 #[cfg(unix)]
-fn terminate_lsp_process_tree_by_id(process_id: u32, grace: Duration) {
-    signal_lsp_process_group(process_id, libc::SIGTERM);
+fn terminate_lsp_process_tree_by_id(
+    process_id: u32,
+    process_group_id: Option<u32>,
+    grace: Duration,
+) {
+    signal_lsp_process_group(process_id, process_group_id, libc::SIGTERM);
     thread::sleep(grace);
-    signal_lsp_process_group(process_id, libc::SIGKILL);
+    signal_lsp_process_group(process_id, process_group_id, libc::SIGKILL);
 }
 
 #[cfg(not(unix))]
-fn terminate_lsp_process_tree_by_id(_process_id: u32, _grace: Duration) {}
+fn terminate_lsp_process_tree_by_id(
+    _process_id: u32,
+    _process_group_id: Option<u32>,
+    _grace: Duration,
+) {
+}
 
 #[cfg(unix)]
-fn signal_lsp_process_group(process_id: u32, signal: libc::c_int) {
-    let process_group_id = process_id as libc::pid_t;
+fn lookup_child_process_group_id(process_id: u32) -> Option<u32> {
+    let process_group_id = unsafe { libc::getpgid(process_id as libc::pid_t) };
+    (process_group_id > 0).then_some(process_group_id as u32)
+}
+
+#[cfg(not(unix))]
+fn lookup_child_process_group_id(_process_id: u32) -> Option<u32> {
+    None
+}
+
+#[cfg(unix)]
+fn signal_lsp_process_group(process_id: u32, process_group_id: Option<u32>, signal: libc::c_int) {
+    let process_id = process_id as libc::pid_t;
+    let process_group_id = process_group_id.unwrap_or(process_id as u32) as libc::pid_t;
     if process_group_id <= 0 {
         return;
     }
 
-    // SAFETY: LSP commands are launched into their own process group with pgid
-    // equal to child pid. A negative pid signals that whole process group.
+    // SAFETY: LSP commands are launched into their own process group. When the
+    // recorded group unexpectedly matches the app's own group, fall back to the
+    // direct child pid so cleanup cannot signal unrelated app siblings.
     unsafe {
-        let _ = libc::kill(-process_group_id, signal);
+        if libc::getpgrp() == process_group_id {
+            let _ = libc::kill(process_id, signal);
+        } else {
+            let _ = libc::kill(-process_group_id, signal);
+        }
     }
 }
 
@@ -1115,6 +1222,36 @@ fn resolve_server_configuration_for_path(
         .insert(cache_key, config.clone());
 
     Ok(config)
+}
+
+pub fn managed_server_kind_for_file(file_path: &str) -> Option<ManagedServerKind> {
+    language_server_spec_for_path(file_path)?.managed
+}
+
+pub fn language_label_for_file(file_path: &str) -> Option<&'static str> {
+    language_server_spec_for_path(file_path).map(|spec| spec.language_id)
+}
+
+pub fn preferred_server_label_for_file(file_path: &str) -> Option<String> {
+    let spec = language_server_spec_for_path(file_path)?;
+    if let Some(kind) = spec.managed {
+        return Some(managed_lsp::managed_server_display_name(kind).to_string());
+    }
+
+    Some(
+        spec.command_candidates
+            .first()
+            .copied()
+            .unwrap_or("language server")
+            .to_string(),
+    )
+}
+
+fn compact_command_label(command: &str) -> &str {
+    Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(command)
 }
 
 fn resolved_server_configuration_cache(
@@ -2661,6 +2798,49 @@ mod tests {
 
         assert!(!process_is_running(session.child_process_id));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lsp_manager_shutdown_terminates_all_sessions() {
+        let manager = LspSessionManager::new();
+        let mut process_ids = Vec::new();
+        let mut dirs = Vec::new();
+
+        for index in 0..3 {
+            let dir = unique_test_directory(&format!("shutdown-manager-{index}"));
+            let server = dir.join("test-lsp");
+            write_executable_script(
+                &server,
+                "#!/bin/sh\ntrap '' TERM\nwhile true; do sleep 1; done\n",
+            );
+            let config = ResolvedServerConfiguration {
+                language_id: format!("test-{index}"),
+                command: server.to_string_lossy().to_string(),
+                args: Vec::new(),
+            };
+            let session = Arc::new(LspSession::spawn(dir.clone(), config).expect("spawn test LSP"));
+            process_ids.push(session.child_process_id);
+            manager.sessions.lock().expect("sessions").insert(
+                SessionKey {
+                    repo_root: dir.clone(),
+                    language_id: format!("test-{index}"),
+                    command: server.to_string_lossy().to_string(),
+                    document_identity: Some(index.to_string()),
+                },
+                session,
+            );
+            dirs.push(dir);
+        }
+
+        manager.shutdown_all();
+
+        for process_id in process_ids {
+            assert!(!process_is_running(process_id));
+        }
+        for dir in dirs {
+            std::fs::remove_dir_all(&dir).ok();
+        }
     }
 
     #[cfg(unix)]

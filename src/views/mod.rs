@@ -31,5 +31,5 @@ pub(crate) use root::{
 pub use settings::{
     cycle_diff_color_theme_preference, decrease_code_font_size_preference,
     increase_code_font_size_preference, reset_code_font_size_preference,
-    trigger_software_update_check,
+    trigger_managed_lsp_install, trigger_software_update_check,
 };

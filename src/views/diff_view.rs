@@ -31,6 +31,7 @@ use crate::inline_diff::{build_hunk_inline_emphasis, normalize_inline_emphasis_r
 use crate::local_documents;
 use crate::local_repo;
 use crate::lsp;
+use crate::managed_lsp::{self, ManagedServerInstallState};
 use crate::markdown::render_markdown;
 use crate::onboarding::WizardStepTarget;
 use crate::review_ai::DiffAnchor;
@@ -1161,6 +1162,16 @@ fn render_diff_panel(
     let guided_review_preparation_overlay = (center_mode == ReviewCenterMode::GuidedReview)
         .then(|| render_guided_review_preparation_overlay(state, app_state, window))
         .flatten();
+    let active_lsp_path = if center_mode == ReviewCenterMode::SourceBrowser {
+        source_target.as_ref().map(|target| target.path.as_str())
+    } else {
+        selected_file.map(|file| file.path.as_str())
+    };
+    let lsp_status_popup = active_lsp_path.and_then(|path| {
+        app_state
+            .active_lsp_status_notice_for_path(path)
+            .map(|notice| (path.to_string(), notice))
+    });
 
     div()
         .relative()
@@ -1262,6 +1273,198 @@ fn render_diff_panel(
         .when_some(guided_review_preparation_overlay, |el, overlay| {
             el.child(overlay)
         })
+        .when_some(lsp_status_popup, |el, (path, notice)| {
+            el.child(render_lsp_status_popup(state, path, notice, app_state))
+        })
+}
+
+fn render_lsp_status_popup(
+    state: &Entity<AppState>,
+    path: String,
+    notice: LspStatusNotice,
+    app_state: &AppState,
+) -> AnyElement {
+    let dismissal_key = notice.dismissal_key.clone();
+    let icon = if notice.busy {
+        LucideIcon::RefreshCw
+    } else {
+        LucideIcon::AlertTriangle
+    };
+    let icon_color = if notice.busy { info() } else { warning() };
+    let detail = compact_lsp_notice_detail(&notice.detail);
+
+    div()
+        .absolute()
+        .right(px(18.0))
+        .bottom(px(18.0))
+        .w(px(336.0))
+        .max_w(px(336.0))
+        .rounded(radius())
+        .border_1()
+        .border_color(diff_annotation_border())
+        .bg(bg_overlay())
+        .shadow(popover_shadow())
+        .occlude()
+        .p(px(12.0))
+        .flex()
+        .flex_col()
+        .gap(px(9.0))
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .gap(px(9.0))
+                .child(div().mt(px(1.0)).child(lucide_icon(icon, 14.0, icon_color)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.0))
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(fg_emphasis())
+                                .child(notice.title),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .line_height(px(16.0))
+                                .text_color(fg_muted())
+                                .child(detail),
+                        ),
+                )
+                .child(render_lsp_status_close_button(
+                    state,
+                    dismissal_key,
+                    "Dismiss LSP notice",
+                )),
+        )
+        .when_some(notice.install_kind, |el, kind| {
+            el.child(render_lsp_install_action(state, path, kind, app_state))
+        })
+        .into_any_element()
+}
+
+fn render_lsp_status_close_button(
+    state: &Entity<AppState>,
+    dismissal_key: String,
+    tooltip: &'static str,
+) -> impl IntoElement {
+    let state = state.clone();
+    div()
+        .id("lsp-status-dismiss")
+        .w(px(22.0))
+        .h(px(22.0))
+        .flex_shrink_0()
+        .rounded(px(5.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(fg_subtle())
+        .hover(|style| style.bg(bg_selected()).text_color(fg_emphasis()))
+        .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            cx.stop_propagation();
+            state.update(cx, |state, cx| {
+                state.dismiss_lsp_status_notice_key(dismissal_key.clone());
+                cx.notify();
+            });
+        })
+        .child(lucide_icon(LucideIcon::X, 12.0, fg_subtle()))
+}
+
+fn render_lsp_install_action(
+    state: &Entity<AppState>,
+    path: String,
+    kind: managed_lsp::ManagedServerKind,
+    app_state: &AppState,
+) -> AnyElement {
+    let installing = app_state.managed_lsp_settings.installing.contains(&kind);
+    let install_state = app_state
+        .managed_lsp_settings
+        .statuses
+        .get(&kind)
+        .map(|status| status.state)
+        .unwrap_or(ManagedServerInstallState::NotInstalled);
+    let label = lsp_install_action_label(install_state, installing);
+    let base = div()
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .px(px(8.0))
+        .py(px(5.0))
+        .rounded(radius_sm())
+        .text_size(px(11.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(if installing { fg_subtle() } else { info() })
+        .child(lucide_icon(
+            if installing {
+                LucideIcon::RefreshCw
+            } else {
+                LucideIcon::Plug
+            },
+            12.0,
+            if installing { fg_subtle() } else { info() },
+        ))
+        .child(label);
+
+    if installing {
+        return base.bg(bg_subtle()).into_any_element();
+    }
+
+    let state_for_install = state.clone();
+    base.hover(|style| style.bg(info_muted()))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            let path = path.clone();
+            state_for_install.update(cx, |state, cx| {
+                let Some(detail_key) = state.active_pr_key.clone() else {
+                    return;
+                };
+                let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
+                    return;
+                };
+                detail_state.lsp_statuses.remove(&path);
+                detail_state.lsp_loading_paths.insert(path);
+                cx.notify();
+            });
+            super::settings::trigger_managed_lsp_install(&state_for_install, kind, window, cx);
+            ensure_active_review_focus_loaded(&state_for_install, window, cx);
+        })
+        .into_any_element()
+}
+
+fn lsp_install_action_label(
+    install_state: ManagedServerInstallState,
+    installing: bool,
+) -> &'static str {
+    if installing {
+        return "Installing...";
+    }
+
+    match install_state {
+        ManagedServerInstallState::NotInstalled => "Install",
+        ManagedServerInstallState::Installed => "Reinstall",
+        ManagedServerInstallState::Broken => "Repair",
+    }
+}
+
+fn compact_lsp_notice_detail(detail: &str) -> String {
+    const MAX_LEN: usize = 180;
+    let normalized = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.len() <= MAX_LEN {
+        return normalized;
+    }
+
+    let mut compact = normalized
+        .chars()
+        .take(MAX_LEN.saturating_sub(3))
+        .collect::<String>();
+    compact.push_str("...");
+    compact
 }
 
 fn render_review_header_change_summary(

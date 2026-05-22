@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -13,7 +14,7 @@ use crate::github::{
 };
 use crate::local_repo::LocalRepositoryStatus;
 use crate::local_review::{self, RememberedLocalRepository};
-use crate::lsp::{LspServerStatus, LspSessionManager, LspSymbolDetails};
+use crate::lsp::{LspServerState, LspServerStatus, LspSessionManager, LspSymbolDetails};
 use crate::managed_lsp::{ManagedServerInstallStatus, ManagedServerKind};
 use crate::notifications;
 use crate::onboarding::{
@@ -156,6 +157,7 @@ pub struct DetailState {
     pub structural_diff_warmup: StructuralDiffWarmupState,
     pub lsp_statuses: std::collections::HashMap<String, LspServerStatus>,
     pub lsp_loading_paths: std::collections::HashSet<String>,
+    pub lsp_symbol_loading_paths: std::collections::HashMap<String, usize>,
     pub lsp_symbol_states: std::collections::HashMap<String, LspSymbolState>,
     pub review_route_loading: bool,
     pub review_route_message: Option<String>,
@@ -164,6 +166,15 @@ pub struct DetailState {
     pub stack_open_pull_requests: Option<Vec<StackPullRequestRef>>,
     pub stack_open_pull_requests_loading: bool,
     pub stack_open_pull_requests_error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LspStatusNotice {
+    pub title: String,
+    pub detail: String,
+    pub install_kind: Option<ManagedServerKind>,
+    pub busy: bool,
+    pub dismissal_key: String,
 }
 
 impl Default for DetailState {
@@ -187,6 +198,7 @@ impl Default for DetailState {
             structural_diff_warmup: StructuralDiffWarmupState::default(),
             lsp_statuses: std::collections::HashMap::new(),
             lsp_loading_paths: std::collections::HashSet::new(),
+            lsp_symbol_loading_paths: std::collections::HashMap::new(),
             lsp_symbol_states: std::collections::HashMap::new(),
             review_route_loading: false,
             review_route_message: None,
@@ -195,6 +207,162 @@ impl Default for DetailState {
             stack_open_pull_requests: None,
             stack_open_pull_requests_loading: false,
             stack_open_pull_requests_error: None,
+        }
+    }
+}
+
+impl DetailState {
+    pub fn lsp_status_notice_for_path(&self, path: &str) -> Option<LspStatusNotice> {
+        if self.lsp_loading_paths.contains(path) {
+            let server_label = crate::lsp::preferred_server_label_for_file(path)
+                .unwrap_or_else(|| "Language server".to_string());
+            return Some(LspStatusNotice {
+                title: "Language server starting".to_string(),
+                detail: format!(
+                    "{server_label} is initializing for {}.",
+                    lsp_notice_file_label(path)
+                ),
+                install_kind: None,
+                busy: true,
+                dismissal_key: format!("starting:{path}"),
+            });
+        }
+
+        if self
+            .lsp_symbol_loading_paths
+            .get(path)
+            .copied()
+            .unwrap_or_default()
+            > 0
+        {
+            let server_label = self
+                .lsp_statuses
+                .get(path)
+                .and_then(LspServerStatus::command_display_label)
+                .or_else(|| crate::lsp::preferred_server_label_for_file(path))
+                .unwrap_or_else(|| "LSP".to_string());
+            return Some(LspStatusNotice {
+                title: "Loading code intelligence".to_string(),
+                detail: format!(
+                    "{server_label} is fetching hover details for {}.",
+                    lsp_notice_file_label(path)
+                ),
+                install_kind: None,
+                busy: true,
+                dismissal_key: format!("symbol-loading:{path}"),
+            });
+        }
+
+        let status = self.lsp_statuses.get(path)?;
+        if status.is_ready() {
+            return None;
+        }
+
+        let install_kind = crate::lsp::managed_server_kind_for_file(path);
+        let language_label = crate::lsp::language_label_for_file(path).unwrap_or("this");
+        let dismissal_key = lsp_status_notice_dismissal_key(path, status, install_kind);
+        match status.state {
+            LspServerState::MissingServer => Some(LspStatusNotice {
+                title: if install_kind.is_some() {
+                    "Language server not installed".to_string()
+                } else {
+                    "Language server unavailable".to_string()
+                },
+                detail: if let Some(kind) = install_kind {
+                    format!(
+                        "Install {} to enable hover details for {language_label} files.",
+                        crate::managed_lsp::managed_server_display_name(kind)
+                    )
+                } else {
+                    status.message.clone()
+                },
+                install_kind,
+                busy: false,
+                dismissal_key,
+            }),
+            LspServerState::CheckoutUnavailable => Some(LspStatusNotice {
+                title: "Language server waiting on checkout".to_string(),
+                detail: status.message.clone(),
+                install_kind: None,
+                busy: false,
+                dismissal_key,
+            }),
+            LspServerState::Error => Some(LspStatusNotice {
+                title: if install_kind.is_some() {
+                    "Language server needs setup".to_string()
+                } else {
+                    "Language server unavailable".to_string()
+                },
+                detail: status.message.clone(),
+                install_kind,
+                busy: false,
+                dismissal_key,
+            }),
+            LspServerState::UnsupportedLanguage | LspServerState::Ready => None,
+        }
+    }
+
+    pub fn begin_lsp_symbol_loading(&mut self, path: &str) {
+        *self
+            .lsp_symbol_loading_paths
+            .entry(path.to_string())
+            .or_default() += 1;
+    }
+
+    pub fn finish_lsp_symbol_loading(&mut self, path: &str) {
+        match self.lsp_symbol_loading_paths.get_mut(path) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+            }
+            Some(_) => {
+                self.lsp_symbol_loading_paths.remove(path);
+            }
+            None => {}
+        }
+    }
+}
+
+fn lsp_notice_file_label(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(path)
+        .to_string()
+}
+
+fn lsp_status_notice_dismissal_key(
+    path: &str,
+    status: &LspServerStatus,
+    install_kind: Option<ManagedServerKind>,
+) -> String {
+    if let Some(kind) = install_kind {
+        match status.state {
+            LspServerState::MissingServer => return format!("managed-missing:{kind:?}"),
+            LspServerState::Error => {
+                return format!("managed-error:{kind:?}:{}", status.message.as_str());
+            }
+            _ => {}
+        }
+    }
+
+    match status.state {
+        LspServerState::MissingServer => format!(
+            "missing:{}:{}",
+            status.language_id.as_deref().unwrap_or_default(),
+            status.command.as_deref().unwrap_or_default()
+        ),
+        LspServerState::CheckoutUnavailable => {
+            format!("checkout:{}:{}", path, status.message.as_str())
+        }
+        LspServerState::Error => format!(
+            "error:{}:{}:{}",
+            path,
+            status.command.as_deref().unwrap_or_default(),
+            status.message.as_str()
+        ),
+        LspServerState::UnsupportedLanguage | LspServerState::Ready => {
+            format!("inactive:{path}:{:?}", status.state)
         }
     }
 }
@@ -1039,6 +1207,7 @@ pub struct AppState {
 
     // PR detail data (keyed by pr_key)
     pub detail_states: std::collections::HashMap<String, DetailState>,
+    pub dismissed_lsp_status_notice_keys: HashSet<String>,
     pub unread_review_comment_ids: std::collections::BTreeSet<String>,
     pub expanded_automation_activity_keys: std::collections::BTreeSet<String>,
     pub expanded_activity_history_keys: std::collections::BTreeSet<String>,
@@ -1224,6 +1393,7 @@ impl AppState {
             workspace_syncing: false,
             workspace_error: None,
             detail_states: std::collections::HashMap::new(),
+            dismissed_lsp_status_notice_keys: HashSet::new(),
             unread_review_comment_ids,
             expanded_automation_activity_keys: std::collections::BTreeSet::new(),
             expanded_activity_history_keys: std::collections::BTreeSet::new(),
@@ -1782,6 +1952,20 @@ impl AppState {
     pub fn active_detail_state(&self) -> Option<&DetailState> {
         let key = self.active_pr_key.as_ref()?;
         self.detail_states.get(key)
+    }
+
+    pub fn active_lsp_status_notice_for_path(&self, path: &str) -> Option<LspStatusNotice> {
+        let notice = self
+            .active_detail_state()?
+            .lsp_status_notice_for_path(path)?;
+        (!self
+            .dismissed_lsp_status_notice_keys
+            .contains(&notice.dismissal_key))
+        .then_some(notice)
+    }
+
+    pub fn dismiss_lsp_status_notice_key(&mut self, dismissal_key: String) {
+        self.dismissed_lsp_status_notice_keys.insert(dismissal_key);
     }
 
     pub fn active_review_brief_state(&self) -> Option<&ReviewBriefState> {
@@ -2759,13 +2943,15 @@ mod tests {
         PullRequestComment, PullRequestDataCompleteness, PullRequestDetail, PullRequestFile,
         PullRequestReview, PullRequestReviewComment, PullRequestReviewThread,
     };
+    use crate::lsp::{LspServerCapabilities, LspServerStatus};
+    use crate::managed_lsp::ManagedServerKind;
     use crate::onboarding::{StartupWizardOptions, WizardStepTarget};
     use crate::review_session::ReviewCenterMode;
     use crate::tutorial_pr::TUTORIAL_PR_KEY;
 
     use super::{
         diff_anchor_for_line, first_review_comment_after_focus_index,
-        review_comment_navigation_items, summary_key, AppState, DiffScrollbarActivity,
+        review_comment_navigation_items, summary_key, AppState, DetailState, DiffScrollbarActivity,
         PullRequestSurface, ReviewModeFocus, SectionId, StructuralDiffWarmupState,
     };
 
@@ -2816,6 +3002,98 @@ mod tests {
         assert!(activity.is_visible());
         assert!(activity.hide_if_current(second_generation));
         assert!(!activity.is_visible());
+    }
+
+    #[test]
+    fn lsp_status_notice_tracks_symbol_loading_after_server_ready() {
+        let mut detail_state = DetailState::default();
+        detail_state.lsp_statuses.insert(
+            "src/lib.rs".to_string(),
+            LspServerStatus::ready(
+                "rust".to_string(),
+                "/tmp/bin/rust-analyzer".to_string(),
+                LspServerCapabilities {
+                    hover_supported: true,
+                    ..Default::default()
+                },
+            ),
+        );
+
+        assert_eq!(detail_state.lsp_status_notice_for_path("src/lib.rs"), None);
+
+        detail_state.begin_lsp_symbol_loading("src/lib.rs");
+        detail_state.begin_lsp_symbol_loading("src/lib.rs");
+        let notice = detail_state
+            .lsp_status_notice_for_path("src/lib.rs")
+            .expect("expected symbol loading notice");
+        assert_eq!(notice.title, "Loading code intelligence");
+        assert_eq!(
+            notice.detail,
+            "rust-analyzer is fetching hover details for lib.rs."
+        );
+        assert!(notice.busy);
+
+        detail_state.finish_lsp_symbol_loading("src/lib.rs");
+        assert_eq!(
+            detail_state
+                .lsp_status_notice_for_path("src/lib.rs")
+                .expect("expected symbol loading notice")
+                .title,
+            "Loading code intelligence"
+        );
+
+        detail_state.finish_lsp_symbol_loading("src/lib.rs");
+        assert_eq!(detail_state.lsp_status_notice_for_path("src/lib.rs"), None);
+    }
+
+    #[test]
+    fn lsp_status_notice_offers_managed_install_for_missing_server() {
+        let mut detail_state = DetailState::default();
+        detail_state.lsp_statuses.insert(
+            "src/lib.rs".to_string(),
+            LspServerStatus::missing_server("rust", "rust-analyzer"),
+        );
+
+        let notice = detail_state
+            .lsp_status_notice_for_path("src/lib.rs")
+            .expect("expected missing server notice");
+        assert_eq!(notice.title, "Language server not installed");
+        assert_eq!(notice.install_kind, Some(ManagedServerKind::RustAnalyzer));
+        assert!(notice.detail.contains("managed rust-analyzer"));
+        assert!(!notice.busy);
+        assert_eq!(notice.dismissal_key, "managed-missing:RustAnalyzer");
+    }
+
+    #[test]
+    fn dismissed_lsp_status_notice_hides_same_managed_server() {
+        let mut state = AppState::new(
+            temp_cache_store("lsp-dismiss"),
+            StartupWizardOptions::force_welcome(),
+        );
+        let detail_key = "owner/repo#1".to_string();
+        let mut detail_state = DetailState::default();
+        detail_state.lsp_statuses.insert(
+            "src/lib.rs".to_string(),
+            LspServerStatus::missing_server("rust", "rust-analyzer"),
+        );
+        detail_state.lsp_statuses.insert(
+            "src/main.rs".to_string(),
+            LspServerStatus::missing_server("rust", "rust-analyzer"),
+        );
+        state.active_pr_key = Some(detail_key.clone());
+        state.detail_states.insert(detail_key, detail_state);
+
+        let notice = state
+            .active_lsp_status_notice_for_path("src/lib.rs")
+            .expect("expected missing server notice");
+        state.dismiss_lsp_status_notice_key(notice.dismissal_key);
+
+        assert!(state
+            .active_lsp_status_notice_for_path("src/lib.rs")
+            .is_none());
+        assert!(state
+            .active_lsp_status_notice_for_path("src/main.rs")
+            .is_none());
     }
 
     #[test]

@@ -444,7 +444,7 @@ pub fn cycle_diff_color_theme_preference(
     update_diff_color_theme_preference(state, next, window, cx);
 }
 
-fn trigger_managed_lsp_install(
+pub fn trigger_managed_lsp_install(
     state: &Entity<AppState>,
     kind: ManagedServerKind,
     window: &mut Window,
