@@ -228,31 +228,6 @@ impl DetailState {
             });
         }
 
-        if self
-            .lsp_symbol_loading_paths
-            .get(path)
-            .copied()
-            .unwrap_or_default()
-            > 0
-        {
-            let server_label = self
-                .lsp_statuses
-                .get(path)
-                .and_then(LspServerStatus::command_display_label)
-                .or_else(|| crate::lsp::preferred_server_label_for_file(path))
-                .unwrap_or_else(|| "LSP".to_string());
-            return Some(LspStatusNotice {
-                title: "Loading code intelligence".to_string(),
-                detail: format!(
-                    "{server_label} is fetching hover details for {}.",
-                    lsp_notice_file_label(path)
-                ),
-                install_kind: None,
-                busy: true,
-                dismissal_key: format!("symbol-loading:{path}"),
-            });
-        }
-
         let status = self.lsp_statuses.get(path)?;
         if status.is_ready() {
             return None;
@@ -854,6 +829,7 @@ pub struct CombinedDiffViewState {
     pub side_by_side_right_scroll: ScrollHandle,
     pub scrollbar_activity: DiffScrollbarActivity,
     pub last_focus_key: Rc<RefCell<Option<String>>>,
+    pub render_cache: Rc<RefCell<Option<Box<dyn std::any::Any>>>>,
 }
 
 impl CombinedDiffViewState {
@@ -864,6 +840,7 @@ impl CombinedDiffViewState {
             side_by_side_right_scroll: ScrollHandle::new(),
             scrollbar_activity: DiffScrollbarActivity::default(),
             last_focus_key: Rc::new(RefCell::new(None)),
+            render_cache: Rc::new(RefCell::new(None)),
         }
     }
 }
@@ -1845,6 +1822,10 @@ impl AppState {
 
         for diff_view_state in self.diff_view_states.borrow_mut().values_mut() {
             diff_view_state.highlighted_hunks = None;
+        }
+
+        for view_state in self.combined_diff_view_states.borrow().values() {
+            *view_state.render_cache.borrow_mut() = None;
         }
     }
 
@@ -3005,7 +2986,7 @@ mod tests {
     }
 
     #[test]
-    fn lsp_status_notice_tracks_symbol_loading_after_server_ready() {
+    fn lsp_status_notice_ignores_symbol_loading_after_server_ready() {
         let mut detail_state = DetailState::default();
         detail_state.lsp_statuses.insert(
             "src/lib.rs".to_string(),
@@ -3023,24 +3004,10 @@ mod tests {
 
         detail_state.begin_lsp_symbol_loading("src/lib.rs");
         detail_state.begin_lsp_symbol_loading("src/lib.rs");
-        let notice = detail_state
-            .lsp_status_notice_for_path("src/lib.rs")
-            .expect("expected symbol loading notice");
-        assert_eq!(notice.title, "Loading code intelligence");
-        assert_eq!(
-            notice.detail,
-            "rust-analyzer is fetching hover details for lib.rs."
-        );
-        assert!(notice.busy);
+        assert_eq!(detail_state.lsp_status_notice_for_path("src/lib.rs"), None);
 
         detail_state.finish_lsp_symbol_loading("src/lib.rs");
-        assert_eq!(
-            detail_state
-                .lsp_status_notice_for_path("src/lib.rs")
-                .expect("expected symbol loading notice")
-                .title,
-            "Loading code intelligence"
-        );
+        assert_eq!(detail_state.lsp_status_notice_for_path("src/lib.rs"), None);
 
         detail_state.finish_lsp_symbol_loading("src/lib.rs");
         assert_eq!(detail_state.lsp_status_notice_for_path("src/lib.rs"), None);

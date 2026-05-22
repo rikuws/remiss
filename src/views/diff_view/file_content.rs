@@ -21,7 +21,6 @@ pub async fn load_pull_request_file_content_flow(
     let request = model
         .read_with(cx, |state, _| {
             let cache = state.cache.clone();
-            let lsp_session_manager = state.lsp_session_manager.clone();
             let detail = state.active_detail()?.clone();
             let detail_key = state.active_pr_key.clone()?;
             let existing_local_repo_status = state
@@ -45,18 +44,15 @@ pub async fn load_pull_request_file_content_flow(
 
             let file_content_loaded =
                 is_local_checkout_file_loaded(detail_state, &request.path, &request.request_key);
-            let lsp_loaded = is_lsp_status_loaded(detail_state, &selected_file.path);
-            let already_loaded = file_content_loaded && lsp_loaded;
+            let already_loaded = file_content_loaded;
 
             Some((
                 cache,
-                lsp_session_manager,
                 detail_key,
                 detail,
                 selected_file,
                 request,
                 file_content_loaded,
-                lsp_loaded,
                 already_loaded,
                 existing_local_repo_status,
             ))
@@ -66,13 +62,11 @@ pub async fn load_pull_request_file_content_flow(
 
     let Some((
         cache,
-        lsp_session_manager,
         detail_key,
         detail,
         selected_file,
         request,
         file_content_loaded,
-        lsp_loaded,
         already_loaded,
         existing_local_repo_status,
     )) = request
@@ -104,7 +98,6 @@ pub async fn load_pull_request_file_content_flow(
     }
 
     let need_file_content = !file_content_loaded;
-    let need_lsp_status = !lsp_loaded;
 
     model
         .update(cx, |state, cx| {
@@ -125,11 +118,6 @@ pub async fn load_pull_request_file_content_flow(
                     .map(|status| !status.ready_for_snapshot_features())
                     .unwrap_or(true);
                 detail_state.local_repository_error = None;
-                if need_lsp_status {
-                    detail_state
-                        .lsp_loading_paths
-                        .insert(selected_file.path.clone());
-                }
             }
 
             cx.notify();
@@ -316,41 +304,6 @@ pub async fn load_pull_request_file_content_flow(
                     }
                 }
 
-                cx.notify();
-            })
-            .ok();
-    }
-
-    if need_lsp_status {
-        let lsp_status = load_lsp_status_for_path(
-            &detail,
-            local_repo_status.as_ref(),
-            local_repo_error.as_deref(),
-            lsp_session_manager,
-            &selected_file.path,
-            "diff file-content",
-            cx,
-        )
-        .await;
-        log_lsp_result(
-            &detail,
-            "diff file-content",
-            &selected_file.path,
-            &lsp_status,
-        );
-
-        model
-            .update(cx, |state, cx| {
-                let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
-                    return;
-                };
-                detail_state.local_repository_loading = false;
-                detail_state.local_repository_status = local_repo_status.clone();
-                detail_state.local_repository_error = local_repo_error.clone();
-                detail_state.lsp_loading_paths.remove(&selected_file.path);
-                detail_state
-                    .lsp_statuses
-                    .insert(selected_file.path.clone(), lsp_status.clone());
                 cx.notify();
             })
             .ok();

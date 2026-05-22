@@ -15,8 +15,6 @@ pub(super) struct CombinedDiffFileContext {
     pub(super) parsed_file_index: Option<usize>,
     pub(super) highlighted_hunks: Option<Arc<Vec<Vec<DiffLineHighlight>>>>,
     pub(super) gutter_layout: DiffGutterLayout,
-    pub(super) file_lsp_context: Option<DiffFileLspContext>,
-    pub(super) selected_anchor: Option<DiffAnchor>,
     pub(super) stack_visibility: Option<StackFileVisibility>,
     pub(super) items: Arc<Vec<DiffViewItem>>,
     pub(super) state_message: Option<String>,
@@ -43,6 +41,59 @@ pub(super) struct CombinedDiffFloatingHeader {
     collapsed: bool,
     reviewed: bool,
     collapse_scroll: Option<DiffFileCollapseScrollAdjustment>,
+}
+
+#[derive(Clone)]
+struct CombinedDiffRenderModel {
+    contexts: Arc<Vec<CombinedDiffFileContext>>,
+    items: Arc<Vec<CombinedDiffViewItem>>,
+    has_side_by_side_rows: bool,
+    combined_side_by_side_widths: Option<SideBySideColumnWidths>,
+}
+
+struct CombinedDiffRenderCache {
+    key: CombinedDiffRenderCacheKey,
+    model: CombinedDiffRenderModel,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct CombinedDiffRenderCacheKey {
+    revision: String,
+    center_mode: ReviewCenterMode,
+    diff_layout: DiffLayout,
+    wrap_diff_lines: bool,
+    stack_filter: Option<CombinedDiffStackFilterKey>,
+    visible_paths: Option<Vec<String>>,
+    waypoint_paths: Vec<(ReviewCenterMode, String)>,
+    files: Vec<CombinedDiffFileRenderStateKey>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct CombinedDiffStackFilterKey {
+    mode: StackDiffMode,
+    selected_layer_id: Option<String>,
+    stack_source: StackSource,
+    selected_layer_title: Option<String>,
+    selected_layer_rationale: Option<String>,
+    selected_layer_warnings: Vec<(String, String, Option<String>)>,
+    visible_atom_ids: Vec<String>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct CombinedDiffFileRenderStateKey {
+    path: String,
+    collapsed: bool,
+    reviewed: bool,
+    prepared_request_key: Option<String>,
+    structural: Option<CombinedDiffStructuralRenderStateKey>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum CombinedDiffStructuralRenderStateKey {
+    Missing,
+    Loading,
+    Error(String),
+    Ready(String),
 }
 
 #[derive(Clone)]
@@ -111,53 +162,37 @@ pub(super) fn render_combined_diff_files(
     stack_filter: Option<LayerDiffFilter>,
     center_mode: ReviewCenterMode,
     diff_layout: DiffLayout,
-    cx: &App,
+    _cx: &App,
 ) -> AnyElement {
     let visible_paths = stack_filter
         .as_ref()
         .map(|filter| stack_file_paths_for_filter(review_stack.as_ref(), filter));
-    let tree_rows = prepare_review_file_tree_rows(app_state, detail, visible_paths.as_ref());
-    let ordered_files =
-        ordered_review_files_from_tree_rows(detail, tree_rows.as_ref(), visible_paths.as_ref());
-    let contexts = ordered_files
-        .into_iter()
-        .map(|file| {
-            prepare_combined_diff_file_context(
-                state,
-                app_state,
-                detail,
-                file,
-                selected_path,
-                selected_anchor,
-                review_stack.as_ref(),
-                stack_filter.as_ref(),
-                center_mode,
-                diff_layout,
-                cx,
-            )
-        })
-        .collect::<Vec<_>>();
-
-    if contexts.is_empty() {
-        return panel_state_text("No files returned for this pull request.").into_any_element();
-    }
-
     let wrap_diff_lines = app_state
         .active_review_session()
         .map(|session| session.wrap_diff_lines)
         .unwrap_or(false);
-    let combined_side_by_side_widths = if wrap_diff_lines {
-        None
-    } else {
-        combined_side_by_side_column_widths(&contexts)
-    };
-    let (items, has_side_by_side_rows) = build_combined_diff_view_items(&contexts);
     let view_state = prepare_combined_diff_view_state(app_state, center_mode);
-    reset_list_state_preserving_scroll(&view_state.list_state, items.len());
+    let model = prepare_combined_diff_render_model(
+        app_state,
+        detail,
+        review_stack.as_ref(),
+        stack_filter.as_ref(),
+        visible_paths.as_ref(),
+        center_mode,
+        diff_layout,
+        wrap_diff_lines,
+        &view_state,
+    );
+
+    if model.contexts.is_empty() {
+        return panel_state_text("No files returned for this pull request.").into_any_element();
+    }
+
+    reset_list_state_preserving_scroll(&view_state.list_state, model.items.len());
     scroll_combined_diff_list_to_focus(
         &view_state,
-        &items,
-        &contexts,
+        model.items.as_ref(),
+        model.contexts.as_ref(),
         &detail.review_threads,
         selected_path,
         selected_anchor,
@@ -167,8 +202,8 @@ pub(super) fn render_combined_diff_files(
         install_combined_diff_scroll_handler(
             state,
             &view_state,
-            items.clone(),
-            contexts.clone(),
+            model.items.clone(),
+            model.contexts.clone(),
             active_pr_key,
             center_mode,
         );
@@ -179,8 +214,8 @@ pub(super) fn render_combined_diff_files(
         .then(|| {
             current_combined_diff_header(
                 &view_state.list_state,
-                &contexts,
-                &items,
+                model.contexts.as_ref(),
+                model.items.as_ref(),
                 app_state.selected_file_path.as_deref().or(selected_path),
             )
         })
@@ -191,8 +226,8 @@ pub(super) fn render_combined_diff_files(
     let show_top_fade = floating_header.is_some();
     let state = state.clone();
     let render_state = state.clone();
-    let items = Arc::new(items);
-    let contexts = Arc::new(contexts);
+    let items = model.items.clone();
+    let contexts = model.contexts.clone();
     let list_state = view_state.list_state.clone();
     let render_collapse_list_state = view_state.list_state.clone();
     let scrollbar_list_state = view_state.list_state.clone();
@@ -204,18 +239,24 @@ pub(super) fn render_combined_diff_files(
     let render_side_by_side_scroll_handles = side_by_side_scroll_handles.clone();
     let render_review_stack = review_stack.clone();
     let render_floating_header_path = floating_header_path.clone();
+    let render_selected_path = selected_path.map(str::to_string);
+    let render_selected_anchor = selected_anchor.cloned();
+    let render_combined_side_by_side_widths = model.combined_side_by_side_widths;
+    let has_side_by_side_rows = model.has_side_by_side_rows;
     let item_count = items.len();
     let rows = list(list_state, move |ix, _window, cx| {
         render_combined_diff_view_item(
             &render_state,
             render_review_stack.clone(),
             render_floating_header_path.as_deref(),
+            render_selected_path.as_deref(),
+            render_selected_anchor.as_ref(),
             contexts.as_ref(),
             items[ix].clone(),
             ix,
             wrap_diff_lines,
             &render_side_by_side_scroll_handles,
-            combined_side_by_side_widths,
+            render_combined_side_by_side_widths,
             &render_collapse_list_state,
             cx,
         )
@@ -702,18 +743,204 @@ fn render_side_by_side_horizontal_scrollbar_lane(
         .into_any_element()
 }
 
+fn prepare_combined_diff_render_model(
+    app_state: &AppState,
+    detail: &PullRequestDetail,
+    review_stack: &ReviewStack,
+    stack_filter: Option<&LayerDiffFilter>,
+    visible_paths: Option<&BTreeSet<String>>,
+    center_mode: ReviewCenterMode,
+    diff_layout: DiffLayout,
+    wrap_diff_lines: bool,
+    view_state: &CombinedDiffViewState,
+) -> CombinedDiffRenderModel {
+    let tree_rows = prepare_review_file_tree_rows(app_state, detail, visible_paths);
+    let ordered_files =
+        ordered_review_files_from_tree_rows(detail, tree_rows.as_ref(), visible_paths);
+    let key = combined_diff_render_cache_key(
+        app_state,
+        detail,
+        &ordered_files,
+        review_stack,
+        stack_filter,
+        visible_paths,
+        center_mode,
+        diff_layout,
+        wrap_diff_lines,
+    );
+
+    if let Some(model) = view_state
+        .render_cache
+        .borrow()
+        .as_ref()
+        .and_then(|cache| cache.downcast_ref::<CombinedDiffRenderCache>())
+        .filter(|cache| cache.key == key)
+        .map(|cache| cache.model.clone())
+    {
+        return model;
+    }
+
+    let contexts = ordered_files
+        .into_iter()
+        .map(|file| {
+            prepare_combined_diff_file_context(
+                app_state,
+                detail,
+                file,
+                review_stack,
+                stack_filter,
+                center_mode,
+                diff_layout,
+            )
+        })
+        .collect::<Vec<_>>();
+    let combined_side_by_side_widths = if wrap_diff_lines {
+        None
+    } else {
+        combined_side_by_side_column_widths(&contexts)
+    };
+    let (items, has_side_by_side_rows) = build_combined_diff_view_items(&contexts);
+    let model = CombinedDiffRenderModel {
+        contexts: Arc::new(contexts),
+        items: Arc::new(items),
+        has_side_by_side_rows,
+        combined_side_by_side_widths,
+    };
+
+    *view_state.render_cache.borrow_mut() = Some(Box::new(CombinedDiffRenderCache {
+        key,
+        model: model.clone(),
+    }));
+
+    model
+}
+
+fn combined_diff_render_cache_key(
+    app_state: &AppState,
+    detail: &PullRequestDetail,
+    ordered_files: &[&PullRequestFile],
+    review_stack: &ReviewStack,
+    stack_filter: Option<&LayerDiffFilter>,
+    visible_paths: Option<&BTreeSet<String>>,
+    center_mode: ReviewCenterMode,
+    diff_layout: DiffLayout,
+    wrap_diff_lines: bool,
+) -> CombinedDiffRenderCacheKey {
+    let detail_state = app_state.active_detail_state();
+    let stack_filter = stack_filter.map(|filter| {
+        let selected_layer = review_stack.selected_layer(filter.selected_layer_id.as_deref());
+        CombinedDiffStackFilterKey {
+            mode: filter.mode,
+            selected_layer_id: filter.selected_layer_id.clone(),
+            stack_source: review_stack.source,
+            selected_layer_title: selected_layer.map(|layer| layer.title.clone()),
+            selected_layer_rationale: selected_layer.map(|layer| layer.rationale.clone()),
+            selected_layer_warnings: selected_layer
+                .map(|layer| {
+                    layer
+                        .warnings
+                        .iter()
+                        .map(|warning| {
+                            (
+                                warning.code.clone(),
+                                warning.message.clone(),
+                                warning.path.clone(),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            visible_atom_ids: filter.visible_atom_ids.iter().cloned().collect(),
+        }
+    });
+    let visible_paths = visible_paths.map(|paths| paths.iter().cloned().collect());
+    let waypoint_paths = app_state
+        .active_review_session()
+        .map(|session| {
+            session
+                .waymarks
+                .iter()
+                .filter(|waymark| {
+                    matches!(
+                        waymark.location.mode,
+                        ReviewCenterMode::SemanticDiff | ReviewCenterMode::StructuralDiff
+                    )
+                })
+                .map(|waymark| (waymark.location.mode, waymark.location.file_path.clone()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let files = ordered_files
+        .iter()
+        .map(|file| {
+            let prepared_request_key = detail_state
+                .and_then(|detail_state| detail_state.file_content_states.get(&file.path))
+                .and_then(|file_state| {
+                    file_state
+                        .prepared
+                        .as_ref()
+                        .map(|_| file_state.request_key.clone().unwrap_or_default())
+                });
+            let structural = (center_mode == ReviewCenterMode::StructuralDiff).then(|| {
+                detail_state
+                    .and_then(|detail_state| detail_state.structural_diff_states.get(&file.path))
+                    .map(combined_diff_structural_render_state_key)
+                    .unwrap_or(CombinedDiffStructuralRenderStateKey::Missing)
+            });
+
+            CombinedDiffFileRenderStateKey {
+                path: file.path.clone(),
+                collapsed: app_state.is_review_file_collapsed(&file.path),
+                reviewed: app_state.is_review_file_reviewed(&file.path),
+                prepared_request_key,
+                structural,
+            }
+        })
+        .collect();
+
+    CombinedDiffRenderCacheKey {
+        revision: detail.updated_at.clone(),
+        center_mode,
+        diff_layout,
+        wrap_diff_lines,
+        stack_filter,
+        visible_paths,
+        waypoint_paths,
+        files,
+    }
+}
+
+fn combined_diff_structural_render_state_key(
+    state: &StructuralDiffFileState,
+) -> CombinedDiffStructuralRenderStateKey {
+    if state.loading {
+        return CombinedDiffStructuralRenderStateKey::Loading;
+    }
+
+    if let Some(error) = state.error.as_ref() {
+        return CombinedDiffStructuralRenderStateKey::Error(error.clone());
+    }
+
+    if state.diff.is_some() {
+        return CombinedDiffStructuralRenderStateKey::Ready(
+            state
+                .request_key
+                .clone()
+                .unwrap_or_else(|| "structural".to_string()),
+        );
+    }
+
+    CombinedDiffStructuralRenderStateKey::Missing
+}
+
 fn prepare_combined_diff_file_context(
-    state: &Entity<AppState>,
     app_state: &AppState,
     detail: &PullRequestDetail,
     file: &PullRequestFile,
-    selected_path: Option<&str>,
-    selected_anchor: Option<&DiffAnchor>,
     review_stack: &ReviewStack,
     stack_filter: Option<&LayerDiffFilter>,
     center_mode: ReviewCenterMode,
     diff_layout: DiffLayout,
-    cx: &App,
 ) -> CombinedDiffFileContext {
     let original_parsed = find_parsed_diff_file(&detail.parsed_diff, &file.path);
     let file_content_state = app_state
@@ -819,14 +1046,6 @@ fn prepare_combined_diff_file_context(
         gutter_layout.reserve_waypoint_slot,
         wrap_diff_lines,
     );
-    let file_lsp_context =
-        build_diff_file_lsp_context(state, file.path.as_str(), prepared_file, cx);
-    let selected_anchor = selected_anchor
-        .filter(|anchor| {
-            diff_anchor_matches_file(anchor, &file.path)
-                && (!anchor.file_path.is_empty() || selected_path == Some(file.path.as_str()))
-        })
-        .cloned();
     let items = state_message
         .is_none()
         .then(|| {
@@ -849,7 +1068,7 @@ fn prepare_combined_diff_file_context(
         .as_ref()
         .map(|parsed| parsed.is_binary)
         .unwrap_or(false);
-    header.active = selected_path == Some(file.path.as_str());
+    header.active = false;
 
     CombinedDiffFileContext {
         file: file.clone(),
@@ -865,8 +1084,6 @@ fn prepare_combined_diff_file_context(
         parsed_file_index,
         highlighted_hunks,
         gutter_layout,
-        file_lsp_context,
-        selected_anchor,
         stack_visibility,
         items: Arc::new(items),
         state_message,
@@ -980,16 +1197,14 @@ fn scroll_combined_diff_list_to_focus(
 fn install_combined_diff_scroll_handler(
     state: &Entity<AppState>,
     view_state: &CombinedDiffViewState,
-    items: Vec<CombinedDiffViewItem>,
-    contexts: Vec<CombinedDiffFileContext>,
+    items: Arc<Vec<CombinedDiffViewItem>>,
+    contexts: Arc<Vec<CombinedDiffFileContext>>,
     active_pr_key: String,
     center_mode: ReviewCenterMode,
 ) {
     let list_state = view_state.list_state.clone();
     let last_focus_key = view_state.last_focus_key.clone();
     let state_for_scroll = state.clone();
-    let items = Arc::new(items);
-    let contexts = Arc::new(contexts);
     list_state
         .clone()
         .set_scroll_handler(move |event, window, _| {
@@ -1000,7 +1215,7 @@ fn install_combined_diff_scroll_handler(
             let contexts = contexts.clone();
             let active_pr_key = active_pr_key.clone();
             let visible_range = event.visible_range.clone();
-            window.on_next_frame(move |window, cx| {
+            window.on_next_frame(move |_window, cx| {
                 let scroll_top = list_state.logical_scroll_top();
                 let focus = combined_diff_reading_focus(
                     items.as_ref(),
@@ -1009,8 +1224,6 @@ fn install_combined_diff_scroll_handler(
                     visible_range,
                 );
                 let compact = scroll_top.item_ix > 0 || scroll_top.offset_in_item > px(0.0);
-                let mut should_load_content = false;
-                let mut should_load_structural = false;
                 state.update(cx, |state, cx| {
                     if state.active_surface != PullRequestSurface::Files
                         || state.active_pr_key.as_deref() != Some(active_pr_key.as_str())
@@ -1036,9 +1249,6 @@ fn install_combined_diff_scroll_handler(
                             state.selected_diff_anchor = None;
                             *last_focus_key.borrow_mut() =
                                 Some(combined_file_focus_key(&focus.file_path));
-                            should_load_content = true;
-                            should_load_structural =
-                                center_mode == ReviewCenterMode::StructuralDiff;
                             cx.notify();
                         }
                         let review_focus_mode = if session_mode == ReviewCenterMode::GuidedReview {
@@ -1060,13 +1270,6 @@ fn install_combined_diff_scroll_handler(
                         cx.notify();
                     }
                 });
-
-                if should_load_structural {
-                    ensure_selected_structural_diff_loaded(&state, window, cx);
-                }
-                if should_load_content {
-                    ensure_selected_file_content_loaded(&state, window, cx);
-                }
             });
         });
 }
@@ -1075,6 +1278,8 @@ fn render_combined_diff_view_item(
     state: &Entity<AppState>,
     review_stack: Arc<ReviewStack>,
     floating_header_path: Option<&str>,
+    selected_path: Option<&str>,
+    selected_anchor: Option<&DiffAnchor>,
     contexts: &[CombinedDiffFileContext],
     item: CombinedDiffViewItem,
     item_ix: usize,
@@ -1090,6 +1295,8 @@ fn render_combined_diff_view_item(
             .map(|context| {
                 let hidden_by_floating_header =
                     floating_header_path == Some(context.file.path.as_str());
+                let mut header = context.header.clone();
+                header.active = selected_path == Some(context.file.path.as_str());
                 div()
                     .ml(px(DIFF_SECTION_HEADER_LEFT_MARGIN))
                     .mr(px(DIFF_SECTION_HEADER_RIGHT_MARGIN))
@@ -1103,7 +1310,7 @@ fn render_combined_diff_view_item(
                     .child(render_diff_file_header_row(
                         state,
                         review_stack,
-                        context.header.clone(),
+                        header,
                         wrap_diff_lines,
                         format!("row-{item_ix}"),
                         context.collapsed,
@@ -1142,6 +1349,8 @@ fn render_combined_diff_view_item(
                     state,
                     context,
                     item,
+                    selected_path,
+                    selected_anchor,
                     side_by_side_scroll_handles,
                     combined_side_by_side_column_widths,
                     cx,
@@ -1156,6 +1365,8 @@ fn render_combined_diff_row_item(
     state: &Entity<AppState>,
     context: &CombinedDiffFileContext,
     item: DiffViewItem,
+    selected_path: Option<&str>,
+    selected_anchor: Option<&DiffAnchor>,
     side_by_side_scroll_handles: &SideBySideScrollHandles,
     combined_side_by_side_column_widths: Option<SideBySideColumnWidths>,
     cx: &App,
@@ -1172,6 +1383,27 @@ fn render_combined_diff_row_item(
             .rows
             .get(row_ix)
             .map(|row| {
+                let selected_anchor = selected_anchor
+                    .filter(|anchor| {
+                        diff_anchor_matches_file(anchor, &context.file.path)
+                            && (!anchor.file_path.is_empty()
+                                || selected_path == Some(context.file.path.as_str()))
+                    })
+                    .cloned();
+                let prepared_file = state
+                    .read(cx)
+                    .active_detail_state()
+                    .and_then(|detail_state| {
+                        detail_state.file_content_states.get(&context.file.path)
+                    })
+                    .and_then(|file_state| file_state.prepared.as_ref())
+                    .cloned();
+                let file_lsp_context = build_diff_file_lsp_context(
+                    state,
+                    context.file.path.as_str(),
+                    prepared_file.as_ref(),
+                    cx,
+                );
                 render_virtualized_diff_row(
                     state,
                     context.gutter_layout,
@@ -1180,9 +1412,9 @@ fn render_combined_diff_row_item(
                     context.structural_side_by_side.as_deref(),
                     context.normal_side_by_side.as_deref(),
                     context.highlighted_hunks.as_deref(),
-                    context.file_lsp_context.as_ref(),
+                    file_lsp_context.as_ref(),
                     row,
-                    context.selected_anchor.as_ref(),
+                    selected_anchor.as_ref(),
                     side_by_side_scroll_handles,
                     combined_side_by_side_column_widths.or(context.side_by_side_column_widths),
                     cx,

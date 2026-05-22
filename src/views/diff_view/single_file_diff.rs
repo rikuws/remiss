@@ -764,15 +764,22 @@ pub(super) fn build_diff_file_lsp_context(
     }
 
     let repo_root = PathBuf::from(local_repo_status.path.as_ref()?);
-    let lsp_status = detail_state.lsp_statuses.get(file_path)?;
-    let references_supported = lsp_status.capabilities.references_supported;
-    if !lsp_status.is_ready()
-        || (!lsp_status.capabilities.hover_supported
-            && !lsp_status.capabilities.signature_help_supported
-            && !lsp_status.capabilities.definition_supported)
-    {
-        return None;
-    }
+    let references_supported = match detail_state.lsp_statuses.get(file_path) {
+        Some(lsp_status) => {
+            if !lsp_status.is_ready()
+                || (!lsp_status.capabilities.hover_supported
+                    && !lsp_status.capabilities.signature_help_supported
+                    && !lsp_status.capabilities.definition_supported)
+            {
+                return None;
+            }
+            lsp_status.capabilities.references_supported
+        }
+        None => {
+            crate::lsp::language_label_for_file(file_path)?;
+            true
+        }
+    };
 
     Some(DiffFileLspContext {
         state: state.clone(),

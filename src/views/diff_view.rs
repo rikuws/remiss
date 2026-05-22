@@ -1428,11 +1428,10 @@ fn render_lsp_install_action(
                     return;
                 };
                 detail_state.lsp_statuses.remove(&path);
-                detail_state.lsp_loading_paths.insert(path);
+                detail_state.lsp_loading_paths.remove(&path);
                 cx.notify();
             });
             super::settings::trigger_managed_lsp_install(&state_for_install, kind, window, cx);
-            ensure_active_review_focus_loaded(&state_for_install, window, cx);
         })
         .into_any_element()
 }
