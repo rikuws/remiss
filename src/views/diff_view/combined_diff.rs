@@ -313,7 +313,7 @@ pub(super) fn render_combined_diff_files(
         .flex_grow()
         .min_h_0()
         .min_w_0()
-        .bg(bg_canvas())
+        .bg(bg_surface())
         .overflow_hidden()
         .child(
             div()
@@ -405,8 +405,8 @@ fn render_diff_scroll_top_fade() -> AnyElement {
         .h(px(DIFF_SCROLL_TOP_FADE_HEIGHT))
         .bg(linear_gradient(
             180.0,
-            linear_color_stop(with_alpha(bg_canvas(), 0.96), 0.0),
-            linear_color_stop(with_alpha(bg_canvas(), 0.0), 1.0),
+            linear_color_stop(with_alpha(bg_surface(), 0.96), 0.0),
+            linear_color_stop(with_alpha(bg_surface(), 0.0), 1.0),
         ))
         .into_any_element()
 }

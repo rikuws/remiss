@@ -36,10 +36,10 @@ pub(crate) fn render_file_tree_header(
     let state_for_close = state.clone();
 
     div()
-        .px(px(12.0))
-        .py(px(10.0))
-        .border_b(px(1.0))
-        .border_color(diff_annotation_border())
+        .pl(px(18.0))
+        .pr(px(8.0))
+        .pt(px(14.0))
+        .pb(px(10.0))
         .flex()
         .items_center()
         .justify_between()

@@ -227,7 +227,7 @@ pub(super) fn render_file_diff(
         .flex_col()
         .flex_grow()
         .min_h_0()
-        .bg(bg_canvas())
+        .bg(bg_surface())
         .overflow_hidden()
         .child(
             div()
@@ -235,7 +235,7 @@ pub(super) fn render_file_diff(
                 .flex_col()
                 .flex_grow()
                 .min_h_0()
-                .bg(bg_canvas())
+                .bg(bg_surface())
                 .when_some(stack_visibility.clone(), |el, visibility| {
                     el.child(render_stack_layer_diff_notice(&visibility))
                 })

@@ -951,6 +951,12 @@ pub fn render_files_view(
         .flex_grow()
         .min_h_0()
         .bg(bg_canvas())
+        .p(px(REVIEW_SURFACE_GAP))
+        .gap(if show_file_tree {
+            px(REVIEW_SURFACE_GAP)
+        } else {
+            px(0.0)
+        })
         .child(
             div()
                 .w(if show_file_tree {
@@ -963,7 +969,8 @@ pub fn render_files_view(
                 .min_h_0()
                 .flex()
                 .flex_row()
-                .rounded_tl(px(12.0))
+                .rounded(radius())
+                .bg(bg_surface())
                 .overflow_hidden()
                 .child(render_review_sidebar_pane(
                     state,
@@ -1037,6 +1044,7 @@ pub fn render_files_view(
 }
 
 const REVIEW_FILE_TREE_ANIMATION_MS: u64 = 220;
+const REVIEW_SURFACE_GAP: f32 = 10.0;
 
 fn review_file_tree_hidden_progress(hidden: bool, delta: f32) -> f32 {
     if hidden {
@@ -1182,6 +1190,7 @@ fn render_diff_panel(
         .flex()
         .flex_col()
         .bg(bg_canvas())
+        .gap(px(REVIEW_SURFACE_GAP))
         .child(render_diff_toolbar(
             state,
             detail,
@@ -1202,7 +1211,9 @@ fn render_diff_panel(
             div()
                 .flex_grow()
                 .min_h_0()
-                .bg(bg_canvas())
+                .bg(bg_surface())
+                .rounded(radius())
+                .overflow_hidden()
                 .flex()
                 .flex_col()
                 .child(
@@ -1576,9 +1587,8 @@ fn render_diff_toolbar(
         .gap(px(12.0))
         .px(px(20.0))
         .py(px(12.0))
-        .bg(bg_canvas())
-        .border_b(px(1.0))
-        .border_color(main_content_border())
+        .bg(bg_surface())
+        .rounded(radius())
         .child(
             div()
                 .flex()
