@@ -56,8 +56,16 @@ pub(super) fn render_diff_section_header(label: &str, count: usize) -> impl Into
 }
 
 pub(super) fn render_diff_state_row(message: impl Into<String>) -> impl IntoElement {
+    render_diff_state_row_with_min_height(message, None)
+}
+
+pub(super) fn render_diff_state_row_with_min_height(
+    message: impl Into<String>,
+    min_height: Option<Pixels>,
+) -> impl IntoElement {
     let message = message.into();
     div()
+        .when_some(min_height, |el, min_height| el.min_h(min_height))
         .px(px(16.0))
         .py(px(18.0))
         .border_b(px(1.0))
@@ -1129,6 +1137,29 @@ pub(super) fn decorated_diff_text_runs(
 pub(super) fn build_diff_highlights(
     parsed_file: &ParsedDiffFile,
 ) -> Arc<Vec<Vec<DiffLineHighlight>>> {
+    let diff_exceeds_highlight_limit = parsed_file
+        .hunks
+        .iter()
+        .flat_map(|hunk| hunk.lines.iter())
+        .try_fold(0usize, |diff_bytes, line| {
+            let diff_bytes = diff_bytes.saturating_add(line.content.len());
+            if diff_bytes > syntax::MAX_HIGHLIGHT_BYTES {
+                Err(())
+            } else {
+                Ok(diff_bytes)
+            }
+        })
+        .is_err();
+    if diff_exceeds_highlight_limit {
+        return Arc::new(
+            parsed_file
+                .hunks
+                .iter()
+                .map(|hunk| vec![DiffLineHighlight::default(); hunk.lines.len()])
+                .collect(),
+        );
+    }
+
     Arc::new(
         parsed_file
             .hunks

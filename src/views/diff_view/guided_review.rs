@@ -41,6 +41,7 @@ pub(super) fn render_guided_review_view(
                 stack_filter,
                 diff_center_mode,
                 diff_layout,
+                window,
                 cx,
             )
             .into_any_element(),

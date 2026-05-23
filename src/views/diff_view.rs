@@ -1250,6 +1250,7 @@ fn render_diff_panel(
                             None,
                             center_mode,
                             structural_diff_layout,
+                            window,
                             cx,
                         )
                         .into_any_element()
@@ -1264,6 +1265,7 @@ fn render_diff_panel(
                             stack_filter.clone(),
                             center_mode,
                             normal_diff_layout,
+                            window,
                             cx,
                         )
                         .into_any_element()
@@ -1792,11 +1794,12 @@ mod tests {
     use super::review_sidebar::sync_stack_timeline_item_count;
     use super::{
         build_normal_side_by_side_diff_file, current_combined_diff_file_index_for_scroll_top,
-        diff_focus_scroll_top_item_ix, focus_item_index_around, max_side_by_side_column_widths,
-        reading_focus_item_index, waypoint_spotlight_detail_label,
-        waypoint_spotlight_location_label, CombinedDiffViewItem, DiffFileCollapseScrollAdjustment,
-        DiffViewItem, SideBySideColumnWidths, StructuralDiffTerminalStatus,
-        DIFF_FILE_HEADER_TOP_MARGIN, DIFF_FOCUS_CONTEXT_ROWS,
+        diff_focus_scroll_top_item_ix, estimated_combined_diff_body_height_for_counts,
+        focus_item_index_around, max_side_by_side_column_widths, reading_focus_item_index,
+        should_animate_combined_diff_jump, should_hydrate_combined_diff_file,
+        waypoint_spotlight_detail_label, waypoint_spotlight_location_label, CombinedDiffViewItem,
+        DiffFileCollapseScrollAdjustment, DiffViewItem, SideBySideColumnWidths,
+        StructuralDiffTerminalStatus, DIFF_FILE_HEADER_TOP_MARGIN, DIFF_FOCUS_CONTEXT_ROWS,
     };
 
     fn test_bounds(top: f32, bottom: f32) -> Bounds<Pixels> {
@@ -2123,6 +2126,65 @@ mod tests {
 
         assert_eq!(widths.left, 640.0);
         assert_eq!(widths.right, 480.0);
+    }
+
+    #[test]
+    fn combined_diff_progressive_hydration_prioritizes_initial_and_requested_files() {
+        let mut hydrated_paths = std::collections::HashSet::new();
+        hydrated_paths.insert("src/far.rs".to_string());
+
+        assert!(should_hydrate_combined_diff_file(
+            "src/near.rs",
+            2,
+            4,
+            &hydrated_paths,
+            false,
+        ));
+        assert!(should_hydrate_combined_diff_file(
+            "src/far.rs",
+            80,
+            4,
+            &hydrated_paths,
+            false,
+        ));
+        assert!(!should_hydrate_combined_diff_file(
+            "src/collapsed.rs",
+            1,
+            4,
+            &hydrated_paths,
+            true,
+        ));
+        assert!(!should_hydrate_combined_diff_file(
+            "src/later.rs",
+            80,
+            4,
+            &hydrated_paths,
+            false,
+        ));
+    }
+
+    #[test]
+    fn combined_diff_deferred_body_height_uses_bounded_line_estimate() {
+        assert_eq!(
+            estimated_combined_diff_body_height_for_counts(20, 2),
+            px(620.0)
+        );
+        assert_eq!(
+            estimated_combined_diff_body_height_for_counts(0, 0),
+            px(58.0)
+        );
+        assert_eq!(
+            estimated_combined_diff_body_height_for_counts(10_000, 200),
+            px(1600.0)
+        );
+    }
+
+    #[test]
+    fn combined_diff_jump_animation_only_applies_to_established_far_targets() {
+        assert!(!should_animate_combined_diff_jump(false, 0, 100));
+        assert!(!should_animate_combined_diff_jump(true, 40, 50));
+        assert!(should_animate_combined_diff_jump(true, 4, 80));
+        assert!(should_animate_combined_diff_jump(true, 80, 4));
     }
 
     #[test]

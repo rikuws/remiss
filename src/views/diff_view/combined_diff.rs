@@ -6,6 +6,7 @@ pub(super) struct CombinedDiffFileContext {
     pub(super) header: ReviewFileHeaderProps,
     pub(super) collapsed: bool,
     pub(super) reviewed: bool,
+    pub(super) estimated_body_height: Option<Pixels>,
     pub(super) parsed: Option<Arc<ParsedDiffFile>>,
     pub(super) parsed_override: Option<Arc<ParsedDiffFile>>,
     pub(super) structural_side_by_side: Option<Arc<crate::difftastic::AdaptedDifftasticDiffFile>>,
@@ -27,6 +28,7 @@ pub(super) enum CombinedDiffViewItem {
     State {
         file_index: usize,
         message: String,
+        min_height: Option<Pixels>,
     },
     Row {
         file_index: usize,
@@ -49,6 +51,7 @@ struct CombinedDiffRenderModel {
     items: Arc<Vec<CombinedDiffViewItem>>,
     has_side_by_side_rows: bool,
     combined_side_by_side_widths: Option<SideBySideColumnWidths>,
+    has_deferred_contexts: bool,
 }
 
 struct CombinedDiffRenderCache {
@@ -95,6 +98,18 @@ enum CombinedDiffStructuralRenderStateKey {
     Error(String),
     Ready(String),
 }
+
+const COMBINED_DIFF_INITIAL_HYDRATED_FILE_COUNT: usize = 0;
+const COMBINED_DIFF_HYDRATION_BATCH_SIZE: usize = 6;
+const COMBINED_DIFF_HYDRATION_DELAY: Duration = Duration::from_millis(16);
+const COMBINED_DIFF_DEFERRED_MESSAGE: &str = "Loading diff rows...";
+const COMBINED_DIFF_ESTIMATED_LINE_HEIGHT: f32 = 28.0;
+const COMBINED_DIFF_ESTIMATED_HUNK_HEADER_HEIGHT: f32 = 30.0;
+const COMBINED_DIFF_ESTIMATED_BODY_MIN_HEIGHT: f32 = 58.0;
+const COMBINED_DIFF_ESTIMATED_BODY_MAX_HEIGHT: f32 = 1600.0;
+const COMBINED_DIFF_JUMP_ANIMATION_MIN_ITEMS: usize = 24;
+const COMBINED_DIFF_JUMP_ANIMATION_STEPS: usize = 10;
+const COMBINED_DIFF_JUMP_ANIMATION_MS: u64 = 180;
 
 #[derive(Clone)]
 pub(super) struct DiffFileCollapseScrollAdjustment {
@@ -162,6 +177,7 @@ pub(super) fn render_combined_diff_files(
     stack_filter: Option<LayerDiffFilter>,
     center_mode: ReviewCenterMode,
     diff_layout: DiffLayout,
+    window: &mut Window,
     _cx: &App,
 ) -> AnyElement {
     let visible_paths = stack_filter
@@ -183,6 +199,7 @@ pub(super) fn render_combined_diff_files(
         wrap_diff_lines,
         &view_state,
     );
+    schedule_combined_diff_hydration(state, &view_state, &model, selected_path, window, _cx);
 
     if model.contexts.is_empty() {
         return panel_state_text("No files returned for this pull request.").into_any_element();
@@ -196,6 +213,8 @@ pub(super) fn render_combined_diff_files(
         &detail.review_threads,
         selected_path,
         selected_anchor,
+        window,
+        _cx,
     );
 
     if let Some(active_pr_key) = app_state.active_pr_key.clone() {
@@ -768,6 +787,17 @@ fn prepare_combined_diff_render_model(
         diff_layout,
         wrap_diff_lines,
     );
+    let progressive_scope_key = combined_diff_progressive_scope_key(
+        app_state,
+        detail,
+        review_stack,
+        stack_filter,
+        visible_paths,
+        center_mode,
+        diff_layout,
+        wrap_diff_lines,
+    );
+    ensure_combined_diff_hydration_scope(view_state, &progressive_scope_key);
 
     if let Some(model) = view_state
         .render_cache
@@ -780,18 +810,38 @@ fn prepare_combined_diff_render_model(
         return model;
     }
 
+    let hydrated_file_count = *view_state.hydrated_file_count.borrow();
+    let hydrated_paths = view_state.hydrated_paths.borrow().clone();
+    let parsed_hunk_counts = combined_diff_parsed_hunk_counts(&detail.parsed_diff);
     let contexts = ordered_files
         .into_iter()
-        .map(|file| {
-            prepare_combined_diff_file_context(
-                app_state,
-                detail,
-                file,
-                review_stack,
-                stack_filter,
-                center_mode,
-                diff_layout,
-            )
+        .enumerate()
+        .map(|(file_index, file)| {
+            let collapsed = app_state.is_review_file_collapsed(&file.path);
+            if should_hydrate_combined_diff_file(
+                file.path.as_str(),
+                file_index,
+                hydrated_file_count,
+                &hydrated_paths,
+                collapsed,
+            ) {
+                prepare_combined_diff_file_context(
+                    app_state,
+                    detail,
+                    file,
+                    review_stack,
+                    stack_filter,
+                    center_mode,
+                    diff_layout,
+                )
+            } else {
+                prepare_deferred_combined_diff_file_context(
+                    app_state,
+                    file,
+                    collapsed,
+                    parsed_hunk_counts.get(&file.path).copied(),
+                )
+            }
         })
         .collect::<Vec<_>>();
     let combined_side_by_side_widths = if wrap_diff_lines {
@@ -799,12 +849,14 @@ fn prepare_combined_diff_render_model(
     } else {
         combined_side_by_side_column_widths(&contexts)
     };
-    let (items, has_side_by_side_rows) = build_combined_diff_view_items(&contexts);
+    let (items, has_side_by_side_rows, has_deferred_contexts) =
+        build_combined_diff_view_items(&contexts);
     let model = CombinedDiffRenderModel {
         contexts: Arc::new(contexts),
         items: Arc::new(items),
         has_side_by_side_rows,
         combined_side_by_side_widths,
+        has_deferred_contexts,
     };
 
     *view_state.render_cache.borrow_mut() = Some(Box::new(CombinedDiffRenderCache {
@@ -813,6 +865,226 @@ fn prepare_combined_diff_render_model(
     }));
 
     model
+}
+
+fn combined_diff_progressive_scope_key(
+    app_state: &AppState,
+    detail: &PullRequestDetail,
+    review_stack: &ReviewStack,
+    stack_filter: Option<&LayerDiffFilter>,
+    visible_paths: Option<&BTreeSet<String>>,
+    center_mode: ReviewCenterMode,
+    diff_layout: DiffLayout,
+    wrap_diff_lines: bool,
+) -> String {
+    let mut hasher = DefaultHasher::new();
+    app_state.active_pr_key.hash(&mut hasher);
+    detail.updated_at.hash(&mut hasher);
+    format!("{center_mode:?}").hash(&mut hasher);
+    format!("{diff_layout:?}").hash(&mut hasher);
+    wrap_diff_lines.hash(&mut hasher);
+    format!("{:?}", review_stack.source).hash(&mut hasher);
+
+    if let Some(filter) = stack_filter {
+        format!("{:?}", filter.mode).hash(&mut hasher);
+        filter.selected_layer_id.hash(&mut hasher);
+        for atom_id in &filter.visible_atom_ids {
+            atom_id.hash(&mut hasher);
+        }
+    }
+
+    if let Some(paths) = visible_paths {
+        for path in paths {
+            path.hash(&mut hasher);
+        }
+    }
+
+    format!("{:x}", hasher.finish())
+}
+
+fn ensure_combined_diff_hydration_scope(
+    view_state: &CombinedDiffViewState,
+    progressive_scope_key: &str,
+) {
+    let mut scope_key = view_state.hydration_scope_key.borrow_mut();
+    if scope_key.as_deref() == Some(progressive_scope_key) {
+        return;
+    }
+
+    *scope_key = Some(progressive_scope_key.to_string());
+    *view_state.hydrated_file_count.borrow_mut() = COMBINED_DIFF_INITIAL_HYDRATED_FILE_COUNT;
+    view_state.hydrated_paths.borrow_mut().clear();
+    let next_generation = view_state.hydration_generation.borrow().wrapping_add(1);
+    *view_state.hydration_generation.borrow_mut() = next_generation;
+    *view_state.hydration_scheduled.borrow_mut() = false;
+    *view_state.render_cache.borrow_mut() = None;
+}
+
+pub(super) fn should_hydrate_combined_diff_file(
+    file_path: &str,
+    file_index: usize,
+    hydrated_file_count: usize,
+    hydrated_paths: &std::collections::HashSet<String>,
+    collapsed: bool,
+) -> bool {
+    !collapsed && (file_index < hydrated_file_count || hydrated_paths.contains(file_path))
+}
+
+fn prepare_deferred_combined_diff_file_context(
+    app_state: &AppState,
+    file: &PullRequestFile,
+    collapsed: bool,
+    parsed_hunk_count: Option<usize>,
+) -> CombinedDiffFileContext {
+    let mut header = ReviewFileHeaderProps::from_pull_request_file(file);
+    header.active = false;
+
+    CombinedDiffFileContext {
+        file: file.clone(),
+        header,
+        collapsed,
+        reviewed: app_state.is_review_file_reviewed(&file.path),
+        estimated_body_height: (!collapsed)
+            .then(|| estimated_combined_diff_body_height(file, parsed_hunk_count)),
+        parsed: None,
+        parsed_override: None,
+        structural_side_by_side: None,
+        normal_side_by_side: None,
+        side_by_side_column_widths: None,
+        rows: Arc::new(Vec::new()),
+        parsed_file_index: None,
+        highlighted_hunks: None,
+        gutter_layout: diff_gutter_layout(file, None, false),
+        stack_visibility: None,
+        items: Arc::new(Vec::new()),
+        state_message: (!collapsed).then(|| COMBINED_DIFF_DEFERRED_MESSAGE.to_string()),
+    }
+}
+
+fn is_deferred_combined_diff_context(context: &CombinedDiffFileContext) -> bool {
+    context.state_message.as_deref() == Some(COMBINED_DIFF_DEFERRED_MESSAGE)
+}
+
+fn combined_diff_parsed_hunk_counts(
+    parsed_files: &[ParsedDiffFile],
+) -> std::collections::HashMap<String, usize> {
+    let mut hunk_counts = std::collections::HashMap::with_capacity(parsed_files.len() * 2);
+    for parsed in parsed_files {
+        let hunk_count = parsed.hunks.len();
+        hunk_counts.insert(parsed.path.clone(), hunk_count);
+        if let Some(previous_path) = parsed.previous_path.as_ref() {
+            hunk_counts.insert(previous_path.clone(), hunk_count);
+        }
+    }
+    hunk_counts
+}
+
+fn estimated_combined_diff_body_height(
+    file: &PullRequestFile,
+    parsed_hunk_count: Option<usize>,
+) -> Pixels {
+    let additions = usize::try_from(file.additions.max(0)).unwrap_or(usize::MAX);
+    let deletions = usize::try_from(file.deletions.max(0)).unwrap_or(usize::MAX);
+    let line_count = additions.saturating_add(deletions).max(1);
+    let hunk_count = parsed_hunk_count.unwrap_or(1).max(1);
+    estimated_combined_diff_body_height_for_counts(line_count, hunk_count)
+}
+
+pub(super) fn estimated_combined_diff_body_height_for_counts(
+    line_count: usize,
+    hunk_count: usize,
+) -> Pixels {
+    let height = line_count as f32 * COMBINED_DIFF_ESTIMATED_LINE_HEIGHT
+        + hunk_count as f32 * COMBINED_DIFF_ESTIMATED_HUNK_HEADER_HEIGHT;
+    px(height.clamp(
+        COMBINED_DIFF_ESTIMATED_BODY_MIN_HEIGHT,
+        COMBINED_DIFF_ESTIMATED_BODY_MAX_HEIGHT,
+    ))
+}
+
+fn schedule_combined_diff_hydration(
+    state: &Entity<AppState>,
+    view_state: &CombinedDiffViewState,
+    model: &CombinedDiffRenderModel,
+    selected_path: Option<&str>,
+    window: &mut Window,
+    cx: &App,
+) {
+    let selected_context_index = selected_path.and_then(|path| {
+        model
+            .contexts
+            .iter()
+            .position(|context| context.file.path == path)
+    });
+    let selected_deferred_path = selected_path
+        .filter(|path| {
+            model.contexts.iter().any(|context| {
+                context.file.path == *path && is_deferred_combined_diff_context(context)
+            })
+        })
+        .map(str::to_string);
+    let hydrated_file_count = *view_state.hydrated_file_count.borrow();
+    let selected_is_far_beyond_prefix = selected_context_index
+        .map(|index| index > hydrated_file_count.saturating_add(COMBINED_DIFF_HYDRATION_BATCH_SIZE))
+        .unwrap_or(false);
+
+    if !model.has_deferred_contexts && selected_deferred_path.is_none() {
+        return;
+    }
+    if selected_deferred_path.is_none() && selected_is_far_beyond_prefix {
+        return;
+    }
+
+    {
+        let mut scheduled = view_state.hydration_scheduled.borrow_mut();
+        if *scheduled {
+            return;
+        }
+        *scheduled = true;
+    }
+
+    let generation = *view_state.hydration_generation.borrow();
+    let advance_prefix = !selected_is_far_beyond_prefix;
+    let view_state = view_state.clone();
+    let state = state.clone();
+    window
+        .spawn(cx, async move |cx| {
+            cx.background_executor()
+                .timer(COMBINED_DIFF_HYDRATION_DELAY)
+                .await;
+
+            let should_notify = {
+                if *view_state.hydration_generation.borrow() != generation {
+                    false
+                } else {
+                    if let Some(path) = selected_deferred_path {
+                        view_state.hydrated_paths.borrow_mut().insert(path);
+                    }
+
+                    {
+                        if advance_prefix {
+                            let mut hydrated_file_count =
+                                view_state.hydrated_file_count.borrow_mut();
+                            *hydrated_file_count = hydrated_file_count
+                                .saturating_add(COMBINED_DIFF_HYDRATION_BATCH_SIZE);
+                        }
+                    }
+
+                    *view_state.render_cache.borrow_mut() = None;
+                    *view_state.hydration_scheduled.borrow_mut() = false;
+                    true
+                }
+            };
+
+            if should_notify {
+                state
+                    .update(cx, |_state, cx| {
+                        cx.notify();
+                    })
+                    .ok();
+            }
+        })
+        .detach();
 }
 
 fn combined_diff_render_cache_key(
@@ -1075,6 +1347,7 @@ fn prepare_combined_diff_file_context(
         header,
         collapsed: app_state.is_review_file_collapsed(&file.path),
         reviewed: app_state.is_review_file_reviewed(&file.path),
+        estimated_body_height: None,
         parsed,
         parsed_override,
         structural_side_by_side,
@@ -1092,11 +1365,13 @@ fn prepare_combined_diff_file_context(
 
 fn build_combined_diff_view_items(
     contexts: &[CombinedDiffFileContext],
-) -> (Vec<CombinedDiffViewItem>, bool) {
+) -> (Vec<CombinedDiffViewItem>, bool, bool) {
     let mut items = Vec::new();
     let mut has_side_by_side_rows = false;
+    let mut has_deferred_contexts = false;
 
     for (file_index, context) in contexts.iter().enumerate() {
+        has_deferred_contexts = has_deferred_contexts || is_deferred_combined_diff_context(context);
         items.push(CombinedDiffViewItem::Header(file_index));
         if context.collapsed {
             continue;
@@ -1108,6 +1383,7 @@ fn build_combined_diff_view_items(
             items.push(CombinedDiffViewItem::State {
                 file_index,
                 message: message.clone(),
+                min_height: context.estimated_body_height,
             });
         } else {
             items.extend(context.items.iter().map(|item| CombinedDiffViewItem::Row {
@@ -1121,7 +1397,7 @@ fn build_combined_diff_view_items(
             || context.normal_side_by_side.is_some();
     }
 
-    (items, has_side_by_side_rows)
+    (items, has_side_by_side_rows, has_deferred_contexts)
 }
 
 fn combined_diff_file_expanded_extra_item_count(context: &CombinedDiffFileContext) -> usize {
@@ -1158,6 +1434,8 @@ fn scroll_combined_diff_list_to_focus(
     review_threads: &[PullRequestReviewThread],
     selected_path: Option<&str>,
     selected_anchor: Option<&DiffAnchor>,
+    window: &mut Window,
+    cx: &App,
 ) {
     let Some(selected_path) = selected_path else {
         return;
@@ -1186,12 +1464,96 @@ fn scroll_combined_diff_list_to_focus(
         .or_else(|| find_combined_diff_file_header_index(items, contexts, selected_path));
 
     if let Some(item_ix) = item_ix {
-        view_state.list_state.scroll_to(ListOffset {
-            item_ix: diff_focus_scroll_top_item_ix(item_ix),
-            offset_in_item: px(0.0),
-        });
+        let target_item_ix = diff_focus_scroll_top_item_ix(item_ix);
+        let current_item_ix = view_state.list_state.logical_scroll_top().item_ix;
+        let has_previous_focus = last_focus_key.is_some();
         *last_focus_key = Some(target_key);
+        if should_animate_combined_diff_jump(has_previous_focus, current_item_ix, target_item_ix) {
+            animate_combined_diff_jump(view_state, current_item_ix, target_item_ix, window, cx);
+        } else {
+            cancel_combined_diff_jump_animation(view_state);
+            view_state.list_state.scroll_to(ListOffset {
+                item_ix: target_item_ix,
+                offset_in_item: px(0.0),
+            });
+        }
     }
+}
+
+pub(super) fn should_animate_combined_diff_jump(
+    has_previous_focus: bool,
+    current_item_ix: usize,
+    target_item_ix: usize,
+) -> bool {
+    has_previous_focus
+        && current_item_ix.abs_diff(target_item_ix) >= COMBINED_DIFF_JUMP_ANIMATION_MIN_ITEMS
+}
+
+fn cancel_combined_diff_jump_animation(view_state: &CombinedDiffViewState) {
+    let next_generation = view_state
+        .scroll_animation_generation
+        .borrow()
+        .wrapping_add(1);
+    *view_state.scroll_animation_generation.borrow_mut() = next_generation;
+    *view_state.scroll_animation_active.borrow_mut() = false;
+}
+
+fn animate_combined_diff_jump(
+    view_state: &CombinedDiffViewState,
+    start_item_ix: usize,
+    target_item_ix: usize,
+    window: &mut Window,
+    cx: &App,
+) {
+    let generation = view_state
+        .scroll_animation_generation
+        .borrow()
+        .wrapping_add(1);
+    *view_state.scroll_animation_generation.borrow_mut() = generation;
+    *view_state.scroll_animation_active.borrow_mut() = true;
+
+    let list_state = view_state.list_state.clone();
+    let animation_generation = view_state.scroll_animation_generation.clone();
+    let animation_active = view_state.scroll_animation_active.clone();
+    window
+        .spawn(cx, async move |cx| {
+            let frame_ms =
+                COMBINED_DIFF_JUMP_ANIMATION_MS / COMBINED_DIFF_JUMP_ANIMATION_STEPS as u64;
+            for step in 1..=COMBINED_DIFF_JUMP_ANIMATION_STEPS {
+                cx.background_executor()
+                    .timer(Duration::from_millis(frame_ms))
+                    .await;
+
+                let progress = step as f32 / COMBINED_DIFF_JUMP_ANIMATION_STEPS as f32;
+                let eased = combined_diff_jump_ease(progress);
+                let next_item_ix = ((start_item_ix as f32)
+                    + (target_item_ix as f32 - start_item_ix as f32) * eased)
+                    .round()
+                    .max(0.0) as usize;
+                let done = step == COMBINED_DIFF_JUMP_ANIMATION_STEPS;
+
+                cx.update(|window, _cx| {
+                    if *animation_generation.borrow() != generation {
+                        return;
+                    }
+
+                    list_state.scroll_to(ListOffset {
+                        item_ix: next_item_ix,
+                        offset_in_item: px(0.0),
+                    });
+                    if done {
+                        *animation_active.borrow_mut() = false;
+                    }
+                    window.refresh();
+                })
+                .ok();
+            }
+        })
+        .detach();
+}
+
+fn combined_diff_jump_ease(progress: f32) -> f32 {
+    (progress.clamp(0.0, 1.0) * std::f32::consts::FRAC_PI_2).sin()
 }
 
 fn install_combined_diff_scroll_handler(
@@ -1336,10 +1698,13 @@ fn render_combined_diff_view_item(
         CombinedDiffViewItem::State {
             file_index,
             message,
+            min_height,
         } => contexts
             .get(file_index)
             .map(|_| {
-                render_combined_diff_body_row(render_diff_state_row(message).into_any_element())
+                render_combined_diff_body_row(
+                    render_diff_state_row_with_min_height(message, min_height).into_any_element(),
+                )
             })
             .unwrap_or_else(|| div().into_any_element()),
         CombinedDiffViewItem::Row { file_index, item } => contexts

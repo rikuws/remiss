@@ -172,6 +172,31 @@ fn adapt_difftastic_line_range(range: DifftasticLineRange) -> AdaptedDifftasticL
 pub fn build_adapted_diff_highlights(
     adapted: &AdaptedDifftasticDiffFile,
 ) -> Arc<Vec<Vec<DiffLineHighlight>>> {
+    let diff_exceeds_highlight_limit = adapted
+        .parsed_file
+        .hunks
+        .iter()
+        .flat_map(|hunk| hunk.lines.iter())
+        .try_fold(0usize, |diff_bytes, line| {
+            let diff_bytes = diff_bytes.saturating_add(line.content.len());
+            if diff_bytes > syntax::MAX_HIGHLIGHT_BYTES {
+                Err(())
+            } else {
+                Ok(diff_bytes)
+            }
+        })
+        .is_err();
+    if diff_exceeds_highlight_limit {
+        return Arc::new(
+            adapted
+                .parsed_file
+                .hunks
+                .iter()
+                .map(|hunk| vec![DiffLineHighlight::default(); hunk.lines.len()])
+                .collect(),
+        );
+    }
+
     Arc::new(
         adapted
             .parsed_file

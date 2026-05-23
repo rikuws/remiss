@@ -798,7 +798,7 @@ impl DiffFileViewState {
             revision,
             parsed_file_index,
             highlighted_hunks,
-            list_state: ListState::new(0, ListAlignment::Top, px(400.0)).measure_all(),
+            list_state: ListState::new(0, ListAlignment::Top, px(400.0)),
             side_by_side_left_scroll: ScrollHandle::new(),
             side_by_side_right_scroll: ScrollHandle::new(),
             scrollbar_activity: DiffScrollbarActivity::default(),
@@ -830,6 +830,13 @@ pub struct CombinedDiffViewState {
     pub scrollbar_activity: DiffScrollbarActivity,
     pub last_focus_key: Rc<RefCell<Option<String>>>,
     pub render_cache: Rc<RefCell<Option<Box<dyn std::any::Any>>>>,
+    pub hydration_scope_key: Rc<RefCell<Option<String>>>,
+    pub hydrated_file_count: Rc<RefCell<usize>>,
+    pub hydrated_paths: Rc<RefCell<HashSet<String>>>,
+    pub hydration_generation: Rc<RefCell<u64>>,
+    pub hydration_scheduled: Rc<RefCell<bool>>,
+    pub scroll_animation_generation: Rc<RefCell<u64>>,
+    pub scroll_animation_active: Rc<RefCell<bool>>,
 }
 
 impl CombinedDiffViewState {
@@ -841,6 +848,13 @@ impl CombinedDiffViewState {
             scrollbar_activity: DiffScrollbarActivity::default(),
             last_focus_key: Rc::new(RefCell::new(None)),
             render_cache: Rc::new(RefCell::new(None)),
+            hydration_scope_key: Rc::new(RefCell::new(None)),
+            hydrated_file_count: Rc::new(RefCell::new(0)),
+            hydrated_paths: Rc::new(RefCell::new(HashSet::new())),
+            hydration_generation: Rc::new(RefCell::new(0)),
+            hydration_scheduled: Rc::new(RefCell::new(false)),
+            scroll_animation_generation: Rc::new(RefCell::new(0)),
+            scroll_animation_active: Rc::new(RefCell::new(false)),
         }
     }
 }
