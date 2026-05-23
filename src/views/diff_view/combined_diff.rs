@@ -313,7 +313,7 @@ pub(super) fn render_combined_diff_files(
         .flex_grow()
         .min_h_0()
         .min_w_0()
-        .bg(diff_editor_bg())
+        .bg(bg_canvas())
         .overflow_hidden()
         .child(
             div()
@@ -405,8 +405,8 @@ fn render_diff_scroll_top_fade() -> AnyElement {
         .h(px(DIFF_SCROLL_TOP_FADE_HEIGHT))
         .bg(linear_gradient(
             180.0,
-            linear_color_stop(with_alpha(diff_editor_bg(), 0.96), 0.0),
-            linear_color_stop(with_alpha(diff_editor_bg(), 0.0), 1.0),
+            linear_color_stop(with_alpha(bg_canvas(), 0.96), 0.0),
+            linear_color_stop(with_alpha(bg_canvas(), 0.0), 1.0),
         ))
         .into_any_element()
 }
@@ -2115,7 +2115,7 @@ fn render_floating_diff_file_header(
         .mr(px(DIFF_SECTION_HEADER_RIGHT_MARGIN))
         .pt(px(DIFF_FLOATING_FILE_HEADER_TOP_PADDING))
         .pb(px(DIFF_FLOATING_FILE_HEADER_BOTTOM_PADDING))
-        .bg(diff_editor_bg())
+        .bg(bg_canvas())
         .child(render_diff_file_header_row(
             state,
             review_stack,
@@ -2254,7 +2254,7 @@ fn render_diff_file_review_toggle(
         .bg(if reviewed {
             success_muted()
         } else {
-            diff_annotation_bg()
+            bg_subtle()
         })
         .flex()
         .items_center()
@@ -2307,7 +2307,7 @@ fn render_diff_line_wrap_toggle(
         .bg(if wrap_diff_lines {
             accent_muted()
         } else {
-            diff_annotation_bg()
+            bg_subtle()
         })
         .flex()
         .items_center()

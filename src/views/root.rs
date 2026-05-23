@@ -56,12 +56,12 @@ const APP_SIDEBAR_EXPANDED_WIDTH: f32 = 216.0;
 const APP_SIDEBAR_ICON_WIDTH: f32 = 58.0;
 const APP_SIDEBAR_HIDDEN_WIDTH: f32 = 0.0;
 const APP_SIDEBAR_TRAFFIC_LIGHT_CLEARANCE: f32 = 58.0;
-pub(crate) const APP_CHROME_HEIGHT: f32 = 64.0;
+pub(crate) const APP_CHROME_HEIGHT: f32 = 48.0;
 pub(crate) const APP_TRAFFIC_LIGHT_LEFT: f32 = 12.0;
 pub(crate) const APP_TRAFFIC_LIGHT_TOP: f32 = 11.0;
 const APP_TITLEBAR_SIDEBAR_TOGGLE_LEFT: f32 = 80.0;
 const APP_TITLEBAR_CONTROL_SIZE: f32 = 30.0;
-const APP_TITLEBAR_CONTROL_TOP: f32 = 2.0;
+const APP_TITLEBAR_CONTROL_TOP: f32 = 9.0;
 const APP_TITLEBAR_CONTROL_ICON_SIZE: f32 = 15.0;
 const APP_CHROME_HIDDEN_LEFT_INSET: f32 = 206.0;
 const APP_CHROME_ICON_LEFT_INSET: f32 = 64.0;
@@ -987,7 +987,7 @@ impl Render for RootView {
             .size_full()
             .flex()
             .flex_row()
-            .bg(bg_canvas())
+            .bg(bg_sidebar())
             .text_color(fg_default())
             .text_size(px(14.0))
             .font_family(ui_font_family())
@@ -1324,9 +1324,7 @@ fn render_app_sidebar(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
         .w(px(sidebar_width))
         .flex_shrink_0()
         .min_h_0()
-        .bg(bg_overlay())
-        .border_r(if closed { px(0.0) } else { px(1.0) })
-        .border_color(border_muted())
+        .bg(bg_sidebar())
         .overflow_hidden()
         .child(
             div()
@@ -1800,6 +1798,7 @@ fn render_main_column(
         .flex_grow()
         .min_w_0()
         .min_h_0()
+        .bg(bg_sidebar())
         .flex()
         .flex_col()
         .child(render_workspace_chrome(state, cx))
@@ -1892,12 +1891,10 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
     div()
         .h(px(APP_CHROME_HEIGHT))
         .flex_shrink_0()
-        .bg(bg_canvas())
-        .border_b(px(1.0))
-        .border_color(border_muted())
+        .bg(bg_sidebar())
         .pl(app_chrome_left_padding(sidebar_mode))
         .pr(px(14.0))
-        .py(px(10.0))
+        .py(px(7.0))
         .flex()
         .items_center()
         .gap(px(12.0))
@@ -2311,6 +2308,9 @@ fn render_workspace_body(
         .relative()
         .flex_grow()
         .min_h_0()
+        .bg(bg_canvas())
+        .rounded_tl(px(12.0))
+        .overflow_hidden()
         .flex()
         .flex_col()
         .child(
@@ -2334,6 +2334,14 @@ fn render_workspace_body(
                     .bg(with_alpha(bg_canvas(), veil_alpha)),
             )
         })
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .rounded_tl(px(12.0))
+                .border_1()
+                .border_color(main_content_border()),
+        )
 }
 
 fn chrome_icon_button(
@@ -2489,7 +2497,7 @@ fn render_notification_drawer(state: &Entity<AppState>, cx: &App) -> impl IntoEl
 
     div()
         .absolute()
-        .top(px(64.0))
+        .top(px(APP_CHROME_HEIGHT))
         .right(px(16.0))
         .w(px(360.0))
         .max_h(px(520.0))

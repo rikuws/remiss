@@ -227,7 +227,7 @@ pub(super) fn render_file_diff(
         .flex_col()
         .flex_grow()
         .min_h_0()
-        .bg(diff_editor_bg())
+        .bg(bg_canvas())
         .overflow_hidden()
         .child(
             div()
@@ -235,7 +235,7 @@ pub(super) fn render_file_diff(
                 .flex_col()
                 .flex_grow()
                 .min_h_0()
-                .bg(diff_editor_bg())
+                .bg(bg_canvas())
                 .when_some(stack_visibility.clone(), |el, visibility| {
                     el.child(render_stack_layer_diff_notice(&visibility))
                 })
@@ -1198,9 +1198,9 @@ pub(super) fn render_diff_gap_row(
         .items_center()
         .w_full()
         .min_h(px(26.0))
-        .bg(diff_annotation_bg())
+        .bg(bg_surface())
         .border_b(px(1.0))
-        .border_color(diff_annotation_border())
+        .border_color(main_content_border())
         .font_family(mono_font_family())
         .text_size(px(11.0))
         .child(
@@ -1208,9 +1208,9 @@ pub(super) fn render_diff_gap_row(
                 .w(px(gutter_layout.gutter_width()))
                 .flex_shrink_0()
                 .h_full()
-                .bg(diff_context_gutter_bg())
+                .bg(bg_canvas())
                 .border_r(px(1.0))
-                .border_color(diff_gutter_separator()),
+                .border_color(main_content_border()),
         )
         .child(
             div()
@@ -1231,7 +1231,7 @@ pub(super) fn render_diff_gap_row(
                                 .px(px(6.0))
                                 .py(px(1.0))
                                 .rounded(px(999.0))
-                                .bg(diff_editor_chrome())
+                                .bg(bg_subtle())
                                 .border_1()
                                 .border_color(transparent())
                                 .text_color(accent())
@@ -1250,9 +1250,9 @@ pub(super) fn render_stack_layer_diff_notice(visibility: &StackFileVisibility) -
     div()
         .px(px(14.0))
         .py(px(8.0))
-        .bg(diff_annotation_bg())
+        .bg(bg_surface())
         .border_b(px(1.0))
-        .border_color(diff_annotation_border())
+        .border_color(main_content_border())
         .flex()
         .items_start()
         .child(
@@ -1359,12 +1359,12 @@ pub(super) fn render_semantic_section_header(
         .border_color(if is_selected {
             diff_selected_edge()
         } else {
-            diff_annotation_border()
+            main_content_border()
         })
         .bg(if is_selected {
             diff_line_hover_bg()
         } else {
-            diff_hunk_bg()
+            bg_surface()
         })
         .child(
             div()
@@ -1598,8 +1598,8 @@ pub(super) fn render_virtualized_diff_row(
                     .px(px(16.0))
                     .py(px(10.0))
                     .border_b(px(1.0))
-                    .border_color(diff_annotation_border())
-                    .bg(diff_annotation_bg())
+                    .border_color(main_content_border())
+                    .bg(bg_canvas())
                     .child(render_review_thread(
                         thread,
                         selected_anchor,
@@ -1618,8 +1618,8 @@ pub(super) fn render_virtualized_diff_row(
                     .px(px(16.0))
                     .py(px(10.0))
                     .border_b(px(1.0))
-                    .border_color(diff_annotation_border())
-                    .bg(diff_annotation_bg())
+                    .border_color(main_content_border())
+                    .bg(bg_canvas())
                     .child(render_review_thread(
                         thread,
                         selected_anchor,

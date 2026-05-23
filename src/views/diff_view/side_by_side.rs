@@ -331,7 +331,7 @@ pub(super) fn render_normal_side_by_side_diff_row(
         .w_full()
         .min_w_0()
         .overflow_hidden()
-        .bg(diff_editor_bg())
+        .bg(bg_canvas())
         .child(render_normal_side_by_side_cell(
             state,
             SideBySideDiffSide::Left,
@@ -483,7 +483,7 @@ pub(super) fn render_structural_side_by_side_diff_row(
         .w_full()
         .min_w_0()
         .overflow_hidden()
-        .bg(diff_editor_bg())
+        .bg(bg_canvas())
         .child(render_structural_side_by_side_cell(
             state,
             SideBySideDiffSide::Left,

@@ -70,7 +70,7 @@ pub fn render_review_file_header_with_controls(
         .h(px(48.0))
         .pl(px(20.0))
         .pr(px(16.0))
-        .bg(diff_annotation_bg())
+        .bg(bg_surface())
         .border_1()
         .border_color(transparent())
         .rounded(radius_sm())

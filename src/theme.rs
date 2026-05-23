@@ -407,8 +407,8 @@ struct DiffThemePalette {
 
 const GRAPHITE_DIFF_THEME: DiffThemePalette = DiffThemePalette {
     editor_bg: (0xf8fafc, DARK_CANVAS),
-    editor_chrome: (0xffffff, DARK_ELEVATED),
-    editor_surface: (0xffffff, DARK_INSET),
+    editor_chrome: (0xffffff, DARK_CANVAS),
+    editor_surface: (0xffffff, DARK_CANVAS),
     annotation_bg: (0xf2f6fb, 0x151a1d),
     annotation_border: ((LIGHT_BORDER_MUTED, 0.72), (0x343b42, 0.64)),
     line_hover_bg: ((0xe6edf6, 0.58), (0xffffff, 0.065)),
@@ -757,6 +757,17 @@ pub fn bg_surface() -> Rgba {
 
 pub fn bg_overlay() -> Rgba {
     theme_hex(LIGHT_ELEVATED, DARK_ELEVATED)
+}
+
+pub fn bg_sidebar() -> Rgba {
+    match active_theme() {
+        ActiveTheme::Light => bg_overlay(),
+        ActiveTheme::Dark => bg_inset(),
+    }
+}
+
+pub fn main_content_border() -> Rgba {
+    theme_hex_alpha((LIGHT_BORDER_MUTED, 0.52), (DARK_BORDER_MUTED, 0.34))
 }
 
 pub fn bg_inset() -> Rgba {
@@ -1264,6 +1275,13 @@ mod tests {
         }
 
         assert_eq!(current.next(), themes[0]);
+    }
+
+    #[test]
+    fn graphite_dark_editor_shell_uses_single_canvas_tone() {
+        assert_eq!(GRAPHITE_DIFF_THEME.editor_bg.1, DARK_CANVAS);
+        assert_eq!(GRAPHITE_DIFF_THEME.editor_chrome.1, DARK_CANVAS);
+        assert_eq!(GRAPHITE_DIFF_THEME.editor_surface.1, DARK_CANVAS);
     }
 
     #[test]

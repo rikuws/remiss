@@ -1085,9 +1085,6 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
         .child(
             div()
                 .w(sidebar_width())
-                .bg(bg_overlay())
-                .border_r(px(1.0))
-                .border_color(border_muted())
                 .p(px(24.0))
                 .px(px(28.0))
                 .flex()

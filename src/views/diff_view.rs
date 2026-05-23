@@ -950,7 +950,7 @@ pub fn render_files_view(
         .flex()
         .flex_grow()
         .min_h_0()
-        .bg(diff_editor_bg())
+        .bg(bg_canvas())
         .child(
             div()
                 .w(if show_file_tree {
@@ -963,6 +963,7 @@ pub fn render_files_view(
                 .min_h_0()
                 .flex()
                 .flex_row()
+                .rounded_tl(px(12.0))
                 .overflow_hidden()
                 .child(render_review_sidebar_pane(
                     state,
@@ -1180,7 +1181,7 @@ fn render_diff_panel(
         .min_w_0()
         .flex()
         .flex_col()
-        .bg(diff_editor_bg())
+        .bg(bg_canvas())
         .child(render_diff_toolbar(
             state,
             detail,
@@ -1201,7 +1202,7 @@ fn render_diff_panel(
             div()
                 .flex_grow()
                 .min_h_0()
-                .bg(diff_editor_bg())
+                .bg(bg_canvas())
                 .flex()
                 .flex_col()
                 .child(
@@ -1575,9 +1576,9 @@ fn render_diff_toolbar(
         .gap(px(12.0))
         .px(px(20.0))
         .py(px(12.0))
-        .bg(diff_editor_surface())
+        .bg(bg_canvas())
         .border_b(px(1.0))
-        .border_color(diff_annotation_border())
+        .border_color(main_content_border())
         .child(
             div()
                 .flex()
