@@ -61,6 +61,7 @@ mod markdown;
 mod notifications;
 mod onboarding;
 mod platform_macos;
+mod process_group;
 mod review_ai;
 mod review_anchors;
 mod review_brief;
