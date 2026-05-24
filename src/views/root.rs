@@ -15,7 +15,6 @@ use crate::app_menu::{
     SwitchToStructuralDiff, SyncWorkspace, ToggleCommandPalette, ToggleFileChooser,
     ToggleWaypointSpotlight,
 };
-use crate::branding::APP_NAME;
 use crate::deep_link::{self, DeepLinkRequest};
 use crate::github;
 use crate::icons::{lucide_icon, LucideIcon};
@@ -1486,21 +1485,11 @@ fn render_sidebar_brand(icons_only: bool) -> impl IntoElement {
                 .items_center()
                 .justify_center()
                 .when(!icons_only, |el| el.justify_start())
-                .gap(px(9.0))
                 .child(
                     img(APP_LOGO_ASSET)
                         .size(px(28.0))
                         .object_fit(ObjectFit::Contain),
-                )
-                .when(!icons_only, |el| {
-                    el.child(
-                        div()
-                            .text_size(px(14.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(fg_emphasis())
-                            .child(APP_NAME),
-                    )
-                }),
+                ),
         )
 }
 

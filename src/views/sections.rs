@@ -26,6 +26,7 @@ pub(super) use pull_request_open::detail_snapshot_needs_background_refresh;
 pub use pull_request_open::open_pull_request;
 
 const OVERVIEW_CONTENT_MAX_WIDTH: f32 = 1440.0;
+const OVERVIEW_PANEL_SCROLLBAR_WIDTH: f32 = 8.0;
 const KANBAN_LANE_WIDTH: f32 = 320.0;
 const KANBAN_LANE_GAP: f32 = 16.0;
 const KANBAN_BOARD_SCROLLBAR_WIDTH: f32 = 8.0;
@@ -82,22 +83,18 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
         s.pull_request_filter_dialog_scope == Some(overview_filter_scope);
     let workspace_loading = s.workspace_loading;
     let workspace_error = s.workspace_error.clone();
-    let authored_comment_items =
-        overview_pull_request_comment_items(&s, OverviewCommentBucket::Authored);
-    let other_comment_items = overview_pull_request_comment_items(&s, OverviewCommentBucket::Other);
+    let comment_items = overview_pull_request_comment_items(&s);
 
     let welcome_greeting = overview_welcome_greeting(&viewer_name, is_auth);
     let state_for_pull_requests = state.clone();
     let state_for_review_requests = state.clone();
     let state_for_items = state.clone();
-    let state_for_authored_comments = state.clone();
-    let state_for_other_comments = state.clone();
+    let state_for_comments = state.clone();
     let show_empty_state = is_auth
         && !workspace_loading
         && workspace_error.is_none()
         && filtered_review_count == 0
-        && authored_comment_items.is_empty()
-        && other_comment_items.is_empty();
+        && comment_items.is_empty();
 
     div()
         .relative()
@@ -119,21 +116,25 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
         )
         .child(
             div()
-                .id("overview-scroll")
+                .id("overview-body")
                 .w_full()
                 .flex()
                 .justify_center()
                 .flex_grow()
                 .min_h_0()
-                .overflow_y_scroll()
+                .overflow_hidden()
                 .child(
                     overview_content_shell()
+                        .h_full()
                         .flex()
                         .flex_col()
+                        .flex_grow()
+                        .min_h_0()
                         .gap(px(18.0))
                         .child(
                             div()
                                 .w_full()
+                                .flex_shrink_0()
                                 .flex()
                                 .flex_wrap()
                                 .gap(px(12.0))
@@ -179,7 +180,7 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                     },
                                 )),
                         )
-                        .child(render_pull_request_filter_bar(
+                        .child(div().flex_shrink_0().child(render_pull_request_filter_bar(
                             state,
                             overview_filter_scope,
                             overview_filter_labels.clone(),
@@ -187,7 +188,7 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                             review_items.len(),
                             overview_hidden_count,
                             overview_filter_dialog_open,
-                        ))
+                        )))
                         .when(show_empty_state, |el| {
                             el.child(overview_empty_state_panel())
                         })
@@ -196,41 +197,43 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                 div()
                                     .w_full()
                                     .flex()
+                                    .flex_grow()
                                     .flex_wrap()
-                                    .items_start()
+                                    .min_h_0()
+                                    .overflow_hidden()
                                     .gap(px(18.0))
-                                    .child(div().flex_1().min_w(px(640.0)).child(
-                                        overview_review_requests_panel(
-                                            filtered_review_items,
-                                            filtered_review_count as i64,
-                                            workspace_loading,
-                                            workspace_error.clone(),
-                                            is_auth,
-                                            state_for_items.clone(),
-                                        ),
-                                    ))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(640.0))
+                                            .h_full()
+                                            .min_h_0()
+                                            .flex()
+                                            .flex_col()
+                                            .child(overview_review_requests_panel(
+                                                filtered_review_items,
+                                                filtered_review_count as i64,
+                                                workspace_loading,
+                                                workspace_error.clone(),
+                                                is_auth,
+                                                state_for_items.clone(),
+                                            )),
+                                    )
                                     .child(
                                         div()
                                             .flex_1()
                                             .min_w(px(380.0))
+                                            .h_full()
+                                            .min_h_0()
                                             .flex()
                                             .flex_col()
                                             .gap(px(18.0))
-                                            .child(overview_pull_request_comment_panel(
-                                                OverviewCommentBucket::Authored,
-                                                authored_comment_items.clone(),
+                                            .child(overview_pull_request_comments_panel(
+                                                comment_items.clone(),
                                                 workspace_loading,
                                                 workspace_error.clone(),
                                                 is_auth,
-                                                state_for_authored_comments.clone(),
-                                            ))
-                                            .child(overview_pull_request_comment_panel(
-                                                OverviewCommentBucket::Other,
-                                                other_comment_items.clone(),
-                                                workspace_loading,
-                                                workspace_error.clone(),
-                                                is_auth,
-                                                state_for_other_comments.clone(),
+                                                state_for_comments.clone(),
                                             )),
                                     ),
                             )
@@ -258,12 +261,6 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
 
 fn overview_content_shell() -> Div {
     div().w_full().max_w(px(OVERVIEW_CONTENT_MAX_WIDTH))
-}
-
-#[derive(Clone, Copy)]
-enum OverviewCommentBucket {
-    Authored,
-    Other,
 }
 
 #[derive(Clone)]
@@ -392,8 +389,7 @@ fn overview_empty_state_panel() -> impl IntoElement {
     )
 }
 
-fn overview_pull_request_comment_panel(
-    bucket: OverviewCommentBucket,
+fn overview_pull_request_comments_panel(
     items: Vec<OverviewReviewCommentItem>,
     workspace_loading: bool,
     workspace_error: Option<String>,
@@ -401,29 +397,12 @@ fn overview_pull_request_comment_panel(
     state: Entity<AppState>,
 ) -> impl IntoElement {
     let has_unread = items.iter().any(|item| item.unread);
-    let (eyebrow_text, title, loading, error, unread, latest, empty, unauthenticated) = match bucket
-    {
-        OverviewCommentBucket::Authored => (
-            "Your PR comments",
-            "Comments on Your Pull Requests",
-            "Checking comments on pull requests you opened.",
-            "Workspace sync needs attention before comments on your pull requests can refresh.",
-            "Unread review comments from others on pull requests you opened.",
-            "Latest comments from others on pull requests you opened.",
-            "No comments from others on your pull requests are waiting in the current workspace.",
-            "Authenticate with gh to populate comments on your pull requests.",
-        ),
-        OverviewCommentBucket::Other => (
-            "Other PR comments",
-            "Comments on Other Pull Requests",
-            "Checking comments on other pull requests in your workspace.",
-            "Workspace sync needs attention before other pull request comments can refresh.",
-            "Unread review comments from others on pull requests opened by other people.",
-            "Latest comments from others on pull requests opened by other people.",
-            "No comments from others on other pull requests are waiting in the current workspace.",
-            "Authenticate with gh to populate comments on other pull requests.",
-        ),
-    };
+    let loading = "Checking pull request comments.";
+    let error = "Workspace sync needs attention before pull request comments can refresh.";
+    let unread = "Unread review comments from others across your workspace.";
+    let latest = "Latest comments from others across your workspace.";
+    let empty = "No comments from others are waiting in the current workspace.";
+    let unauthenticated = "Authenticate with gh to populate pull request comments.";
     let copy = if workspace_loading {
         loading
     } else if workspace_error.is_some() {
@@ -434,10 +413,12 @@ fn overview_pull_request_comment_panel(
         latest
     };
 
-    panel().child(
+    panel().h_full().min_h_0().flex().flex_col().child(
         div()
             .p(px(20.0))
             .px(px(22.0))
+            .flex_grow()
+            .min_h_0()
             .flex()
             .flex_col()
             .gap(px(16.0))
@@ -447,13 +428,14 @@ fn overview_pull_request_comment_panel(
                     .flex_col()
                     .gap(px(4.0))
                     .min_w_0()
-                    .child(eyebrow(eyebrow_text))
+                    .flex_shrink_0()
+                    .child(eyebrow("PR comments"))
                     .child(
                         div()
                             .text_size(px(18.0))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(fg_emphasis())
-                            .child(title),
+                            .child("Comments"),
                     )
                     .child(
                         div()
@@ -478,11 +460,21 @@ fn overview_pull_request_comment_panel(
                 },
             )
             .child(
-                div().flex().flex_col().gap(px(10.0)).children(
-                    items
-                        .into_iter()
-                        .map(|item| overview_review_comment_row(item, state.clone())),
-                ),
+                restrict_scroll_to_axis(div())
+                    .id("overview-comments-scroll")
+                    .overflow_y_scroll()
+                    .scrollbar_width(px(OVERVIEW_PANEL_SCROLLBAR_WIDTH))
+                    .flex_grow()
+                    .min_h_0()
+                    .pb(px(8.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.0))
+                    .children(
+                        items
+                            .into_iter()
+                            .map(|item| overview_review_comment_row(item, state.clone())),
+                    ),
             ),
     )
 }
@@ -495,13 +487,15 @@ fn overview_review_requests_panel(
     is_auth: bool,
     state: Entity<AppState>,
 ) -> impl IntoElement {
-    let visible_count = review_items.len().min(8);
+    let visible_count = review_items.len();
     let remaining_count = review_count.saturating_sub(visible_count as i64);
-    let visible_items = review_items.into_iter().take(8).collect::<Vec<_>>();
+    let visible_items = review_items;
 
-    panel().child(
+    panel().h_full().min_h_0().flex().flex_col().child(
         div()
             .p(px(10.0))
+            .flex_grow()
+            .min_h_0()
             .flex()
             .flex_col()
             .gap(px(8.0))
@@ -530,7 +524,13 @@ fn overview_review_requests_panel(
                 },
             )
             .child(
-                div()
+                restrict_scroll_to_axis(div())
+                    .id("overview-review-requests-scroll")
+                    .overflow_y_scroll()
+                    .scrollbar_width(px(OVERVIEW_PANEL_SCROLLBAR_WIDTH))
+                    .flex_grow()
+                    .min_h_0()
+                    .pb(px(8.0))
                     .flex()
                     .flex_col()
                     .gap(px(2.0))
@@ -546,6 +546,7 @@ fn overview_review_requests_panel(
                     div()
                         .px(px(12.0))
                         .pt(px(4.0))
+                        .flex_shrink_0()
                         .text_size(px(12.0))
                         .text_color(fg_subtle())
                         .child(format!("{remaining_count} more in the review board")),
@@ -604,6 +605,7 @@ fn overview_review_request_row(
 
     div()
         .w_full()
+        .flex_shrink_0()
         .min_h(px(74.0))
         .px(px(14.0))
         .py(px(10.0))
@@ -705,6 +707,7 @@ fn overview_review_comment_row(
 
     div()
         .w_full()
+        .flex_shrink_0()
         .relative()
         .pl(px(34.0))
         .pr(px(10.0))
@@ -810,10 +813,7 @@ fn overview_review_comment_row(
         )
 }
 
-fn overview_pull_request_comment_items(
-    state: &AppState,
-    bucket: OverviewCommentBucket,
-) -> Vec<OverviewReviewCommentItem> {
+fn overview_pull_request_comment_items(state: &AppState) -> Vec<OverviewReviewCommentItem> {
     let mut summaries = BTreeMap::new();
     if let Some(workspace) = state.workspace.as_ref() {
         for item in workspace.queues.iter().flat_map(|queue| &queue.items) {
@@ -824,6 +824,10 @@ fn overview_pull_request_comment_items(
     }
 
     let viewer_login = state.viewer_login().unwrap_or_default();
+    if viewer_login.is_empty() {
+        return Vec::new();
+    }
+
     let mut unread_items = Vec::new();
     let mut latest_items = Vec::new();
 
@@ -838,10 +842,6 @@ fn overview_pull_request_comment_items(
         else {
             continue;
         };
-
-        if !overview_detail_matches_comment_bucket(summary, detail, viewer_login, bucket) {
-            continue;
-        }
 
         for comment in &detail.comments {
             if comment.body.trim().is_empty() || comment.author_login == viewer_login {
@@ -886,26 +886,7 @@ fn overview_pull_request_comment_items(
             .cmp(&left.timestamp)
             .then_with(|| left.location.cmp(&right.location))
     });
-    items.truncate(5);
     items
-}
-
-fn overview_detail_matches_comment_bucket(
-    summary: &github::PullRequestSummary,
-    detail: &github::PullRequestDetail,
-    viewer_login: &str,
-    bucket: OverviewCommentBucket,
-) -> bool {
-    if viewer_login.is_empty() {
-        return false;
-    }
-
-    let authored_by_viewer =
-        summary.author_login == viewer_login || detail.author_login == viewer_login;
-    match bucket {
-        OverviewCommentBucket::Authored => authored_by_viewer,
-        OverviewCommentBucket::Other => !authored_by_viewer,
-    }
 }
 
 fn overview_comment_item_for_comment(
