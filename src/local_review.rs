@@ -386,9 +386,12 @@ fn summary_from_detail(detail: &PullRequestDetail, key: &str) -> PullRequestSumm
         deletions: detail.deletions,
         changed_files: detail.changed_files,
         state: detail.state.clone(),
+        author_association: "OWNER".to_string(),
         review_decision: None,
         updated_at: detail.updated_at.clone(),
         url: String::new(),
+        repository_default_branch: None,
+        triage_signals: Vec::new(),
     }
 }
 

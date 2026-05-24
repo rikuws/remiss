@@ -1185,6 +1185,10 @@ pub struct AppState {
     pub local_review_error: Option<String>,
     pub muted_repos: std::collections::HashSet<String>,
     pub pull_request_filter_settings: PullRequestFilterSettings,
+    pub pull_request_filter_dialog_scope: Option<PullRequestFilterScope>,
+    pub pull_request_filter_creator_scope: Option<PullRequestFilterScope>,
+    pub pull_request_filter_preset_name: String,
+    pub pull_request_filter_message: Option<String>,
     pub project_shader_settings: ProjectShaderSettings,
     pub project_shader_settings_error: Option<String>,
     pub project_shader_picker: Option<ProjectShaderPickerState>,
@@ -1379,6 +1383,10 @@ impl AppState {
             local_review_error: None,
             muted_repos,
             pull_request_filter_settings,
+            pull_request_filter_dialog_scope: None,
+            pull_request_filter_creator_scope: None,
+            pull_request_filter_preset_name: String::new(),
+            pull_request_filter_message: None,
             project_shader_settings,
             project_shader_settings_error,
             project_shader_picker: None,
@@ -1762,13 +1770,14 @@ impl AppState {
         }
     }
 
-    pub fn set_pull_request_filter_preset(
+    pub fn toggle_pull_request_filter_preset(
         &mut self,
         scope: PullRequestFilterScope,
         preset_id: &str,
     ) {
         self.pull_request_filter_settings
-            .set_active_preset(scope, preset_id);
+            .toggle_preset(scope, preset_id);
+        self.pull_request_filter_message = None;
         self.persist_pull_request_filter_settings();
     }
 
@@ -1778,7 +1787,62 @@ impl AppState {
         toggle: PullRequestFilterToggle,
     ) {
         self.pull_request_filter_settings.toggle(scope, toggle);
+        self.pull_request_filter_message = None;
         self.persist_pull_request_filter_settings();
+    }
+
+    pub fn open_pull_request_filter_dialog(&mut self, scope: PullRequestFilterScope) {
+        self.pull_request_filter_dialog_scope = Some(scope);
+        self.pull_request_filter_message = None;
+    }
+
+    pub fn close_pull_request_filter_dialog(&mut self) {
+        self.pull_request_filter_dialog_scope = None;
+        self.close_pull_request_filter_creator();
+    }
+
+    pub fn open_pull_request_filter_creator(&mut self, scope: PullRequestFilterScope) {
+        self.pull_request_filter_creator_scope = Some(scope);
+        self.pull_request_filter_preset_name.clear();
+        self.pull_request_filter_message = None;
+    }
+
+    pub fn close_pull_request_filter_creator(&mut self) {
+        self.pull_request_filter_creator_scope = None;
+        self.pull_request_filter_preset_name.clear();
+        self.pull_request_filter_message = None;
+    }
+
+    pub fn save_current_pull_request_filter_preset(&mut self) {
+        let Some(scope) = self.pull_request_filter_creator_scope else {
+            return;
+        };
+
+        match self
+            .pull_request_filter_settings
+            .save_current_as_preset(scope, &self.pull_request_filter_preset_name)
+        {
+            Ok(_) => {
+                self.persist_pull_request_filter_settings();
+                self.close_pull_request_filter_creator();
+            }
+            Err(error) => {
+                self.pull_request_filter_message = Some(error);
+            }
+        }
+    }
+
+    pub fn delete_custom_pull_request_filter_preset(
+        &mut self,
+        scope: PullRequestFilterScope,
+        preset_id: &str,
+    ) {
+        if self
+            .pull_request_filter_settings
+            .delete_custom_preset(scope, preset_id)
+        {
+            self.persist_pull_request_filter_settings();
+        }
     }
 
     fn persist_pull_request_filter_settings(&self) {
@@ -2998,9 +3062,12 @@ impl AppState {
             deletions: detail.deletions,
             changed_files: detail.changed_files,
             state: detail.state.clone(),
+            author_association: "NONE".to_string(),
             review_decision: detail.review_decision.clone(),
             updated_at: detail.updated_at.clone(),
             url: detail.url.clone(),
+            repository_default_branch: None,
+            triage_signals: Vec::new(),
         };
         let detail_key = pr_key(&repository, number);
 

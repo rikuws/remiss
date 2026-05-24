@@ -33,6 +33,7 @@ const TEXT_TOOLTIP_SHOW_DELAY: Duration = Duration::from_millis(500);
 pub enum AppTextFieldKind {
     PaletteQuery,
     FileChooserQuery,
+    PullRequestFilterName,
     ReviewBody,
     WaymarkDraft,
     InlineCommentDraft,
@@ -1031,6 +1032,9 @@ impl AppTextInput {
             match self.field {
                 AppTextFieldKind::PaletteQuery => app_state.palette_query.clone(),
                 AppTextFieldKind::FileChooserQuery => app_state.file_chooser_query.clone(),
+                AppTextFieldKind::PullRequestFilterName => {
+                    app_state.pull_request_filter_preset_name.clone()
+                }
                 AppTextFieldKind::ReviewBody => app_state.review_body.clone(),
                 AppTextFieldKind::WaymarkDraft => app_state.waymark_draft.clone(),
                 AppTextFieldKind::InlineCommentDraft => app_state.inline_comment_draft.clone(),
@@ -1452,6 +1456,20 @@ impl Element for AppTextInput {
                                     cx.notify();
                                 });
                             }
+                            "enter" if field == AppTextFieldKind::PullRequestFilterName => {
+                                key_state.update(cx, |app_state, cx| {
+                                    key_marked_range.borrow_mut().take();
+                                    app_state.save_current_pull_request_filter_preset();
+                                    cx.notify();
+                                });
+                            }
+                            "escape" if field == AppTextFieldKind::PullRequestFilterName => {
+                                key_state.update(cx, |app_state, cx| {
+                                    key_marked_range.borrow_mut().take();
+                                    app_state.close_pull_request_filter_creator();
+                                    cx.notify();
+                                });
+                            }
                             "tab" => {}
                             _ => {
                                 handled = false;
@@ -1593,6 +1611,7 @@ fn input_text_for_field<'a>(state: &'a AppState, field: AppTextFieldKind) -> &'a
     match field {
         AppTextFieldKind::PaletteQuery => state.palette_query.as_str(),
         AppTextFieldKind::FileChooserQuery => state.file_chooser_query.as_str(),
+        AppTextFieldKind::PullRequestFilterName => state.pull_request_filter_preset_name.as_str(),
         AppTextFieldKind::ReviewBody => state.review_body.as_str(),
         AppTextFieldKind::WaymarkDraft => state.waymark_draft.as_str(),
         AppTextFieldKind::InlineCommentDraft => state.inline_comment_draft.as_str(),
@@ -1620,6 +1639,10 @@ fn set_input_text_for_field(state: &mut AppState, field: AppTextFieldKind, value
                 item_ix: 0,
                 offset_in_item: px(0.0),
             });
+        }
+        AppTextFieldKind::PullRequestFilterName => {
+            state.pull_request_filter_preset_name = value;
+            state.pull_request_filter_message = None;
         }
         AppTextFieldKind::ReviewBody => {
             state.review_body = value;
@@ -1735,6 +1758,7 @@ fn normalize_paste(field: AppTextFieldKind, text: &str) -> String {
     match field {
         AppTextFieldKind::PaletteQuery => text.replace('\n', " "),
         AppTextFieldKind::FileChooserQuery => text.replace('\n', " "),
+        AppTextFieldKind::PullRequestFilterName => text.replace('\n', " "),
         AppTextFieldKind::ReviewBody => text.to_string(),
         AppTextFieldKind::WaymarkDraft => text.replace('\n', " "),
         AppTextFieldKind::InlineCommentDraft => text.to_string(),

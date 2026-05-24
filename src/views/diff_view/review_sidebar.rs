@@ -2471,9 +2471,12 @@ fn stack_layer_pull_request_summary(
         deletions: layer.metrics.deletions as i64,
         changed_files: layer.metrics.file_count as i64,
         state: pr.state.clone(),
+        author_association: "NONE".to_string(),
         review_decision: pr.review_decision.clone(),
         updated_at: String::new(),
         url: pr.url.clone(),
+        repository_default_branch: None,
+        triage_signals: Vec::new(),
     })
 }
 

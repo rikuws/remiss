@@ -268,9 +268,12 @@ mod tests {
             deletions: 1,
             changed_files: 1,
             state: "OPEN".to_string(),
+            author_association: "NONE".to_string(),
             review_decision: None,
             updated_at: updated_at.to_string(),
             url: format!("https://example.com/{repository}/{number}"),
+            repository_default_branch: Some("main".to_string()),
+            triage_signals: Vec::new(),
         }
     }
 

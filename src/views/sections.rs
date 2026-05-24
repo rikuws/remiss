@@ -4,14 +4,13 @@ use gpui::*;
 use crate::github;
 use crate::icons::{lucide_icon, LucideIcon};
 use crate::review_filters::{
-    current_epoch_days, filter_pull_requests, ActivityFilter, DraftFilter, FreshnessFilter,
-    PullRequestFilterContext, PullRequestFilterScope, PullRequestFilterToggle,
-    ReviewDecisionFilter, SizeFilter,
+    current_epoch_days, filter_pull_requests, PullRequestFilterContext, PullRequestFilterScope,
 };
 use crate::review_session::location_label;
 use crate::shader_surface::{OverviewShaderVariant, ShaderCornerMask};
 use crate::state::*;
 use crate::theme::*;
+use crate::triage::{PullRequestTriageSignal, PullRequestTriageSignalKind};
 
 use super::settings::render_settings_view;
 use super::workspace_sync::trigger_sync_workspace;
@@ -20,7 +19,9 @@ use std::{
     time::Duration,
 };
 
+mod pull_request_filters;
 mod pull_request_open;
+use pull_request_filters::{render_pull_request_filter_bar, render_pull_request_filter_dialog};
 pub(super) use pull_request_open::detail_snapshot_needs_background_refresh;
 pub use pull_request_open::open_pull_request;
 
@@ -60,10 +61,9 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let overview_filter = s
         .pull_request_filter_settings
         .current_filter(overview_filter_scope);
-    let overview_active_preset_id = s
+    let overview_active_preset_ids = s
         .pull_request_filter_settings
-        .active_preset_id(overview_filter_scope)
-        .map(str::to_string);
+        .active_preset_ids(overview_filter_scope);
     let overview_presets = s
         .pull_request_filter_settings
         .presets(overview_filter_scope);
@@ -78,6 +78,8 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let filtered_review_count = filtered_review_items.len();
     let overview_filter_labels = overview_filter.active_labels();
     let overview_hidden_count = review_items.len().saturating_sub(filtered_review_count);
+    let overview_filter_dialog_open =
+        s.pull_request_filter_dialog_scope == Some(overview_filter_scope);
     let workspace_loading = s.workspace_loading;
     let workspace_error = s.workspace_error.clone();
     let authored_comment_items =
@@ -98,6 +100,7 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
         && other_comment_items.is_empty();
 
     div()
+        .relative()
         .p(px(28.0))
         .px(px(40.0))
         .flex()
@@ -179,14 +182,11 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                         .child(render_pull_request_filter_bar(
                             state,
                             overview_filter_scope,
-                            overview_presets,
-                            overview_active_preset_id,
-                            &overview_filter,
-                            overview_filter_labels,
+                            overview_filter_labels.clone(),
                             filtered_review_count,
                             review_items.len(),
                             overview_hidden_count,
-                            !s.muted_repos.is_empty(),
+                            overview_filter_dialog_open,
                         ))
                         .when(show_empty_state, |el| {
                             el.child(overview_empty_state_panel())
@@ -237,6 +237,23 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                         }),
                 ),
         )
+        .when(overview_filter_dialog_open, |el| {
+            el.child(render_pull_request_filter_dialog(
+                state,
+                overview_filter_scope,
+                overview_presets,
+                overview_active_preset_ids,
+                &overview_filter,
+                overview_filter_labels,
+                filtered_review_count,
+                review_items.len(),
+                overview_hidden_count,
+                !s.muted_repos.is_empty(),
+                s.pull_request_filter_creator_scope,
+                s.pull_request_filter_preset_name.clone(),
+                s.pull_request_filter_message.clone(),
+            ))
+        })
 }
 
 fn overview_content_shell() -> Div {
@@ -582,6 +599,7 @@ fn overview_review_request_row(
     let author_login = item.author_login.clone();
     let author_avatar_url = item.author_avatar_url.clone();
     let updated = format_relative_time(&item.updated_at);
+    let triage_signals = item.triage_signals.clone();
     let summary = item.clone();
 
     div()
@@ -625,7 +643,16 @@ fn overview_review_request_row(
                         .whitespace_nowrap()
                         .overflow_x_hidden()
                         .child(repo_ref),
-                ),
+                )
+                .when(!triage_signals.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .flex()
+                            .gap(px(5.0))
+                            .flex_wrap()
+                            .children(triage_signals.into_iter().take(3).map(triage_signal_badge)),
+                    )
+                }),
         )
         .child(
             div()
@@ -995,10 +1022,9 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
         .unwrap_or_default();
     let filter_scope = pull_request_filter_scope_for_section(s.active_section);
     let current_filter = s.pull_request_filter_settings.current_filter(filter_scope);
-    let active_preset_id = s
+    let active_preset_ids = s
         .pull_request_filter_settings
-        .active_preset_id(filter_scope)
-        .map(str::to_string);
+        .active_preset_ids(filter_scope);
     let filter_presets = s.pull_request_filter_settings.presets(filter_scope);
     let unread_pr_keys = unread_pull_request_keys_for_filter(s, &current_filter);
     let filter_context = PullRequestFilterContext {
@@ -1074,6 +1100,7 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let mut muted_list: Vec<String> = muted_repos.iter().cloned().collect::<Vec<_>>();
     muted_list.sort();
     let has_muted = !muted_list.is_empty();
+    let filter_dialog_open = s.pull_request_filter_dialog_scope == Some(filter_scope);
 
     div()
         .relative()
@@ -1213,14 +1240,11 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                 .child(render_pull_request_filter_bar(
                     state,
                     filter_scope,
-                    filter_presets,
-                    active_preset_id,
-                    &current_filter,
-                    active_filter_labels,
+                    active_filter_labels.clone(),
                     filtered_queue_items.len(),
                     queue_items.len(),
                     hidden_by_filter_count,
-                    has_muted,
+                    filter_dialog_open,
                 ))
                 .when(workspace_loading, |el| {
                     el.child(
@@ -1309,6 +1333,23 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                 picker,
                 shader_settings_error,
                 cx,
+            ))
+        })
+        .when(filter_dialog_open, |el| {
+            el.child(render_pull_request_filter_dialog(
+                state,
+                filter_scope,
+                filter_presets,
+                active_preset_ids,
+                &current_filter,
+                active_filter_labels,
+                filtered_queue_items.len(),
+                queue_items.len(),
+                hidden_by_filter_count,
+                has_muted,
+                s.pull_request_filter_creator_scope,
+                s.pull_request_filter_preset_name.clone(),
+                s.pull_request_filter_message.clone(),
             ))
         })
 }
@@ -1926,199 +1967,6 @@ fn unread_pull_request_keys_for_filter(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_pull_request_filter_bar(
-    state: &Entity<AppState>,
-    scope: PullRequestFilterScope,
-    presets: Vec<crate::review_filters::PullRequestFilterPreset>,
-    active_preset_id: Option<String>,
-    filter: &crate::review_filters::PullRequestFilter,
-    active_labels: Vec<String>,
-    visible_count: usize,
-    total_count: usize,
-    hidden_count: usize,
-    has_muted: bool,
-) -> impl IntoElement {
-    let state_for_ready = state.clone();
-    let state_for_draft = state.clone();
-    let state_for_unread = state.clone();
-    let state_for_fresh = state.clone();
-    let state_for_stale = state.clone();
-    let state_for_large = state.clone();
-    let state_for_needs_review = state.clone();
-    let state_for_muted = state.clone();
-    let mut status = format!("{visible_count}/{total_count}");
-    if hidden_count > 0 {
-        status.push_str(&format!(" visible, {hidden_count} hidden"));
-    } else {
-        status.push_str(" visible");
-    }
-
-    div()
-        .px(px(28.0))
-        .pb(px(12.0))
-        .flex()
-        .flex_col()
-        .gap(px(8.0))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .flex_wrap()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(5.0))
-                        .mr(px(4.0))
-                        .text_size(px(11.0))
-                        .font_family(mono_font_family())
-                        .text_color(fg_subtle())
-                        .child(lucide_icon(LucideIcon::ListFilter, 12.0, fg_subtle()))
-                        .child(status),
-                )
-                .children(presets.into_iter().map(|preset| {
-                    let preset_id = preset.id.clone();
-                    let active = active_preset_id.as_deref() == Some(preset.id.as_str());
-                    let state = state.clone();
-                    filter_chip(&preset.label, active, move |_, _, cx| {
-                        state.update(cx, |state, cx| {
-                            state.set_pull_request_filter_preset(scope, &preset_id);
-                            cx.notify();
-                        });
-                    })
-                }))
-                .child(filter_chip(
-                    "Ready",
-                    filter.draft == DraftFilter::Ready,
-                    move |_, _, cx| {
-                        state_for_ready.update(cx, |state, cx| {
-                            state.toggle_pull_request_filter(scope, PullRequestFilterToggle::Ready);
-                            cx.notify();
-                        });
-                    },
-                ))
-                .child(filter_chip(
-                    "Draft",
-                    filter.draft == DraftFilter::Draft,
-                    move |_, _, cx| {
-                        state_for_draft.update(cx, |state, cx| {
-                            state.toggle_pull_request_filter(scope, PullRequestFilterToggle::Draft);
-                            cx.notify();
-                        });
-                    },
-                ))
-                .child(filter_chip(
-                    "Unread",
-                    filter.activity == ActivityFilter::Unread,
-                    move |_, _, cx| {
-                        state_for_unread.update(cx, |state, cx| {
-                            state
-                                .toggle_pull_request_filter(scope, PullRequestFilterToggle::Unread);
-                            cx.notify();
-                        });
-                    },
-                ))
-                .child(filter_chip(
-                    "Fresh",
-                    filter.freshness == FreshnessFilter::Fresh,
-                    move |_, _, cx| {
-                        state_for_fresh.update(cx, |state, cx| {
-                            state.toggle_pull_request_filter(scope, PullRequestFilterToggle::Fresh);
-                            cx.notify();
-                        });
-                    },
-                ))
-                .child(filter_chip(
-                    "Stale",
-                    filter.freshness == FreshnessFilter::Stale,
-                    move |_, _, cx| {
-                        state_for_stale.update(cx, |state, cx| {
-                            state.toggle_pull_request_filter(scope, PullRequestFilterToggle::Stale);
-                            cx.notify();
-                        });
-                    },
-                ))
-                .child(filter_chip(
-                    "Large",
-                    filter.size == SizeFilter::Large,
-                    move |_, _, cx| {
-                        state_for_large.update(cx, |state, cx| {
-                            state.toggle_pull_request_filter(scope, PullRequestFilterToggle::Large);
-                            cx.notify();
-                        });
-                    },
-                ))
-                .child(filter_chip(
-                    "Needs review",
-                    filter.review_decision == ReviewDecisionFilter::ReviewRequired,
-                    move |_, _, cx| {
-                        state_for_needs_review.update(cx, |state, cx| {
-                            state.toggle_pull_request_filter(
-                                scope,
-                                PullRequestFilterToggle::NeedsReview,
-                            );
-                            cx.notify();
-                        });
-                    },
-                ))
-                .when(has_muted || filter.include_muted, |el| {
-                    el.child(filter_chip(
-                        "Muted",
-                        filter.include_muted,
-                        move |_, _, cx| {
-                            state_for_muted.update(cx, |state, cx| {
-                                state.toggle_pull_request_filter(
-                                    scope,
-                                    PullRequestFilterToggle::IncludeMuted,
-                                );
-                                cx.notify();
-                            });
-                        },
-                    ))
-                }),
-        )
-        .when(!active_labels.is_empty(), |el| {
-            el.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .flex_wrap()
-                    .children(active_labels.into_iter().map(|label| subtle_pill(&label))),
-            )
-        })
-}
-
-fn filter_chip(
-    label: &str,
-    active: bool,
-    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    div()
-        .px(px(9.0))
-        .py(px(4.0))
-        .rounded(radius_sm())
-        .border_1()
-        .border_color(if active {
-            focus_border()
-        } else {
-            transparent()
-        })
-        .bg(if active { bg_selected() } else { bg_overlay() })
-        .text_size(px(11.0))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(if active { fg_emphasis() } else { fg_muted() })
-        .hover(move |style| {
-            style
-                .bg(if active { bg_selected() } else { hover_bg() })
-                .text_color(fg_emphasis())
-        })
-        .on_mouse_down(MouseButton::Left, on_click)
-        .child(label.to_string())
-}
-
 fn pill_badge(label: &str, fg: Rgba, bg: Rgba, _border: Rgba) -> impl IntoElement {
     div()
         .px(px(8.0))
@@ -2166,6 +2014,32 @@ fn review_decision_badge(decision: &str) -> AnyElement {
             pill_badge("Commented", accent(), accent_muted(), accent()).into_any_element()
         }
         _ => subtle_pill(decision).into_any_element(),
+    }
+}
+
+fn triage_signal_badge(signal: PullRequestTriageSignal) -> AnyElement {
+    match signal.kind {
+        PullRequestTriageSignalKind::Vouched | PullRequestTriageSignalKind::Trusted => {
+            pill_badge(&signal.label, success(), success_muted(), diff_add_border())
+                .into_any_element()
+        }
+        PullRequestTriageSignalKind::Denounced => pill_badge(
+            &signal.label,
+            danger(),
+            danger_muted(),
+            diff_remove_border(),
+        )
+        .into_any_element(),
+        PullRequestTriageSignalKind::FirstTimeContributor
+        | PullRequestTriageSignalKind::TrustListError => {
+            pill_badge(&signal.label, warning(), warning_muted(), warning()).into_any_element()
+        }
+        PullRequestTriageSignalKind::PriorContributor => {
+            pill_badge(&signal.label, info(), info_muted(), info()).into_any_element()
+        }
+        PullRequestTriageSignalKind::TrustUnknown | PullRequestTriageSignalKind::NoTrustList => {
+            subtle_pill(&signal.label).into_any_element()
+        }
     }
 }
 
@@ -2450,6 +2324,7 @@ fn kanban_card(
     let comments = item.comments_count;
     let changed_files = item.changed_files;
     let review_decision = item.review_decision.clone();
+    let triage_signals = item.triage_signals.clone();
     let summary = item.clone();
 
     div()
@@ -2533,6 +2408,7 @@ fn kanban_card(
                         .when(comments > 0, |el| {
                             el.child(subtle_pill(&format!("{comments} comments")))
                         })
+                        .children(triage_signals.into_iter().take(3).map(triage_signal_badge))
                         .child(subtle_pill(&format!("{changed_files} files"))),
                 ),
         )

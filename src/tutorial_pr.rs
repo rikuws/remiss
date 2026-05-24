@@ -51,9 +51,12 @@ pub fn summary() -> PullRequestSummary {
         deletions: detail.deletions,
         changed_files: detail.changed_files,
         state: "TUTORIAL".to_string(),
+        author_association: "OWNER".to_string(),
         review_decision: None,
         updated_at: detail.updated_at.clone(),
         url: detail.url.clone(),
+        repository_default_branch: Some("main".to_string()),
+        triage_signals: Vec::new(),
     }
 }
 

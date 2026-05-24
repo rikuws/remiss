@@ -3,12 +3,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{cache::CacheStore, github::PullRequestSummary};
+use crate::{
+    cache::CacheStore,
+    github::PullRequestSummary,
+    triage::{has_signal, has_trusted_signal, PullRequestTriageSignalKind},
+};
 
 pub(crate) const MUTED_REPOSITORIES_CACHE_KEY: &str = "muted-repositories-v1";
 const PULL_REQUEST_FILTER_SETTINGS_CACHE_KEY: &str = "pull-request-filters-v1";
 const FRESH_WINDOW_DAYS: i64 = 3;
 const STALE_AFTER_DAYS: i64 = 14;
+const CUSTOM_PRESET_ID_PREFIX: &str = "custom:";
+const CUSTOM_PRESET_ORDER_START: usize = 100;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -82,6 +88,11 @@ pub enum PullRequestFilterToggle {
     Large,
     NeedsReview,
     IncludeMuted,
+    Trusted,
+    Vouched,
+    FirstTime,
+    TrustUnknown,
+    Denounced,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -135,6 +146,16 @@ impl PullRequestFilterSettings {
             .and_then(|scope| scope.active_preset_id.as_deref())
     }
 
+    pub fn active_preset_ids(&self, scope: PullRequestFilterScope) -> Vec<String> {
+        let mut entry = self
+            .scopes
+            .get(scope.key())
+            .cloned()
+            .unwrap_or_else(|| PullRequestFilterScopeSettings::default_for_scope(scope));
+        entry.normalize(scope);
+        entry.active_preset_ids()
+    }
+
     pub fn presets(&self, scope: PullRequestFilterScope) -> Vec<PullRequestFilterPreset> {
         self.scopes
             .get(scope.key())
@@ -150,13 +171,43 @@ impl PullRequestFilterSettings {
         entry.set_active_preset(preset_id, scope);
     }
 
+    pub fn toggle_preset(&mut self, scope: PullRequestFilterScope, preset_id: &str) {
+        let entry = self
+            .scopes
+            .entry(scope.key().to_string())
+            .or_insert_with(|| PullRequestFilterScopeSettings::default_for_scope(scope));
+        entry.toggle_preset(preset_id, scope);
+    }
+
     pub fn toggle(&mut self, scope: PullRequestFilterScope, toggle: PullRequestFilterToggle) {
         let entry = self
             .scopes
             .entry(scope.key().to_string())
             .or_insert_with(|| PullRequestFilterScopeSettings::default_for_scope(scope));
         entry.current.toggle(toggle);
-        entry.active_preset_id = None;
+        entry.active_preset_id = entry.exact_active_preset_id();
+    }
+
+    pub fn save_current_as_preset(
+        &mut self,
+        scope: PullRequestFilterScope,
+        label: &str,
+    ) -> Result<String, String> {
+        let label = normalize_custom_preset_label(label)
+            .ok_or_else(|| "Give the filter a name before saving.".to_string())?;
+        let entry = self
+            .scopes
+            .entry(scope.key().to_string())
+            .or_insert_with(|| PullRequestFilterScopeSettings::default_for_scope(scope));
+        entry.save_current_as_preset(scope, label)
+    }
+
+    pub fn delete_custom_preset(&mut self, scope: PullRequestFilterScope, preset_id: &str) -> bool {
+        let entry = self
+            .scopes
+            .entry(scope.key().to_string())
+            .or_insert_with(|| PullRequestFilterScopeSettings::default_for_scope(scope));
+        entry.delete_custom_preset(scope, preset_id)
     }
 }
 
@@ -187,24 +238,17 @@ impl PullRequestFilterScopeSettings {
     }
 
     fn normalize(&mut self, scope: PullRequestFilterScope) {
-        if self.presets.is_empty() {
-            self.presets = default_presets(scope);
-        }
+        let mut normalized = default_presets(scope);
+        normalized.extend(
+            self.presets
+                .iter()
+                .filter(|preset| preset.is_custom())
+                .cloned(),
+        );
+        self.presets = normalized;
         self.presets.sort_by_key(|preset| preset.order);
         self.presets.dedup_by(|left, right| left.id == right.id);
-        if self
-            .active_preset_id
-            .as_deref()
-            .map(|id| self.presets.iter().any(|preset| preset.id == id))
-            .unwrap_or(false)
-        {
-            return;
-        }
-        if self.current == PullRequestFilter::default() {
-            self.active_preset_id = self.presets.first().map(|preset| preset.id.clone());
-        } else {
-            self.active_preset_id = None;
-        }
+        self.active_preset_id = self.exact_active_preset_id();
     }
 
     fn set_active_preset(&mut self, preset_id: &str, scope: PullRequestFilterScope) {
@@ -213,6 +257,128 @@ impl PullRequestFilterScopeSettings {
             self.current = preset.filter.clone();
             self.active_preset_id = Some(preset.id.clone());
         }
+    }
+
+    fn toggle_preset(&mut self, preset_id: &str, scope: PullRequestFilterScope) {
+        self.normalize(scope);
+        let Some(preset) = self
+            .presets
+            .iter()
+            .find(|preset| preset.id == preset_id)
+            .cloned()
+        else {
+            return;
+        };
+
+        if preset.filter == PullRequestFilter::default() {
+            self.current = PullRequestFilter::default();
+            self.active_preset_id = Some(preset.id);
+            return;
+        }
+
+        if self.current.includes(&preset.filter) {
+            self.current.remove(&preset.filter);
+        } else {
+            self.current.merge(&preset.filter);
+        }
+        self.active_preset_id = self.exact_active_preset_id();
+    }
+
+    fn active_preset_ids(&self) -> Vec<String> {
+        if self.current == PullRequestFilter::default() {
+            return self
+                .presets
+                .iter()
+                .find(|preset| preset.filter == PullRequestFilter::default())
+                .map(|preset| vec![preset.id.clone()])
+                .unwrap_or_default();
+        }
+
+        self.presets
+            .iter()
+            .filter(|preset| preset.filter != PullRequestFilter::default())
+            .filter(|preset| self.current.includes(&preset.filter))
+            .map(|preset| preset.id.clone())
+            .collect()
+    }
+
+    fn exact_active_preset_id(&self) -> Option<String> {
+        if let Some(active_preset_id) = self.active_preset_id.as_deref() {
+            if let Some(preset) = self
+                .presets
+                .iter()
+                .find(|preset| preset.id == active_preset_id && preset.filter == self.current)
+            {
+                return Some(preset.id.clone());
+            }
+        }
+
+        self.presets
+            .iter()
+            .find(|preset| preset.filter == self.current)
+            .map(|preset| preset.id.clone())
+    }
+
+    fn save_current_as_preset(
+        &mut self,
+        scope: PullRequestFilterScope,
+        label: String,
+    ) -> Result<String, String> {
+        self.normalize(scope);
+        if self.current == PullRequestFilter::default() {
+            return Err("Set at least one criterion before saving a filter.".to_string());
+        }
+        if default_presets(scope)
+            .into_iter()
+            .any(|preset| preset.label.eq_ignore_ascii_case(&label))
+        {
+            return Err("A built-in filter already uses that name.".to_string());
+        }
+
+        if let Some(existing) = self
+            .presets
+            .iter_mut()
+            .find(|preset| preset.is_custom() && preset.label.eq_ignore_ascii_case(&label))
+        {
+            existing.filter = self.current.clone();
+            let id = existing.id.clone();
+            self.active_preset_id = Some(id.clone());
+            return Ok(id);
+        }
+
+        let id = custom_preset_id(&label, &self.presets);
+        let order = next_custom_preset_order(&self.presets);
+        self.presets.push(PullRequestFilterPreset {
+            id: id.clone(),
+            label,
+            order,
+            filter: self.current.clone(),
+        });
+        self.active_preset_id = Some(id.clone());
+        self.normalize(scope);
+        Ok(id)
+    }
+
+    fn delete_custom_preset(&mut self, scope: PullRequestFilterScope, preset_id: &str) -> bool {
+        self.normalize(scope);
+        let Some(index) = self
+            .presets
+            .iter()
+            .position(|preset| preset.id == preset_id && preset.is_custom())
+        else {
+            return false;
+        };
+
+        self.presets.remove(index);
+        if self.active_preset_id.as_deref() == Some(preset_id) {
+            let all = default_presets(scope)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| preset("all", "All", 0, PullRequestFilter::default()));
+            self.current = all.filter;
+            self.active_preset_id = Some(all.id);
+        }
+        true
     }
 }
 
@@ -223,6 +389,12 @@ pub struct PullRequestFilterPreset {
     pub label: String,
     pub order: usize,
     pub filter: PullRequestFilter,
+}
+
+impl PullRequestFilterPreset {
+    pub fn is_custom(&self) -> bool {
+        self.id.starts_with(CUSTOM_PRESET_ID_PREFIX)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -243,6 +415,8 @@ pub struct PullRequestFilter {
     #[serde(default)]
     pub review_decision: ReviewDecisionFilter,
     #[serde(default)]
+    pub trust: TrustFilter,
+    #[serde(default)]
     pub include_muted: bool,
 }
 
@@ -256,6 +430,7 @@ impl Default for PullRequestFilter {
             freshness: FreshnessFilter::Any,
             size: SizeFilter::Any,
             review_decision: ReviewDecisionFilter::Any,
+            trust: TrustFilter::Any,
             include_muted: false,
         }
     }
@@ -308,8 +483,13 @@ impl PullRequestFilter {
         if self.size != SizeFilter::Any && !self.size.matches(summary) {
             return false;
         }
-        self.review_decision
+        if !self
+            .review_decision
             .matches(summary.review_decision.as_deref())
+        {
+            return false;
+        }
+        self.trust.matches(summary)
     }
 
     pub fn active_labels(&self) -> Vec<String> {
@@ -325,10 +505,107 @@ impl PullRequestFilter {
         labels.extend(self.freshness.active_label().map(str::to_string));
         labels.extend(self.size.active_label().map(str::to_string));
         labels.extend(self.review_decision.active_label().map(str::to_string));
+        labels.extend(self.trust.active_label().map(str::to_string));
         if self.include_muted {
             labels.push("muted included".to_string());
         }
         labels
+    }
+
+    fn includes(&self, filter: &Self) -> bool {
+        if let Some(repository) = filter.repository.as_ref() {
+            if self.repository.as_ref() != Some(repository) {
+                return false;
+            }
+        }
+        if let Some(author) = filter.author.as_ref() {
+            if self.author.as_ref() != Some(author) {
+                return false;
+            }
+        }
+        if filter.draft != DraftFilter::Any && self.draft != filter.draft {
+            return false;
+        }
+        if filter.activity != ActivityFilter::Any && self.activity != filter.activity {
+            return false;
+        }
+        if filter.freshness != FreshnessFilter::Any && self.freshness != filter.freshness {
+            return false;
+        }
+        if filter.size != SizeFilter::Any && self.size != filter.size {
+            return false;
+        }
+        if filter.review_decision != ReviewDecisionFilter::Any
+            && self.review_decision != filter.review_decision
+        {
+            return false;
+        }
+        if filter.trust != TrustFilter::Any && self.trust != filter.trust {
+            return false;
+        }
+        !filter.include_muted || self.include_muted
+    }
+
+    fn merge(&mut self, filter: &Self) {
+        if filter.repository.is_some() {
+            self.repository = filter.repository.clone();
+        }
+        if filter.author.is_some() {
+            self.author = filter.author.clone();
+        }
+        if filter.draft != DraftFilter::Any {
+            self.draft = filter.draft;
+        }
+        if filter.activity != ActivityFilter::Any {
+            self.activity = filter.activity;
+        }
+        if filter.freshness != FreshnessFilter::Any {
+            self.freshness = filter.freshness;
+        }
+        if filter.size != SizeFilter::Any {
+            self.size = filter.size;
+        }
+        if filter.review_decision != ReviewDecisionFilter::Any {
+            self.review_decision = filter.review_decision;
+        }
+        if filter.trust != TrustFilter::Any {
+            self.trust = filter.trust;
+        }
+        if filter.include_muted {
+            self.include_muted = true;
+        }
+    }
+
+    fn remove(&mut self, filter: &Self) {
+        if filter.repository.is_some() && self.repository == filter.repository {
+            self.repository = None;
+        }
+        if filter.author.is_some() && self.author == filter.author {
+            self.author = None;
+        }
+        if filter.draft != DraftFilter::Any && self.draft == filter.draft {
+            self.draft = DraftFilter::Any;
+        }
+        if filter.activity != ActivityFilter::Any && self.activity == filter.activity {
+            self.activity = ActivityFilter::Any;
+        }
+        if filter.freshness != FreshnessFilter::Any && self.freshness == filter.freshness {
+            self.freshness = FreshnessFilter::Any;
+        }
+        if filter.size != SizeFilter::Any && self.size == filter.size {
+            self.size = SizeFilter::Any;
+        }
+        if filter.review_decision != ReviewDecisionFilter::Any
+            && self.review_decision == filter.review_decision
+        {
+            self.review_decision = ReviewDecisionFilter::Any;
+        }
+        if filter.trust != TrustFilter::Any && self.trust == filter.trust {
+            self.trust = TrustFilter::Any;
+        }
+        if filter.include_muted {
+            self.include_muted = false;
+        }
     }
 
     fn toggle(&mut self, toggle: PullRequestFilterToggle) {
@@ -385,6 +662,41 @@ impl PullRequestFilter {
             }
             PullRequestFilterToggle::IncludeMuted => {
                 self.include_muted = !self.include_muted;
+            }
+            PullRequestFilterToggle::Trusted => {
+                self.trust = if self.trust == TrustFilter::Trusted {
+                    TrustFilter::Any
+                } else {
+                    TrustFilter::Trusted
+                };
+            }
+            PullRequestFilterToggle::Vouched => {
+                self.trust = if self.trust == TrustFilter::Vouched {
+                    TrustFilter::Any
+                } else {
+                    TrustFilter::Vouched
+                };
+            }
+            PullRequestFilterToggle::FirstTime => {
+                self.trust = if self.trust == TrustFilter::FirstTime {
+                    TrustFilter::Any
+                } else {
+                    TrustFilter::FirstTime
+                };
+            }
+            PullRequestFilterToggle::TrustUnknown => {
+                self.trust = if self.trust == TrustFilter::Unknown {
+                    TrustFilter::Any
+                } else {
+                    TrustFilter::Unknown
+                };
+            }
+            PullRequestFilterToggle::Denounced => {
+                self.trust = if self.trust == TrustFilter::Denounced {
+                    TrustFilter::Any
+                } else {
+                    TrustFilter::Denounced
+                };
             }
         }
     }
@@ -543,6 +855,62 @@ impl ReviewDecisionFilter {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TrustFilter {
+    #[default]
+    Any,
+    Trusted,
+    Vouched,
+    FirstTime,
+    Unknown,
+    Denounced,
+}
+
+impl TrustFilter {
+    fn matches(self, summary: &PullRequestSummary) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Trusted => has_trusted_signal(&summary.triage_signals),
+            Self::Vouched => has_signal(
+                &summary.triage_signals,
+                PullRequestTriageSignalKind::Vouched,
+            ),
+            Self::FirstTime => has_signal(
+                &summary.triage_signals,
+                PullRequestTriageSignalKind::FirstTimeContributor,
+            ),
+            Self::Unknown => {
+                has_signal(
+                    &summary.triage_signals,
+                    PullRequestTriageSignalKind::TrustUnknown,
+                ) || has_signal(
+                    &summary.triage_signals,
+                    PullRequestTriageSignalKind::NoTrustList,
+                ) || has_signal(
+                    &summary.triage_signals,
+                    PullRequestTriageSignalKind::TrustListError,
+                )
+            }
+            Self::Denounced => has_signal(
+                &summary.triage_signals,
+                PullRequestTriageSignalKind::Denounced,
+            ),
+        }
+    }
+
+    fn active_label(self) -> Option<&'static str> {
+        match self {
+            Self::Any => None,
+            Self::Trusted => Some("trusted"),
+            Self::Vouched => Some("vouched"),
+            Self::FirstTime => Some("first-time"),
+            Self::Unknown => Some("trust unknown"),
+            Self::Denounced => Some("denounced"),
+        }
+    }
+}
+
 pub struct PullRequestFilterContext<'a> {
     pub muted_repositories: &'a HashSet<String>,
     pub unread_pr_keys: &'a BTreeSet<String>,
@@ -592,29 +960,41 @@ fn default_presets(scope: PullRequestFilterScope) -> Vec<PullRequestFilterPreset
     let mut presets = vec![preset("all", "All", 0, PullRequestFilter::default())];
     match scope {
         PullRequestFilterScope::Overview => {
-            presets.push(preset("unread", "Unread", 1, unread_filter()));
+            presets.push(preset("trusted", "Trusted", 1, trusted_filter()));
+            presets.push(preset("first-time", "First-time", 2, first_time_filter()));
+            presets.push(preset("unknown", "Unknown", 3, unknown_trust_filter()));
+            presets.push(preset("denounced", "Denounced", 4, denounced_filter()));
+            presets.push(preset("unread", "Unread", 5, unread_filter()));
             presets.push(preset(
                 "attention",
                 "Needs Review",
-                2,
+                6,
                 needs_review_filter(),
             ));
-            presets.push(preset("large", "Large", 3, large_ready_filter()));
+            presets.push(preset("large", "Large", 7, large_ready_filter()));
         }
         PullRequestFilterScope::Pulls => {
-            presets.push(preset("ready", "Ready", 1, ready_filter()));
-            presets.push(preset("drafts", "Drafts", 2, draft_filter()));
-            presets.push(preset("large", "Large", 3, large_ready_filter()));
+            presets.push(preset("trusted", "Trusted", 1, trusted_filter()));
+            presets.push(preset("first-time", "First-time", 2, first_time_filter()));
+            presets.push(preset("unknown", "Unknown", 3, unknown_trust_filter()));
+            presets.push(preset("denounced", "Denounced", 4, denounced_filter()));
+            presets.push(preset("ready", "Ready", 5, ready_filter()));
+            presets.push(preset("drafts", "Drafts", 6, draft_filter()));
+            presets.push(preset("large", "Large", 7, large_ready_filter()));
         }
         PullRequestFilterScope::Reviews => {
-            presets.push(preset("unread", "Unread", 1, unread_filter()));
+            presets.push(preset("trusted", "Trusted", 1, trusted_filter()));
+            presets.push(preset("first-time", "First-time", 2, first_time_filter()));
+            presets.push(preset("unknown", "Unknown", 3, unknown_trust_filter()));
+            presets.push(preset("denounced", "Denounced", 4, denounced_filter()));
+            presets.push(preset("unread", "Unread", 5, unread_filter()));
             presets.push(preset(
                 "attention",
                 "Needs Review",
-                2,
+                6,
                 needs_review_filter(),
             ));
-            presets.push(preset("stale", "Stale", 3, stale_filter()));
+            presets.push(preset("stale", "Stale", 7, stale_filter()));
         }
     }
     presets
@@ -632,6 +1012,58 @@ fn preset(
         order,
         filter,
     }
+}
+
+fn normalize_custom_preset_label(label: &str) -> Option<String> {
+    let normalized = label.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized.chars().take(40).collect())
+    }
+}
+
+fn custom_preset_id(label: &str, presets: &[PullRequestFilterPreset]) -> String {
+    let mut slug = String::new();
+    let mut previous_dash = false;
+    for ch in label.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+            previous_dash = false;
+        } else if !previous_dash && !slug.is_empty() {
+            slug.push('-');
+            previous_dash = true;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        slug.push_str("filter");
+    }
+
+    let base = format!("{CUSTOM_PRESET_ID_PREFIX}{slug}");
+    if !presets.iter().any(|preset| preset.id == base) {
+        return base;
+    }
+
+    for suffix in 2.. {
+        let candidate = format!("{base}-{suffix}");
+        if !presets.iter().any(|preset| preset.id == candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("custom preset id suffix search is unbounded")
+}
+
+fn next_custom_preset_order(presets: &[PullRequestFilterPreset]) -> usize {
+    presets
+        .iter()
+        .filter(|preset| preset.is_custom())
+        .map(|preset| preset.order)
+        .max()
+        .map(|order| order.saturating_add(1))
+        .unwrap_or(CUSTOM_PRESET_ORDER_START)
 }
 
 fn ready_filter() -> PullRequestFilter {
@@ -674,6 +1106,34 @@ fn large_ready_filter() -> PullRequestFilter {
     PullRequestFilter {
         draft: DraftFilter::Ready,
         size: SizeFilter::Large,
+        ..PullRequestFilter::default()
+    }
+}
+
+fn trusted_filter() -> PullRequestFilter {
+    PullRequestFilter {
+        trust: TrustFilter::Trusted,
+        ..PullRequestFilter::default()
+    }
+}
+
+fn first_time_filter() -> PullRequestFilter {
+    PullRequestFilter {
+        trust: TrustFilter::FirstTime,
+        ..PullRequestFilter::default()
+    }
+}
+
+fn unknown_trust_filter() -> PullRequestFilter {
+    PullRequestFilter {
+        trust: TrustFilter::Unknown,
+        ..PullRequestFilter::default()
+    }
+}
+
+fn denounced_filter() -> PullRequestFilter {
+    PullRequestFilter {
+        trust: TrustFilter::Denounced,
         ..PullRequestFilter::default()
     }
 }
@@ -750,10 +1210,13 @@ mod tests {
             deletions: 10,
             changed_files: 2,
             state: "OPEN".to_string(),
+            author_association: "NONE".to_string(),
             review_decision: None,
             updated_at: updated_at.to_string(),
             url: String::new(),
             local_key: None,
+            repository_default_branch: Some("main".to_string()),
+            triage_signals: Vec::new(),
         }
     }
 
@@ -787,6 +1250,7 @@ mod tests {
             freshness: FreshnessFilter::Fresh,
             size: SizeFilter::Large,
             review_decision: ReviewDecisionFilter::ReviewRequired,
+            trust: TrustFilter::Any,
             include_muted: false,
         };
 
@@ -837,6 +1301,52 @@ mod tests {
     }
 
     #[test]
+    fn trust_filters_match_triage_signals() {
+        let muted = HashSet::new();
+        let unread = BTreeSet::new();
+        let ctx = context(&muted, &unread);
+        let mut item = summary("owner/repo", 1, "alice", "2026-05-20T00:00:00Z");
+        item.triage_signals = vec![crate::triage::PullRequestTriageSignal {
+            kind: PullRequestTriageSignalKind::Vouched,
+            label: "vouched".to_string(),
+            detail: None,
+        }];
+
+        assert!(PullRequestFilter {
+            trust: TrustFilter::Trusted,
+            ..PullRequestFilter::default()
+        }
+        .matches(&item, &ctx));
+        assert!(PullRequestFilter {
+            trust: TrustFilter::Vouched,
+            ..PullRequestFilter::default()
+        }
+        .matches(&item, &ctx));
+
+        item.triage_signals = vec![crate::triage::PullRequestTriageSignal {
+            kind: PullRequestTriageSignalKind::FirstTimeContributor,
+            label: "first-time contributor".to_string(),
+            detail: None,
+        }];
+        assert!(PullRequestFilter {
+            trust: TrustFilter::FirstTime,
+            ..PullRequestFilter::default()
+        }
+        .matches(&item, &ctx));
+
+        item.triage_signals = vec![crate::triage::PullRequestTriageSignal {
+            kind: PullRequestTriageSignalKind::NoTrustList,
+            label: "no trust list".to_string(),
+            detail: None,
+        }];
+        assert!(PullRequestFilter {
+            trust: TrustFilter::Unknown,
+            ..PullRequestFilter::default()
+        }
+        .matches(&item, &ctx));
+    }
+
+    #[test]
     fn filter_settings_persist_active_preset_and_current_filter() {
         let cache = temp_cache_store("settings");
         let mut settings = PullRequestFilterSettings::default();
@@ -862,8 +1372,143 @@ mod tests {
                 .into_iter()
                 .map(|preset| preset.id)
                 .collect::<Vec<_>>(),
-            vec!["all", "unread", "attention", "stale"]
+            vec![
+                "all",
+                "trusted",
+                "first-time",
+                "unknown",
+                "denounced",
+                "unread",
+                "attention",
+                "stale"
+            ]
         );
+    }
+
+    #[test]
+    fn custom_filter_presets_save_and_reload() {
+        let cache = temp_cache_store("custom-settings");
+        let mut settings = PullRequestFilterSettings::default();
+        settings.toggle(
+            PullRequestFilterScope::Overview,
+            PullRequestFilterToggle::Ready,
+        );
+        settings.toggle(
+            PullRequestFilterScope::Overview,
+            PullRequestFilterToggle::Fresh,
+        );
+
+        let id = settings
+            .save_current_as_preset(PullRequestFilterScope::Overview, "  Ready this week  ")
+            .expect("save custom filter");
+        assert_eq!(id, "custom:ready-this-week");
+        assert_eq!(
+            settings.active_preset_id(PullRequestFilterScope::Overview),
+            Some("custom:ready-this-week")
+        );
+
+        save_pull_request_filter_settings(&cache, &settings).expect("save filters");
+        let loaded = load_pull_request_filter_settings(&cache).expect("load filters");
+        let presets = loaded.presets(PullRequestFilterScope::Overview);
+        let custom = presets
+            .iter()
+            .find(|preset| preset.id == "custom:ready-this-week")
+            .expect("custom preset");
+
+        assert!(custom.is_custom());
+        assert_eq!(custom.label, "Ready this week");
+        assert_eq!(custom.filter.draft, DraftFilter::Ready);
+        assert_eq!(custom.filter.freshness, FreshnessFilter::Fresh);
+        assert_eq!(
+            presets
+                .iter()
+                .take(5)
+                .map(|preset| preset.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["all", "trusted", "first-time", "unknown", "denounced"]
+        );
+    }
+
+    #[test]
+    fn saved_filter_presets_toggle_into_composite_filter() {
+        let mut settings = PullRequestFilterSettings::default();
+
+        settings.toggle_preset(PullRequestFilterScope::Reviews, "trusted");
+        settings.toggle_preset(PullRequestFilterScope::Reviews, "unread");
+
+        let filter = settings.current_filter(PullRequestFilterScope::Reviews);
+        assert_eq!(filter.trust, TrustFilter::Trusted);
+        assert_eq!(filter.activity, ActivityFilter::Unread);
+        assert_eq!(
+            settings.active_preset_id(PullRequestFilterScope::Reviews),
+            None
+        );
+        assert_eq!(
+            settings.active_preset_ids(PullRequestFilterScope::Reviews),
+            vec!["trusted".to_string(), "unread".to_string()]
+        );
+
+        settings.toggle_preset(PullRequestFilterScope::Reviews, "trusted");
+        let filter = settings.current_filter(PullRequestFilterScope::Reviews);
+        assert_eq!(filter.trust, TrustFilter::Any);
+        assert_eq!(filter.activity, ActivityFilter::Unread);
+        assert_eq!(
+            settings.active_preset_ids(PullRequestFilterScope::Reviews),
+            vec!["unread".to_string()]
+        );
+
+        settings.toggle_preset(PullRequestFilterScope::Reviews, "all");
+        assert_eq!(
+            settings.current_filter(PullRequestFilterScope::Reviews),
+            PullRequestFilter::default()
+        );
+        assert_eq!(
+            settings.active_preset_ids(PullRequestFilterScope::Reviews),
+            vec!["all".to_string()]
+        );
+    }
+
+    #[test]
+    fn compound_saved_filter_presets_can_stack_with_other_facets() {
+        let mut settings = PullRequestFilterSettings::default();
+
+        settings.toggle_preset(PullRequestFilterScope::Reviews, "attention");
+        settings.toggle_preset(PullRequestFilterScope::Reviews, "stale");
+
+        let filter = settings.current_filter(PullRequestFilterScope::Reviews);
+        assert_eq!(filter.draft, DraftFilter::Ready);
+        assert_eq!(filter.review_decision, ReviewDecisionFilter::ReviewRequired);
+        assert_eq!(filter.freshness, FreshnessFilter::Stale);
+        assert_eq!(
+            settings.active_preset_ids(PullRequestFilterScope::Reviews),
+            vec!["attention".to_string(), "stale".to_string()]
+        );
+    }
+
+    #[test]
+    fn deleting_active_custom_filter_returns_to_all() {
+        let mut settings = PullRequestFilterSettings::default();
+        settings.toggle(
+            PullRequestFilterScope::Reviews,
+            PullRequestFilterToggle::Unread,
+        );
+        let id = settings
+            .save_current_as_preset(PullRequestFilterScope::Reviews, "Unread queue")
+            .expect("save custom filter");
+
+        assert!(settings.delete_custom_preset(PullRequestFilterScope::Reviews, &id));
+        assert_eq!(
+            settings.active_preset_id(PullRequestFilterScope::Reviews),
+            Some("all")
+        );
+        assert_eq!(
+            settings.current_filter(PullRequestFilterScope::Reviews),
+            PullRequestFilter::default()
+        );
+        assert!(!settings
+            .presets(PullRequestFilterScope::Reviews)
+            .into_iter()
+            .any(|preset| preset.id == id));
     }
 
     #[test]

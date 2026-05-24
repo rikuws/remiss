@@ -7,10 +7,15 @@ use crate::{
     diff::ParsedDiffFile,
     gh::{self, CommandOutput},
     stacks::model::StackPullRequestRef,
+    triage::{
+        parse_trustdown_file, triage_signals_for_author, PullRequestTriageSignal,
+        RepositoryTrustIndex, RepositoryTrustState,
+    },
 };
 
 const WORKSPACE_CACHE_KEY: &str = "workspace-snapshot-v3";
 const AUTH_STATE_CACHE_KEY: &str = "auth-state-v1";
+const REPOSITORY_TRUST_INDEX_CACHE_PREFIX: &str = "repository-trust-index-v1";
 const GITHUB_GRAPHQL_PAGE_SIZE: i64 = 100;
 const GITHUB_SEARCH_RESULT_LIMIT: usize = 1_000;
 const OVERSIZED_DIFF_UNAVAILABLE_REASON: &str = "GitHub did not return the unified diff because this pull request is too large; Remiss loaded the file list and will fetch file-level review context on demand.";
@@ -46,9 +51,15 @@ pub struct PullRequestSummary {
     pub deletions: i64,
     pub changed_files: i64,
     pub state: String,
+    #[serde(default = "default_author_association")]
+    pub author_association: String,
     pub review_decision: Option<String>,
     pub updated_at: String,
     pub url: String,
+    #[serde(default)]
+    pub repository_default_branch: Option<String>,
+    #[serde(default)]
+    pub triage_signals: Vec<PullRequestTriageSignal>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -368,19 +379,27 @@ fn review_action_event(action: ReviewAction) -> &'static str {
 }
 
 pub fn load_workspace_snapshot(cache: &CacheStore) -> Result<WorkspaceSnapshot, String> {
+    if crate::demo_data::demo_mode_enabled() {
+        return Ok(crate::demo_data::workspace_snapshot());
+    }
+
     let auth = cached_auth_state(cache)?;
     let cached = cache.get::<WorkspaceCachePayload>(WORKSPACE_CACHE_KEY)?;
     Ok(workspace_snapshot_from_cache(auth, cached))
 }
 
 pub fn sync_workspace_snapshot(cache: &CacheStore) -> Result<WorkspaceSnapshot, String> {
+    if crate::demo_data::demo_mode_enabled() {
+        return Ok(crate::demo_data::workspace_snapshot());
+    }
+
     let auth = refresh_auth_state(cache)?;
 
     if !auth.is_authenticated {
         return load_workspace_snapshot(cache);
     }
 
-    let payload = fetch_workspace_payload()?;
+    let payload = fetch_workspace_payload(cache)?;
     let fetched_at_ms = now_ms();
     cache.put(WORKSPACE_CACHE_KEY, &payload, fetched_at_ms)?;
 
@@ -398,6 +417,11 @@ pub fn load_pull_request_detail(
     repository: &str,
     number: i64,
 ) -> Result<PullRequestDetailSnapshot, String> {
+    if crate::demo_data::demo_mode_enabled() {
+        return crate::demo_data::pull_request_detail_snapshot(repository, number)
+            .ok_or_else(|| format!("Demo mode has no pull request {repository}#{number}."));
+    }
+
     let auth = cached_auth_state(cache)?;
     let key = pull_request_detail_cache_key(repository, number);
     let cached = cache.get::<PullRequestDetail>(&key)?;
@@ -415,6 +439,11 @@ pub fn sync_pull_request_detail(
     repository: &str,
     number: i64,
 ) -> Result<PullRequestDetailSnapshot, String> {
+    if crate::demo_data::demo_mode_enabled() {
+        return crate::demo_data::pull_request_detail_snapshot(repository, number)
+            .ok_or_else(|| format!("Demo mode has no pull request {repository}#{number}."));
+    }
+
     let auth = refresh_auth_state(cache)?;
 
     if !auth.is_authenticated {
@@ -437,6 +466,10 @@ pub fn sync_pull_request_detail(
 pub fn fetch_open_pull_request_stack_refs(
     repository: &str,
 ) -> Result<Vec<StackPullRequestRef>, String> {
+    if crate::demo_data::demo_mode_enabled() {
+        return Ok(crate::demo_data::open_pull_request_stack_refs(repository));
+    }
+
     let (owner, name) = split_repository(repository)?;
     let query = r#"
         query($owner: String!, $name: String!, $count: Int!, $cursor: String) {
@@ -505,6 +538,11 @@ pub fn fetch_pull_request_summary(
     repository: &str,
     number: i64,
 ) -> Result<PullRequestSummary, String> {
+    if crate::demo_data::demo_mode_enabled() {
+        return crate::demo_data::pull_request_summary(repository, number)
+            .ok_or_else(|| format!("Demo mode has no pull request {repository}#{number}."));
+    }
+
     let (owner, name) = split_repository(repository)?;
     let query = r#"
         query($owner: String!, $name: String!, $number: Int!) {
@@ -519,10 +557,11 @@ pub fn fetch_pull_request_summary(
               additions
               deletions
               changedFiles
+              authorAssociation
               reviewDecision
               author { login avatarUrl }
               comments { totalCount }
-              repository { nameWithOwner }
+              repository { nameWithOwner defaultBranchRef { name } }
             }
           }
         }
@@ -556,6 +595,17 @@ pub fn submit_pull_request_review(
     action: ReviewAction,
     body: &str,
 ) -> Result<ActionResult, String> {
+    if crate::demo_data::demo_mode_enabled() {
+        let action_label = match action {
+            ReviewAction::Approve => "review approval accepted locally",
+            ReviewAction::Comment => "review comment accepted locally",
+            ReviewAction::RequestChanges => "change request accepted locally",
+        };
+        return Ok(crate::demo_data::action_result(&format!(
+            "{action_label} for {repository}#{number}"
+        )));
+    }
+
     let auth = live_auth_state()?;
 
     if !auth.is_authenticated {
@@ -630,6 +680,12 @@ pub fn add_pull_request_review_thread(
             success: false,
             message: "Line comments require both a line number and diff side.".to_string(),
         });
+    }
+
+    if crate::demo_data::demo_mode_enabled() {
+        return Ok(crate::demo_data::action_result(&format!(
+            "review thread accepted locally for {pull_request_id}:{path}"
+        )));
     }
 
     let mutation = r#"
@@ -726,6 +782,12 @@ pub fn add_pending_pull_request_review_thread(
         });
     }
 
+    if crate::demo_data::demo_mode_enabled() {
+        return Ok(crate::demo_data::action_result(&format!(
+            "pending review comment accepted locally for {pull_request_id}:{path}"
+        )));
+    }
+
     let mutation = r#"
         mutation(
           $pullRequestId: ID,
@@ -814,6 +876,12 @@ pub fn update_pull_request_review_comment(
         });
     }
 
+    if crate::demo_data::demo_mode_enabled() {
+        return Ok(crate::demo_data::action_result(&format!(
+            "comment update accepted locally for {comment_id}"
+        )));
+    }
+
     let mutation = r#"
         mutation($commentId: ID!, $body: String!) {
           updatePullRequestReviewComment(
@@ -850,6 +918,12 @@ pub fn update_pull_request_review_comment(
 }
 
 pub fn delete_pull_request_review_comment(comment_id: &str) -> Result<ActionResult, String> {
+    if crate::demo_data::demo_mode_enabled() {
+        return Ok(crate::demo_data::action_result(&format!(
+            "comment deletion accepted locally for {comment_id}"
+        )));
+    }
+
     let auth = live_auth_state()?;
 
     if !auth.is_authenticated {
@@ -897,6 +971,18 @@ pub fn submit_graphql_pull_request_review(
     action: ReviewAction,
     body: &str,
 ) -> Result<ActionResult, String> {
+    if crate::demo_data::demo_mode_enabled() {
+        let action_label = match action {
+            ReviewAction::Approve => "review approval accepted locally",
+            ReviewAction::Comment => "review comment accepted locally",
+            ReviewAction::RequestChanges => "change request accepted locally",
+        };
+        let review_id = pending_review_id.unwrap_or(pull_request_id);
+        return Ok(crate::demo_data::action_result(&format!(
+            "{action_label} for {review_id}"
+        )));
+    }
+
     let auth = live_auth_state()?;
 
     if !auth.is_authenticated {
@@ -985,6 +1071,12 @@ pub fn reply_to_review_thread(thread_id: &str, body: &str) -> Result<ActionResul
         });
     }
 
+    if crate::demo_data::demo_mode_enabled() {
+        return Ok(crate::demo_data::action_result(&format!(
+            "thread reply accepted locally for {thread_id}"
+        )));
+    }
+
     let mutation = r#"
         mutation($threadId: ID!, $body: String!) {
           addPullRequestReviewThreadReply(
@@ -1018,6 +1110,17 @@ pub fn set_review_thread_resolution(
     thread_id: &str,
     resolved: bool,
 ) -> Result<ActionResult, String> {
+    if crate::demo_data::demo_mode_enabled() {
+        let action = if resolved {
+            "thread resolution accepted locally"
+        } else {
+            "thread reopen accepted locally"
+        };
+        return Ok(crate::demo_data::action_result(&format!(
+            "{action} for {thread_id}"
+        )));
+    }
+
     let auth = live_auth_state()?;
 
     if !auth.is_authenticated {
@@ -1086,6 +1189,13 @@ pub fn load_pull_request_file_content(
     reference: &str,
     path: &str,
 ) -> Result<RepositoryFileContent, String> {
+    if crate::demo_data::demo_mode_enabled() {
+        return crate::demo_data::pull_request_file_content(repository, reference, path)
+            .ok_or_else(|| {
+                format!("Demo mode has no file content for {repository}@{reference}:{path}.")
+            });
+    }
+
     let key = pull_request_file_content_cache_key(repository, reference, path);
     if let Some(cached) = cache.get::<RepositoryFileContent>(&key)? {
         return Ok(cached.value);
@@ -1141,7 +1251,7 @@ fn workspace_snapshot_from_cache(
     }
 }
 
-fn fetch_workspace_payload() -> Result<WorkspaceCachePayload, String> {
+fn fetch_workspace_payload(cache: &CacheStore) -> Result<WorkspaceCachePayload, String> {
     let viewer = fetch_viewer()?;
     let queue_specs = [
         (
@@ -1175,6 +1285,7 @@ fn fetch_workspace_payload() -> Result<WorkspaceCachePayload, String> {
     for (id, label, query) in queue_specs {
         queues.push(fetch_queue(id, label, query)?);
     }
+    enrich_workspace_triage(cache, &mut queues);
 
     Ok(WorkspaceCachePayload {
         viewer: Some(viewer),
@@ -1215,10 +1326,11 @@ fn fetch_queue(id: &str, label: &str, search_query: &str) -> Result<PullRequestQ
                 additions
                 deletions
                 changedFiles
+                authorAssociation
                 reviewDecision
                 author { login avatarUrl }
                 comments { totalCount }
-                repository { nameWithOwner }
+                repository { nameWithOwner defaultBranchRef { name } }
               }
             }
           }
@@ -1291,6 +1403,130 @@ fn fetch_queue(id: &str, label: &str, search_query: &str) -> Result<PullRequestQ
         is_complete: truncated_reason.is_none(),
         truncated_reason,
     })
+}
+
+fn enrich_workspace_triage(cache: &CacheStore, queues: &mut [PullRequestQueue]) {
+    let mut repositories = BTreeMap::<String, Option<String>>::new();
+    for item in queues.iter().flat_map(|queue| queue.items.iter()) {
+        repositories
+            .entry(item.repository.clone())
+            .or_insert_with(|| item.repository_default_branch.clone());
+    }
+
+    let mut trust_indexes = BTreeMap::<String, RepositoryTrustIndex>::new();
+    for (repository, default_branch) in repositories {
+        let index = load_repository_trust_index(cache, &repository, default_branch.as_deref());
+        trust_indexes.insert(repository, index);
+    }
+
+    for item in queues.iter_mut().flat_map(|queue| queue.items.iter_mut()) {
+        item.triage_signals = triage_signals_for_author(
+            &item.author_login,
+            &item.author_association,
+            trust_indexes.get(&item.repository),
+        );
+    }
+}
+
+fn load_repository_trust_index(
+    cache: &CacheStore,
+    repository: &str,
+    default_branch: Option<&str>,
+) -> RepositoryTrustIndex {
+    match fetch_repository_trust_index(repository, default_branch) {
+        Ok(index) => {
+            let _ = cache.put(
+                &repository_trust_index_cache_key(repository),
+                &index,
+                now_ms(),
+            );
+            index
+        }
+        Err(error) => {
+            match cache
+                .get::<RepositoryTrustIndex>(&repository_trust_index_cache_key(repository))
+                .ok()
+                .flatten()
+            {
+                Some(cached) => cached.value,
+                None => RepositoryTrustIndex {
+                    repository: repository.to_string(),
+                    state: RepositoryTrustState::Error,
+                    message: Some(error),
+                    ..RepositoryTrustIndex::default()
+                },
+            }
+        }
+    }
+}
+
+fn fetch_repository_trust_index(
+    repository: &str,
+    default_branch: Option<&str>,
+) -> Result<RepositoryTrustIndex, String> {
+    let reference = default_branch
+        .filter(|branch| !branch.trim().is_empty())
+        .ok_or_else(|| format!("No default branch was returned for {repository}."))?;
+    let mut index = RepositoryTrustIndex {
+        repository: repository.to_string(),
+        ..RepositoryTrustIndex::default()
+    };
+    let mut fetch_errors = Vec::new();
+    let mut parse_warnings = Vec::new();
+
+    for path in ["VOUCHED.td", ".github/VOUCHED.td"] {
+        match fetch_optional_repository_text_file(repository, reference, path) {
+            Ok(Some(content)) => {
+                let (records, warnings) = parse_trustdown_file(path, &content);
+                index.source_paths.push(path.to_string());
+                for (login, record) in records {
+                    let should_replace = index
+                        .records
+                        .get(&login)
+                        .map(|existing| {
+                            record.status == crate::triage::TrustRecordStatus::Denounced
+                                || existing.status != crate::triage::TrustRecordStatus::Denounced
+                        })
+                        .unwrap_or(true);
+                    if should_replace {
+                        index.records.insert(login, record);
+                    }
+                }
+                parse_warnings.extend(warnings);
+            }
+            Ok(None) => {}
+            Err(error) => fetch_errors.push(error),
+        }
+    }
+
+    if !index.source_paths.is_empty() {
+        index.state = RepositoryTrustState::Loaded;
+        if !parse_warnings.is_empty() {
+            index.message = Some(parse_warnings.join(" "));
+        }
+    } else if fetch_errors.is_empty() {
+        index.state = RepositoryTrustState::Missing;
+    } else {
+        index.state = RepositoryTrustState::Error;
+        index.message = Some(fetch_errors.join(" "));
+    }
+
+    Ok(index)
+}
+
+fn fetch_optional_repository_text_file(
+    repository: &str,
+    reference: &str,
+    path: &str,
+) -> Result<Option<String>, String> {
+    match fetch_repository_file_content(repository, reference, path) {
+        Ok(document) if document.is_binary => Err(format!(
+            "{repository}@{reference}:{path} is not a text file."
+        )),
+        Ok(document) => Ok(document.content),
+        Err(error) if repository_file_missing_error(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn fetch_pull_request_detail(repository: &str, number: i64) -> Result<PullRequestDetail, String> {
@@ -2046,6 +2282,10 @@ fn pull_request_files_selection() -> &'static str {
 }
 
 fn cached_auth_state(cache: &CacheStore) -> Result<AuthState, String> {
+    if crate::demo_data::demo_mode_enabled() {
+        return Ok(crate::demo_data::auth_state());
+    }
+
     if let Some(cached) = cache.get::<AuthState>(AUTH_STATE_CACHE_KEY)? {
         return Ok(cached.value);
     }
@@ -2060,6 +2300,10 @@ fn cached_auth_state(cache: &CacheStore) -> Result<AuthState, String> {
 }
 
 fn refresh_auth_state(cache: &CacheStore) -> Result<AuthState, String> {
+    if crate::demo_data::demo_mode_enabled() {
+        return Ok(crate::demo_data::auth_state());
+    }
+
     let auth = live_auth_state()?;
     cache.put(AUTH_STATE_CACHE_KEY, &auth, now_ms())?;
     Ok(auth)
@@ -2070,6 +2314,10 @@ pub fn check_live_auth_state() -> Result<AuthState, String> {
 }
 
 fn live_auth_state() -> Result<AuthState, String> {
+    if crate::demo_data::demo_mode_enabled() {
+        return Ok(crate::demo_data::auth_state());
+    }
+
     let hostname = std::env::var("GH_HOST")
         .ok()
         .filter(|v| !v.trim().is_empty())
@@ -2194,12 +2442,20 @@ fn map_pull_request_summary(node: &Value) -> Option<PullRequestSummary> {
         deletions: i64_field(node, "deletions"),
         changed_files: i64_field(node, "changedFiles"),
         state: str_field_or(node, "state", "OPEN"),
+        author_association: str_field_or(node, "authorAssociation", "NONE"),
         review_decision: node
             .get("reviewDecision")
             .and_then(Value::as_str)
             .map(str::to_string),
         updated_at: str_field(node, "updatedAt"),
         url: node.get("url")?.as_str()?.to_string(),
+        repository_default_branch: node
+            .get("repository")
+            .and_then(|repo| repo.get("defaultBranchRef"))
+            .and_then(|branch| branch.get("name"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        triage_signals: Vec::new(),
     })
 }
 
@@ -2629,8 +2885,24 @@ fn pull_request_file_content_cache_key(repository: &str, reference: &str, path: 
     )
 }
 
+fn repository_trust_index_cache_key(repository: &str) -> String {
+    format!(
+        "{REPOSITORY_TRUST_INDEX_CACHE_PREFIX}:{}",
+        encode_uri_component(repository)
+    )
+}
+
+fn repository_file_missing_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("not found") || lower.contains("404")
+}
+
 fn default_change_type() -> String {
     "MODIFIED".to_string()
+}
+
+fn default_author_association() -> String {
+    "NONE".to_string()
 }
 
 fn default_true() -> bool {
@@ -2704,10 +2976,11 @@ mod tests {
             "additions": 120,
             "deletions": 34,
             "changedFiles": 9,
+            "authorAssociation": "COLLABORATOR",
             "reviewDecision": "REVIEW_REQUIRED",
             "author": { "login": "rikuws", "avatarUrl": "https://example.com/avatar.png" },
             "comments": { "totalCount": 6 },
-            "repository": { "nameWithOwner": "acme/repo" }
+            "repository": { "nameWithOwner": "acme/repo", "defaultBranchRef": { "name": "main" } }
         });
 
         let summary = map_pull_request_summary(&node).expect("summary");
@@ -2720,7 +2993,9 @@ mod tests {
         assert_eq!(summary.additions, 120);
         assert_eq!(summary.deletions, 34);
         assert_eq!(summary.changed_files, 9);
+        assert_eq!(summary.author_association, "COLLABORATOR");
         assert_eq!(summary.review_decision.as_deref(), Some("REVIEW_REQUIRED"));
+        assert_eq!(summary.repository_default_branch.as_deref(), Some("main"));
     }
 
     #[test]

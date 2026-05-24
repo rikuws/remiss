@@ -80,6 +80,15 @@ pub fn sync_workspace_with_notifications(
     cache: &CacheStore,
 ) -> Result<WorkspaceSyncOutcome, String> {
     let workspace = github::sync_workspace_snapshot(cache)?;
+    if crate::demo_data::demo_mode_enabled() {
+        return Ok(WorkspaceSyncOutcome {
+            workspace,
+            notifications: Vec::new(),
+            unread_review_comment_ids: load_unread_review_comment_ids(cache)?,
+            review_detail_snapshots: crate::demo_data::pull_request_detail_snapshots(),
+        });
+    }
+
     let previous = cache
         .get::<PersistedNotificationState>(NOTIFICATION_STATE_CACHE_KEY)?
         .map(|document| document.value);

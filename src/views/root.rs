@@ -600,9 +600,12 @@ fn summary_from_detail(detail: &github::PullRequestDetail) -> github::PullReques
         deletions: detail.deletions,
         changed_files: detail.changed_files,
         state: detail.state.clone(),
+        author_association: "NONE".to_string(),
         review_decision: detail.review_decision.clone(),
         updated_at: detail.updated_at.clone(),
         url: detail.url.clone(),
+        repository_default_branch: None,
+        triage_signals: Vec::new(),
     }
 }
 
@@ -668,9 +671,12 @@ fn placeholder_pull_request_summary(repository: &str, number: i64) -> github::Pu
         deletions: 0,
         changed_files: 0,
         state: "LOADING".to_string(),
+        author_association: "NONE".to_string(),
         review_decision: None,
         updated_at: String::new(),
         url: deep_link::github_pull_request_web_url(repository, number),
+        repository_default_branch: None,
+        triage_signals: Vec::new(),
     }
 }
 

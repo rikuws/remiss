@@ -43,6 +43,7 @@ mod code_display;
 mod code_symbols;
 mod command_runner;
 mod deep_link;
+mod demo_data;
 mod diagnostic_logs;
 mod diff;
 mod difftastic;
@@ -93,6 +94,7 @@ mod temp_source_window;
 #[cfg(test)]
 mod test_git;
 mod theme;
+mod triage;
 mod tutorial_pr;
 mod views;
 mod vim;
@@ -271,6 +273,20 @@ fn start_app(
                     });
                 }
                 _ => {}
+            }
+            return;
+        }
+
+        let filter_dialog_open = app_state_for_keys
+            .read(cx)
+            .pull_request_filter_dialog_scope
+            .is_some();
+        if filter_dialog_open {
+            if keystroke.key == "escape" {
+                app_state_for_keys.update(cx, |state, cx| {
+                    state.close_pull_request_filter_dialog();
+                    cx.notify();
+                });
             }
             return;
         }
@@ -454,6 +470,7 @@ fn allows_global_pull_request_paste(state: &AppState) -> bool {
     state.active_onboarding_wizard.is_none()
         && !state.palette_open
         && !state.file_chooser_open
+        && state.pull_request_filter_dialog_scope.is_none()
         && !state.waypoint_spotlight_open
         && !state.review_finish_modal_open
         && state.active_review_line_action.is_none()

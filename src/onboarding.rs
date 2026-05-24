@@ -356,8 +356,20 @@ pub fn initial_wizard_session(
     progress: &OnboardingProgress,
     options: &StartupWizardOptions,
 ) -> Option<WizardSession> {
+    initial_wizard_session_with_demo_mode(progress, options, crate::demo_data::demo_mode_enabled())
+}
+
+fn initial_wizard_session_with_demo_mode(
+    progress: &OnboardingProgress,
+    options: &StartupWizardOptions,
+    demo_mode: bool,
+) -> Option<WizardSession> {
     if let Some(forced_id) = options.force_wizard_id.as_deref() {
         return wizard_by_id(forced_id).map(|definition| WizardSession::new(definition, true));
+    }
+
+    if demo_mode {
+        return None;
     }
 
     next_pending_wizard(progress)
@@ -490,8 +502,12 @@ mod tests {
     #[test]
     fn initial_wizard_returns_welcome_until_completed() {
         let progress = OnboardingProgress::default();
-        let session = initial_wizard_session(&progress, &StartupWizardOptions::default())
-            .expect("welcome wizard should be pending");
+        let session = initial_wizard_session_with_demo_mode(
+            &progress,
+            &StartupWizardOptions::default(),
+            false,
+        )
+        .expect("welcome wizard should be pending");
 
         assert_eq!(session.definition.id, WELCOME_WIZARD_ID);
         assert!(!session.forced);
@@ -519,12 +535,38 @@ mod tests {
         let welcome = wizard_by_id(WELCOME_WIZARD_ID).expect("welcome wizard exists");
         mark_wizard_completed(&mut progress, &welcome);
 
-        assert!(initial_wizard_session(&progress, &StartupWizardOptions::default()).is_none());
+        assert!(initial_wizard_session_with_demo_mode(
+            &progress,
+            &StartupWizardOptions::default(),
+            false,
+        )
+        .is_none());
 
-        let forced = initial_wizard_session(&progress, &StartupWizardOptions::force_welcome())
-            .expect("forced welcome wizard should open");
+        let forced = initial_wizard_session_with_demo_mode(
+            &progress,
+            &StartupWizardOptions::force_welcome(),
+            false,
+        )
+        .expect("forced welcome wizard should open");
         assert_eq!(forced.definition.id, WELCOME_WIZARD_ID);
         assert!(forced.forced);
+    }
+
+    #[test]
+    fn demo_mode_suppresses_unforced_wizard() {
+        let progress = OnboardingProgress::default();
+        let options = StartupWizardOptions::default();
+
+        assert!(initial_wizard_session_with_demo_mode(&progress, &options, true).is_none());
+        assert!(
+            initial_wizard_session_with_demo_mode(
+                &progress,
+                &StartupWizardOptions::force_welcome(),
+                true,
+            )
+            .expect("forced wizard still opens")
+            .forced
+        );
     }
 
     #[test]

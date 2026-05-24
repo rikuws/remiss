@@ -78,6 +78,13 @@ cargo test --all-features
 cargo run
 ```
 
+To run the app with deterministic local fixture data instead of live GitHub
+queues:
+
+```sh
+REMISS_DEMO_MODE=1 cargo run
+```
+
 To build a local app bundle:
 
 ```sh
