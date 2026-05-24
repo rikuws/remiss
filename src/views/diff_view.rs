@@ -1999,8 +1999,9 @@ mod tests {
         max_side_by_side_column_widths, reading_focus_item_index,
         should_animate_combined_diff_jump, should_hydrate_combined_diff_file,
         waypoint_spotlight_detail_label, waypoint_spotlight_location_label, CombinedDiffViewItem,
-        DiffFileCollapseScrollAdjustment, DiffViewItem, SideBySideColumnWidths,
-        StructuralDiffTerminalStatus, DIFF_FILE_HEADER_TOP_MARGIN, DIFF_FOCUS_CONTEXT_ROWS,
+        DiffFileCollapseScrollAdjustment, DiffVerticalScrollbarMetrics, DiffViewItem,
+        SideBySideColumnWidths, StructuralDiffTerminalStatus, DIFF_FILE_HEADER_TOP_MARGIN,
+        DIFF_FOCUS_CONTEXT_ROWS,
     };
 
     fn test_bounds(top: f32, bottom: f32) -> Bounds<Pixels> {
@@ -2383,10 +2384,10 @@ mod tests {
     }
 
     #[test]
-    fn combined_diff_deferred_body_height_uses_bounded_line_estimate() {
+    fn combined_diff_deferred_body_height_uses_line_estimate() {
         assert_eq!(
             estimated_combined_diff_body_height_for_counts(20, 2),
-            px(620.0)
+            px(708.0)
         );
         assert_eq!(
             estimated_combined_diff_body_height_for_counts(0, 0),
@@ -2394,8 +2395,26 @@ mod tests {
         );
         assert_eq!(
             estimated_combined_diff_body_height_for_counts(10_000, 200),
-            px(1600.0)
+            px(326800.0)
         );
+    }
+
+    #[test]
+    fn diff_scrollbar_metrics_map_offsets_without_measuring_rows() {
+        let metrics = DiffVerticalScrollbarMetrics::from_item_heights([10.0, 20.0, 30.0]);
+
+        assert_eq!(metrics.max_offset(15.0), 45.0);
+        assert_eq!(
+            metrics.scroll_offset_for(ListOffset {
+                item_ix: 1,
+                offset_in_item: px(5.0),
+            }),
+            15.0
+        );
+
+        let scroll_top = metrics.scroll_top_for_offset(35.0);
+        assert_eq!(scroll_top.item_ix, 2);
+        assert_eq!(scroll_top.offset_in_item, px(5.0));
     }
 
     #[test]

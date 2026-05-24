@@ -103,13 +103,19 @@ const COMBINED_DIFF_INITIAL_HYDRATED_FILE_COUNT: usize = 0;
 const COMBINED_DIFF_HYDRATION_BATCH_SIZE: usize = 6;
 const COMBINED_DIFF_HYDRATION_DELAY: Duration = Duration::from_millis(16);
 const COMBINED_DIFF_DEFERRED_MESSAGE: &str = "Loading diff rows...";
-const COMBINED_DIFF_ESTIMATED_LINE_HEIGHT: f32 = 28.0;
-const COMBINED_DIFF_ESTIMATED_HUNK_HEADER_HEIGHT: f32 = 30.0;
+const COMBINED_DIFF_ESTIMATED_LINE_HEIGHT: f32 = 32.0;
+const COMBINED_DIFF_ESTIMATED_HUNK_HEADER_HEIGHT: f32 = 34.0;
 const COMBINED_DIFF_ESTIMATED_BODY_MIN_HEIGHT: f32 = 58.0;
-const COMBINED_DIFF_ESTIMATED_BODY_MAX_HEIGHT: f32 = 1600.0;
 const COMBINED_DIFF_JUMP_ANIMATION_MIN_ITEMS: usize = 24;
 const COMBINED_DIFF_JUMP_ANIMATION_STEPS: usize = 10;
 const COMBINED_DIFF_JUMP_ANIMATION_MS: u64 = 180;
+
+#[derive(Clone, Copy)]
+struct CombinedDiffParsedStats {
+    line_count: usize,
+    hunk_count: usize,
+    review_thread_height: f32,
+}
 
 #[derive(Clone)]
 pub(super) struct DiffFileCollapseScrollAdjustment {
@@ -269,6 +275,12 @@ pub(super) fn render_combined_diff_files(
     let render_combined_side_by_side_widths = model.combined_side_by_side_widths;
     let has_side_by_side_rows = model.has_side_by_side_rows;
     let item_count = items.len();
+    let vertical_scrollbar_metrics = combined_diff_vertical_scrollbar_metrics(
+        model.items.as_ref(),
+        model.contexts.as_ref(),
+        &detail.review_threads,
+        wrap_diff_lines,
+    );
     let rows = list(list_state, move |ix, _window, cx| {
         render_combined_diff_view_item(
             &render_state,
@@ -310,6 +322,7 @@ pub(super) fn render_combined_diff_files(
         (!wrap_diff_lines && has_side_by_side_rows).then_some(&side_by_side_scroll_handles),
         DiffScrollbarInsets::combined_body(),
         show_top_fade,
+        Some(vertical_scrollbar_metrics),
     );
 
     div()
@@ -352,6 +365,7 @@ pub(super) fn render_diff_scroll_body(
     side_by_side_scroll_handles: Option<&SideBySideScrollHandles>,
     side_by_side_scrollbar_insets: DiffScrollbarInsets,
     show_top_fade: bool,
+    vertical_scrollbar_metrics: Option<DiffVerticalScrollbarMetrics>,
 ) -> AnyElement {
     let scrollbars_visible = scrollbar_activity.is_visible();
     let has_side_by_side_scrollbars = side_by_side_scroll_handles
@@ -394,7 +408,14 @@ pub(super) fn render_diff_scroll_body(
         .when(show_top_fade, |el| el.child(render_diff_scroll_top_fade()))
         .when_some(
             scrollbars_visible
-                .then(|| render_diff_vertical_scrollbar(list_state, item_count, scrollbar_activity))
+                .then(|| {
+                    render_diff_vertical_scrollbar(
+                        list_state,
+                        item_count,
+                        scrollbar_activity,
+                        vertical_scrollbar_metrics.as_ref(),
+                    )
+                })
                 .flatten(),
             |el, scrollbar| el.child(scrollbar),
         )
@@ -423,6 +444,70 @@ pub(super) fn restrict_diff_scroll_to_axis(mut element: Div) -> Div {
 }
 
 #[derive(Clone)]
+pub(super) struct DiffVerticalScrollbarMetrics {
+    prefix_heights: Arc<Vec<f32>>,
+    total_height: f32,
+}
+
+impl DiffVerticalScrollbarMetrics {
+    pub(super) fn from_item_heights(heights: impl IntoIterator<Item = f32>) -> Self {
+        let mut prefix_heights = Vec::new();
+        let mut total_height = 0.0;
+        prefix_heights.push(total_height);
+        for height in heights {
+            total_height += height.max(0.0);
+            prefix_heights.push(total_height);
+        }
+
+        Self {
+            prefix_heights: Arc::new(prefix_heights),
+            total_height,
+        }
+    }
+
+    fn item_count(&self) -> usize {
+        self.prefix_heights.len().saturating_sub(1)
+    }
+
+    pub(super) fn max_offset(&self, viewport_height: f32) -> f32 {
+        (self.total_height - viewport_height).max(0.0)
+    }
+
+    pub(super) fn scroll_offset_for(&self, scroll_top: ListOffset) -> f32 {
+        if self.item_count() == 0 {
+            return 0.0;
+        }
+
+        let item_ix = scroll_top.item_ix.min(self.item_count());
+        let item_top = self
+            .prefix_heights
+            .get(item_ix)
+            .copied()
+            .unwrap_or(self.total_height);
+        (item_top + f32::from(scroll_top.offset_in_item)).clamp(0.0, self.total_height)
+    }
+
+    pub(super) fn scroll_top_for_offset(&self, offset: f32) -> ListOffset {
+        let offset = offset.clamp(0.0, self.total_height);
+        let item_ix = self
+            .prefix_heights
+            .partition_point(|height| *height <= offset)
+            .saturating_sub(1)
+            .min(self.item_count());
+        let item_top = self
+            .prefix_heights
+            .get(item_ix)
+            .copied()
+            .unwrap_or(self.total_height);
+
+        ListOffset {
+            item_ix,
+            offset_in_item: px(offset - item_top),
+        }
+    }
+}
+
+#[derive(Clone)]
 struct DiffVerticalScrollbarDrag {
     id: String,
     list_state: ListState,
@@ -430,6 +515,7 @@ struct DiffVerticalScrollbarDrag {
     start_scroll_offset: f32,
     max_scroll_offset: f32,
     thumb_travel: f32,
+    metrics: Option<DiffVerticalScrollbarMetrics>,
 }
 
 impl DiffVerticalScrollbarDrag {
@@ -439,6 +525,7 @@ impl DiffVerticalScrollbarDrag {
         start_scroll_offset: f32,
         max_scroll_offset: f32,
         thumb_travel: f32,
+        metrics: Option<DiffVerticalScrollbarMetrics>,
     ) -> Self {
         Self {
             id,
@@ -447,6 +534,7 @@ impl DiffVerticalScrollbarDrag {
             start_scroll_offset,
             max_scroll_offset,
             thumb_travel,
+            metrics,
         }
     }
 
@@ -463,8 +551,13 @@ impl DiffVerticalScrollbarDrag {
         let scroll_offset = (self.start_scroll_offset
             + delta / self.thumb_travel * self.max_scroll_offset)
             .clamp(0.0, self.max_scroll_offset);
-        self.list_state
-            .set_offset_from_scrollbar(point(px(0.0), px(-scroll_offset)));
+        if let Some(metrics) = self.metrics.as_ref() {
+            self.list_state
+                .scroll_to(metrics.scroll_top_for_offset(scroll_offset));
+        } else {
+            self.list_state
+                .set_offset_from_scrollbar(point(px(0.0), px(-scroll_offset)));
+        }
         window.refresh();
     }
 }
@@ -558,13 +651,17 @@ fn render_diff_vertical_scrollbar(
     list_state: &ListState,
     item_count: usize,
     scrollbar_activity: &DiffScrollbarActivity,
+    metrics: Option<&DiffVerticalScrollbarMetrics>,
 ) -> Option<AnyElement> {
     if item_count <= 1 {
         return None;
     }
 
     let viewport_height = f32::from(list_state.viewport_bounds().size.height);
-    let max_offset = f32::from(list_state.max_offset_for_scrollbar().height);
+    let metrics = metrics.filter(|metrics| metrics.item_count() == item_count);
+    let max_offset = metrics
+        .map(|metrics| metrics.max_offset(viewport_height))
+        .unwrap_or_else(|| f32::from(list_state.max_offset_for_scrollbar().height));
     if viewport_height <= 0.0 || max_offset <= 0.0 {
         return None;
     }
@@ -572,8 +669,10 @@ fn render_diff_vertical_scrollbar(
     let content_height = viewport_height + max_offset;
     let thumb_height =
         (viewport_height * (viewport_height / content_height)).clamp(36.0, viewport_height);
-    let scroll_offset =
-        (-f32::from(list_state.scroll_px_offset_for_scrollbar().y)).clamp(0.0, max_offset);
+    let scroll_offset = metrics
+        .map(|metrics| metrics.scroll_offset_for(list_state.logical_scroll_top()))
+        .unwrap_or_else(|| -f32::from(list_state.scroll_px_offset_for_scrollbar().y))
+        .clamp(0.0, max_offset);
     let thumb_top = if max_offset <= 0.0 {
         0.0
     } else {
@@ -587,6 +686,7 @@ fn render_diff_vertical_scrollbar(
         scroll_offset,
         max_offset,
         viewport_height - thumb_height,
+        metrics.cloned(),
     );
     let drag_id_for_move = drag_id.clone();
     let drag_start_activity = scrollbar_activity.clone();
@@ -818,7 +918,7 @@ fn prepare_combined_diff_render_model(
 
     let hydrated_file_count = *view_state.hydrated_file_count.borrow();
     let hydrated_paths = view_state.hydrated_paths.borrow().clone();
-    let parsed_hunk_counts = combined_diff_parsed_hunk_counts(&detail.parsed_diff);
+    let parsed_stats = combined_diff_parsed_stats(detail);
     let contexts = ordered_files
         .into_iter()
         .enumerate()
@@ -845,7 +945,7 @@ fn prepare_combined_diff_render_model(
                     app_state,
                     file,
                     collapsed,
-                    parsed_hunk_counts.get(&file.path).copied(),
+                    parsed_stats.get(&file.path).copied(),
                 )
             }
         })
@@ -940,7 +1040,7 @@ fn prepare_deferred_combined_diff_file_context(
     app_state: &AppState,
     file: &PullRequestFile,
     collapsed: bool,
-    parsed_hunk_count: Option<usize>,
+    parsed_stats: Option<CombinedDiffParsedStats>,
 ) -> CombinedDiffFileContext {
     let mut header = ReviewFileHeaderProps::from_pull_request_file(file);
     header.active = false;
@@ -951,7 +1051,7 @@ fn prepare_deferred_combined_diff_file_context(
         collapsed,
         reviewed: app_state.is_review_file_reviewed(&file.path),
         estimated_body_height: (!collapsed)
-            .then(|| estimated_combined_diff_body_height(file, parsed_hunk_count)),
+            .then(|| estimated_combined_diff_body_height(file, parsed_stats)),
         parsed: None,
         parsed_override: None,
         structural_side_by_side: None,
@@ -971,29 +1071,55 @@ fn is_deferred_combined_diff_context(context: &CombinedDiffFileContext) -> bool 
     context.state_message.as_deref() == Some(COMBINED_DIFF_DEFERRED_MESSAGE)
 }
 
-fn combined_diff_parsed_hunk_counts(
-    parsed_files: &[ParsedDiffFile],
-) -> std::collections::HashMap<String, usize> {
-    let mut hunk_counts = std::collections::HashMap::with_capacity(parsed_files.len() * 2);
-    for parsed in parsed_files {
-        let hunk_count = parsed.hunks.len();
-        hunk_counts.insert(parsed.path.clone(), hunk_count);
+fn combined_diff_parsed_stats(
+    detail: &PullRequestDetail,
+) -> std::collections::HashMap<String, CombinedDiffParsedStats> {
+    let mut stats = std::collections::HashMap::with_capacity(detail.parsed_diff.len() * 2);
+    for parsed in &detail.parsed_diff {
+        let file_stats = CombinedDiffParsedStats {
+            line_count: parsed.hunks.iter().map(|hunk| hunk.lines.len()).sum(),
+            hunk_count: parsed.hunks.len(),
+            review_thread_height: 0.0,
+        };
+        stats.insert(parsed.path.clone(), file_stats);
         if let Some(previous_path) = parsed.previous_path.as_ref() {
-            hunk_counts.insert(previous_path.clone(), hunk_count);
+            stats.insert(previous_path.clone(), file_stats);
         }
     }
-    hunk_counts
+
+    for thread in &detail.review_threads {
+        let entry = stats
+            .entry(thread.path.clone())
+            .or_insert(CombinedDiffParsedStats {
+                line_count: 0,
+                hunk_count: 0,
+                review_thread_height: 0.0,
+            });
+        entry.review_thread_height += 52.0 + estimated_review_thread_row_height(thread);
+    }
+
+    stats
 }
 
 fn estimated_combined_diff_body_height(
     file: &PullRequestFile,
-    parsed_hunk_count: Option<usize>,
+    parsed_stats: Option<CombinedDiffParsedStats>,
 ) -> Pixels {
     let additions = usize::try_from(file.additions.max(0)).unwrap_or(usize::MAX);
     let deletions = usize::try_from(file.deletions.max(0)).unwrap_or(usize::MAX);
-    let line_count = additions.saturating_add(deletions).max(1);
-    let hunk_count = parsed_hunk_count.unwrap_or(1).max(1);
+    let fallback_line_count = additions.saturating_add(deletions).max(1);
+    let line_count = parsed_stats
+        .map(|stats| stats.line_count)
+        .unwrap_or(fallback_line_count)
+        .max(1);
+    let hunk_count = parsed_stats
+        .map(|stats| stats.hunk_count)
+        .unwrap_or(1)
+        .max(1);
     estimated_combined_diff_body_height_for_counts(line_count, hunk_count)
+        + parsed_stats
+            .map(|stats| px(stats.review_thread_height))
+            .unwrap_or_else(|| px(0.0))
 }
 
 pub(super) fn estimated_combined_diff_body_height_for_counts(
@@ -1002,10 +1128,7 @@ pub(super) fn estimated_combined_diff_body_height_for_counts(
 ) -> Pixels {
     let height = line_count as f32 * COMBINED_DIFF_ESTIMATED_LINE_HEIGHT
         + hunk_count as f32 * COMBINED_DIFF_ESTIMATED_HUNK_HEADER_HEIGHT;
-    px(height.clamp(
-        COMBINED_DIFF_ESTIMATED_BODY_MIN_HEIGHT,
-        COMBINED_DIFF_ESTIMATED_BODY_MAX_HEIGHT,
-    ))
+    px(height.max(COMBINED_DIFF_ESTIMATED_BODY_MIN_HEIGHT))
 }
 
 fn schedule_combined_diff_hydration(
@@ -1404,6 +1527,51 @@ fn build_combined_diff_view_items(
     }
 
     (items, has_side_by_side_rows, has_deferred_contexts)
+}
+
+fn combined_diff_vertical_scrollbar_metrics(
+    items: &[CombinedDiffViewItem],
+    contexts: &[CombinedDiffFileContext],
+    review_threads: &[PullRequestReviewThread],
+    wrap_diff_lines: bool,
+) -> DiffVerticalScrollbarMetrics {
+    DiffVerticalScrollbarMetrics::from_item_heights(items.iter().enumerate().map(|(ix, item)| {
+        estimated_combined_diff_item_height(item, ix, contexts, review_threads, wrap_diff_lines)
+    }))
+}
+
+fn estimated_combined_diff_item_height(
+    item: &CombinedDiffViewItem,
+    item_ix: usize,
+    contexts: &[CombinedDiffFileContext],
+    review_threads: &[PullRequestReviewThread],
+    wrap_diff_lines: bool,
+) -> f32 {
+    match item {
+        CombinedDiffViewItem::Header(_) => {
+            let top_margin = if item_ix == 0 {
+                DIFF_FILE_HEADER_TOP_MARGIN_FIRST
+            } else {
+                DIFF_FILE_HEADER_TOP_MARGIN
+            };
+            top_margin + 48.0 + DIFF_FILE_HEADER_BOTTOM_MARGIN
+        }
+        CombinedDiffViewItem::StackNotice(_) => 76.0,
+        CombinedDiffViewItem::State { min_height, .. } => min_height.map(f32::from).unwrap_or(58.0),
+        CombinedDiffViewItem::Row { file_index, item } => contexts
+            .get(*file_index)
+            .map(|context| {
+                estimated_diff_view_item_height(
+                    *item,
+                    context.rows.as_ref(),
+                    context.parsed.as_deref(),
+                    review_threads,
+                    wrap_diff_lines,
+                )
+            })
+            .unwrap_or(0.0),
+        CombinedDiffViewItem::Footer => 12.0,
+    }
 }
 
 fn combined_diff_file_expanded_extra_item_count(context: &CombinedDiffFileContext) -> usize {

@@ -229,6 +229,16 @@ pub(super) fn render_file_diff(
         });
     }
 
+    let vertical_scrollbar_metrics =
+        DiffVerticalScrollbarMetrics::from_item_heights(items.iter().map(|item| {
+            estimated_diff_view_item_height(
+                *item,
+                rows.as_ref(),
+                parsed,
+                &review_threads,
+                wrap_diff_lines,
+            )
+        }));
     let items = Arc::new(items);
     let state = state.clone();
 
@@ -267,6 +277,7 @@ pub(super) fn render_file_diff(
                         side_by_side_scroll_handles,
                         side_by_side_column_widths,
                         scrollbar_activity,
+                        vertical_scrollbar_metrics,
                     )
                     .into_any_element(),
                 ),
@@ -290,6 +301,7 @@ pub(super) fn render_virtualized_diff_rows(
     side_by_side_scroll_handles: SideBySideScrollHandles,
     side_by_side_column_widths: Option<SideBySideColumnWidths>,
     scrollbar_activity: DiffScrollbarActivity,
+    vertical_scrollbar_metrics: DiffVerticalScrollbarMetrics,
 ) -> AnyElement {
     let state = state.clone();
     let scroll_state = state.clone();
@@ -346,6 +358,7 @@ pub(super) fn render_virtualized_diff_rows(
         (!wrap_diff_lines && has_side_by_side_rows).then_some(&side_by_side_scroll_handles),
         DiffScrollbarInsets::none(),
         false,
+        Some(vertical_scrollbar_metrics),
     )
 }
 
@@ -354,6 +367,91 @@ pub(super) enum DiffViewItem {
     Row(usize),
     Gap(DiffGapSummary),
     StackLayerEmpty,
+}
+
+// Conservative estimates keep the custom scrollbar from shrinking as rows hydrate.
+const DIFF_SCROLLBAR_ESTIMATED_LINE_HEIGHT: f32 = 32.0;
+const DIFF_SCROLLBAR_ESTIMATED_HUNK_HEADER_HEIGHT: f32 = 34.0;
+
+pub(super) fn estimated_diff_view_item_height(
+    item: DiffViewItem,
+    rows: &[DiffRenderRow],
+    parsed: Option<&ParsedDiffFile>,
+    review_threads: &[PullRequestReviewThread],
+    wrap_diff_lines: bool,
+) -> f32 {
+    match item {
+        DiffViewItem::Gap(_) => 30.0,
+        DiffViewItem::StackLayerEmpty => 58.0,
+        DiffViewItem::Row(row_ix) => rows
+            .get(row_ix)
+            .map(|row| {
+                estimated_diff_render_row_height(row, parsed, review_threads, wrap_diff_lines)
+            })
+            .unwrap_or(0.0),
+    }
+}
+
+fn estimated_diff_render_row_height(
+    row: &DiffRenderRow,
+    parsed: Option<&ParsedDiffFile>,
+    review_threads: &[PullRequestReviewThread],
+    wrap_diff_lines: bool,
+) -> f32 {
+    match row {
+        DiffRenderRow::FileCommentsHeader { .. } | DiffRenderRow::OutdatedCommentsHeader { .. } => {
+            26.0
+        }
+        DiffRenderRow::FileCommentThread { thread_index }
+        | DiffRenderRow::InlineThread { thread_index }
+        | DiffRenderRow::OutdatedThread { thread_index } => review_threads
+            .get(*thread_index)
+            .map(estimated_review_thread_row_height)
+            .unwrap_or(96.0),
+        DiffRenderRow::HunkHeader { .. } => DIFF_SCROLLBAR_ESTIMATED_HUNK_HEADER_HEIGHT,
+        DiffRenderRow::Line {
+            hunk_index,
+            line_index,
+        } => estimated_diff_line_height(
+            parsed
+                .and_then(|parsed| parsed.hunks.get(*hunk_index))
+                .and_then(|hunk| hunk.lines.get(*line_index)),
+            wrap_diff_lines,
+        ),
+        DiffRenderRow::NoTextHunks | DiffRenderRow::NoParsedDiff => 58.0,
+        DiffRenderRow::RawDiffFallback => 1200.0,
+    }
+}
+
+fn estimated_diff_line_height(line: Option<&ParsedDiffLine>, wrap_diff_lines: bool) -> f32 {
+    let row_height = f32::from(diff_row_height_px());
+    if !wrap_diff_lines {
+        return row_height.max(DIFF_SCROLLBAR_ESTIMATED_LINE_HEIGHT);
+    }
+
+    let content_len = line.map(|line| line.content.len()).unwrap_or(0);
+    let visual_rows = content_len.saturating_add(71) / 72;
+    let wrapped_height = f32::from(diff_code_line_height_px()) * visual_rows.max(1) as f32 + 4.0;
+    row_height
+        .max(DIFF_SCROLLBAR_ESTIMATED_LINE_HEIGHT)
+        .max(wrapped_height)
+}
+
+pub(super) fn estimated_review_thread_row_height(thread: &PullRequestReviewThread) -> f32 {
+    let comments_height = thread
+        .comments
+        .iter()
+        .map(estimated_review_comment_height)
+        .sum::<f32>();
+    let reply_prompt_height = if thread.viewer_can_reply { 54.0 } else { 0.0 };
+
+    20.0 + 42.0 + 16.0 + comments_height + reply_prompt_height
+}
+
+fn estimated_review_comment_height(comment: &PullRequestReviewComment) -> f32 {
+    let body_rows = comment.body.len().saturating_add(89) / 90;
+    let body_height = body_rows.max(1) as f32 * 22.0;
+    (20.0 + 24.0 + 10.0 + body_height).max(42.0)
 }
 
 pub(super) fn diff_scroll_focus_for_item_index(
