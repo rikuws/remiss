@@ -95,6 +95,7 @@ mod test_git;
 mod theme;
 mod tutorial_pr;
 mod views;
+mod vim;
 mod window_settings;
 
 use std::sync::Arc;
