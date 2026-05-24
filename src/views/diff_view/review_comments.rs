@@ -909,32 +909,7 @@ pub(super) fn build_review_line_action_target(
     hunk_header: Option<&str>,
     line: &ParsedDiffLine,
 ) -> Option<ReviewLineActionTarget> {
-    let side = if matches!(line.kind, DiffLineKind::Deletion) {
-        Some("LEFT")
-    } else if matches!(line.kind, DiffLineKind::Addition | DiffLineKind::Context) {
-        Some("RIGHT")
-    } else {
-        None
-    }?;
-
-    let line_number = match side {
-        "LEFT" => line.left_line_number,
-        _ => line.right_line_number,
-    }?;
-    let display_line = usize::try_from(line_number).ok().filter(|line| *line > 0)?;
-
-    Some(ReviewLineActionTarget {
-        anchor: DiffAnchor {
-            file_path: file_path.to_string(),
-            hunk_header: hunk_header.map(str::to_string),
-            line: Some(line_number),
-            side: Some(side.to_string()),
-            thread_id: None,
-        },
-        start_line: None,
-        start_side: None,
-        label: format!("{file_path}:{display_line}"),
-    })
+    crate::vim::diff::review_line_action_target_for_line(file_path, hunk_header, line)
 }
 
 pub(super) fn render_reviewable_diff_line(
@@ -957,6 +932,7 @@ pub(super) fn render_reviewable_diff_line(
         drag_origin,
         drag_current,
         hovered_gutter_action_key,
+        pointer_hover_suppressed,
         waypoint,
         wrap_diff_lines,
     ) = {
@@ -967,6 +943,7 @@ pub(super) fn render_reviewable_diff_line(
         let hovered_gutter_action_key = (!app_state.diff_gutter_hover_suppressed())
             .then(|| app_state.hovered_diff_gutter_action_key.clone())
             .flatten();
+        let pointer_hover_suppressed = app_state.diff_vim_pointer_hover_suppressed;
         let waypoint = line_action_target
             .as_ref()
             .and_then(|target| {
@@ -984,6 +961,7 @@ pub(super) fn render_reviewable_diff_line(
             drag_origin,
             drag_current,
             hovered_gutter_action_key,
+            pointer_hover_suppressed,
             waypoint,
             wrap_diff_lines,
         )
@@ -1026,6 +1004,7 @@ pub(super) fn render_reviewable_diff_line(
         hovered_gutter_action_key.as_deref(),
         text_selection,
         wrap_diff_lines,
+        pointer_hover_suppressed,
     )
 }
 

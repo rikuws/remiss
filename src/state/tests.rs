@@ -5,19 +5,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::cache::CacheStore;
 use crate::diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk, ParsedDiffLine};
 use crate::github::{
-    PullRequestComment, PullRequestDataCompleteness, PullRequestDetail, PullRequestFile,
-    PullRequestReview, PullRequestReviewComment, PullRequestReviewThread,
+    AuthState, PullRequestComment, PullRequestDataCompleteness, PullRequestDetail,
+    PullRequestDetailSnapshot, PullRequestFile, PullRequestReview, PullRequestReviewComment,
+    PullRequestReviewThread,
 };
 use crate::lsp::{LspServerCapabilities, LspServerStatus};
 use crate::managed_lsp::ManagedServerKind;
 use crate::onboarding::{StartupWizardOptions, WizardStepTarget};
+use crate::review_ai::DiffAnchor;
 use crate::review_session::ReviewCenterMode;
 use crate::tutorial_pr::TUTORIAL_PR_KEY;
 
 use super::{
     diff_anchor_for_line, first_review_comment_after_focus_index, review_comment_navigation_items,
-    summary_key, AppState, DetailState, DiffScrollbarActivity, PullRequestSurface, ReviewModeFocus,
-    SectionId, StructuralDiffWarmupState,
+    summary_key, AppState, DetailState, DiffScrollbarActivity, PullRequestSurface,
+    ReviewLineActionTarget, ReviewModeFocus, SectionId, StructuralDiffWarmupState,
 };
 
 fn temp_cache_store(name: &str) -> CacheStore {
@@ -29,6 +31,21 @@ fn temp_cache_store(name: &str) -> CacheStore {
         "/tmp/remiss-state-test-{name}-{suffix}/cache.sqlite"
     ));
     CacheStore::new(path).expect("cache")
+}
+
+fn review_line_target(file_path: &str, line: i64) -> ReviewLineActionTarget {
+    ReviewLineActionTarget {
+        anchor: DiffAnchor {
+            file_path: file_path.to_string(),
+            hunk_header: None,
+            line: Some(line),
+            side: Some("RIGHT".to_string()),
+            thread_id: None,
+        },
+        start_line: None,
+        start_side: None,
+        label: format!("{file_path}:{line}"),
+    }
 }
 
 #[test]
@@ -67,6 +84,62 @@ fn diff_scrollbar_activity_hides_only_current_generation() {
     assert!(activity.is_visible());
     assert!(activity.hide_if_current(second_generation));
     assert!(!activity.is_visible());
+}
+
+#[test]
+fn diff_vim_cursor_seed_uses_mouse_hover_when_mouse_owns_highlight() {
+    let cache = temp_cache_store("diff-vim-hover-seed");
+    let mut state = AppState::new(cache, StartupWizardOptions::force_welcome());
+    state.selected_file_path = Some("src/lib.rs".to_string());
+    state.selected_diff_anchor = Some(review_line_target("src/lib.rs", 2).anchor);
+
+    let hovered = review_line_target("src/lib.rs", 8);
+    assert!(state.set_diff_vim_pointer_hover_target(hovered.clone()));
+    assert_eq!(
+        state
+            .diff_vim_cursor_seed_target()
+            .map(|target| target.stable_key()),
+        Some(hovered.stable_key())
+    );
+
+    state.suppress_diff_vim_pointer_hover();
+    assert_eq!(
+        state
+            .diff_vim_cursor_seed_target()
+            .map(|target| target.stable_key()),
+        Some(review_line_target("src/lib.rs", 2).stable_key())
+    );
+}
+
+#[test]
+fn active_diff_vim_targets_follow_mouse_hovered_file() {
+    let cache = temp_cache_store("diff-vim-hover-file");
+    let mut state = AppState::new(cache, StartupWizardOptions::force_welcome());
+    let detail_key = "org/repo#1".to_string();
+    let mut detail_state = DetailState::default();
+    detail_state.snapshot = Some(PullRequestDetailSnapshot {
+        auth: AuthState {
+            is_authenticated: true,
+            active_login: Some("you".to_string()),
+            active_hostname: Some("github.com".to_string()),
+            message: String::new(),
+        },
+        loaded_from_cache: false,
+        fetched_at_ms: None,
+        detail: Some(detail_with_threads(Vec::new())),
+    });
+    state.active_surface = PullRequestSurface::Files;
+    state.active_pr_key = Some(detail_key.clone());
+    state.detail_states.insert(detail_key, detail_state);
+    state.selected_file_path = Some("src/a.rs".to_string());
+    state.selected_diff_anchor = Some(review_line_target("src/a.rs", 2).anchor);
+
+    assert!(state.set_diff_vim_pointer_hover_target(review_line_target("src/b.rs", 4)));
+
+    let rows = state.active_diff_vim_targets();
+    assert!(!rows.is_empty());
+    assert!(rows.iter().all(|row| row.anchor.file_path == "src/b.rs"));
+    assert!(rows.iter().any(|row| row.anchor.line == Some(4)));
 }
 
 #[test]

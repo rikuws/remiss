@@ -79,7 +79,7 @@ pub(super) fn render_file_diff(
     let rows = diff_view_state.rows.clone();
     let parsed_file_index = diff_view_state.parsed_file_index;
     let highlighted_hunks = diff_view_state.highlighted_hunks.clone();
-    let (reserve_waypoint_slot, wrap_diff_lines) = {
+    let (reserve_waypoint_slot, wrap_diff_lines, focus_scroll_behavior) = {
         let app_state = state.read(cx);
         let has_review_submission = app_state
             .active_detail()
@@ -101,7 +101,16 @@ pub(super) fn render_file_diff(
             .active_review_session()
             .map(|session| session.wrap_diff_lines)
             .unwrap_or(false);
-        (reserve_waypoint_slot, wrap_diff_lines)
+        let focus_scroll_behavior = if app_state.diff_vim_pointer_hover_suppressed {
+            DiffFocusScrollBehavior::VimMotion
+        } else {
+            DiffFocusScrollBehavior::Context
+        };
+        (
+            reserve_waypoint_slot,
+            wrap_diff_lines,
+            focus_scroll_behavior,
+        )
     };
     let gutter_layout = diff_gutter_layout(file, parsed, reserve_waypoint_slot);
     let selected_anchor = selected_anchor.cloned();
@@ -156,6 +165,7 @@ pub(super) fn render_file_diff(
         &review_threads,
         selected_anchor.as_ref(),
         file.path.as_str(),
+        focus_scroll_behavior,
     );
 
     if let Some(active_pr_key) = state.read(cx).active_pr_key.clone() {
@@ -408,6 +418,7 @@ fn scroll_diff_list_to_focus(
     review_threads: &[PullRequestReviewThread],
     selected_anchor: Option<&DiffAnchor>,
     fallback_file_path: &str,
+    scroll_behavior: DiffFocusScrollBehavior,
 ) {
     let Some(anchor) = selected_anchor else {
         return;
@@ -429,10 +440,17 @@ fn scroll_diff_list_to_focus(
         review_threads,
         anchor,
     ) {
-        view_state.list_state.scroll_to(ListOffset {
-            item_ix: diff_focus_scroll_top_item_ix(item_ix),
-            offset_in_item: px(0.0),
-        });
+        match scroll_behavior {
+            DiffFocusScrollBehavior::Context => {
+                view_state.list_state.scroll_to(ListOffset {
+                    item_ix: diff_focus_scroll_top_item_ix(item_ix),
+                    offset_in_item: px(0.0),
+                });
+            }
+            DiffFocusScrollBehavior::VimMotion => {
+                scroll_diff_list_to_vim_focus(&view_state.list_state, item_ix);
+            }
+        }
         *last_focus_key = Some(focus_key);
     }
 }

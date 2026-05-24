@@ -4,6 +4,13 @@
 //! movement commands into host-owned motions so diff and source views can decide
 //! how rows, anchors, and scroll positions map to those motions.
 
+pub mod diff;
+pub mod input;
+
+#[cfg(test)]
+mod diff_tests;
+#[cfg(test)]
+mod input_tests;
 #[cfg(test)]
 mod tests;
 
@@ -79,6 +86,10 @@ impl ReadOnlyVim {
 
     pub fn mode(&self) -> ReadOnlyVimMode {
         self.mode
+    }
+
+    pub fn has_pending_input(&self) -> bool {
+        self.count.is_some() || self.pending.is_some()
     }
 
     pub fn reset(&mut self) {

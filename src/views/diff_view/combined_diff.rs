@@ -187,6 +187,11 @@ pub(super) fn render_combined_diff_files(
         .active_review_session()
         .map(|session| session.wrap_diff_lines)
         .unwrap_or(false);
+    let focus_scroll_behavior = if app_state.diff_vim_pointer_hover_suppressed {
+        DiffFocusScrollBehavior::VimMotion
+    } else {
+        DiffFocusScrollBehavior::Context
+    };
     let view_state = prepare_combined_diff_view_state(app_state, center_mode);
     let model = prepare_combined_diff_render_model(
         app_state,
@@ -213,6 +218,7 @@ pub(super) fn render_combined_diff_files(
         &detail.review_threads,
         selected_path,
         selected_anchor,
+        focus_scroll_behavior,
         window,
         _cx,
     );
@@ -1434,6 +1440,7 @@ fn scroll_combined_diff_list_to_focus(
     review_threads: &[PullRequestReviewThread],
     selected_path: Option<&str>,
     selected_anchor: Option<&DiffAnchor>,
+    scroll_behavior: DiffFocusScrollBehavior,
     window: &mut Window,
     cx: &App,
 ) {
@@ -1464,18 +1471,36 @@ fn scroll_combined_diff_list_to_focus(
         .or_else(|| find_combined_diff_file_header_index(items, contexts, selected_path));
 
     if let Some(item_ix) = item_ix {
-        let target_item_ix = diff_focus_scroll_top_item_ix(item_ix);
         let current_item_ix = view_state.list_state.logical_scroll_top().item_ix;
         let has_previous_focus = last_focus_key.is_some();
         *last_focus_key = Some(target_key);
-        if should_animate_combined_diff_jump(has_previous_focus, current_item_ix, target_item_ix) {
-            animate_combined_diff_jump(view_state, current_item_ix, target_item_ix, window, cx);
-        } else {
-            cancel_combined_diff_jump_animation(view_state);
-            view_state.list_state.scroll_to(ListOffset {
-                item_ix: target_item_ix,
-                offset_in_item: px(0.0),
-            });
+        match scroll_behavior {
+            DiffFocusScrollBehavior::Context => {
+                let target_item_ix = diff_focus_scroll_top_item_ix(item_ix);
+                if should_animate_combined_diff_jump(
+                    has_previous_focus,
+                    current_item_ix,
+                    target_item_ix,
+                ) {
+                    animate_combined_diff_jump(
+                        view_state,
+                        current_item_ix,
+                        target_item_ix,
+                        window,
+                        cx,
+                    );
+                } else {
+                    cancel_combined_diff_jump_animation(view_state);
+                    view_state.list_state.scroll_to(ListOffset {
+                        item_ix: target_item_ix,
+                        offset_in_item: px(0.0),
+                    });
+                }
+            }
+            DiffFocusScrollBehavior::VimMotion => {
+                cancel_combined_diff_jump_animation(view_state);
+                scroll_diff_list_to_vim_focus(&view_state.list_state, item_ix);
+            }
         }
     }
 }

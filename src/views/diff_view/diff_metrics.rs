@@ -206,6 +206,7 @@ pub(super) fn render_diff_line_with_threads(
             .then(|| app_state.hovered_diff_gutter_action_key.clone())
             .flatten()
     };
+    let pointer_hover_suppressed = state.read(cx).diff_vim_pointer_hover_suppressed;
 
     div()
         .flex()
@@ -226,6 +227,7 @@ pub(super) fn render_diff_line_with_threads(
             hovered_diff_gutter_action_key.as_deref(),
             text_selection,
             false,
+            pointer_hover_suppressed,
         ))
         .when(!threads.is_empty(), |el| {
             el.child(
@@ -268,12 +270,16 @@ pub(super) fn render_diff_line(
     hovered_diff_gutter_action_key: Option<&str>,
     text_selection: Option<DiffTextSelectionContext>,
     wrap_diff_lines: bool,
+    pointer_hover_suppressed: bool,
 ) -> impl IntoElement {
-    let is_selected = line_matches_diff_anchor(line, selected_anchor) || range_selected;
+    let is_anchor_selected = line_matches_diff_anchor(line, selected_anchor);
+    let is_selected = is_anchor_selected || range_selected;
+    let selected_fill_visible = range_selected || (is_anchor_selected && pointer_hover_suppressed);
     let gutter_line_action = line_action.clone();
     let has_gutter_line_action = gutter_line_action.is_some();
     let source_slot_action = source_action.clone();
     let hover_source_action = source_action.clone();
+    let row_pointer_target = line_action.clone();
     let row_drag_action = line_action.clone();
     let row_drop_action = line_action.clone();
     let row_click_action = line_action.clone();
@@ -357,9 +363,40 @@ pub(super) fn render_diff_line(
         } else {
             transparent()
         })
-        .hover(move |style| style.bg(diff_line_hover_bg()).text_color(marker_color))
-        .when(is_selected, |el| {
+        .when(!pointer_hover_suppressed, |el| {
+            el.hover(move |style| style.bg(diff_line_hover_bg()).text_color(marker_color))
+        })
+        .when(selected_fill_visible, |el| {
+            el.bg(diff_line_hover_bg())
+                .text_color(marker_color)
+                .border_l(px(2.0))
+                .border_color(diff_selected_edge())
+        })
+        .when(is_selected && !selected_fill_visible, |el| {
             el.border_l(px(2.0)).border_color(diff_selected_edge())
+        })
+        .when_some(row_pointer_target, |el, (state, target)| {
+            let move_state = state.clone();
+            let move_target = target.clone();
+            let leave_state = state;
+            let leave_target = target;
+            el.on_mouse_move(move |_, _, cx| {
+                move_state.update(cx, |state, cx| {
+                    if state.set_diff_vim_pointer_hover_target(move_target.clone()) {
+                        cx.notify();
+                    }
+                });
+            })
+            .on_hover(move |hovered, _, cx| {
+                if *hovered {
+                    return;
+                }
+                leave_state.update(cx, |state, cx| {
+                    if state.clear_diff_vim_pointer_hover_target(&leave_target) {
+                        cx.notify();
+                    }
+                });
+            })
         })
         .when_some(hover_source_action, |el, (state, target)| {
             el.on_mouse_move(move |_, _, cx| {

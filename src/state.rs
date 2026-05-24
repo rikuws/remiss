@@ -46,6 +46,7 @@ use crate::shader_surface::{
 use crate::stacks::model::{ReviewStack, StackDiffMode, StackPullRequestRef};
 use crate::syntax::{self, SyntaxSpan};
 use crate::theme::{self, CodeFontSizePreference, DiffColorThemePreference, ThemePreference};
+use crate::vim::{diff::VimDiffState, ReadOnlyVim, ReadOnlyVimMode};
 use gpui::{
     px, AnyWindowHandle, ListAlignment, ListState, Pixels, Point, ScrollHandle, WindowAppearance,
 };
@@ -1258,6 +1259,10 @@ pub struct AppState {
     pub review_line_action_mode: ReviewLineActionMode,
     pub active_review_line_drag_origin: Option<ReviewLineActionTarget>,
     pub active_review_line_drag_current: Option<ReviewLineActionTarget>,
+    pub diff_vim: ReadOnlyVim,
+    pub diff_vim_state: VimDiffState,
+    pub diff_vim_pointer_hover_suppressed: bool,
+    pub hovered_diff_line_action_target: Option<ReviewLineActionTarget>,
     pub hovered_diff_gutter_action_key: Option<String>,
     pub diff_gutter_hover_suppressed_until: Option<Instant>,
     pub inline_comment_draft: String,
@@ -1437,6 +1442,10 @@ impl AppState {
             review_line_action_mode: ReviewLineActionMode::Menu,
             active_review_line_drag_origin: None,
             active_review_line_drag_current: None,
+            diff_vim: ReadOnlyVim::new(),
+            diff_vim_state: VimDiffState::default(),
+            diff_vim_pointer_hover_suppressed: false,
+            hovered_diff_line_action_target: None,
             hovered_diff_gutter_action_key: None,
             diff_gutter_hover_suppressed_until: None,
             inline_comment_draft: String::new(),
@@ -2123,6 +2132,49 @@ impl AppState {
         })
     }
 
+    pub fn diff_vim_cursor_seed_target(&self) -> Option<ReviewLineActionTarget> {
+        if !self.diff_vim_visual_selection_active() && !self.diff_vim_pointer_hover_suppressed {
+            if let Some(target) = self.hovered_diff_line_action_target.clone() {
+                return Some(target);
+            }
+        }
+
+        self.selected_diff_line_target()
+    }
+
+    pub fn active_diff_vim_targets(&self) -> Vec<ReviewLineActionTarget> {
+        if self.active_surface != PullRequestSurface::Files
+            || self.effective_review_center_mode() == ReviewCenterMode::SourceBrowser
+        {
+            return Vec::new();
+        }
+
+        let Some(detail) = self.active_detail() else {
+            return Vec::new();
+        };
+
+        let seed_target = self.diff_vim_cursor_seed_target();
+        let selected_path = seed_target
+            .as_ref()
+            .map(|target| target.anchor.file_path.as_str())
+            .or_else(|| {
+                self.selected_diff_anchor
+                    .as_ref()
+                    .map(|anchor| anchor.file_path.as_str())
+            })
+            .or(self.selected_file_path.as_deref());
+
+        let parsed = selected_path
+            .and_then(|path| find_parsed_diff_file(&detail.parsed_diff, path))
+            .or_else(|| detail.parsed_diff.first());
+        let Some(parsed) = parsed else {
+            return Vec::new();
+        };
+
+        let file_path = selected_path.unwrap_or(parsed.path.as_str());
+        crate::vim::diff::review_line_action_targets_for_parsed_file(file_path, parsed)
+    }
+
     pub fn active_review_task_route(&self) -> Option<&ReviewTaskRoute> {
         self.active_review_session()
             .and_then(|session| session.task_route.as_ref())
@@ -2664,6 +2716,10 @@ impl AppState {
         }
     }
 
+    pub fn clear_review_scroll_focus(&mut self) {
+        self.review_scroll_focus = None;
+    }
+
     pub fn suppress_diff_gutter_hover_for(&mut self, duration: Duration) {
         self.hovered_diff_gutter_action_key = None;
         self.diff_gutter_hover_suppressed_until = Some(Instant::now() + duration);
@@ -2673,6 +2729,49 @@ impl AppState {
         self.diff_gutter_hover_suppressed_until
             .map(|until| until > Instant::now())
             .unwrap_or(false)
+    }
+
+    pub fn suppress_diff_vim_pointer_hover(&mut self) {
+        self.diff_vim_pointer_hover_suppressed = true;
+        self.hovered_diff_line_action_target = None;
+        self.hovered_diff_gutter_action_key = None;
+    }
+
+    fn diff_vim_visual_selection_active(&self) -> bool {
+        self.diff_vim.mode() == ReadOnlyVimMode::VisualLine
+            || self.diff_vim_state.visual_anchor_index().is_some()
+    }
+
+    pub fn set_diff_vim_pointer_hover_target(&mut self, target: ReviewLineActionTarget) -> bool {
+        if self.diff_vim_visual_selection_active() {
+            return false;
+        }
+
+        let target_changed = self
+            .hovered_diff_line_action_target
+            .as_ref()
+            .map(|current| current.stable_key() != target.stable_key())
+            .unwrap_or(true);
+        let was_suppressed = self.diff_vim_pointer_hover_suppressed;
+
+        self.diff_vim_pointer_hover_suppressed = false;
+        self.hovered_diff_line_action_target = Some(target);
+
+        was_suppressed || target_changed
+    }
+
+    pub fn clear_diff_vim_pointer_hover_target(&mut self, target: &ReviewLineActionTarget) -> bool {
+        if self
+            .hovered_diff_line_action_target
+            .as_ref()
+            .map(|current| current.stable_key() == target.stable_key())
+            .unwrap_or(false)
+        {
+            self.hovered_diff_line_action_target = None;
+            return true;
+        }
+
+        false
     }
 
     pub fn set_review_scroll_focus(

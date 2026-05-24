@@ -73,6 +73,7 @@ use crate::temp_source_window::{
     temp_source_target_for_diff_side,
 };
 use crate::theme::*;
+use crate::vim::{diff::VimDiffOutcome, ReadOnlyVimMode, VimIntent, VimKey};
 use crate::{github, notifications, review_intelligence};
 
 use super::file_chooser::render_file_chooser;
@@ -128,9 +129,54 @@ use self::side_by_side::*;
 use self::single_file_diff::*;
 
 pub(super) const DIFF_FOCUS_CONTEXT_ROWS: usize = 12;
+const DIFF_VIM_SCROLL_EDGE_CONTEXT_ROWS: f32 = 4.0;
+const DIFF_VIM_SCROLL_EDGE_MAX_VIEWPORT_FRACTION: f32 = 0.24;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DiffFocusScrollBehavior {
+    Context,
+    VimMotion,
+}
 
 pub(super) fn diff_focus_scroll_top_item_ix(focus_item_ix: usize) -> usize {
     focus_item_ix.saturating_sub(DIFF_FOCUS_CONTEXT_ROWS)
+}
+
+pub(super) fn scroll_diff_list_to_vim_focus(list_state: &ListState, item_ix: usize) {
+    let viewport_bounds = list_state.viewport_bounds();
+    let Some(item_bounds) = list_state.bounds_for_item(item_ix) else {
+        list_state.scroll_to_reveal_item(item_ix);
+        return;
+    };
+
+    if let Some(delta) = diff_vim_scroll_delta_for_bounds(item_bounds, viewport_bounds) {
+        list_state.scroll_by(delta);
+    }
+}
+
+fn diff_vim_scroll_delta_for_bounds(
+    item_bounds: Bounds<Pixels>,
+    viewport_bounds: Bounds<Pixels>,
+) -> Option<Pixels> {
+    let viewport_height = f32::from(viewport_bounds.size.height);
+    let item_height = f32::from(item_bounds.size.height);
+    if viewport_height <= 0.0 || item_height <= 0.0 {
+        return None;
+    }
+
+    let available_margin = ((viewport_height - item_height).max(0.0) * 0.5)
+        .min(viewport_height * DIFF_VIM_SCROLL_EDGE_MAX_VIEWPORT_FRACTION);
+    let edge_context = (item_height * DIFF_VIM_SCROLL_EDGE_CONTEXT_ROWS).min(available_margin);
+    let top_edge = viewport_bounds.top() + px(edge_context);
+    let bottom_edge = viewport_bounds.bottom() - px(edge_context);
+
+    if item_bounds.top() < top_edge {
+        Some(item_bounds.top() - top_edge)
+    } else if item_bounds.bottom() > bottom_edge {
+        Some(item_bounds.bottom() - bottom_edge)
+    } else {
+        None
+    }
 }
 
 pub fn enter_files_surface(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
@@ -290,6 +336,134 @@ pub fn open_review_source_location(
     });
 
     ensure_active_review_focus_loaded(state, window, cx);
+}
+
+pub fn trigger_diff_vim_key(
+    state: &Entity<AppState>,
+    key: VimKey,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    let mut confirmed_target = None;
+    let consumed = state.update(cx, |state, cx| {
+        if !diff_vim_keyboard_available(state) {
+            return false;
+        }
+
+        let visual_active = state.diff_vim.mode() == ReadOnlyVimMode::VisualLine
+            || state.diff_vim_state.visual_anchor_index().is_some();
+        if matches!(key, VimKey::Escape) && !visual_active && !state.diff_vim.has_pending_input() {
+            return false;
+        }
+
+        if matches!(key, VimKey::Char('c')) && !visual_active {
+            state.diff_vim.handle_key(key);
+            return false;
+        }
+
+        let rows = state.active_diff_vim_targets();
+        if rows.is_empty() {
+            state.diff_vim.reset();
+            return false;
+        }
+
+        if let Some(selected) = state.diff_vim_cursor_seed_target() {
+            state.diff_vim_state.set_cursor_for_target(&rows, &selected);
+        }
+
+        let had_pending_input = state.diff_vim.has_pending_input();
+        let intent = state.diff_vim.handle_key(key);
+        let has_pending_input = state.diff_vim.has_pending_input();
+        let outcome = state.diff_vim_state.apply_intent(&rows, intent);
+        let should_consume_noop = intent != VimIntent::Noop
+            || had_pending_input
+            || has_pending_input
+            || visual_active
+            || matches!(key, VimKey::Escape);
+
+        match outcome {
+            VimDiffOutcome::Noop => {
+                if should_consume_noop {
+                    state.suppress_diff_vim_pointer_hover();
+                    cx.notify();
+                }
+                should_consume_noop
+            }
+            VimDiffOutcome::Cancelled => {
+                state.active_review_line_drag_origin = None;
+                state.active_review_line_drag_current = None;
+                state.suppress_diff_vim_pointer_hover();
+                cx.notify();
+                true
+            }
+            VimDiffOutcome::Moved { cursor } => {
+                focus_diff_vim_target(state, &cursor);
+                state.suppress_diff_vim_pointer_hover();
+                cx.notify();
+                true
+            }
+            VimDiffOutcome::VisualStarted { origin, cursor } => {
+                focus_diff_vim_target(state, &cursor);
+                state.active_review_line_drag_origin = Some(origin);
+                state.active_review_line_drag_current = Some(cursor);
+                state.suppress_diff_vim_pointer_hover();
+                cx.notify();
+                true
+            }
+            VimDiffOutcome::VisualChanged { origin, cursor, .. } => {
+                focus_diff_vim_target(state, &cursor);
+                state.active_review_line_drag_origin = Some(origin);
+                state.active_review_line_drag_current = Some(cursor);
+                state.suppress_diff_vim_pointer_hover();
+                cx.notify();
+                true
+            }
+            VimDiffOutcome::SelectionConfirmed { target } => {
+                state.active_review_line_drag_origin = None;
+                state.active_review_line_drag_current = None;
+                focus_diff_vim_target(state, &target);
+                state.suppress_diff_vim_pointer_hover();
+                confirmed_target = Some(target);
+                cx.notify();
+                true
+            }
+        }
+    });
+
+    if let Some(target) = confirmed_target {
+        open_review_line_action(state, target, window.mouse_position(), cx);
+    }
+
+    consumed
+}
+
+fn diff_vim_keyboard_available(state: &AppState) -> bool {
+    state.active_surface == PullRequestSurface::Files
+        && state.active_detail().is_some()
+        && state.effective_review_center_mode() != ReviewCenterMode::SourceBrowser
+        && !state.palette_open
+        && !state.file_chooser_open
+        && !state.waypoint_spotlight_open
+        && state.project_shader_picker.is_none()
+        && state.active_onboarding_wizard.is_none()
+        && !state.review_editor_active
+        && !state.review_finish_modal_open
+        && state.active_review_line_action.is_none()
+        && state.active_review_thread_reply_id.is_none()
+        && state.editing_review_comment_id.is_none()
+}
+
+fn focus_diff_vim_target(state: &mut AppState, target: &ReviewLineActionTarget) {
+    state.active_surface = PullRequestSurface::Files;
+    state.selected_file_path = Some(target.anchor.file_path.clone());
+    state.selected_diff_anchor = Some(target.anchor.clone());
+    state.active_review_line_action = None;
+    state.active_review_line_action_position = None;
+    state.review_line_action_mode = ReviewLineActionMode::Menu;
+    state.inline_comment_error = None;
+    state.waypoint_spotlight_open = false;
+    state.clear_review_scroll_focus();
+    state.persist_active_review_session();
 }
 
 pub fn ensure_active_review_focus_loaded(
@@ -1805,8 +1979,9 @@ mod tests {
     use super::review_sidebar::sync_stack_timeline_item_count;
     use super::{
         build_normal_side_by_side_diff_file, current_combined_diff_file_index_for_scroll_top,
-        diff_focus_scroll_top_item_ix, estimated_combined_diff_body_height_for_counts,
-        focus_item_index_around, max_side_by_side_column_widths, reading_focus_item_index,
+        diff_focus_scroll_top_item_ix, diff_vim_scroll_delta_for_bounds,
+        estimated_combined_diff_body_height_for_counts, focus_item_index_around,
+        max_side_by_side_column_widths, reading_focus_item_index,
         should_animate_combined_diff_jump, should_hydrate_combined_diff_file,
         waypoint_spotlight_detail_label, waypoint_spotlight_location_label, CombinedDiffViewItem,
         DiffFileCollapseScrollAdjustment, DiffViewItem, SideBySideColumnWidths,
@@ -1918,6 +2093,24 @@ mod tests {
             9
         );
         assert_eq!(diff_focus_scroll_top_item_ix(4), 0);
+    }
+
+    #[test]
+    fn vim_focus_scroll_waits_until_selection_reaches_edge_context() {
+        let viewport = test_bounds(0.0, 300.0);
+
+        assert_eq!(
+            diff_vim_scroll_delta_for_bounds(test_bounds(116.0, 144.0), viewport),
+            None
+        );
+        assert_eq!(
+            diff_vim_scroll_delta_for_bounds(test_bounds(240.0, 268.0), viewport),
+            Some(px(40.0))
+        );
+        assert_eq!(
+            diff_vim_scroll_delta_for_bounds(test_bounds(20.0, 48.0), viewport),
+            Some(px(-52.0))
+        );
     }
 
     #[test]

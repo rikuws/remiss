@@ -123,6 +123,7 @@ use views::{
     trigger_submit_inline_comment, trigger_submit_review, trigger_submit_review_from_review_mode,
     RootView,
 };
+use vim::input::vim_key_from_keystroke;
 
 fn main() {
     cli_binary::repair_process_path_for_cli_tools();
@@ -184,6 +185,20 @@ fn start_app(
         trigger_software_update_check(&app_state_for_updates, cx);
     });
     install_temp_source_window_key_bindings(cx);
+    let app_state_for_diff_vim = app_state.clone();
+    cx.intercept_keystrokes(move |event, window, cx| {
+        if app_state_for_diff_vim.read(cx).temp_source_window.window == cx.active_window() {
+            return;
+        }
+
+        let Some(key) = vim_key_from_keystroke(&event.keystroke) else {
+            return;
+        };
+        if views::diff_view::trigger_diff_vim_key(&app_state_for_diff_vim, key, window, cx) {
+            cx.stop_propagation();
+        }
+    })
+    .detach();
     let initial_window_appearance = cx.window_appearance();
     app_state.update(cx, |state, _| {
         state.set_window_appearance(initial_window_appearance);
