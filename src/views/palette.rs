@@ -407,18 +407,15 @@ fn palette_item(
                         .child(label),
                 )
                 .child(command_item_accessory(row_role, selected, saved_code_theme))
-                .when(
-                    selected && !matches!(row_role, CommandItemRole::CodeThemeParent { .. }),
-                    |el| {
-                        el.child(
-                            div()
-                                .text_size(px(11.0))
-                                .font_family(mono_font_family())
-                                .text_color(fg_subtle())
-                                .child("enter"),
-                        )
-                    },
-                ),
+                .when(selected && !row_role.is_menu_parent(), |el| {
+                    el.child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_family(mono_font_family())
+                            .text_color(fg_subtle())
+                            .child("enter"),
+                    )
+                }),
         )
         .with_animation(
             ("palette-row-reveal", animation_id),
@@ -451,6 +448,11 @@ fn command_item_animation_id(item: &CommandItem) -> u64 {
     hasher.finish()
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CommandMenuId {
+    CodeTheme,
+}
+
 fn command_item_accessory(
     role: CommandItemRole,
     selected: bool,
@@ -464,18 +466,15 @@ fn command_item_accessory(
             el.child(icon)
         })
         .when_some(code_theme_parent_icon(role), |el, icon| el.child(icon))
-        .when(
-            selected && matches!(role, CommandItemRole::CodeThemeParent { .. }),
-            |el| {
-                el.child(
-                    div()
-                        .text_size(px(11.0))
-                        .font_family(mono_font_family())
-                        .text_color(fg_subtle())
-                        .child("enter"),
-                )
-            },
-        )
+        .when(selected && role.is_menu_parent(), |el| {
+            el.child(
+                div()
+                    .text_size(px(11.0))
+                    .font_family(mono_font_family())
+                    .text_color(fg_subtle())
+                    .child("enter"),
+            )
+        })
 }
 
 fn code_theme_check_icon(
@@ -510,6 +509,26 @@ enum CommandItemRole {
     Normal,
     CodeThemeParent { expanded: bool },
     CodeThemeOption(DiffColorThemePreference),
+}
+
+impl CommandItemRole {
+    fn parent_menu(self) -> Option<CommandMenuId> {
+        match self {
+            Self::CodeThemeParent { .. } => Some(CommandMenuId::CodeTheme),
+            _ => None,
+        }
+    }
+
+    fn child_menu(self) -> Option<CommandMenuId> {
+        match self {
+            Self::CodeThemeOption(_) => Some(CommandMenuId::CodeTheme),
+            _ => None,
+        }
+    }
+
+    fn is_menu_parent(self) -> bool {
+        self.parent_menu().is_some()
+    }
 }
 
 #[derive(Clone)]
@@ -779,23 +798,116 @@ pub(super) fn fuzzy_query_chars(query: &str) -> Vec<char> {
 }
 
 fn ranked_command_items(items: Vec<CommandItem>, query_chars: &[char]) -> Vec<CommandItem> {
-    let mut ranked = items
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, item)| {
-            fuzzy_match_score(&item.search_text, query_chars).map(|score| (score, index, item))
+    let mut ranked = Vec::new();
+    let mut index = 0;
+    while index < items.len() {
+        let item = items[index].clone();
+        if let Some(menu_id) = item.role.parent_menu() {
+            let parent_index = index;
+            index += 1;
+
+            let mut children = Vec::new();
+            while index < items.len() && items[index].role.child_menu() == Some(menu_id) {
+                children.push((index, items[index].clone()));
+                index += 1;
+            }
+
+            if let Some(group) = ranked_menu_group(item, parent_index, children, query_chars) {
+                ranked.push(group);
+            }
+            continue;
+        }
+
+        if let Some(score) = fuzzy_match_score(&item.search_text, query_chars) {
+            ranked.push(RankedCommandGroup {
+                score,
+                index,
+                items: vec![item],
+            });
+        }
+        index += 1;
+    }
+
+    ranked.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.index.cmp(&right.index))
+    });
+
+    ranked.into_iter().flat_map(|group| group.items).collect()
+}
+
+struct RankedCommandGroup {
+    score: i64,
+    index: usize,
+    items: Vec<CommandItem>,
+}
+
+fn ranked_menu_group(
+    parent: CommandItem,
+    parent_index: usize,
+    children: Vec<(usize, CommandItem)>,
+    query_chars: &[char],
+) -> Option<RankedCommandGroup> {
+    let parent_score = fuzzy_match_score(&parent.search_text, query_chars);
+    let parent_label_search_text = command_search_text(&parent.label, &[]);
+    let mut matching_children = children
+        .iter()
+        .filter_map(|(index, child)| {
+            menu_child_match_score(&parent_label_search_text, child, query_chars).map(|score| {
+                RankedCommandGroup {
+                    score,
+                    index: *index,
+                    items: vec![child.clone()],
+                }
+            })
         })
         .collect::<Vec<_>>();
 
-    ranked.sort_by(
-        |(left_score, left_index, _), (right_score, right_index, _)| {
-            right_score
-                .cmp(left_score)
-                .then_with(|| left_index.cmp(right_index))
-        },
-    );
+    if parent_score.is_none() && matching_children.is_empty() {
+        return None;
+    }
 
-    ranked.into_iter().map(|(_, _, item)| item).collect()
+    let child_score = matching_children
+        .iter()
+        .map(|child| child.score)
+        .max()
+        .unwrap_or(i64::MIN);
+    let score = parent_score.unwrap_or(i64::MIN).max(child_score);
+    let mut items = vec![parent];
+    if parent_score.is_some() {
+        items.extend(children.into_iter().map(|(_, child)| child));
+    } else {
+        matching_children.sort_by(|left, right| {
+            right
+                .score
+                .cmp(&left.score)
+                .then_with(|| left.index.cmp(&right.index))
+        });
+        items.extend(matching_children.into_iter().flat_map(|child| child.items));
+    }
+
+    Some(RankedCommandGroup {
+        score,
+        index: parent_index,
+        items,
+    })
+}
+
+fn menu_child_match_score(
+    parent_label_search_text: &str,
+    child: &CommandItem,
+    query_chars: &[char],
+) -> Option<i64> {
+    fuzzy_match_score(&child.search_text, query_chars).or_else(|| {
+        let mut grouped_search_text =
+            String::with_capacity(parent_label_search_text.len() + 1 + child.search_text.len());
+        grouped_search_text.push_str(parent_label_search_text);
+        grouped_search_text.push(' ');
+        grouped_search_text.push_str(&child.search_text);
+        fuzzy_match_score(&grouped_search_text, query_chars)
+    })
 }
 
 pub(super) fn fuzzy_match_score(search_text: &str, query_chars: &[char]) -> Option<i64> {
@@ -997,7 +1109,17 @@ fn apply_command_action(
 
 fn toggle_code_theme_submenu(state: &Entity<AppState>, cx: &mut App) {
     state.update(cx, |s, cx| {
-        if s.palette_code_theme_expanded {
+        if !normalized_palette_query(s).is_empty() {
+            s.palette_code_theme_expanded = true;
+            let filtered = filtered_command_items(s);
+            if let Some(option_index) = filtered
+                .iter()
+                .position(|item| matches!(item.role, CommandItemRole::CodeThemeOption(_)))
+            {
+                s.palette_selected_index = option_index;
+                apply_selection_preview(s, filtered.get(option_index));
+            }
+        } else if s.palette_code_theme_expanded {
             s.palette_code_theme_expanded = false;
             revert_code_theme_preview_in_state(s);
         } else {
@@ -1275,7 +1397,9 @@ fn ease_out_sine(progress: f32) -> f32 {
 mod tests {
     use super::{
         fuzzy_match_score, fuzzy_query_chars, ranked_command_items, CommandAction, CommandItem,
+        CODE_THEME_COMMAND_LABEL,
     };
+    use crate::theme::DiffColorThemePreference;
 
     #[test]
     fn fuzzy_match_accepts_abbreviated_navigation_queries() {
@@ -1330,5 +1454,54 @@ mod tests {
         let ranked = ranked_command_items(items, &fuzzy_query_chars("ai"));
 
         assert_eq!(ranked[0].label, "Switch to Guided Review");
+    }
+
+    #[test]
+    fn ranked_command_items_keeps_menu_options_when_parent_matches_query() {
+        let mut items = vec![CommandItem::normal(
+            "Sync workspace",
+            CommandAction::SyncWorkspace,
+        )];
+        items.push(CommandItem::code_theme_parent(true));
+        items.extend(
+            DiffColorThemePreference::all()
+                .iter()
+                .copied()
+                .map(CommandItem::code_theme_option),
+        );
+
+        let ranked = ranked_command_items(items, &fuzzy_query_chars("code theme"));
+        let parent_index = ranked
+            .iter()
+            .position(|item| item.label == CODE_THEME_COMMAND_LABEL)
+            .expect("code theme command should match");
+        let option_labels = ranked
+            [parent_index + 1..parent_index + 1 + DiffColorThemePreference::all().len()]
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect::<Vec<_>>();
+        let expected = DiffColorThemePreference::all()
+            .iter()
+            .map(DiffColorThemePreference::label)
+            .collect::<Vec<_>>();
+
+        assert_eq!(option_labels, expected);
+    }
+
+    #[test]
+    fn ranked_command_items_keeps_menu_parent_when_child_matches_query() {
+        let mut items = vec![CommandItem::code_theme_parent(true)];
+        items.extend(
+            DiffColorThemePreference::all()
+                .iter()
+                .copied()
+                .map(CommandItem::code_theme_option),
+        );
+
+        let ranked = ranked_command_items(items, &fuzzy_query_chars("code theme nord"));
+
+        assert_eq!(ranked[0].label, CODE_THEME_COMMAND_LABEL);
+        assert_eq!(ranked[1].label, DiffColorThemePreference::Nord.label());
+        assert_eq!(ranked.len(), 2);
     }
 }
