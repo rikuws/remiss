@@ -2140,7 +2140,11 @@ fn render_floating_diff_file_header(
         .mr(px(DIFF_SECTION_HEADER_RIGHT_MARGIN))
         .pt(px(DIFF_FLOATING_FILE_HEADER_TOP_PADDING))
         .pb(px(DIFF_FLOATING_FILE_HEADER_BOTTOM_PADDING))
-        .bg(bg_canvas())
+        .bg(linear_gradient(
+            180.0,
+            linear_color_stop(with_alpha(bg_surface(), 0.72), 0.0),
+            linear_color_stop(with_alpha(bg_surface(), 0.0), 1.0),
+        ))
         .child(render_diff_file_header_row(
             state,
             review_stack,

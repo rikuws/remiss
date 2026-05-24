@@ -25,6 +25,7 @@ use crate::review_session::{load_review_session, ReviewCenterMode};
 use crate::state::*;
 use crate::theme::*;
 
+use super::corner_mask::{render_corner_mask, CornerMask};
 use super::diff_view::{
     ensure_active_review_focus_loaded, ensure_structural_diff_warmup_started, enter_files_surface,
     enter_stack_review_mode, switch_review_code_mode, toggle_waypoint_spotlight,
@@ -77,6 +78,7 @@ const NOTIFICATION_DRAWER_ANIMATION_MS: u64 = 160;
 const WORKSPACE_ROUTE_ANIMATION_MS: u64 = 160;
 const WORKSPACE_ROUTE_INITIAL_CONTENT_OPACITY: f32 = 0.58;
 const WORKSPACE_ROUTE_INITIAL_VEIL_ALPHA: f32 = 0.22;
+const WORKSPACE_BODY_RADIUS: f32 = 12.0;
 
 #[derive(Clone, Debug, PartialEq)]
 struct WorkspaceRouteKey {
@@ -1381,70 +1383,89 @@ fn render_app_sidebar(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                 )
                 .child(div().flex_grow().min_h(px(16.0)))
                 .child(render_local_review_sidebar_section(state, cx, icons_only))
-                .child(
-                    div()
-                        .px(if icons_only { px(10.0) } else { px(14.0) })
-                        .pb(px(14.0))
-                        .pt(px(12.0))
-                        .border_t(px(1.0))
-                        .border_color(border_muted())
-                        .flex()
-                        .flex_col()
-                        .gap(px(8.0))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(6.0))
-                                .when(!icons_only, |el| {
-                                    el.child(
-                                        div()
-                                            .px(px(6.0))
-                                            .text_size(px(10.0))
-                                            .font_family(mono_font_family())
-                                            .text_color(fg_subtle())
-                                            .child("THEME"),
-                                    )
-                                })
-                                .child(
-                                    div()
-                                        .flex()
-                                        .gap(px(6.0))
-                                        .when(icons_only, |el| el.flex_col())
-                                        .when(!icons_only, |el| el.flex_row())
-                                        .children(ThemePreference::all().iter().map(|candidate| {
-                                            let candidate = *candidate;
-                                            let state = state_for_theme.clone();
-                                            sidebar_theme_button(
-                                                theme_icon(candidate),
-                                                candidate.label(),
-                                                theme_preference == candidate,
-                                                icons_only,
-                                                move |_, window, cx| {
-                                                    update_theme_preference(
-                                                        &state, candidate, window, cx,
-                                                    );
-                                                },
-                                            )
-                                        })),
-                                ),
-                        )
-                        .child(sidebar_action_button(
-                            LucideIcon::RefreshCw,
-                            sync_label,
-                            icons_only,
-                            sync_color,
-                            move |_, window, cx| {
-                                trigger_sync_workspace(&state_for_sync, window, cx)
-                            },
-                        )),
-                ),
+                .child(render_sidebar_footer(
+                    icons_only,
+                    theme_preference,
+                    state_for_theme,
+                    state_for_sync,
+                    sync_label,
+                    sync_color,
+                )),
         )
         .with_animation(
             animation_key,
             Animation::new(Duration::from_millis(APP_SIDEBAR_ANIMATION_MS))
                 .with_easing(ease_in_out),
             move |el, delta| el.w(lerp_px(previous_sidebar_width, sidebar_width, delta)),
+        )
+}
+
+fn render_sidebar_footer(
+    icons_only: bool,
+    theme_preference: ThemePreference,
+    state_for_theme: Entity<AppState>,
+    state_for_sync: Entity<AppState>,
+    sync_label: &'static str,
+    sync_color: Rgba,
+) -> impl IntoElement {
+    div()
+        .px(if icons_only { px(8.0) } else { px(10.0) })
+        .pb(px(12.0))
+        .pt(px(8.0))
+        .child(
+            div()
+                .rounded(radius())
+                .border_1()
+                .border_color(transparent())
+                .bg(mix_rgba(bg_sidebar(), bg_surface(), 0.72))
+                .shadow(surface_shadow())
+                .p(if icons_only { px(6.0) } else { px(8.0) })
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.0))
+                        .when(!icons_only, |el| {
+                            el.child(
+                                div()
+                                    .px(px(6.0))
+                                    .text_size(px(10.0))
+                                    .font_family(mono_font_family())
+                                    .text_color(fg_subtle())
+                                    .child("THEME"),
+                            )
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(6.0))
+                                .when(icons_only, |el| el.flex_col())
+                                .when(!icons_only, |el| el.flex_row())
+                                .children(ThemePreference::all().iter().map(|candidate| {
+                                    let candidate = *candidate;
+                                    let state = state_for_theme.clone();
+                                    sidebar_theme_button(
+                                        theme_icon(candidate),
+                                        candidate.label(),
+                                        theme_preference == candidate,
+                                        icons_only,
+                                        move |_, window, cx| {
+                                            update_theme_preference(&state, candidate, window, cx);
+                                        },
+                                    )
+                                })),
+                        ),
+                )
+                .child(sidebar_action_button(
+                    LucideIcon::RefreshCw,
+                    sync_label,
+                    icons_only,
+                    sync_color,
+                    move |_, window, cx| trigger_sync_workspace(&state_for_sync, window, cx),
+                )),
         )
 }
 
@@ -2309,13 +2330,14 @@ fn render_workspace_body(
     let progress = workspace_route_transition.progress;
     let content_opacity = lerp_f32(WORKSPACE_ROUTE_INITIAL_CONTENT_OPACITY, 1.0, progress);
     let veil_alpha = lerp_f32(WORKSPACE_ROUTE_INITIAL_VEIL_ALPHA, 0.0, progress);
+    let body_radius = px(WORKSPACE_BODY_RADIUS);
 
     div()
         .relative()
         .flex_grow()
         .min_h_0()
         .bg(bg_canvas())
-        .rounded_tl(px(12.0))
+        .rounded(body_radius)
         .overflow_hidden()
         .flex()
         .flex_col()
@@ -2344,10 +2366,15 @@ fn render_workspace_body(
             div()
                 .absolute()
                 .inset_0()
-                .rounded_tl(px(12.0))
+                .rounded(body_radius)
                 .border_1()
                 .border_color(main_content_border()),
         )
+        .child(render_corner_mask(
+            body_radius,
+            bg_sidebar(),
+            CornerMask::ALL,
+        ))
 }
 
 fn chrome_icon_button(

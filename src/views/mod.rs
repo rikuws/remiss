@@ -1,3 +1,4 @@
+mod corner_mask;
 pub(crate) mod diff_view;
 mod file_chooser;
 mod file_tree;

@@ -76,6 +76,7 @@ use crate::theme::*;
 use crate::vim::{diff::VimDiffOutcome, ReadOnlyVimMode, VimIntent, VimKey};
 use crate::{github, notifications, review_intelligence};
 
+use super::corner_mask::{render_corner_mask, CornerMask};
 use super::file_chooser::render_file_chooser;
 use super::file_tree::{
     render_file_tree_directory_row, render_file_tree_file_row, render_file_tree_header,
@@ -1118,6 +1119,7 @@ pub fn render_files_view(
     };
     let selected_file = selected_path.and_then(|path| files.iter().find(|file| file.path == path));
     let semantic_file = selected_file.map(|file| prepare_semantic_diff_file(&s, detail, file));
+    let surface_radius = radius();
 
     div()
         .relative()
@@ -1143,7 +1145,8 @@ pub fn render_files_view(
                 .min_h_0()
                 .flex()
                 .flex_row()
-                .rounded(radius())
+                .relative()
+                .rounded(surface_radius)
                 .bg(bg_surface())
                 .overflow_hidden()
                 .child(render_review_sidebar_pane(
@@ -1155,6 +1158,11 @@ pub fn render_files_view(
                     &review_session,
                     review_stack.clone(),
                     cx,
+                ))
+                .child(render_corner_mask(
+                    surface_radius,
+                    bg_canvas(),
+                    CornerMask::ALL,
                 ))
                 .with_animation(
                     file_tree_animation_key,
@@ -1256,7 +1264,7 @@ const DIFF_SECTION_HEADER_RIGHT_MARGIN: f32 =
     DIFF_SECTION_BODY_RIGHT_MARGIN - DIFF_SECTION_HEADER_OVERHANG;
 const DIFF_FILE_HEADER_TOP_MARGIN_FIRST: f32 = 14.0;
 const DIFF_FILE_HEADER_TOP_MARGIN: f32 = 36.0;
-const DIFF_FILE_HEADER_BOTTOM_MARGIN: f32 = 10.0;
+const DIFF_FILE_HEADER_BOTTOM_MARGIN: f32 = 2.0;
 const DIFF_FLOATING_FILE_HEADER_TOP_PADDING: f32 = 10.0;
 const DIFF_FLOATING_FILE_HEADER_BOTTOM_PADDING: f32 = 10.0;
 const DIFF_SCROLL_TOP_FADE_HEIGHT: f32 = 30.0;
@@ -1381,12 +1389,14 @@ fn render_diff_panel(
             !has_textual_diff,
             app_state.is_onboarding_target(WizardStepTarget::ReviewFeedback),
         ))
-        .child(
+        .child({
+            let panel_radius = radius();
             div()
+                .relative()
                 .flex_grow()
                 .min_h_0()
                 .bg(bg_surface())
-                .rounded(radius())
+                .rounded(panel_radius)
                 .overflow_hidden()
                 .flex()
                 .flex_col()
@@ -1456,8 +1466,13 @@ fn render_diff_panel(
                         )
                         .into_any_element()
                     },
-                ),
-        )
+                )
+                .child(render_corner_mask(
+                    panel_radius,
+                    bg_canvas(),
+                    CornerMask::ALL,
+                ))
+        })
         .when_some(guided_review_preparation_overlay, |el, overlay| {
             el.child(overlay)
         })
