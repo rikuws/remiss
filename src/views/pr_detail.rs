@@ -30,9 +30,15 @@ use super::sections::{
 
 const ACTIVITY_MARKDOWN_PREVIEW_LIMIT: usize = 900;
 
+mod opening;
 mod overview;
+mod tabs;
 
+use self::opening::render_pull_request_opening_state;
 use self::overview::*;
+use self::tabs::markdown_editor_tab_label;
+
+pub use self::tabs::surface_tab;
 
 const PR_OVERVIEW_CONTENT_MAX_WIDTH: f32 = 1440.0;
 const REVIEW_BRIEF_STATUS_TEXT_MIN_WIDTH: f32 = 260.0;
@@ -414,181 +420,6 @@ pub fn render_pr_workspace(
         .when(
             detail.is_some() && surface == PullRequestSurface::Files,
             |el| el.child(render_files_view(state, window, cx)),
-        )
-        .into_any_element()
-}
-
-fn render_pull_request_opening_state(summary: &github::PullRequestSummary) -> impl IntoElement {
-    let metadata_ready = !is_placeholder_pull_request_summary(summary);
-    let title = if metadata_ready {
-        summary.title.clone()
-    } else {
-        format!("{} #{}", summary.repository, summary.number)
-    };
-    let status = if metadata_ready {
-        "Loading review data"
-    } else {
-        "Opening pull request"
-    };
-
-    div()
-        .flex_grow()
-        .min_h_0()
-        .h_full()
-        .bg(bg_canvas())
-        .px(px(32.0))
-        .py(px(18.0))
-        .flex()
-        .items_start()
-        .justify_center()
-        .child(
-            div()
-                .w_full()
-                .max_w(px(PR_OVERVIEW_CONTENT_MAX_WIDTH))
-                .flex()
-                .flex_col()
-                .gap(px(12.0))
-                .child(
-                    div()
-                        .flex()
-                        .items_start()
-                        .justify_between()
-                        .gap(px(16.0))
-                        .pb(px(12.0))
-                        .border_b(px(1.0))
-                        .border_color(border_muted())
-                        .child(
-                            div()
-                                .min_w_0()
-                                .flex_1()
-                                .flex()
-                                .flex_col()
-                                .gap(px(5.0))
-                                .child(
-                                    div()
-                                        .text_size(px(11.0))
-                                        .font_family(mono_font_family())
-                                        .text_color(fg_subtle())
-                                        .child(format!(
-                                            "PULL REQUEST / {} / #{}",
-                                            summary.repository, summary.number
-                                        )),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(22.0))
-                                        .line_height(px(28.0))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(fg_emphasis())
-                                        .child(title),
-                                )
-                                .when(metadata_ready, |el| {
-                                    el.child(
-                                        div()
-                                            .flex()
-                                            .flex_wrap()
-                                            .gap(px(8.0))
-                                            .text_size(px(12.0))
-                                            .text_color(fg_muted())
-                                            .child(pull_request_state_badge(
-                                                &summary.state,
-                                                summary.is_draft,
-                                            ))
-                                            .child(format!("by {}", summary.author_login))
-                                            .child(format_relative_time(&summary.updated_at)),
-                                    )
-                                }),
-                        )
-                        .child(render_compact_opening_status(status)),
-                )
-                .when(metadata_ready, |el| {
-                    el.child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .gap(px(10.0))
-                            .child(opening_metric(
-                                "Files",
-                                summary.changed_files.max(0).to_string(),
-                            ))
-                            .child(opening_metric(
-                                "Diff",
-                                format!(
-                                    "+{} / -{}",
-                                    summary.additions.max(0),
-                                    summary.deletions.max(0)
-                                ),
-                            ))
-                            .child(opening_metric(
-                                "Comments",
-                                summary.comments_count.max(0).to_string(),
-                            )),
-                    )
-                })
-                .when(!metadata_ready, |el| {
-                    el.child(
-                        div()
-                            .text_size(px(12.0))
-                            .line_height(px(18.0))
-                            .text_color(fg_muted())
-                            .child("Fetching title and PR metadata."),
-                    )
-                }),
-        )
-}
-
-fn render_compact_opening_status(label: &'static str) -> AnyElement {
-    div()
-        .mt(px(2.0))
-        .flex_shrink_0()
-        .rounded(px(6.0))
-        .border_1()
-        .border_color(border_muted())
-        .bg(bg_inset())
-        .px(px(9.0))
-        .py(px(6.0))
-        .flex()
-        .items_center()
-        .gap(px(7.0))
-        .child(lucide_icon(LucideIcon::RefreshCw, 12.0, fg_subtle()))
-        .child(
-            div()
-                .text_size(px(12.0))
-                .line_height(px(16.0))
-                .text_color(fg_muted())
-                .child(label),
-        )
-        .into_any_element()
-}
-
-fn is_placeholder_pull_request_summary(summary: &github::PullRequestSummary) -> bool {
-    summary.state == "LOADING" && summary.title == format!("Pull request #{}", summary.number)
-}
-
-fn opening_metric(label: &'static str, value: String) -> AnyElement {
-    div()
-        .rounded(px(6.0))
-        .border_1()
-        .border_color(border_muted())
-        .bg(bg_subtle())
-        .px(px(9.0))
-        .py(px(6.0))
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .child(
-            div()
-                .text_size(px(10.0))
-                .font_family(mono_font_family())
-                .text_color(fg_subtle())
-                .child(label),
-        )
-        .child(
-            div()
-                .text_size(px(12.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(fg_emphasis())
-                .child(value),
         )
         .into_any_element()
 }
@@ -2165,55 +1996,6 @@ fn count_copy(count: usize, singular: &str, plural: &str) -> String {
     } else {
         plural.to_string()
     }
-}
-
-pub fn surface_tab(
-    label: &str,
-    active: bool,
-    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    let animation_id = SharedString::from(format!("surface-tab-{label}-{}", usize::from(active)));
-
-    div()
-        .px(px(14.0))
-        .py(px(6.0))
-        .rounded(radius_sm())
-        .text_size(px(12.0))
-        .border_1()
-        .border_color(transparent())
-        .when(active, |el| el.bg(bg_emphasis()).text_color(fg_emphasis()))
-        .when(!active, |el| el.text_color(fg_muted()))
-        .hover(move |style| {
-            style
-                .bg(if active { bg_emphasis() } else { bg_selected() })
-                .text_color(fg_emphasis())
-        })
-        .on_mouse_down(MouseButton::Left, on_click)
-        .child(label.to_string())
-        .with_animation(
-            animation_id,
-            Animation::new(Duration::from_millis(TOGGLE_ANIMATION_MS)).with_easing(ease_in_out),
-            move |el, delta| {
-                let progress = selected_reveal_progress(active, delta);
-                el.bg(mix_rgba(transparent(), bg_emphasis(), progress))
-                    .text_color(mix_rgba(fg_muted(), fg_emphasis(), progress))
-            },
-        )
-}
-
-fn markdown_editor_tab_label(label: &str, active: bool) -> impl IntoElement {
-    div()
-        .px(px(8.0))
-        .py(px(3.0))
-        .rounded(radius_sm())
-        .text_size(px(12.0))
-        .font_weight(if active {
-            FontWeight::SEMIBOLD
-        } else {
-            FontWeight::MEDIUM
-        })
-        .text_color(if active { fg_emphasis() } else { fg_muted() })
-        .child(label.to_string())
 }
 
 fn trigger_sync_pr(
