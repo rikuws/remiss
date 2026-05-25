@@ -54,6 +54,9 @@ use self::tabs::{compact_close_button, pr_tab};
 
 pub struct RootView {
     state: Entity<AppState>,
+    screenshot_config: Option<crate::screenshot_mode::ScreenshotConfig>,
+    screenshot_ready_frames: u8,
+    screenshot_ready_written: bool,
     workspace_route_key: Option<WorkspaceRouteKey>,
     workspace_route_animation_started_at: Option<Instant>,
 }
@@ -104,7 +107,12 @@ struct AppMenuAvailability {
 }
 
 impl RootView {
-    pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        state: Entity<AppState>,
+        screenshot_config: Option<crate::screenshot_mode::ScreenshotConfig>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let initial_appearance = window.appearance();
         state.update(cx, |state, _| {
             state.set_window_appearance(initial_appearance);
@@ -120,116 +128,125 @@ impl RootView {
             }
         })
         .detach();
-        cx.observe_window_bounds(window, {
-            let state = state.clone();
-            move |_, window, cx| {
-                if window.is_fullscreen() || window.is_maximized() {
-                    return;
+        if screenshot_config.is_none() {
+            cx.observe_window_bounds(window, {
+                let state = state.clone();
+                move |_, window, cx| {
+                    if window.is_fullscreen() || window.is_maximized() {
+                        return;
+                    }
+
+                    let cache = state.read(cx).cache.clone();
+                    let _ = crate::window_settings::save_window_size(
+                        cache.as_ref(),
+                        window.bounds().size,
+                    );
                 }
+            })
+            .detach();
 
-                let cache = state.read(cx).cache.clone();
-                let _ =
-                    crate::window_settings::save_window_size(cache.as_ref(), window.bounds().size);
-            }
-        })
-        .detach();
+            // Bootstrap: load workspace from cache, then sync in background.
+            let model = state.clone();
+            cx.spawn_in(window, async move |_this, cx| {
+                // Load bootstrap status
+                let cache = model.read_with(cx, |s, _| s.cache.clone()).ok();
+                let Some(cache) = cache else { return };
 
-        // Bootstrap: load workspace from cache, then sync in background.
-        let model = state.clone();
-        cx.spawn_in(window, async move |_this, cx| {
-            // Load bootstrap status
-            let cache = model.read_with(cx, |s, _| s.cache.clone()).ok();
-            let Some(cache) = cache else { return };
-
-            let result = cx
-                .background_executor()
-                .spawn({
-                    let cache = cache.clone();
-                    async move { github::load_workspace_snapshot(&cache) }
-                })
-                .await;
-
-            model
-                .update(cx, |state, cx| {
-                    state.workspace_loading = false;
-                    state.bootstrap_loading = false;
-                    match &result {
-                        Ok(ws) => {
-                            state.gh_available = ws.auth.is_authenticated;
-                            state.workspace = Some(ws.clone());
-                        }
-                        Err(e) => {
-                            state.workspace_error = Some(e.clone());
-                        }
-                    }
-                    cx.notify();
-                })
-                .ok();
-
-            maybe_bootstrap_debug_pull_request(&model, cache.as_ref(), cx).await;
-
-            // Check gh version
-            let gh_result = cx
-                .background_executor()
-                .spawn(async { crate::gh::run(&["--version"]) })
-                .await;
-
-            model
-                .update(cx, |state, cx| {
-                    if let Ok(output) = gh_result {
-                        if output.exit_code == Some(0) {
-                            state.gh_available = true;
-                            state.gh_version = output.stdout.lines().next().map(str::to_string);
-                        }
-                    }
-                    cx.notify();
-                })
-                .ok();
-
-            // Now sync workspace in background.
-            model
-                .update(cx, |state, cx| {
-                    state.workspace_syncing = true;
-                    cx.notify();
-                })
-                .ok();
-
-            sync_workspace_flow(model.clone(), cx).await;
-
-            loop {
-                wait_for_workspace_poll_interval(cx).await;
-
-                let should_sync = model
-                    .read_with(cx, |state, _| {
-                        state.is_authenticated() && !state.workspace_syncing
+                let result = cx
+                    .background_executor()
+                    .spawn({
+                        let cache = cache.clone();
+                        async move { github::load_workspace_snapshot(&cache) }
                     })
-                    .ok()
-                    .unwrap_or(false);
-                if !should_sync {
-                    continue;
-                }
+                    .await;
 
                 model
                     .update(cx, |state, cx| {
-                        if state.workspace_syncing {
-                            return;
+                        state.workspace_loading = false;
+                        state.bootstrap_loading = false;
+                        match &result {
+                            Ok(ws) => {
+                                state.gh_available = ws.auth.is_authenticated;
+                                state.workspace = Some(ws.clone());
+                            }
+                            Err(e) => {
+                                state.workspace_error = Some(e.clone());
+                            }
                         }
+                        cx.notify();
+                    })
+                    .ok();
 
+                maybe_bootstrap_debug_pull_request(&model, cache.as_ref(), cx).await;
+
+                // Check gh version
+                let gh_result = cx
+                    .background_executor()
+                    .spawn(async { crate::gh::run(&["--version"]) })
+                    .await;
+
+                model
+                    .update(cx, |state, cx| {
+                        if let Ok(output) = gh_result {
+                            if output.exit_code == Some(0) {
+                                state.gh_available = true;
+                                state.gh_version = output.stdout.lines().next().map(str::to_string);
+                            }
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+
+                // Now sync workspace in background.
+                model
+                    .update(cx, |state, cx| {
                         state.workspace_syncing = true;
                         cx.notify();
                     })
                     .ok();
 
                 sync_workspace_flow(model.clone(), cx).await;
-            }
-        })
-        .detach();
 
-        refresh_onboarding_gh_status(&state, window, cx);
-        refresh_local_review_repositories(&state, window, cx);
+                loop {
+                    wait_for_workspace_poll_interval(cx).await;
+
+                    let should_sync = model
+                        .read_with(cx, |state, _| {
+                            state.is_authenticated() && !state.workspace_syncing
+                        })
+                        .ok()
+                        .unwrap_or(false);
+                    if !should_sync {
+                        continue;
+                    }
+
+                    model
+                        .update(cx, |state, cx| {
+                            if state.workspace_syncing {
+                                return;
+                            }
+
+                            state.workspace_syncing = true;
+                            cx.notify();
+                        })
+                        .ok();
+
+                    sync_workspace_flow(model.clone(), cx).await;
+                }
+            })
+            .detach();
+
+            refresh_onboarding_gh_status(&state, window, cx);
+            refresh_local_review_repositories(&state, window, cx);
+        } else {
+            ensure_active_review_focus_loaded(&state, window, cx);
+        }
 
         Self {
             state,
+            screenshot_config,
+            screenshot_ready_frames: 0,
+            screenshot_ready_written: false,
             workspace_route_key: None,
             workspace_route_animation_started_at: None,
         }
@@ -287,6 +304,12 @@ impl RootView {
             workspace_route_key(&state)
         };
 
+        if self.screenshot_config.is_some() {
+            self.workspace_route_key = Some(current_key);
+            self.workspace_route_animation_started_at = None;
+            return WorkspaceRouteTransition { progress: 1.0 };
+        }
+
         match &self.workspace_route_key {
             None => {
                 self.workspace_route_key = Some(current_key);
@@ -314,6 +337,38 @@ impl RootView {
             .unwrap_or(1.0);
 
         WorkspaceRouteTransition { progress }
+    }
+
+    fn mark_screenshot_ready_if_needed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.screenshot_ready_written {
+            return;
+        }
+
+        let Some(config) = self.screenshot_config.clone() else {
+            return;
+        };
+
+        let ready = {
+            let state = self.state.read(cx);
+            crate::screenshot_mode::is_ready_for_capture(&state, &config)
+        };
+        if !ready {
+            self.screenshot_ready_frames = 0;
+            return;
+        }
+
+        if self.screenshot_ready_frames == 0 {
+            self.screenshot_ready_frames = 1;
+            window.request_animation_frame();
+            return;
+        }
+
+        self.screenshot_ready_written = true;
+        cx.defer_in(window, move |_, _, _| {
+            if let Err(error) = config.write_ready_file() {
+                eprintln!("{error}");
+            }
+        });
     }
 }
 
@@ -1022,7 +1077,9 @@ impl Render for RootView {
                 el.child(render_onboarding_wizard(&self.state, cx))
             });
 
-        attach_app_menu_action_handlers(root, self.state.clone(), app_menu_availability)
+        let root = attach_app_menu_action_handlers(root, self.state.clone(), app_menu_availability);
+        self.mark_screenshot_ready_if_needed(window, cx);
+        root
     }
 }
 

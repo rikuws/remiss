@@ -77,6 +77,7 @@ mod review_partner;
 mod review_queue;
 mod review_routes;
 mod review_session;
+mod screenshot_mode;
 mod selectable_text;
 mod semantic_diff;
 mod semantic_review;
@@ -162,6 +163,7 @@ fn start_app(
     cx: &mut App,
     deep_link_dispatcher: deep_link::DeepLinkDispatcher,
 ) -> Result<(), String> {
+    let screenshot_config = screenshot_mode::ScreenshotConfig::from_env()?;
     let startup_wizard_options = onboarding::StartupWizardOptions::from_env_and_args();
     let bundled_fonts =
         load_bundled_fonts().map_err(|error| format!("Failed to load bundled fonts: {error}"))?;
@@ -169,10 +171,28 @@ fn start_app(
         .add_fonts(bundled_fonts)
         .map_err(|error| format!("Failed to register bundled fonts: {error}"))?;
 
-    let cache = CacheStore::new(cache_path())
+    if let Some(config) = screenshot_config.as_ref() {
+        config.clear_ready_file()?;
+    }
+
+    let cache_path = screenshot_config
+        .as_ref()
+        .map(|config| config.cache_path.clone())
+        .unwrap_or_else(cache_path);
+    let cache = CacheStore::new(cache_path)
         .map_err(|error| format!("Failed to initialize cache: {error}"))?;
-    let initial_window_size = window_settings::load_window_size(&cache);
-    let app_state = cx.new(move |_| AppState::new(cache, startup_wizard_options));
+    let initial_window_size = screenshot_config
+        .as_ref()
+        .map(|config| config.window_size())
+        .unwrap_or_else(|| window_settings::load_window_size(&cache));
+    let screenshot_config_for_state = screenshot_config.clone();
+    let app_state = cx.new(move |_| {
+        let mut state = AppState::new(cache, startup_wizard_options);
+        if let Some(config) = screenshot_config_for_state.as_ref() {
+            screenshot_mode::stage_initial_state(&mut state, config);
+        }
+        state
+    });
     let lsp_session_manager_for_quit = app_state.read(cx).lsp_session_manager.clone();
     cx.on_app_quit(move |_| {
         let lsp_session_manager = lsp_session_manager_for_quit.clone();
@@ -207,6 +227,8 @@ fn start_app(
     });
 
     let bounds = Bounds::centered(None, initial_window_size, cx);
+    let app_state_for_window = app_state.clone();
+    let screenshot_config_for_window = screenshot_config.clone();
     let root_window = cx
         .open_window(
             WindowOptions {
@@ -214,7 +236,11 @@ fn start_app(
                 titlebar: Some(main_window_titlebar_options()),
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| RootView::new(app_state.clone(), window, cx)),
+            move |window, cx| {
+                let app_state = app_state_for_window.clone();
+                let screenshot_config = screenshot_config_for_window.clone();
+                cx.new(move |cx| RootView::new(app_state, screenshot_config, window, cx))
+            },
         )
         .map_err(|error| format!("Failed to open app window: {error:?}"))?;
     let async_app = cx.to_async();
@@ -235,11 +261,13 @@ fn start_app(
         }
     });
 
-    if let Err(error) = platform_macos::updates::start_updater() {
-        report_sentry_error(format!("{APP_NAME} updater disabled: {error}"));
-    }
-    if let Err(error) = platform_macos::prepare_system_notifications() {
-        report_sentry_error(format!("{APP_NAME} notifications disabled: {error}"));
+    if screenshot_config.is_none() {
+        if let Err(error) = platform_macos::updates::start_updater() {
+            report_sentry_error(format!("{APP_NAME} updater disabled: {error}"));
+        }
+        if let Err(error) = platform_macos::prepare_system_notifications() {
+            report_sentry_error(format!("{APP_NAME} notifications disabled: {error}"));
+        }
     }
 
     let app_state_for_keys = app_state.clone();

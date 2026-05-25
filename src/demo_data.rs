@@ -34,9 +34,17 @@ struct DemoFile {
 }
 
 pub fn demo_mode_enabled() -> bool {
-    std::env::var(DEMO_MODE_ENV)
+    demo_mode_enabled_from_vars(|name| std::env::var(name).ok())
+}
+
+fn demo_mode_enabled_from_vars<F>(mut var: F) -> bool
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    var(DEMO_MODE_ENV)
         .map(|value| env_truthy(&value))
         .unwrap_or(false)
+        || crate::screenshot_mode::screenshot_mode_enabled_from_vars(var)
 }
 
 pub fn auth_state() -> AuthState {
@@ -2251,5 +2259,14 @@ mod tests {
         assert!(!env_truthy("false"));
         assert!(!env_truthy("off"));
         assert!(!env_truthy(" "));
+    }
+
+    #[test]
+    fn screenshot_mode_implies_demo_mode() {
+        let value = |name: &str| {
+            (name == crate::screenshot_mode::SCREENSHOT_MODE_ENV).then(|| "1".to_string())
+        };
+
+        assert!(demo_mode_enabled_from_vars(value));
     }
 }

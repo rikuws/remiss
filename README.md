@@ -90,3 +90,19 @@ To build a local app bundle:
 ```sh
 ./scripts/build-app.sh
 ```
+
+To capture a deterministic macOS screenshot artifact, build the packaged app and
+run the capture helper:
+
+```sh
+REMISS_ENABLE_SPARKLE=0 ./scripts/build-app.sh
+./scripts/capture-screenshot-macos.sh \
+  --scenario review-workspace \
+  --output screenshots/macos/review-workspace.png
+```
+
+Screenshot mode stages Remiss into a known demo review workspace, writes a
+`<output>.ready` marker when that screen has rendered, and leaves PNG capture to
+the platform script. It does not do baseline image comparison or visual diffing.
+On same-repository pull requests, the screenshot workflow also posts or updates a
+PR comment with links to the uploaded PNG artifacts.

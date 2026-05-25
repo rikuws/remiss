@@ -41,6 +41,7 @@ pub async fn load_pull_request_file_content_flow(
             let parsed = find_parsed_diff_file(&detail.parsed_diff, &selected_file.path).cloned();
             let request = build_file_content_request(&detail, &selected_file, parsed.as_ref())?;
             let detail_state = state.detail_states.get(&detail_key);
+            let skip_local_checkout = crate::screenshot_mode::screenshot_mode_enabled();
 
             let file_content_loaded =
                 is_local_checkout_file_loaded(detail_state, &request.path, &request.request_key);
@@ -55,6 +56,7 @@ pub async fn load_pull_request_file_content_flow(
                 file_content_loaded,
                 already_loaded,
                 existing_local_repo_status,
+                skip_local_checkout,
             ))
         })
         .ok()
@@ -69,6 +71,7 @@ pub async fn load_pull_request_file_content_flow(
         file_content_loaded,
         already_loaded,
         existing_local_repo_status,
+        skip_local_checkout,
     )) = request
     else {
         return;
@@ -113,10 +116,11 @@ pub async fn load_pull_request_file_content_flow(
                     file_state.loading = true;
                     file_state.error = None;
                 }
-                detail_state.local_repository_loading = existing_local_repo_status
-                    .as_ref()
-                    .map(|status| !status.ready_for_snapshot_features())
-                    .unwrap_or(true);
+                detail_state.local_repository_loading = !skip_local_checkout
+                    && existing_local_repo_status
+                        .as_ref()
+                        .map(|status| !status.ready_for_snapshot_features())
+                        .unwrap_or(true);
                 detail_state.local_repository_error = None;
             }
 
@@ -124,55 +128,156 @@ pub async fn load_pull_request_file_content_flow(
         })
         .ok();
 
-    let local_repo_result = if let Some(status) = existing_local_repo_status
-        .clone()
-        .filter(|status| status.ready_for_snapshot_features())
-    {
-        Ok(status)
+    let (local_repo_status, local_repo_error, load_result) = if skip_local_checkout {
+        log_checkout_flow_event(
+            &detail,
+            format!(
+                "diff file-content local checkout skipped for screenshot mode; path={}",
+                request.path
+            ),
+        );
+
+        let load_result = if need_file_content {
+            let load_result = cx
+                .background_executor()
+                .spawn({
+                    let cache = cache.clone();
+                    let repository = detail.repository.clone();
+                    let path = request.path.clone();
+                    let reference = request.reference.clone();
+                    async move {
+                        github::load_pull_request_file_content(
+                            &cache,
+                            &repository,
+                            &reference,
+                            &path,
+                        )
+                    }
+                })
+                .await;
+            log_document_result(
+                &detail,
+                "diff file-content final document",
+                &request.path,
+                &request.reference,
+                &load_result,
+            );
+            Some(load_result)
+        } else {
+            log_checkout_flow_event(
+                &detail,
+                format!(
+                    "diff file-content document skipped; path={}; request_key already loaded",
+                    request.path
+                ),
+            );
+            None
+        };
+        (None, None, load_result)
     } else {
-        cx.background_executor()
-            .spawn({
-                let cache = cache.clone();
-                let repository = detail.repository.clone();
-                let pull_request_number = detail.number;
-                let head_ref_oid = detail.head_ref_oid.clone();
-                async move {
-                    local_repo::load_or_prepare_local_repository_for_pull_request(
-                        &cache,
-                        &repository,
-                        pull_request_number,
-                        head_ref_oid.as_deref(),
-                    )
+        let local_repo_result = if let Some(status) = existing_local_repo_status
+            .clone()
+            .filter(|status| status.ready_for_snapshot_features())
+        {
+            Ok(status)
+        } else {
+            cx.background_executor()
+                .spawn({
+                    let cache = cache.clone();
+                    let repository = detail.repository.clone();
+                    let pull_request_number = detail.number;
+                    let head_ref_oid = detail.head_ref_oid.clone();
+                    async move {
+                        local_repo::load_or_prepare_local_repository_for_pull_request(
+                            &cache,
+                            &repository,
+                            pull_request_number,
+                            head_ref_oid.as_deref(),
+                        )
+                    }
+                })
+                .await
+        };
+        log_local_repo_result(&detail, "diff file-content flow", &local_repo_result);
+
+        let local_repo_status = local_repo_result.as_ref().ok().cloned();
+        let local_repo_error = local_repo_result
+            .as_ref()
+            .ok()
+            .and_then(|status| {
+                if status.ready_for_snapshot_features() {
+                    None
+                } else {
+                    Some(status.message.clone())
                 }
             })
-            .await
-    };
-    log_local_repo_result(&detail, "diff file-content flow", &local_repo_result);
+            .or_else(|| local_repo_result.as_ref().err().cloned());
 
-    let local_repo_status = local_repo_result.as_ref().ok().cloned();
-    let local_repo_error = local_repo_result
-        .as_ref()
-        .ok()
-        .and_then(|status| {
-            if status.ready_for_snapshot_features() {
-                None
+        let load_result = if need_file_content {
+            let local_load_result = if let Some(status) = local_repo_status.as_ref() {
+                if status.ready_for_snapshot_features() {
+                    if let Some(root) = status.path.as_deref() {
+                        log_checkout_flow_event(
+                            &detail,
+                            format!(
+                                "diff file-content local document load start; root={root}; path={}; local_reference={}; prefer_worktree={}",
+                                request.path,
+                                request.local_reference,
+                                request.prefer_worktree && status.should_prefer_worktree_contents(),
+                            ),
+                        );
+                        cx.background_executor()
+                            .spawn({
+                                let cache = cache.clone();
+                                let repository = detail.repository.clone();
+                                let path = request.path.clone();
+                                let reference = request.local_reference.clone();
+                                let prefer_worktree = request.prefer_worktree
+                                    && status.should_prefer_worktree_contents();
+                                let root = std::path::PathBuf::from(root);
+                                async move {
+                                    local_documents::load_local_repository_file_content(
+                                        &cache,
+                                        &repository,
+                                        &root,
+                                        &reference,
+                                        &path,
+                                        prefer_worktree,
+                                    )
+                                }
+                            })
+                            .await
+                    } else {
+                        Err(status.message.clone())
+                    }
+                } else {
+                    Err(local_repo_error
+                        .clone()
+                        .unwrap_or_else(|| "Local checkout is not ready yet.".to_string()))
+                }
             } else {
-                Some(status.message.clone())
-            }
-        })
-        .or_else(|| local_repo_result.as_ref().err().cloned());
+                Err(local_repo_error
+                    .clone()
+                    .unwrap_or_else(|| "Local checkout is not ready yet.".to_string()))
+            };
+            log_document_result(
+                &detail,
+                "diff file-content local document",
+                &request.path,
+                &request.local_reference,
+                &local_load_result,
+            );
 
-    let load_result = if need_file_content {
-        let local_load_result = if let Some(status) = local_repo_status.as_ref() {
-            if status.ready_for_snapshot_features() {
-                if let Some(root) = status.path.as_deref() {
+            let load_result = match local_load_result {
+                Ok(document) => Ok(document),
+                Err(local_error) => {
                     log_checkout_flow_event(
                         &detail,
                         format!(
-                            "diff file-content local document load start; root={root}; path={}; local_reference={}; prefer_worktree={}",
+                            "diff file-content GitHub fallback start; path={}; reference={}; local_error={}",
                             request.path,
-                            request.local_reference,
-                            request.prefer_worktree && status.should_prefer_worktree_contents(),
+                            request.reference,
+                            sanitize_checkout_log_text(&local_error),
                         ),
                     );
                     cx.background_executor()
@@ -180,90 +285,44 @@ pub async fn load_pull_request_file_content_flow(
                             let cache = cache.clone();
                             let repository = detail.repository.clone();
                             let path = request.path.clone();
-                            let reference = request.local_reference.clone();
-                            let prefer_worktree =
-                                request.prefer_worktree && status.should_prefer_worktree_contents();
-                            let root = std::path::PathBuf::from(root);
+                            let reference = request.reference.clone();
                             async move {
-                                local_documents::load_local_repository_file_content(
+                                github::load_pull_request_file_content(
                                     &cache,
                                     &repository,
-                                    &root,
                                     &reference,
                                     &path,
-                                    prefer_worktree,
                                 )
+                                .map_err(|github_error| {
+                                    format!(
+                                        "{local_error}\nGitHub fallback also failed for {repository}@{reference}:{path}: {github_error}"
+                                    )
+                                })
                             }
                         })
                         .await
-                } else {
-                    Err(status.message.clone())
                 }
-            } else {
-                Err(local_repo_error
-                    .clone()
-                    .unwrap_or_else(|| "Local checkout is not ready yet.".to_string()))
-            }
+            };
+            log_document_result(
+                &detail,
+                "diff file-content final document",
+                &request.path,
+                &request.reference,
+                &load_result,
+            );
+            Some(load_result)
         } else {
-            Err(local_repo_error
-                .clone()
-                .unwrap_or_else(|| "Local checkout is not ready yet.".to_string()))
+            log_checkout_flow_event(
+                &detail,
+                format!(
+                    "diff file-content document skipped; path={}; request_key already loaded",
+                    request.path
+                ),
+            );
+            None
         };
-        log_document_result(
-            &detail,
-            "diff file-content local document",
-            &request.path,
-            &request.local_reference,
-            &local_load_result,
-        );
 
-        let load_result = match local_load_result {
-            Ok(document) => Ok(document),
-            Err(local_error) => {
-                log_checkout_flow_event(
-                    &detail,
-                    format!(
-                        "diff file-content GitHub fallback start; path={}; reference={}; local_error={}",
-                        request.path,
-                        request.reference,
-                        sanitize_checkout_log_text(&local_error),
-                    ),
-                );
-                cx.background_executor()
-                    .spawn({
-                    let cache = cache.clone();
-                    let repository = detail.repository.clone();
-                    let path = request.path.clone();
-                    let reference = request.reference.clone();
-                    async move {
-                        github::load_pull_request_file_content(&cache, &repository, &reference, &path)
-                            .map_err(|github_error| {
-                                format!(
-                                    "{local_error}\nGitHub fallback also failed for {repository}@{reference}:{path}: {github_error}"
-                                )
-                            })
-                    }
-                })
-                .await
-            }
-        };
-        log_document_result(
-            &detail,
-            "diff file-content final document",
-            &request.path,
-            &request.reference,
-            &load_result,
-        );
-        Some(load_result)
-    } else {
-        log_checkout_flow_event(
-            &detail,
-            format!(
-                "diff file-content document skipped; path={}; request_key already loaded",
-                request.path
-            ),
-        );
-        None
+        (local_repo_status, local_repo_error, load_result)
     };
 
     let prepared_result = load_result.map(|load_result| {
