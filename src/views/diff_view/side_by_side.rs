@@ -399,6 +399,12 @@ fn render_normal_side_by_side_cell(
         .unwrap_or(false);
     let line_entry =
         line_index.and_then(|line_index| hunk.lines.get(line_index).map(|line| (line_index, line)));
+    let (row_bg, gutter_bg) = line_entry
+        .map(|(_, line)| {
+            let (row_bg, gutter_bg, _, _) = diff_line_palette(&line.kind);
+            (row_bg, gutter_bg)
+        })
+        .unwrap_or_else(|| (diff_context_bg(), diff_context_gutter_bg()));
     let cell_min_width = column_width.max(side_by_side_cell_min_width(
         gutter_layout,
         line_entry.map(|(_, line)| line.content.as_str()),
@@ -452,6 +458,9 @@ fn render_normal_side_by_side_cell(
 
     render_side_by_side_cell_container(
         side,
+        gutter_layout,
+        row_bg,
+        gutter_bg,
         row_scroll_key,
         scroll_handle,
         content,
@@ -551,6 +560,12 @@ fn render_structural_side_by_side_cell(
         cell.map(|cell| cell.line.content.as_str()),
         wrap_diff_lines,
     ));
+    let (row_bg, gutter_bg) = cell
+        .map(|cell| {
+            let (row_bg, gutter_bg, _, _) = diff_line_palette(&cell.line.kind);
+            (row_bg, gutter_bg)
+        })
+        .unwrap_or_else(|| (diff_context_bg(), diff_context_gutter_bg()));
     let content = cell
         .map(|cell| {
             let emphasis_ranges = if DIFF_INLINE_EMPHASIS_ENABLED {
@@ -605,6 +620,9 @@ fn render_structural_side_by_side_cell(
 
     render_side_by_side_cell_container(
         side,
+        gutter_layout,
+        row_bg,
+        gutter_bg,
         row_scroll_key,
         scroll_handle,
         content,
@@ -615,6 +633,9 @@ fn render_structural_side_by_side_cell(
 
 fn render_side_by_side_cell_container(
     side: SideBySideDiffSide,
+    gutter_layout: DiffGutterLayout,
+    row_bg: Rgba,
+    gutter_bg: Rgba,
     row_scroll_key: &str,
     scroll_handle: &ScrollHandle,
     content: AnyElement,
@@ -635,9 +656,12 @@ fn render_side_by_side_cell_container(
     };
 
     div()
+        .relative()
         .flex_1()
         .min_w_0()
         .overflow_hidden()
+        .bg(row_bg)
+        .child(render_diff_gutter_backdrop(gutter_layout, gutter_bg))
         .when(side == SideBySideDiffSide::Left, |el| {
             el.border_r(px(1.0)).border_color(diff_gutter_separator())
         })
@@ -690,9 +714,6 @@ fn render_empty_side_by_side_cell(
                     .flex_shrink_0()
                     .w(px(gutter_layout.gutter_width()))
                     .min_h(diff_row_height_px())
-                    .bg(diff_context_gutter_bg())
-                    .border_r(px(1.0))
-                    .border_color(diff_gutter_separator())
                     .when(gutter_layout.reserve_source_slot, |el| {
                         el.child(div().w(diff_source_slot_width_px()).h_full())
                     })
@@ -703,6 +724,7 @@ fn render_empty_side_by_side_cell(
                         div()
                             .w(px(diff_line_number_column_width()))
                             .px(px(DIFF_LINE_NUMBER_CELL_PADDING_X))
+                            .py(px(1.0))
                             .flex()
                             .justify_end()
                             .text_size(diff_line_number_font_size_px())

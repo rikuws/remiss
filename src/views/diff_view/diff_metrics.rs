@@ -314,27 +314,7 @@ pub(super) fn render_diff_line(
         )),
     );
 
-    let (row_bg, gutter_bg, marker_color, fallback_text_color) = match line.kind {
-        DiffLineKind::Addition => (diff_add_bg(), diff_add_gutter_bg(), success(), fg_default()),
-        DiffLineKind::Deletion => (
-            diff_remove_bg(),
-            diff_remove_gutter_bg(),
-            danger(),
-            fg_default(),
-        ),
-        DiffLineKind::Meta => (
-            diff_meta_bg(),
-            diff_context_gutter_bg(),
-            fg_subtle(),
-            fg_muted(),
-        ),
-        DiffLineKind::Context => (
-            diff_context_bg(),
-            diff_context_gutter_bg(),
-            fg_subtle(),
-            fg_default(),
-        ),
-    };
+    let (row_bg, gutter_bg, marker_color, fallback_text_color) = diff_line_palette(&line.kind);
     let marker_visible = is_selected || force_marker_visible;
     let number_color = if is_selected {
         fg_default()
@@ -344,6 +324,7 @@ pub(super) fn render_diff_line(
 
     div()
         .id(row_id)
+        .relative()
         .flex()
         .w_full()
         .min_w(px(diff_line_min_width(
@@ -375,6 +356,7 @@ pub(super) fn render_diff_line(
         .when(is_selected && !selected_fill_visible, |el| {
             el.border_l(px(2.0)).border_color(diff_selected_edge())
         })
+        .child(render_diff_gutter_backdrop(gutter_layout, gutter_bg))
         .when_some(row_pointer_target, |el, (state, target)| {
             let move_state = state.clone();
             let move_target = target.clone();
@@ -442,9 +424,6 @@ pub(super) fn render_diff_line(
                 .flex_shrink_0()
                 .w(px(gutter_layout.gutter_width()))
                 .min_h(diff_row_height_px())
-                .bg(gutter_bg)
-                .border_r(px(1.0))
-                .border_color(diff_gutter_separator())
                 .when(gutter_layout.reserve_source_slot, |el| {
                     el.child(
                         div()
@@ -661,6 +640,7 @@ pub(super) fn render_diff_line(
                         div()
                             .w(px(diff_line_number_column_width()))
                             .px(px(DIFF_LINE_NUMBER_CELL_PADDING_X))
+                            .py(px(1.0))
                             .flex()
                             .justify_end()
                             .text_size(diff_line_number_font_size_px())
@@ -675,6 +655,7 @@ pub(super) fn render_diff_line(
                         div()
                             .w(px(diff_line_number_column_width()))
                             .px(px(DIFF_LINE_NUMBER_CELL_PADDING_X))
+                            .py(px(1.0))
                             .flex()
                             .justify_end()
                             .text_size(diff_line_number_font_size_px())
@@ -704,6 +685,45 @@ pub(super) fn render_diff_line(
             text_selection,
             wrap_diff_lines,
         ))
+}
+
+pub(super) fn diff_line_palette(kind: &DiffLineKind) -> (Rgba, Rgba, Rgba, Rgba) {
+    match kind {
+        DiffLineKind::Addition => (diff_add_bg(), diff_add_gutter_bg(), success(), fg_default()),
+        DiffLineKind::Deletion => (
+            diff_remove_bg(),
+            diff_remove_gutter_bg(),
+            danger(),
+            fg_default(),
+        ),
+        DiffLineKind::Meta => (
+            diff_meta_bg(),
+            diff_context_gutter_bg(),
+            fg_subtle(),
+            fg_muted(),
+        ),
+        DiffLineKind::Context => (
+            diff_context_bg(),
+            diff_context_gutter_bg(),
+            fg_subtle(),
+            fg_default(),
+        ),
+    }
+}
+
+pub(super) fn render_diff_gutter_backdrop(
+    gutter_layout: DiffGutterLayout,
+    gutter_bg: Rgba,
+) -> impl IntoElement {
+    div()
+        .absolute()
+        .top(px(0.0))
+        .bottom(px(0.0))
+        .left(px(0.0))
+        .w(px(gutter_layout.gutter_width()))
+        .bg(gutter_bg)
+        .border_r(px(1.0))
+        .border_color(diff_gutter_separator())
 }
 
 fn diff_source_action_key(target: &TempSourceTarget) -> String {

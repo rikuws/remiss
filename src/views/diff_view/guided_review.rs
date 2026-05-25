@@ -1708,14 +1708,23 @@ pub(super) fn render_local_review_empty_state(
     local_repo_error: Option<&str>,
 ) -> impl IntoElement {
     let state_for_refresh = state.clone();
+    let blocked = detail.title.starts_with("Local review blocked:");
     let title = if local_repo_loading {
         "Refreshing local review"
+    } else if blocked {
+        "Local review blocked"
     } else {
         "No local changes"
     };
     let message = local_repo_error
         .or_else(|| local_repo_status.map(|status| status.message.as_str()))
-        .unwrap_or("This checkout has no reviewable changes ahead of the selected base.");
+        .unwrap_or_else(|| {
+            if detail.body.trim().is_empty() {
+                "This checkout has no reviewable changes ahead of the selected base."
+            } else {
+                detail.body.as_str()
+            }
+        });
     let base = detail.base_ref_oid.as_deref().unwrap_or("unknown");
     let head = detail.head_ref_oid.as_deref().unwrap_or("unknown");
 

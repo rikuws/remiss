@@ -22,6 +22,10 @@ use crate::{
 
 const REMEMBERED_REPOSITORIES_KEY: &str = "local-review-repositories-v1";
 const LOCAL_REVIEW_GIT_TIMEOUT: Duration = Duration::from_secs(120);
+const LOCAL_REVIEW_MAX_CHANGED_FILES: usize = 400;
+const LOCAL_REVIEW_MAX_CHANGED_LINES: i64 = 30_000;
+const LOCAL_REVIEW_MAX_COMMITS: i64 = 250;
+const LOCAL_REVIEW_MAX_UNTRACKED_BYTES: u64 = 5 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -201,23 +205,36 @@ pub fn inspect_working_checkout(path: &Path, fetch: bool) -> Result<LocalReviewI
     let clean = worktree_is_clean(&root)?;
     let (base_ref_name, base_oid) = resolve_review_base(&root)?;
     let commits_count = rev_list_count(&root, &base_oid, &head_oid)?;
-    let raw_diff = if clean {
-        if commits_count == 0 {
-            String::new()
-        } else {
-            diff_between(&root, &base_oid, &head_oid)?
-        }
+    let untracked_paths = if clean {
+        Vec::new()
     } else {
-        diff_worktree(&root, &base_oid)?
+        untracked_paths(&root)?
     };
-    let key = local_review_key(
-        &repository,
-        &branch,
+    let diff_payload = build_local_review_diff(
+        &root,
+        clean,
+        &base_ref_name,
         &base_oid,
-        &local_review_head_identity(&head_oid, clean, &raw_diff),
-    );
+        &head_oid,
+        commits_count,
+        &untracked_paths,
+    )?;
+    let (raw_diff, blocked_message, head_identity) = match diff_payload {
+        LocalReviewDiffPayload::Loaded { raw_diff, identity } => (raw_diff, None, identity),
+        LocalReviewDiffPayload::Blocked { message, identity } => {
+            (String::new(), Some(message), identity)
+        }
+    };
+    let key = local_review_key(&repository, &branch, &base_oid, &head_identity);
 
-    let (status, message, parsed_diff, files) = if raw_diff.trim().is_empty() {
+    let (status, message, parsed_diff, files) = if let Some(message) = blocked_message {
+        (
+            LocalReviewStatusKind::Blocked,
+            message,
+            Vec::new(),
+            Vec::new(),
+        )
+    } else if raw_diff.trim().is_empty() {
         (
             LocalReviewStatusKind::NoDiff,
             if clean {
@@ -252,7 +269,7 @@ pub fn inspect_working_checkout(path: &Path, fetch: bool) -> Result<LocalReviewI
         expected_head_oid: Some(head_oid.clone()),
         matches_expected_head: true,
         is_worktree_clean: clean,
-        ready_for_local_features: true,
+        ready_for_local_features: status != LocalReviewStatusKind::Blocked,
         message: message.clone(),
     };
     let detail = synthetic_detail(SyntheticDetailInput {
@@ -519,17 +536,17 @@ fn worktree_is_clean(path: &Path) -> Result<bool, String> {
 }
 
 fn resolve_review_base(path: &Path) -> Result<(String, String), String> {
-    if let Some(upstream) = upstream_ref(path)? {
-        if let Some(base_oid) = merge_base(path, &upstream, "HEAD")? {
-            return Ok((upstream, base_oid));
+    for candidate in default_branch_candidates(path)? {
+        if verify_commit(path, &candidate)? {
+            if let Some(base_oid) = review_base_oid(path, &candidate, "HEAD")? {
+                return Ok((candidate, base_oid));
+            }
         }
     }
 
-    for candidate in default_branch_candidates(path)? {
-        if verify_commit(path, &candidate)? {
-            if let Some(base_oid) = merge_base(path, &candidate, "HEAD")? {
-                return Ok((candidate, base_oid));
-            }
+    if let Some(upstream) = upstream_ref(path)? {
+        if let Some(base_oid) = review_base_oid(path, &upstream, "HEAD")? {
+            return Ok((upstream, base_oid));
         }
     }
 
@@ -616,21 +633,359 @@ fn merge_base(path: &Path, left: &str, right: &str) -> Result<Option<String>, St
     }
 }
 
+fn fork_point(path: &Path, reference: &str, head: &str) -> Result<Option<String>, String> {
+    let output = run_git(path, ["merge-base", "--fork-point", reference, head])?;
+    if output.exit_code != Some(0) {
+        return Ok(None);
+    }
+
+    let base = output.stdout.trim();
+    if base.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(base.to_string()))
+    }
+}
+
+fn review_base_oid(path: &Path, reference: &str, head: &str) -> Result<Option<String>, String> {
+    if let Some(base_oid) = fork_point(path, reference, head)? {
+        return Ok(Some(base_oid));
+    }
+
+    merge_base(path, reference, head)
+}
+
 fn rev_list_count(path: &Path, base_oid: &str, head_oid: &str) -> Result<i64, String> {
     let range = format!("{base_oid}..{head_oid}");
     let output = run_git(path, ["rev-list", "--count", &range])?;
     if output.exit_code != Some(0) {
-        return Err(process_error(output, "Failed to count unpushed commits"));
+        return Err(process_error(
+            output,
+            "Failed to count local branch commits",
+        ));
     }
 
     output
         .stdout
         .trim()
         .parse::<i64>()
-        .map_err(|error| format!("Failed to parse unpushed commit count: {error}"))
+        .map_err(|error| format!("Failed to parse local branch commit count: {error}"))
 }
 
-fn diff_between(path: &Path, base_oid: &str, head_oid: &str) -> Result<String, String> {
+enum LocalReviewDiffPayload {
+    Loaded { raw_diff: String, identity: String },
+    Blocked { message: String, identity: String },
+}
+
+#[derive(Clone, Debug, Default)]
+struct LocalReviewDiffMetrics {
+    commits_count: i64,
+    changed_files: usize,
+    additions: i64,
+    deletions: i64,
+    binary_files: usize,
+    untracked_files: usize,
+    untracked_bytes: u64,
+    metadata_truncated: bool,
+}
+
+impl LocalReviewDiffMetrics {
+    fn changed_lines(&self) -> i64 {
+        self.additions.saturating_add(self.deletions)
+    }
+
+    fn identity_source(&self) -> String {
+        format!(
+            "commits:{};files:{};additions:{};deletions:{};binary:{};untracked:{};untracked_bytes:{};truncated:{}",
+            self.commits_count,
+            self.changed_files,
+            self.additions,
+            self.deletions,
+            self.binary_files,
+            self.untracked_files,
+            self.untracked_bytes,
+            self.metadata_truncated
+        )
+    }
+}
+
+enum DiffTextLoad {
+    Loaded(String),
+    Truncated,
+}
+
+fn build_local_review_diff(
+    path: &Path,
+    clean: bool,
+    base_ref_name: &str,
+    base_oid: &str,
+    head_oid: &str,
+    commits_count: i64,
+    untracked_paths: &[String],
+) -> Result<LocalReviewDiffPayload, String> {
+    let metrics = if clean {
+        diff_metrics_between(path, base_oid, head_oid, commits_count)?
+    } else {
+        diff_metrics_worktree(path, base_oid, commits_count, untracked_paths)?
+    };
+    let metrics_identity = metrics.identity_source();
+    let identity = if clean {
+        head_oid.to_string()
+    } else {
+        format!("{head_oid}:worktree-{}", short_hash(&metrics_identity))
+    };
+
+    if let Some(message) = local_review_diff_limit_message(clean, base_ref_name, &metrics) {
+        return Ok(LocalReviewDiffPayload::Blocked { message, identity });
+    }
+
+    let raw_diff = if clean {
+        if commits_count == 0 {
+            String::new()
+        } else {
+            match diff_between(path, base_oid, head_oid)? {
+                DiffTextLoad::Loaded(raw_diff) => raw_diff,
+                DiffTextLoad::Truncated => {
+                    return Ok(LocalReviewDiffPayload::Blocked {
+                        message: local_review_diff_truncated_message(clean, base_ref_name),
+                        identity,
+                    });
+                }
+            }
+        }
+    } else {
+        match diff_worktree(path, base_oid, untracked_paths)? {
+            DiffTextLoad::Loaded(raw_diff) => raw_diff,
+            DiffTextLoad::Truncated => {
+                return Ok(LocalReviewDiffPayload::Blocked {
+                    message: local_review_diff_truncated_message(clean, base_ref_name),
+                    identity,
+                });
+            }
+        }
+    };
+    let identity = if clean {
+        identity
+    } else {
+        local_review_head_identity(head_oid, clean, &raw_diff)
+    };
+
+    Ok(LocalReviewDiffPayload::Loaded { raw_diff, identity })
+}
+
+fn diff_metrics_between(
+    path: &Path,
+    base_oid: &str,
+    head_oid: &str,
+    commits_count: i64,
+) -> Result<LocalReviewDiffMetrics, String> {
+    let mut metrics = LocalReviewDiffMetrics {
+        commits_count,
+        ..Default::default()
+    };
+    apply_diff_name_count(
+        &mut metrics,
+        run_git(
+            path,
+            [
+                "diff",
+                "--name-only",
+                "-z",
+                "--find-renames",
+                "--find-copies",
+                base_oid,
+                head_oid,
+            ],
+        )?,
+        "Failed to count local review changed files",
+    )?;
+    apply_diff_numstat(
+        &mut metrics,
+        run_git(
+            path,
+            [
+                "diff",
+                "--numstat",
+                "--find-renames",
+                "--find-copies",
+                base_oid,
+                head_oid,
+            ],
+        )?,
+        "Failed to measure local review diff",
+    )?;
+    Ok(metrics)
+}
+
+fn diff_metrics_worktree(
+    path: &Path,
+    base_oid: &str,
+    commits_count: i64,
+    untracked_paths: &[String],
+) -> Result<LocalReviewDiffMetrics, String> {
+    let mut metrics = LocalReviewDiffMetrics {
+        commits_count,
+        ..Default::default()
+    };
+    apply_diff_name_count(
+        &mut metrics,
+        run_git(
+            path,
+            [
+                "diff",
+                "--name-only",
+                "-z",
+                "--find-renames",
+                "--find-copies",
+                base_oid,
+                "--",
+            ],
+        )?,
+        "Failed to count local review changed files",
+    )?;
+    apply_diff_numstat(
+        &mut metrics,
+        run_git(
+            path,
+            [
+                "diff",
+                "--numstat",
+                "--find-renames",
+                "--find-copies",
+                base_oid,
+                "--",
+            ],
+        )?,
+        "Failed to measure local review diff",
+    )?;
+
+    metrics.untracked_files = untracked_paths.len();
+    metrics.changed_files = metrics
+        .changed_files
+        .saturating_add(metrics.untracked_files);
+    let root = path;
+    metrics.untracked_bytes = untracked_paths
+        .iter()
+        .filter_map(|relative_path| fs::metadata(root.join(relative_path)).ok())
+        .filter(|metadata| metadata.is_file())
+        .map(|metadata| metadata.len())
+        .sum();
+    Ok(metrics)
+}
+
+fn apply_diff_name_count(
+    metrics: &mut LocalReviewDiffMetrics,
+    output: CommandOutput,
+    error_prefix: &str,
+) -> Result<(), String> {
+    if output.exit_code != Some(0) {
+        return Err(process_error(output, error_prefix));
+    }
+
+    metrics.changed_files = metrics
+        .changed_files
+        .saturating_add(count_nul_terminated_items(&output.stdout_bytes));
+    metrics.metadata_truncated |= output.stdout_truncated;
+    Ok(())
+}
+
+fn apply_diff_numstat(
+    metrics: &mut LocalReviewDiffMetrics,
+    output: CommandOutput,
+    error_prefix: &str,
+) -> Result<(), String> {
+    if output.exit_code != Some(0) {
+        return Err(process_error(output, error_prefix));
+    }
+
+    for line in output.stdout.lines() {
+        let mut fields = line.split('\t');
+        let additions = fields.next().unwrap_or_default();
+        let deletions = fields.next().unwrap_or_default();
+        if additions == "-" || deletions == "-" {
+            metrics.binary_files = metrics.binary_files.saturating_add(1);
+            continue;
+        }
+        metrics.additions = metrics
+            .additions
+            .saturating_add(additions.parse::<i64>().unwrap_or(0));
+        metrics.deletions = metrics
+            .deletions
+            .saturating_add(deletions.parse::<i64>().unwrap_or(0));
+    }
+    metrics.metadata_truncated |= output.stdout_truncated;
+    Ok(())
+}
+
+fn count_nul_terminated_items(bytes: &[u8]) -> usize {
+    bytes
+        .split(|byte| *byte == 0)
+        .filter(|item| !item.is_empty())
+        .count()
+}
+
+fn local_review_diff_limit_message(
+    clean: bool,
+    base_ref_name: &str,
+    metrics: &LocalReviewDiffMetrics,
+) -> Option<String> {
+    let mut reasons = Vec::new();
+    if metrics.metadata_truncated {
+        reasons.push("diff metadata exceeded the local safety limit".to_string());
+    }
+    if metrics.commits_count > LOCAL_REVIEW_MAX_COMMITS {
+        reasons.push(format!("{} commits", metrics.commits_count));
+    }
+    if metrics.changed_files > LOCAL_REVIEW_MAX_CHANGED_FILES {
+        reasons.push(format!("{} files", metrics.changed_files));
+    }
+    if metrics.changed_lines() > LOCAL_REVIEW_MAX_CHANGED_LINES {
+        reasons.push(format!("{} changed lines", metrics.changed_lines()));
+    }
+    if metrics.untracked_bytes > LOCAL_REVIEW_MAX_UNTRACKED_BYTES {
+        reasons.push(format!(
+            "{} of untracked files",
+            format_bytes(metrics.untracked_bytes)
+        ));
+    }
+
+    if reasons.is_empty() {
+        None
+    } else {
+        let scope = if clean {
+            "branch diff"
+        } else {
+            "working checkout diff"
+        };
+        Some(format!(
+            "Local Changes did not load this {scope} because it is too large ({} from {}). Open a smaller topic branch or narrow the checkout before reviewing.",
+            reasons.join(", "),
+            base_ref_name
+        ))
+    }
+}
+
+fn local_review_diff_truncated_message(clean: bool, base_ref_name: &str) -> String {
+    let scope = if clean {
+        "branch diff"
+    } else {
+        "working checkout diff"
+    };
+    format!(
+        "Local Changes stopped loading this {scope} because the patch exceeded the local safety limit from {base_ref_name}. Open a smaller topic branch or narrow the checkout before reviewing."
+    )
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const MIB: u64 = 1024 * 1024;
+    if bytes >= MIB {
+        format!("{} MiB", bytes / MIB)
+    } else {
+        format!("{} KiB", (bytes + 1023) / 1024)
+    }
+}
+
+fn diff_between(path: &Path, base_oid: &str, head_oid: &str) -> Result<DiffTextLoad, String> {
     let output = run_git(
         path,
         [
@@ -645,11 +1000,18 @@ fn diff_between(path: &Path, base_oid: &str, head_oid: &str) -> Result<String, S
     if output.exit_code != Some(0) {
         return Err(process_error(output, "Failed to build local review diff"));
     }
+    if output.stdout_truncated {
+        return Ok(DiffTextLoad::Truncated);
+    }
 
-    Ok(command_stdout_text(&output))
+    Ok(DiffTextLoad::Loaded(command_stdout_text(&output)))
 }
 
-fn diff_worktree(path: &Path, base_oid: &str) -> Result<String, String> {
+fn diff_worktree(
+    path: &Path,
+    base_oid: &str,
+    untracked_paths: &[String],
+) -> Result<DiffTextLoad, String> {
     let output = run_git(
         path,
         [
@@ -667,13 +1029,19 @@ fn diff_worktree(path: &Path, base_oid: &str) -> Result<String, String> {
             "Failed to build local review working tree diff",
         ));
     }
-
-    let mut raw_diff = command_stdout_text(&output);
-    for untracked_path in untracked_paths(path)? {
-        append_diff(&mut raw_diff, &diff_untracked_file(path, &untracked_path)?);
+    if output.stdout_truncated {
+        return Ok(DiffTextLoad::Truncated);
     }
 
-    Ok(raw_diff)
+    let mut raw_diff = command_stdout_text(&output);
+    for untracked_path in untracked_paths {
+        match diff_untracked_file(path, untracked_path)? {
+            DiffTextLoad::Loaded(diff) => append_diff(&mut raw_diff, &diff),
+            DiffTextLoad::Truncated => return Ok(DiffTextLoad::Truncated),
+        }
+    }
+
+    Ok(DiffTextLoad::Loaded(raw_diff))
 }
 
 fn untracked_paths(path: &Path) -> Result<Vec<String>, String> {
@@ -697,13 +1065,13 @@ fn untracked_paths(path: &Path) -> Result<Vec<String>, String> {
         .collect()
 }
 
-fn diff_untracked_file(root: &Path, relative_path: &str) -> Result<String, String> {
+fn diff_untracked_file(root: &Path, relative_path: &str) -> Result<DiffTextLoad, String> {
     let full_path = root.join(relative_path);
     if fs::metadata(&full_path)
         .map(|metadata| metadata.is_dir())
         .unwrap_or(false)
     {
-        return Ok(String::new());
+        return Ok(DiffTextLoad::Loaded(String::new()));
     }
 
     let output = run_git(
@@ -718,7 +1086,8 @@ fn diff_untracked_file(root: &Path, relative_path: &str) -> Result<String, Strin
         ],
     )?;
     match output.exit_code {
-        Some(0) | Some(1) => Ok(command_stdout_text(&output)),
+        Some(0) | Some(1) if output.stdout_truncated => Ok(DiffTextLoad::Truncated),
+        Some(0) | Some(1) => Ok(DiffTextLoad::Loaded(command_stdout_text(&output))),
         _ => Err(process_error(
             output,
             "Failed to build local review diff for untracked file",
@@ -925,6 +1294,7 @@ mod tests {
     use super::{
         inspect_working_checkout, normalized_remote_repository, reusable_local_repository_status,
         upsert_remembered_repository, LocalReviewStatusKind, RememberedLocalRepository,
+        LOCAL_REVIEW_MAX_CHANGED_FILES,
     };
 
     struct GitFixture {
@@ -996,6 +1366,31 @@ mod tests {
             run_git(
                 &self.root,
                 ["update-ref", "refs/remotes/origin/main", "HEAD"],
+            );
+        }
+
+        fn push_branch(&self, branch: &str) {
+            run_git(
+                &self.root,
+                ["remote", "set-url", "origin", self.remote.to_str().unwrap()],
+            );
+            run_git(&self.root, ["push", "-u", "origin", branch]);
+            run_git(
+                &self.root,
+                [
+                    "remote",
+                    "set-url",
+                    "origin",
+                    "git@github.com:openai/example.git",
+                ],
+            );
+            run_git(
+                &self.root,
+                [
+                    "update-ref",
+                    &format!("refs/remotes/origin/{branch}"),
+                    "HEAD",
+                ],
             );
         }
 
@@ -1107,6 +1502,54 @@ mod tests {
         assert_eq!(inspection.status, LocalReviewStatusKind::Ready);
         assert_eq!(inspection.base_ref_name, "origin/main");
         assert_eq!(inspection.base_oid, base);
+    }
+
+    #[test]
+    fn reviews_pushed_feature_branch_against_default_branch_base() {
+        let fixture = GitFixture::new("openai/example");
+        fixture.set_file("src/lib.rs", "pub fn value() -> i32 { 1 }\n");
+        let base = fixture.commit_all("initial");
+        fixture.push_main();
+        fixture.checkout_branch("feature");
+        fixture.set_file("src/lib.rs", "pub fn value() -> i32 { 2 }\n");
+        let head = fixture.commit_all("feature");
+        fixture.push_branch("feature");
+
+        let inspection = inspect_working_checkout(&fixture.root, false).expect("inspection");
+
+        assert_eq!(inspection.status, LocalReviewStatusKind::Ready);
+        assert_eq!(inspection.base_ref_name, "origin/main");
+        assert_eq!(inspection.base_oid, base);
+        assert_eq!(inspection.head_oid, head);
+        assert_eq!(inspection.commits_count, 1);
+        assert_eq!(inspection.detail.files.len(), 1);
+        assert_eq!(inspection.detail.files[0].path, "src/lib.rs");
+    }
+
+    #[test]
+    fn blocks_large_branch_diff_before_loading_patch() {
+        let fixture = GitFixture::new("openai/example");
+        fixture.set_file("src/lib.rs", "pub fn value() -> i32 { 1 }\n");
+        fixture.commit_all("initial");
+        fixture.push_main();
+        fixture.checkout_branch("dev");
+        for index in 0..=LOCAL_REVIEW_MAX_CHANGED_FILES {
+            fixture.set_file(
+                &format!("generated/file-{index}.txt"),
+                &format!("generated {index}\n"),
+            );
+        }
+        fixture.commit_all("wide branch");
+
+        let inspection = inspect_working_checkout(&fixture.root, false).expect("inspection");
+
+        assert_eq!(inspection.status, LocalReviewStatusKind::Blocked);
+        assert_eq!(inspection.base_ref_name, "origin/main");
+        assert!(inspection.detail.files.is_empty());
+        assert!(inspection.detail.raw_diff.is_empty());
+        assert!(!inspection.local_repository_status.ready_for_local_features);
+        assert!(inspection.message.contains("too large"));
+        assert!(inspection.message.contains("401 files"));
     }
 
     #[test]
