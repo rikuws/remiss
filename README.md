@@ -102,7 +102,7 @@ REMISS_ENABLE_SPARKLE=0 ./scripts/build-app.sh
 ```
 
 Screenshot mode stages Remiss into a known demo review workspace, writes a
-`<output>.ready` marker when that screen has rendered, and leaves PNG capture to
-the platform script. It does not do baseline image comparison or visual diffing.
+`<output>.ready` marker when that screen has rendered, and leaves platform PNG
+capture to the helper scripts. It does not do baseline image comparison or visual diffing.
 On same-repository pull requests, the screenshot workflow also posts or updates a
 PR comment with links to the uploaded PNG artifacts.

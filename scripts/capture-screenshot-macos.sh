@@ -81,7 +81,26 @@ if [[ ! -f "$READY_FILE" ]]; then
 fi
 
 sleep 0.2
-screencapture -x "$OUTPUT"
+WINDOW_RECT="$(
+  osascript <<OSA 2>/dev/null || true
+tell application "System Events"
+  set remissProcesses to every process whose unix id is $PID
+  if (count of remissProcesses) is 0 then return ""
+  tell item 1 of remissProcesses
+    if (count of windows) is 0 then return ""
+    set windowPosition to position of window 1
+    set windowSize to size of window 1
+    return (item 1 of windowPosition as integer) & "," & (item 2 of windowPosition as integer) & "," & (item 1 of windowSize as integer) & "," & (item 2 of windowSize as integer)
+  end tell
+end tell
+OSA
+)"
+
+if [[ "$WINDOW_RECT" =~ ^-?[0-9]+,-?[0-9]+,[0-9]+,[0-9]+$ ]]; then
+  screencapture -x -R "$WINDOW_RECT" "$OUTPUT"
+else
+  screencapture -x "$OUTPUT"
+fi
 
 if [[ ! -s "$OUTPUT" ]]; then
   echo "Screenshot was not written: $OUTPUT" >&2

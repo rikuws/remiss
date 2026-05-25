@@ -80,6 +80,18 @@ jobs:
         shell: pwsh
         run: ./scripts/build-windows.ps1
 
+      - name: Set screenshot display
+        shell: pwsh
+        run: |
+          if (Get-Command Set-DisplayResolution -ErrorAction SilentlyContinue) {
+            Set-DisplayResolution -Width 1920 -Height 1200 -Force
+          } else {
+            Write-Warning "Set-DisplayResolution is not available on this runner."
+          }
+          Add-Type -AssemblyName System.Windows.Forms
+          $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          Write-Host "Primary display: $($bounds.Width)x$($bounds.Height)"
+
       - name: Capture review workspace
         shell: pwsh
         run: |
