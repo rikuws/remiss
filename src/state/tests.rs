@@ -116,18 +116,20 @@ fn active_diff_vim_targets_follow_mouse_hovered_file() {
     let cache = temp_cache_store("diff-vim-hover-file");
     let mut state = AppState::new(cache, StartupWizardOptions::force_welcome());
     let detail_key = "org/repo#1".to_string();
-    let mut detail_state = DetailState::default();
-    detail_state.snapshot = Some(PullRequestDetailSnapshot {
-        auth: AuthState {
-            is_authenticated: true,
-            active_login: Some("you".to_string()),
-            active_hostname: Some("github.com".to_string()),
-            message: String::new(),
-        },
-        loaded_from_cache: false,
-        fetched_at_ms: None,
-        detail: Some(detail_with_threads(Vec::new())),
-    });
+    let detail_state = DetailState {
+        snapshot: Some(PullRequestDetailSnapshot {
+            auth: AuthState {
+                is_authenticated: true,
+                active_login: Some("you".to_string()),
+                active_hostname: Some("github.com".to_string()),
+                message: String::new(),
+            },
+            loaded_from_cache: false,
+            fetched_at_ms: None,
+            detail: Some(detail_with_threads(Vec::new())),
+        }),
+        ..Default::default()
+    };
     state.active_surface = PullRequestSurface::Files;
     state.active_pr_key = Some(detail_key.clone());
     state.detail_states.insert(detail_key, detail_state);
