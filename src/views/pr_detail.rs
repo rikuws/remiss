@@ -2131,11 +2131,12 @@ mod tests {
 
     use super::{
         activity_markdown_preview, apply_submitted_review_to_detail,
-        automation_activity_needs_attention, humanize_review_state, is_automation_actor,
-        participant_display_name, summarize_commit_freshness, summarize_feedback_preview,
-        summarize_own_pr_feedback, summarize_participants, summarize_recent_activity,
-        summarize_review_status, ActivityItem, ActivityItemKind, ACTIVITY_MARKDOWN_PREVIEW_LIMIT,
+        automation_activity_needs_attention, humanize_review_state, participant_display_name,
+        summarize_commit_freshness, summarize_feedback_preview, summarize_own_pr_feedback,
+        summarize_participants, summarize_recent_activity, summarize_review_status, ActivityItem,
+        ActivityItemKind, ACTIVITY_MARKDOWN_PREVIEW_LIMIT,
     };
+    use crate::actors::is_automation_actor;
     use crate::github::{
         PullRequestComment, PullRequestCommit, PullRequestDetail, PullRequestFile,
         PullRequestReview, PullRequestReviewComment, PullRequestReviewThread, ReviewAction,

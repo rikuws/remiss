@@ -31,6 +31,7 @@
     clippy::useless_vec
 )]
 
+mod actors;
 mod agents;
 mod app_assets;
 mod app_http;

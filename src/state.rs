@@ -25,8 +25,12 @@ use crate::review_ai::{
 };
 use crate::review_brief::ReviewBrief;
 use crate::review_filters::{
-    load_muted_repositories, load_pull_request_filter_settings, save_muted_repositories,
-    save_pull_request_filter_settings, PullRequestFilterScope, PullRequestFilterSettings,
+    load_muted_repositories, load_overview_comment_filter_settings,
+    load_overview_review_filter_settings, load_pull_request_filter_settings,
+    save_muted_repositories, save_overview_comment_filter_settings,
+    save_overview_review_filter_settings, save_pull_request_filter_settings,
+    OverviewCommentFilterSettings, OverviewCommentFilterToggle, OverviewReviewFilterSettings,
+    OverviewReviewFilterToggle, PullRequestFilterScope, PullRequestFilterSettings,
     PullRequestFilterToggle,
 };
 use crate::review_partner::{GeneratedReviewPartnerContext, ReviewPartnerFocusTarget};
@@ -912,6 +916,12 @@ pub struct ProjectShaderPickerState {
     pub label: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OverviewPanelFilterTarget {
+    ReviewRequests,
+    Comments,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct OnboardingRouteSnapshot {
     pub active_section: SectionId,
@@ -941,6 +951,9 @@ pub struct AppState {
     pub pull_request_filter_creator_scope: Option<PullRequestFilterScope>,
     pub pull_request_filter_preset_name: String,
     pub pull_request_filter_message: Option<String>,
+    pub overview_comment_filter_settings: OverviewCommentFilterSettings,
+    pub overview_review_filter_settings: OverviewReviewFilterSettings,
+    pub overview_panel_filter_target: Option<OverviewPanelFilterTarget>,
     pub project_shader_settings: ProjectShaderSettings,
     pub project_shader_settings_error: Option<String>,
     pub project_shader_picker: Option<ProjectShaderPickerState>,
@@ -1108,6 +1121,20 @@ impl AppState {
                 PullRequestFilterSettings::default()
             }
         };
+        let overview_comment_filter_settings = match load_overview_comment_filter_settings(&cache) {
+            Ok(settings) => settings,
+            Err(error) => {
+                eprintln!("Failed to load overview comment filters: {error}");
+                OverviewCommentFilterSettings::default()
+            }
+        };
+        let overview_review_filter_settings = match load_overview_review_filter_settings(&cache) {
+            Ok(settings) => settings,
+            Err(error) => {
+                eprintln!("Failed to load overview review filters: {error}");
+                OverviewReviewFilterSettings::default()
+            }
+        };
         let (project_shader_settings, project_shader_settings_error) =
             match load_project_shader_settings(&cache) {
                 Ok(settings) => (settings, None),
@@ -1139,6 +1166,9 @@ impl AppState {
             pull_request_filter_creator_scope: None,
             pull_request_filter_preset_name: String::new(),
             pull_request_filter_message: None,
+            overview_comment_filter_settings,
+            overview_review_filter_settings,
+            overview_panel_filter_target: None,
             project_shader_settings,
             project_shader_settings_error,
             project_shader_picker: None,
@@ -1543,7 +1573,38 @@ impl AppState {
         self.persist_pull_request_filter_settings();
     }
 
+    pub fn toggle_overview_panel_filter(&mut self, target: OverviewPanelFilterTarget) {
+        self.close_pull_request_filter_dialog();
+        self.overview_panel_filter_target =
+            (self.overview_panel_filter_target != Some(target)).then_some(target);
+    }
+
+    pub fn close_overview_panel_filter(&mut self) {
+        self.overview_panel_filter_target = None;
+    }
+
+    pub fn toggle_overview_comment_filter(&mut self, toggle: OverviewCommentFilterToggle) {
+        self.overview_comment_filter_settings.toggle(toggle);
+        self.persist_overview_comment_filter_settings();
+    }
+
+    pub fn reset_overview_comment_filter(&mut self) {
+        self.overview_comment_filter_settings.reset();
+        self.persist_overview_comment_filter_settings();
+    }
+
+    pub fn toggle_overview_review_filter(&mut self, toggle: OverviewReviewFilterToggle) {
+        self.overview_review_filter_settings.toggle(toggle);
+        self.persist_overview_review_filter_settings();
+    }
+
+    pub fn reset_overview_review_filter(&mut self) {
+        self.overview_review_filter_settings.reset();
+        self.persist_overview_review_filter_settings();
+    }
+
     pub fn open_pull_request_filter_dialog(&mut self, scope: PullRequestFilterScope) {
+        self.close_overview_panel_filter();
         self.pull_request_filter_dialog_scope = Some(scope);
         self.pull_request_filter_message = None;
     }
@@ -1603,6 +1664,24 @@ impl AppState {
             &self.pull_request_filter_settings,
         ) {
             eprintln!("Failed to save pull request filters: {error}");
+        }
+    }
+
+    fn persist_overview_comment_filter_settings(&self) {
+        if let Err(error) = save_overview_comment_filter_settings(
+            self.cache.as_ref(),
+            &self.overview_comment_filter_settings,
+        ) {
+            eprintln!("Failed to save overview comment filters: {error}");
+        }
+    }
+
+    fn persist_overview_review_filter_settings(&self) {
+        if let Err(error) = save_overview_review_filter_settings(
+            self.cache.as_ref(),
+            &self.overview_review_filter_settings,
+        ) {
+            eprintln!("Failed to save overview review filters: {error}");
         }
     }
 

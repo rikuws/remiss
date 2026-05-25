@@ -15,10 +15,10 @@ use super::super::tooltips::build_static_tooltip;
 use super::{error_text, subtle_pill};
 
 #[derive(Clone, Copy)]
-struct FilterCriterion {
-    label: &'static str,
-    active: bool,
-    toggle: PullRequestFilterToggle,
+pub(super) struct FilterCriterion {
+    pub label: &'static str,
+    pub active: bool,
+    pub toggle: PullRequestFilterToggle,
     visible: bool,
 }
 
@@ -345,7 +345,7 @@ fn render_criteria(
         )
 }
 
-fn filter_criteria(filter: &PullRequestFilter, has_muted: bool) -> Vec<FilterCriterion> {
+pub(super) fn filter_criteria(filter: &PullRequestFilter, has_muted: bool) -> Vec<FilterCriterion> {
     [
         FilterCriterion::new(
             "Trusted",

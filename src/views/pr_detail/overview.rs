@@ -1,3 +1,5 @@
+use crate::actors::is_automation_actor;
+
 use super::*;
 
 pub(super) fn render_overview_surface(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
@@ -1966,21 +1968,6 @@ fn activity_history_key(detail: &github::PullRequestDetail) -> String {
 
 fn review_snapshot_key(detail: &github::PullRequestDetail) -> String {
     format!("{}#{}", detail.repository, detail.number)
-}
-
-pub(super) fn is_automation_actor(login: &str) -> bool {
-    let login = login.trim().to_ascii_lowercase();
-    if login.is_empty() {
-        return false;
-    }
-
-    login.contains("[bot]")
-        || login.ends_with("-bot")
-        || login.ends_with("bot")
-        || matches!(
-            login.as_str(),
-            "github-actions" | "dependabot" | "renovate" | "vercel" | "netlify" | "supabase"
-        )
 }
 
 pub(super) fn automation_activity_needs_attention(item: &ActivityItem) -> bool {

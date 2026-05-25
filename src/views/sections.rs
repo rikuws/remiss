@@ -1,10 +1,14 @@
 use gpui::prelude::*;
 use gpui::*;
 
+use crate::actors::is_automation_actor;
 use crate::github;
 use crate::icons::{lucide_icon, LucideIcon};
 use crate::review_filters::{
-    current_epoch_days, filter_pull_requests, PullRequestFilterContext, PullRequestFilterScope,
+    current_epoch_days, filter_overview_review_requests, filter_pull_requests,
+    OverviewCommentActorKind, OverviewCommentFilter, OverviewCommentFilterToggle,
+    OverviewCommentKind, OverviewReviewFilter, OverviewReviewFilterToggle,
+    PullRequestFilterContext, PullRequestFilterScope,
 };
 use crate::review_session::location_label;
 use crate::shader_surface::{OverviewShaderVariant, ShaderCornerMask};
@@ -13,6 +17,7 @@ use crate::theme::*;
 use crate::triage::{PullRequestTriageSignal, PullRequestTriageSignalKind};
 
 use super::settings::render_settings_view;
+use super::tooltips::build_static_tooltip;
 use super::workspace_sync::trigger_sync_workspace;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -58,42 +63,44 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
         .review_queue()
         .map(|q| q.items.clone())
         .unwrap_or_default();
-    let overview_filter_scope = PullRequestFilterScope::Overview;
-    let overview_filter = s
-        .pull_request_filter_settings
-        .current_filter(overview_filter_scope);
-    let overview_active_preset_ids = s
-        .pull_request_filter_settings
-        .active_preset_ids(overview_filter_scope);
-    let overview_presets = s
-        .pull_request_filter_settings
-        .presets(overview_filter_scope);
-    let unread_pr_keys = unread_pull_request_keys_for_filter(s, &overview_filter);
+    let overview_review_filter = s.overview_review_filter_settings.current_filter();
+    let unread_pr_keys = unread_pull_request_keys(s);
     let overview_filter_context = PullRequestFilterContext {
         muted_repositories: &s.muted_repos,
         unread_pr_keys: &unread_pr_keys,
         now_epoch_days: current_epoch_days(),
     };
-    let filtered_review_items =
-        filter_pull_requests(&review_items, &overview_filter, &overview_filter_context);
+    let filtered_review_items = filter_overview_review_requests(
+        &review_items,
+        &overview_review_filter,
+        &overview_filter_context,
+    );
     let filtered_review_count = filtered_review_items.len();
-    let overview_filter_labels = overview_filter.active_labels();
     let overview_hidden_count = review_items.len().saturating_sub(filtered_review_count);
-    let overview_filter_dialog_open =
-        s.pull_request_filter_dialog_scope == Some(overview_filter_scope);
+    let overview_filter_open =
+        s.overview_panel_filter_target == Some(OverviewPanelFilterTarget::ReviewRequests);
+    let any_overview_filter_open = s.overview_panel_filter_target.is_some();
     let workspace_loading = s.workspace_loading;
     let workspace_error = s.workspace_error.clone();
+    let comment_filter = s.overview_comment_filter_settings.current_filter();
     let comment_items = overview_pull_request_comment_items(&s);
+    let comment_bucket_has_unread = comment_items.iter().any(|item| item.unread);
+    let filtered_comment_items = filter_overview_comment_items(&comment_items, &comment_filter);
+    let filtered_comment_count = filtered_comment_items.len();
+    let comment_hidden_count = comment_items.len().saturating_sub(filtered_comment_count);
+    let comment_filter_open =
+        s.overview_panel_filter_target == Some(OverviewPanelFilterTarget::Comments);
 
     let welcome_greeting = overview_welcome_greeting(&viewer_name, is_auth);
     let state_for_pull_requests = state.clone();
     let state_for_review_requests = state.clone();
     let state_for_items = state.clone();
     let state_for_comments = state.clone();
+    let state_for_background = state.clone();
     let show_empty_state = is_auth
         && !workspace_loading
         && workspace_error.is_none()
-        && filtered_review_count == 0
+        && review_items.is_empty()
         && comment_items.is_empty();
 
     div()
@@ -107,6 +114,14 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
         .min_h_0()
         .h_full()
         .overflow_hidden()
+        .when(any_overview_filter_open, |el| {
+            el.on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                state_for_background.update(cx, |state, cx| {
+                    state.close_overview_panel_filter();
+                    cx.notify();
+                });
+            })
+        })
         .child(
             div().w_full().flex().justify_center().child(
                 overview_content_shell()
@@ -180,15 +195,6 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                     },
                                 )),
                         )
-                        .child(div().flex_shrink_0().child(render_pull_request_filter_bar(
-                            state,
-                            overview_filter_scope,
-                            overview_filter_labels.clone(),
-                            filtered_review_count,
-                            review_items.len(),
-                            overview_hidden_count,
-                            overview_filter_dialog_open,
-                        )))
                         .when(show_empty_state, |el| {
                             el.child(overview_empty_state_panel())
                         })
@@ -213,6 +219,13 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                             .child(overview_review_requests_panel(
                                                 filtered_review_items,
                                                 filtered_review_count as i64,
+                                                review_items.len(),
+                                                overview_hidden_count,
+                                                overview_review_filter.active_group_count(),
+                                                overview_filter_open,
+                                                overview_review_filter.clone(),
+                                                any_overview_filter_open,
+                                                !s.muted_repos.is_empty(),
                                                 workspace_loading,
                                                 workspace_error.clone(),
                                                 is_auth,
@@ -229,7 +242,14 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                             .flex_col()
                                             .gap(px(18.0))
                                             .child(overview_pull_request_comments_panel(
-                                                comment_items.clone(),
+                                                filtered_comment_items.clone(),
+                                                comment_items.len(),
+                                                comment_hidden_count,
+                                                comment_filter.active_group_count(),
+                                                comment_filter_open,
+                                                comment_filter.clone(),
+                                                any_overview_filter_open,
+                                                comment_bucket_has_unread,
                                                 workspace_loading,
                                                 workspace_error.clone(),
                                                 is_auth,
@@ -240,23 +260,6 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                         }),
                 ),
         )
-        .when(overview_filter_dialog_open, |el| {
-            el.child(render_pull_request_filter_dialog(
-                state,
-                overview_filter_scope,
-                overview_presets,
-                overview_active_preset_ids,
-                &overview_filter,
-                overview_filter_labels,
-                filtered_review_count,
-                review_items.len(),
-                overview_hidden_count,
-                !s.muted_repos.is_empty(),
-                s.pull_request_filter_creator_scope,
-                s.pull_request_filter_preset_name.clone(),
-                s.pull_request_filter_message.clone(),
-            ))
-        })
 }
 
 fn overview_content_shell() -> Div {
@@ -268,6 +271,8 @@ struct OverviewReviewCommentItem {
     summary: github::PullRequestSummary,
     author_login: String,
     author_avatar_url: Option<String>,
+    actor_kind: OverviewCommentActorKind,
+    comment_kind: OverviewCommentKind,
     location: String,
     preview: String,
     timestamp: String,
@@ -391,19 +396,27 @@ fn overview_empty_state_panel() -> impl IntoElement {
 
 fn overview_pull_request_comments_panel(
     items: Vec<OverviewReviewCommentItem>,
+    total_count: usize,
+    hidden_count: usize,
+    filter_active_count: usize,
+    filter_open: bool,
+    filter: OverviewCommentFilter,
+    close_on_outside_click: bool,
+    bucket_has_unread: bool,
     workspace_loading: bool,
     workspace_error: Option<String>,
     is_auth: bool,
     state: Entity<AppState>,
 ) -> impl IntoElement {
     let comment_count = items.len() as i64;
-    let has_unread = items.iter().any(|item| item.unread);
+    let status = overview_filter_status_text(items.len(), total_count, hidden_count);
     let loading = "Checking pull request comments.";
     let empty = "No comments from others are waiting in the current workspace.";
     let unauthenticated = "Authenticate with gh to populate pull request comments.";
 
     panel().h_full().min_h_0().flex().flex_col().child(
         div()
+            .relative()
             .p(px(10.0))
             .flex_grow()
             .min_h_0()
@@ -412,12 +425,21 @@ fn overview_pull_request_comments_panel(
             .gap(px(8.0))
             .child(overview_group_header(
                 LucideIcon::MessageSquare,
-                if has_unread {
+                if bucket_has_unread {
                     "Unread comments"
                 } else {
                     "Comments"
                 },
                 comment_count,
+                Some(
+                    overview_panel_filter_button(
+                        &state,
+                        OverviewPanelFilterTarget::Comments,
+                        filter_active_count,
+                        filter_open,
+                    )
+                    .into_any_element(),
+                ),
             ))
             .when(workspace_loading, |el| el.child(panel_state_text(loading)))
             .when_some(workspace_error.clone(), |el, err| {
@@ -427,7 +449,11 @@ fn overview_pull_request_comments_panel(
                 !workspace_loading && workspace_error.is_none() && items.is_empty(),
                 |el| {
                     el.child(panel_state_text(if is_auth {
-                        empty
+                        if total_count > 0 {
+                            "No comments match these filters."
+                        } else {
+                            empty
+                        }
                     } else {
                         unauthenticated
                     }))
@@ -449,13 +475,31 @@ fn overview_pull_request_comments_panel(
                             .into_iter()
                             .map(|item| overview_review_comment_row(item, state.clone())),
                     ),
-            ),
+            )
+            .when(close_on_outside_click, |el| {
+                el.child(overview_filter_backdrop(&state))
+            })
+            .when(filter_open, |el| {
+                el.child(overview_comment_filter_dropdown(
+                    &state,
+                    filter,
+                    &status,
+                    filter_active_count,
+                ))
+            }),
     )
 }
 
 fn overview_review_requests_panel(
     review_items: Vec<github::PullRequestSummary>,
     review_count: i64,
+    total_count: usize,
+    hidden_count: usize,
+    filter_active_count: usize,
+    filter_open: bool,
+    filter: OverviewReviewFilter,
+    close_on_outside_click: bool,
+    has_muted: bool,
     workspace_loading: bool,
     workspace_error: Option<String>,
     is_auth: bool,
@@ -464,9 +508,11 @@ fn overview_review_requests_panel(
     let visible_count = review_items.len();
     let remaining_count = review_count.saturating_sub(visible_count as i64);
     let visible_items = review_items;
+    let status = overview_filter_status_text(visible_count, total_count, hidden_count);
 
     panel().h_full().min_h_0().flex().flex_col().child(
         div()
+            .relative()
             .p(px(10.0))
             .flex_grow()
             .min_h_0()
@@ -476,6 +522,15 @@ fn overview_review_requests_panel(
             .child(overview_request_group_header(
                 "Review requested",
                 review_count,
+                Some(
+                    overview_panel_filter_button(
+                        &state,
+                        OverviewPanelFilterTarget::ReviewRequests,
+                        filter_active_count,
+                        filter_open,
+                    )
+                    .into_any_element(),
+                ),
             ))
             .when(workspace_loading, |el| {
                 el.child(
@@ -491,7 +546,11 @@ fn overview_review_requests_panel(
                 !workspace_loading && workspace_error.is_none() && visible_items.is_empty(),
                 |el| {
                     el.child(div().px(px(8.0)).child(panel_state_text(if is_auth {
-                        "No pull requests are currently requesting your review."
+                        if total_count > 0 {
+                            "No review requests match these filters."
+                        } else {
+                            "No pull requests are currently requesting your review."
+                        }
                     } else {
                         "Authenticate with gh to populate the review queue."
                     })))
@@ -525,15 +584,36 @@ fn overview_review_requests_panel(
                         .text_color(fg_subtle())
                         .child(format!("{remaining_count} more in the review board")),
                 )
+            })
+            .when(close_on_outside_click, |el| {
+                el.child(overview_filter_backdrop(&state))
+            })
+            .when(filter_open, |el| {
+                el.child(overview_review_request_filter_dropdown(
+                    &state,
+                    filter,
+                    &status,
+                    filter_active_count,
+                    has_muted,
+                ))
             }),
     )
 }
 
-fn overview_request_group_header(label: &str, count: i64) -> impl IntoElement {
-    overview_group_header(LucideIcon::ListChecks, label, count)
+fn overview_request_group_header(
+    label: &str,
+    count: i64,
+    trailing: Option<AnyElement>,
+) -> impl IntoElement {
+    overview_group_header(LucideIcon::ListChecks, label, count, trailing)
 }
 
-fn overview_group_header(icon: LucideIcon, label: &str, count: i64) -> impl IntoElement {
+fn overview_group_header(
+    icon: LucideIcon,
+    label: &str,
+    count: i64,
+    trailing: Option<AnyElement>,
+) -> impl IntoElement {
     div()
         .min_h(px(44.0))
         .px(px(14.0))
@@ -562,11 +642,566 @@ fn overview_group_header(icon: LucideIcon, label: &str, count: i64) -> impl Into
         )
         .child(
             div()
-                .font_family(mono_font_family())
-                .text_size(px(16.0))
-                .text_color(fg_subtle())
-                .child(count.to_string()),
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .font_family(mono_font_family())
+                        .text_size(px(16.0))
+                        .text_color(fg_subtle())
+                        .child(count.to_string()),
+                )
+                .when_some(trailing, |el, trailing| el.child(trailing)),
         )
+}
+
+fn overview_panel_filter_button(
+    state: &Entity<AppState>,
+    target: OverviewPanelFilterTarget,
+    active_count: usize,
+    open: bool,
+) -> impl IntoElement {
+    let state = state.clone();
+    let id = match target {
+        OverviewPanelFilterTarget::ReviewRequests => "overview-review-request-filter-button",
+        OverviewPanelFilterTarget::Comments => "overview-comment-filter-button",
+    };
+    div()
+        .id(id)
+        .h(px(28.0))
+        .px(px(9.0))
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(if open { focus_border() } else { transparent() })
+        .bg(if open {
+            bg_selected()
+        } else {
+            control_button_bg()
+        })
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .text_color(if open { fg_emphasis() } else { fg_muted() })
+        .text_size(px(11.0))
+        .font_weight(FontWeight::MEDIUM)
+        .hover(move |style| {
+            style
+                .bg(if open {
+                    bg_selected()
+                } else {
+                    control_button_hover_bg()
+                })
+                .text_color(fg_emphasis())
+        })
+        .tooltip(|_, cx| build_static_tooltip("Choose filters", cx))
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            cx.stop_propagation();
+            state.update(cx, |state, cx| {
+                state.toggle_overview_panel_filter(target);
+                cx.notify();
+            });
+        })
+        .child(lucide_icon(LucideIcon::ListFilter, 12.0, fg_muted()))
+        .child("Filters".to_string())
+        .when(active_count > 0, |el| {
+            el.child(
+                div()
+                    .min_w(px(16.0))
+                    .h(px(16.0))
+                    .px(px(4.0))
+                    .rounded(px(999.0))
+                    .bg(success())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .font_family(mono_font_family())
+                    .text_size(px(10.0))
+                    .text_color(bg_canvas())
+                    .child(active_count.to_string()),
+            )
+        })
+        .child(lucide_icon(
+            if open {
+                LucideIcon::ChevronDown
+            } else {
+                LucideIcon::ChevronRight
+            },
+            12.0,
+            fg_subtle(),
+        ))
+}
+
+fn overview_filter_backdrop(state: &Entity<AppState>) -> impl IntoElement {
+    let state = state.clone();
+    div()
+        .absolute()
+        .inset_0()
+        .bg(transparent())
+        .occlude()
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            cx.stop_propagation();
+            state.update(cx, |state, cx| {
+                state.close_overview_panel_filter();
+                cx.notify();
+            });
+        })
+}
+
+fn overview_review_request_filter_dropdown(
+    state: &Entity<AppState>,
+    filter: OverviewReviewFilter,
+    status: &str,
+    active_count: usize,
+    has_muted: bool,
+) -> impl IntoElement {
+    let reset_state = state.clone();
+    overview_filter_dropdown_shell("Review filters", status)
+        .child(overview_filter_dropdown_header(
+            state,
+            active_count > 0,
+            move |_, _, cx| {
+                reset_state.update(cx, |state, cx| {
+                    state.reset_overview_review_filter();
+                    cx.notify();
+                });
+            },
+        ))
+        .child(overview_filter_group_label("Trust"))
+        .child(overview_filter_checkbox_rows([
+            overview_review_filter_row(
+                state,
+                "Trusted",
+                filter.include_trusted,
+                OverviewReviewFilterToggle::Trusted,
+            ),
+            overview_review_filter_row(
+                state,
+                "Vouched",
+                filter.include_vouched,
+                OverviewReviewFilterToggle::Vouched,
+            ),
+            overview_review_filter_row(
+                state,
+                "First-time",
+                filter.include_first_time,
+                OverviewReviewFilterToggle::FirstTime,
+            ),
+            overview_review_filter_row(
+                state,
+                "Unknown",
+                filter.include_trust_unknown,
+                OverviewReviewFilterToggle::TrustUnknown,
+            ),
+            overview_review_filter_row(
+                state,
+                "Denounced",
+                filter.include_denounced,
+                OverviewReviewFilterToggle::Denounced,
+            ),
+            overview_review_filter_row(
+                state,
+                "Other",
+                filter.include_trust_other,
+                OverviewReviewFilterToggle::TrustOther,
+            ),
+        ]))
+        .child(overview_filter_group_label("State"))
+        .child(overview_filter_checkbox_rows([
+            overview_review_filter_row(
+                state,
+                "Ready",
+                filter.include_ready,
+                OverviewReviewFilterToggle::Ready,
+            ),
+            overview_review_filter_row(
+                state,
+                "Draft",
+                filter.include_draft,
+                OverviewReviewFilterToggle::Draft,
+            ),
+        ]))
+        .child(overview_filter_group_label("Activity"))
+        .child(overview_filter_checkbox_rows([
+            overview_review_filter_row(
+                state,
+                "Read",
+                filter.include_read,
+                OverviewReviewFilterToggle::Read,
+            ),
+            overview_review_filter_row(
+                state,
+                "Unread",
+                filter.include_unread,
+                OverviewReviewFilterToggle::Unread,
+            ),
+        ]))
+        .child(overview_filter_group_label("Freshness"))
+        .child(overview_filter_checkbox_rows([
+            overview_review_filter_row(
+                state,
+                "Fresh",
+                filter.include_fresh,
+                OverviewReviewFilterToggle::Fresh,
+            ),
+            overview_review_filter_row(
+                state,
+                "Normal",
+                filter.include_normal_freshness,
+                OverviewReviewFilterToggle::NormalFreshness,
+            ),
+            overview_review_filter_row(
+                state,
+                "Stale",
+                filter.include_stale,
+                OverviewReviewFilterToggle::Stale,
+            ),
+        ]))
+        .child(overview_filter_group_label("Size"))
+        .child(overview_filter_checkbox_rows([
+            overview_review_filter_row(
+                state,
+                "Small",
+                filter.include_small,
+                OverviewReviewFilterToggle::Small,
+            ),
+            overview_review_filter_row(
+                state,
+                "Medium",
+                filter.include_medium,
+                OverviewReviewFilterToggle::Medium,
+            ),
+            overview_review_filter_row(
+                state,
+                "Large",
+                filter.include_large,
+                OverviewReviewFilterToggle::Large,
+            ),
+        ]))
+        .child(overview_filter_group_label("Review decision"))
+        .child(overview_filter_checkbox_rows([
+            overview_review_filter_row(
+                state,
+                "Needs review",
+                filter.include_needs_review,
+                OverviewReviewFilterToggle::NeedsReview,
+            ),
+            overview_review_filter_row(
+                state,
+                "Other",
+                filter.include_other_review_decisions,
+                OverviewReviewFilterToggle::OtherReviewDecision,
+            ),
+        ]))
+        .when(has_muted || filter.include_muted, |el| {
+            el.child(overview_filter_group_label("Muted"))
+                .child(overview_filter_checkbox_rows([overview_review_filter_row(
+                    state,
+                    "Muted",
+                    filter.include_muted,
+                    OverviewReviewFilterToggle::IncludeMuted,
+                )]))
+        })
+}
+
+fn overview_comment_filter_dropdown(
+    state: &Entity<AppState>,
+    filter: OverviewCommentFilter,
+    status: &str,
+    active_count: usize,
+) -> impl IntoElement {
+    let reset_state = state.clone();
+    overview_filter_dropdown_shell("Comment filters", status)
+        .child(overview_filter_dropdown_header(
+            state,
+            active_count > 0,
+            move |_, _, cx| {
+                reset_state.update(cx, |state, cx| {
+                    state.reset_overview_comment_filter();
+                    cx.notify();
+                });
+            },
+        ))
+        .child(overview_filter_group_label("Author"))
+        .child(overview_filter_checkbox_rows([
+            overview_comment_filter_row(
+                state,
+                "People",
+                filter.include_people,
+                OverviewCommentFilterToggle::People,
+            ),
+            overview_comment_filter_row(
+                state,
+                "Bots",
+                filter.include_bots,
+                OverviewCommentFilterToggle::Bots,
+            ),
+        ]))
+        .child(overview_filter_group_label("Comment type"))
+        .child(overview_filter_checkbox_rows([
+            overview_comment_filter_row(
+                state,
+                "Conversation",
+                filter.include_conversation,
+                OverviewCommentFilterToggle::Conversation,
+            ),
+            overview_comment_filter_row(
+                state,
+                "Inline",
+                filter.include_inline,
+                OverviewCommentFilterToggle::Inline,
+            ),
+        ]))
+        .child(overview_filter_group_label("Resolution"))
+        .child(overview_filter_checkbox_rows([
+            overview_comment_filter_row(
+                state,
+                "Resolved",
+                filter.include_resolved,
+                OverviewCommentFilterToggle::Resolved,
+            ),
+            overview_comment_filter_row(
+                state,
+                "Unresolved",
+                filter.include_unresolved,
+                OverviewCommentFilterToggle::Unresolved,
+            ),
+        ]))
+        .child(overview_filter_group_label("Freshness"))
+        .child(overview_filter_checkbox_rows([
+            overview_comment_filter_row(
+                state,
+                "Current",
+                filter.include_current,
+                OverviewCommentFilterToggle::Current,
+            ),
+            overview_comment_filter_row(
+                state,
+                "Outdated",
+                filter.include_outdated,
+                OverviewCommentFilterToggle::Outdated,
+            ),
+        ]))
+}
+
+fn overview_comment_filter_row(
+    state: &Entity<AppState>,
+    label: &'static str,
+    active: bool,
+    toggle: OverviewCommentFilterToggle,
+) -> AnyElement {
+    let state = state.clone();
+    overview_filter_checkbox_row(label, active, move |_, _, cx| {
+        state.update(cx, |state, cx| {
+            state.toggle_overview_comment_filter(toggle);
+            cx.notify();
+        });
+    })
+    .into_any_element()
+}
+
+fn overview_review_filter_row(
+    state: &Entity<AppState>,
+    label: &'static str,
+    active: bool,
+    toggle: OverviewReviewFilterToggle,
+) -> AnyElement {
+    let state = state.clone();
+    overview_filter_checkbox_row(label, active, move |_, _, cx| {
+        state.update(cx, |state, cx| {
+            state.toggle_overview_review_filter(toggle);
+            cx.notify();
+        });
+    })
+    .into_any_element()
+}
+
+fn overview_filter_dropdown_shell(title: &'static str, status: &str) -> Stateful<Div> {
+    div()
+        .absolute()
+        .id("overview-panel-filter-dropdown")
+        .top(px(60.0))
+        .right(px(16.0))
+        .w(px(286.0))
+        .max_h(px(440.0))
+        .p(px(12.0))
+        .rounded(radius())
+        .border_1()
+        .border_color(border_muted())
+        .bg(bg_overlay())
+        .shadow(dialog_shadow())
+        .occlude()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation();
+        })
+        .overflow_y_scroll()
+        .flex()
+        .flex_col()
+        .gap(px(10.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg_emphasis())
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_family(mono_font_family())
+                        .text_color(fg_subtle())
+                        .child(status.to_string()),
+                ),
+        )
+}
+
+fn overview_filter_dropdown_header(
+    state: &Entity<AppState>,
+    reset_enabled: bool,
+    on_reset: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let close_state = state.clone();
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(8.0))
+        .child(overview_filter_reset_button(reset_enabled, on_reset))
+        .child(
+            div()
+                .id("overview-panel-filter-close")
+                .w(px(26.0))
+                .h(px(26.0))
+                .rounded(radius_sm())
+                .flex()
+                .items_center()
+                .justify_center()
+                .hover(|style| {
+                    style
+                        .bg(control_button_hover_bg())
+                        .text_color(fg_emphasis())
+                })
+                .tooltip(|_, cx| build_static_tooltip("Close filters", cx))
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    cx.stop_propagation();
+                    close_state.update(cx, |state, cx| {
+                        state.close_overview_panel_filter();
+                        cx.notify();
+                    });
+                })
+                .child(lucide_icon(LucideIcon::X, 12.0, fg_subtle())),
+        )
+}
+
+fn overview_filter_reset_button(
+    enabled: bool,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> Div {
+    let button = div()
+        .h(px(26.0))
+        .px(px(8.0))
+        .rounded(radius_sm())
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .text_size(px(11.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(fg_muted())
+        .child(lucide_icon(LucideIcon::RotateCcw, 11.0, fg_muted()))
+        .child("Reset".to_string());
+
+    if enabled {
+        button
+            .hover(|style| {
+                style
+                    .bg(control_button_hover_bg())
+                    .text_color(fg_emphasis())
+            })
+            .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                cx.stop_propagation();
+                on_click(event, window, cx);
+            })
+    } else {
+        button.opacity(0.42)
+    }
+}
+
+fn overview_filter_group_label(label: &str) -> impl IntoElement {
+    div()
+        .pt(px(2.0))
+        .text_size(px(10.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(fg_subtle())
+        .child(label.to_string().to_uppercase())
+}
+
+fn overview_filter_checkbox_rows<const N: usize>(rows: [AnyElement; N]) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .children(rows.into_iter())
+}
+
+fn overview_filter_checkbox_row(
+    label: &'static str,
+    active: bool,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> Div {
+    div()
+        .h(px(30.0))
+        .px(px(8.0))
+        .rounded(radius_sm())
+        .flex()
+        .items_center()
+        .gap(px(9.0))
+        .text_size(px(12.0))
+        .text_color(if active { fg_emphasis() } else { fg_muted() })
+        .hover(|style| {
+            style
+                .bg(control_button_hover_bg())
+                .text_color(fg_emphasis())
+        })
+        .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+            cx.stop_propagation();
+            on_click(event, window, cx);
+        })
+        .child(overview_filter_checkbox(active))
+        .child(label.to_string())
+}
+
+fn overview_filter_checkbox(active: bool) -> impl IntoElement {
+    div()
+        .w(px(17.0))
+        .h(px(17.0))
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(if active { success() } else { border_muted() })
+        .bg(if active { success() } else { transparent() })
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(active, |el| {
+            el.child(lucide_icon(LucideIcon::Check, 11.0, bg_canvas()))
+        })
+}
+
+fn overview_filter_status_text(
+    visible_count: usize,
+    total_count: usize,
+    hidden_count: usize,
+) -> String {
+    if hidden_count > 0 {
+        format!("{visible_count}/{total_count} visible, {hidden_count} hidden")
+    } else {
+        format!("{visible_count}/{total_count} visible")
+    }
 }
 
 fn overview_review_request_row(
@@ -868,6 +1503,24 @@ fn overview_pull_request_comment_items(state: &AppState) -> Vec<OverviewReviewCo
     items
 }
 
+fn filter_overview_comment_items(
+    items: &[OverviewReviewCommentItem],
+    filter: &OverviewCommentFilter,
+) -> Vec<OverviewReviewCommentItem> {
+    items
+        .iter()
+        .filter(|item| {
+            filter.matches(
+                item.actor_kind,
+                item.comment_kind,
+                item.is_resolved,
+                item.is_outdated,
+            )
+        })
+        .cloned()
+        .collect()
+}
+
 fn overview_comment_item_for_comment(
     summary: &github::PullRequestSummary,
     thread: &github::PullRequestReviewThread,
@@ -878,6 +1531,8 @@ fn overview_comment_item_for_comment(
         summary: summary.clone(),
         author_login: comment.author_login.clone(),
         author_avatar_url: comment.author_avatar_url.clone(),
+        actor_kind: overview_comment_actor_kind(&comment.author_login),
+        comment_kind: OverviewCommentKind::Inline,
         location: overview_comment_location(thread, comment),
         preview: summarize_overview_comment(&comment.body),
         timestamp: comment
@@ -898,12 +1553,22 @@ fn overview_item_for_pull_request_comment(
         summary: summary.clone(),
         author_login: comment.author_login.clone(),
         author_avatar_url: comment.author_avatar_url.clone(),
+        actor_kind: overview_comment_actor_kind(&comment.author_login),
+        comment_kind: OverviewCommentKind::Conversation,
         location: "Conversation".to_string(),
         preview: summarize_overview_comment(&comment.body),
         timestamp: comment.updated_at.clone(),
         unread: false,
         is_resolved: false,
         is_outdated: false,
+    }
+}
+
+fn overview_comment_actor_kind(login: &str) -> OverviewCommentActorKind {
+    if is_automation_actor(login) {
+        OverviewCommentActorKind::Bot
+    } else {
+        OverviewCommentActorKind::Person
     }
 }
 

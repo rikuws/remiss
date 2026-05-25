@@ -11,6 +11,8 @@ use crate::{
 
 pub(crate) const MUTED_REPOSITORIES_CACHE_KEY: &str = "muted-repositories-v1";
 const PULL_REQUEST_FILTER_SETTINGS_CACHE_KEY: &str = "pull-request-filters-v1";
+const OVERVIEW_COMMENT_FILTER_SETTINGS_CACHE_KEY: &str = "overview-comment-filters-v1";
+const OVERVIEW_REVIEW_FILTER_SETTINGS_CACHE_KEY: &str = "overview-review-filters-v1";
 const FRESH_WINDOW_DAYS: i64 = 3;
 const STALE_AFTER_DAYS: i64 = 14;
 const CUSTOM_PRESET_ID_PREFIX: &str = "custom:";
@@ -93,6 +95,485 @@ pub enum PullRequestFilterToggle {
     FirstTime,
     TrustUnknown,
     Denounced,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OverviewCommentFilterToggle {
+    People,
+    Bots,
+    Conversation,
+    Inline,
+    Resolved,
+    Unresolved,
+    Current,
+    Outdated,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OverviewCommentActorKind {
+    Person,
+    Bot,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OverviewCommentKind {
+    Conversation,
+    Inline,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OverviewReviewFilterToggle {
+    Trusted,
+    Vouched,
+    FirstTime,
+    TrustUnknown,
+    Denounced,
+    TrustOther,
+    Ready,
+    Draft,
+    Read,
+    Unread,
+    Fresh,
+    NormalFreshness,
+    Stale,
+    Small,
+    Medium,
+    Large,
+    NeedsReview,
+    OtherReviewDecision,
+    IncludeMuted,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverviewReviewFilterSettings {
+    #[serde(default)]
+    filter: OverviewReviewFilter,
+}
+
+impl Default for OverviewReviewFilterSettings {
+    fn default() -> Self {
+        Self {
+            filter: OverviewReviewFilter::default(),
+        }
+    }
+}
+
+impl OverviewReviewFilterSettings {
+    pub fn current_filter(&self) -> OverviewReviewFilter {
+        self.filter.clone()
+    }
+
+    pub fn toggle(&mut self, toggle: OverviewReviewFilterToggle) {
+        self.filter.toggle(toggle);
+    }
+
+    pub fn reset(&mut self) {
+        self.filter = OverviewReviewFilter::default();
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverviewReviewFilter {
+    #[serde(default = "default_true")]
+    pub include_trusted: bool,
+    #[serde(default = "default_true")]
+    pub include_vouched: bool,
+    #[serde(default = "default_true")]
+    pub include_first_time: bool,
+    #[serde(default = "default_true")]
+    pub include_trust_unknown: bool,
+    #[serde(default = "default_true")]
+    pub include_denounced: bool,
+    #[serde(default = "default_true")]
+    pub include_trust_other: bool,
+    #[serde(default = "default_true")]
+    pub include_ready: bool,
+    #[serde(default = "default_true")]
+    pub include_draft: bool,
+    #[serde(default = "default_true")]
+    pub include_read: bool,
+    #[serde(default = "default_true")]
+    pub include_unread: bool,
+    #[serde(default = "default_true")]
+    pub include_fresh: bool,
+    #[serde(default = "default_true")]
+    pub include_normal_freshness: bool,
+    #[serde(default = "default_true")]
+    pub include_stale: bool,
+    #[serde(default = "default_true")]
+    pub include_small: bool,
+    #[serde(default = "default_true")]
+    pub include_medium: bool,
+    #[serde(default = "default_true")]
+    pub include_large: bool,
+    #[serde(default = "default_true")]
+    pub include_needs_review: bool,
+    #[serde(default = "default_true")]
+    pub include_other_review_decisions: bool,
+    #[serde(default)]
+    pub include_muted: bool,
+}
+
+impl Default for OverviewReviewFilter {
+    fn default() -> Self {
+        Self {
+            include_trusted: true,
+            include_vouched: true,
+            include_first_time: true,
+            include_trust_unknown: true,
+            include_denounced: true,
+            include_trust_other: true,
+            include_ready: true,
+            include_draft: true,
+            include_read: true,
+            include_unread: true,
+            include_fresh: true,
+            include_normal_freshness: true,
+            include_stale: true,
+            include_small: true,
+            include_medium: true,
+            include_large: true,
+            include_needs_review: true,
+            include_other_review_decisions: true,
+            include_muted: false,
+        }
+    }
+}
+
+impl OverviewReviewFilter {
+    pub fn matches(
+        &self,
+        summary: &PullRequestSummary,
+        context: &PullRequestFilterContext,
+    ) -> bool {
+        if !self.include_muted && context.muted_repositories.contains(&summary.repository) {
+            return false;
+        }
+
+        if !match summary.is_draft {
+            true => self.include_draft,
+            false => self.include_ready,
+        } {
+            return false;
+        }
+
+        let unread = context.unread_pr_keys.contains(&summary_cache_key(summary));
+        if !match unread {
+            true => self.include_unread,
+            false => self.include_read,
+        } {
+            return false;
+        }
+
+        if !self.matches_freshness(summary.updated_at.as_str(), context.now_epoch_days) {
+            return false;
+        }
+
+        if !self.matches_size(summary) {
+            return false;
+        }
+
+        if !self.matches_review_decision(summary.review_decision.as_deref()) {
+            return false;
+        }
+
+        self.matches_trust(summary)
+    }
+
+    pub fn active_group_count(&self) -> usize {
+        [
+            self.include_trusted
+                && self.include_vouched
+                && self.include_first_time
+                && self.include_trust_unknown
+                && self.include_denounced
+                && self.include_trust_other,
+            self.include_ready && self.include_draft,
+            self.include_read && self.include_unread,
+            self.include_fresh && self.include_normal_freshness && self.include_stale,
+            self.include_small && self.include_medium && self.include_large,
+            self.include_needs_review && self.include_other_review_decisions,
+            !self.include_muted,
+        ]
+        .into_iter()
+        .filter(|group_is_default| !group_is_default)
+        .count()
+    }
+
+    fn matches_trust(&self, summary: &PullRequestSummary) -> bool {
+        let trusted = TrustFilter::Trusted.matches(summary);
+        let vouched = TrustFilter::Vouched.matches(summary);
+        let first_time = TrustFilter::FirstTime.matches(summary);
+        let unknown = TrustFilter::Unknown.matches(summary);
+        let denounced = TrustFilter::Denounced.matches(summary);
+        let other = !(trusted || vouched || first_time || unknown || denounced);
+
+        (trusted && self.include_trusted)
+            || (vouched && self.include_vouched)
+            || (first_time && self.include_first_time)
+            || (unknown && self.include_trust_unknown)
+            || (denounced && self.include_denounced)
+            || (other && self.include_trust_other)
+    }
+
+    fn matches_freshness(&self, updated_at: &str, now_epoch_days: i64) -> bool {
+        let fresh = FreshnessFilter::Fresh.matches(updated_at, now_epoch_days);
+        let stale = FreshnessFilter::Stale.matches(updated_at, now_epoch_days);
+        let normal = !(fresh || stale);
+
+        (fresh && self.include_fresh)
+            || (normal && self.include_normal_freshness)
+            || (stale && self.include_stale)
+    }
+
+    fn matches_size(&self, summary: &PullRequestSummary) -> bool {
+        match summary_size(summary) {
+            SizeFilter::Small => self.include_small,
+            SizeFilter::Medium => self.include_medium,
+            SizeFilter::Large => self.include_large,
+            SizeFilter::Any => true,
+        }
+    }
+
+    fn matches_review_decision(&self, review_decision: Option<&str>) -> bool {
+        let needs_review = ReviewDecisionFilter::ReviewRequired.matches(review_decision);
+        if needs_review {
+            self.include_needs_review
+        } else {
+            self.include_other_review_decisions
+        }
+    }
+
+    fn toggle(&mut self, toggle: OverviewReviewFilterToggle) {
+        match toggle {
+            OverviewReviewFilterToggle::Trusted => self.include_trusted = !self.include_trusted,
+            OverviewReviewFilterToggle::Vouched => self.include_vouched = !self.include_vouched,
+            OverviewReviewFilterToggle::FirstTime => {
+                self.include_first_time = !self.include_first_time
+            }
+            OverviewReviewFilterToggle::TrustUnknown => {
+                self.include_trust_unknown = !self.include_trust_unknown
+            }
+            OverviewReviewFilterToggle::Denounced => {
+                self.include_denounced = !self.include_denounced
+            }
+            OverviewReviewFilterToggle::TrustOther => {
+                self.include_trust_other = !self.include_trust_other
+            }
+            OverviewReviewFilterToggle::Ready => self.include_ready = !self.include_ready,
+            OverviewReviewFilterToggle::Draft => self.include_draft = !self.include_draft,
+            OverviewReviewFilterToggle::Read => self.include_read = !self.include_read,
+            OverviewReviewFilterToggle::Unread => self.include_unread = !self.include_unread,
+            OverviewReviewFilterToggle::Fresh => self.include_fresh = !self.include_fresh,
+            OverviewReviewFilterToggle::NormalFreshness => {
+                self.include_normal_freshness = !self.include_normal_freshness
+            }
+            OverviewReviewFilterToggle::Stale => self.include_stale = !self.include_stale,
+            OverviewReviewFilterToggle::Small => self.include_small = !self.include_small,
+            OverviewReviewFilterToggle::Medium => self.include_medium = !self.include_medium,
+            OverviewReviewFilterToggle::Large => self.include_large = !self.include_large,
+            OverviewReviewFilterToggle::NeedsReview => {
+                self.include_needs_review = !self.include_needs_review
+            }
+            OverviewReviewFilterToggle::OtherReviewDecision => {
+                self.include_other_review_decisions = !self.include_other_review_decisions
+            }
+            OverviewReviewFilterToggle::IncludeMuted => self.include_muted = !self.include_muted,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverviewCommentFilterSettings {
+    #[serde(default)]
+    filter: OverviewCommentFilter,
+}
+
+impl Default for OverviewCommentFilterSettings {
+    fn default() -> Self {
+        Self {
+            filter: OverviewCommentFilter::default(),
+        }
+    }
+}
+
+impl OverviewCommentFilterSettings {
+    pub fn current_filter(&self) -> OverviewCommentFilter {
+        self.filter.clone()
+    }
+
+    pub fn toggle(&mut self, toggle: OverviewCommentFilterToggle) {
+        self.filter.toggle(toggle);
+    }
+
+    pub fn reset(&mut self) {
+        self.filter = OverviewCommentFilter::default();
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverviewCommentFilter {
+    #[serde(default = "default_true")]
+    pub include_people: bool,
+    #[serde(default = "default_true")]
+    pub include_bots: bool,
+    #[serde(default = "default_true")]
+    pub include_conversation: bool,
+    #[serde(default = "default_true")]
+    pub include_inline: bool,
+    #[serde(default = "default_true")]
+    pub include_resolved: bool,
+    #[serde(default = "default_true")]
+    pub include_unresolved: bool,
+    #[serde(default = "default_true")]
+    pub include_current: bool,
+    #[serde(default = "default_true")]
+    pub include_outdated: bool,
+}
+
+impl Default for OverviewCommentFilter {
+    fn default() -> Self {
+        Self {
+            include_people: true,
+            include_bots: true,
+            include_conversation: true,
+            include_inline: true,
+            include_resolved: true,
+            include_unresolved: true,
+            include_current: true,
+            include_outdated: true,
+        }
+    }
+}
+
+impl OverviewCommentFilter {
+    pub fn matches(
+        &self,
+        actor_kind: OverviewCommentActorKind,
+        comment_kind: OverviewCommentKind,
+        is_resolved: bool,
+        is_outdated: bool,
+    ) -> bool {
+        if !match actor_kind {
+            OverviewCommentActorKind::Person => self.include_people,
+            OverviewCommentActorKind::Bot => self.include_bots,
+        } {
+            return false;
+        }
+
+        if !match comment_kind {
+            OverviewCommentKind::Conversation => self.include_conversation,
+            OverviewCommentKind::Inline => self.include_inline,
+        } {
+            return false;
+        }
+
+        if !match is_resolved {
+            true => self.include_resolved,
+            false => self.include_unresolved,
+        } {
+            return false;
+        }
+
+        match is_outdated {
+            true => self.include_outdated,
+            false => self.include_current,
+        }
+    }
+
+    pub fn active_group_count(&self) -> usize {
+        [
+            self.include_people && self.include_bots,
+            self.include_conversation && self.include_inline,
+            self.include_resolved && self.include_unresolved,
+            self.include_current && self.include_outdated,
+        ]
+        .into_iter()
+        .filter(|group_is_default| !group_is_default)
+        .count()
+    }
+
+    pub fn active_labels(&self) -> Vec<String> {
+        let mut labels = Vec::new();
+        push_pair_label(
+            &mut labels,
+            self.include_people,
+            self.include_bots,
+            "people",
+            "bots",
+            "no authors",
+        );
+        push_pair_label(
+            &mut labels,
+            self.include_conversation,
+            self.include_inline,
+            "conversation",
+            "inline",
+            "no comment types",
+        );
+        push_pair_label(
+            &mut labels,
+            self.include_resolved,
+            self.include_unresolved,
+            "resolved",
+            "unresolved",
+            "no resolution states",
+        );
+        push_pair_label(
+            &mut labels,
+            self.include_current,
+            self.include_outdated,
+            "current",
+            "outdated",
+            "no freshness states",
+        );
+        labels
+    }
+
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    fn toggle(&mut self, toggle: OverviewCommentFilterToggle) {
+        match toggle {
+            OverviewCommentFilterToggle::People => self.include_people = !self.include_people,
+            OverviewCommentFilterToggle::Bots => self.include_bots = !self.include_bots,
+            OverviewCommentFilterToggle::Conversation => {
+                self.include_conversation = !self.include_conversation
+            }
+            OverviewCommentFilterToggle::Inline => self.include_inline = !self.include_inline,
+            OverviewCommentFilterToggle::Resolved => self.include_resolved = !self.include_resolved,
+            OverviewCommentFilterToggle::Unresolved => {
+                self.include_unresolved = !self.include_unresolved
+            }
+            OverviewCommentFilterToggle::Current => self.include_current = !self.include_current,
+            OverviewCommentFilterToggle::Outdated => self.include_outdated = !self.include_outdated,
+        }
+    }
+}
+
+fn push_pair_label(
+    labels: &mut Vec<String>,
+    first: bool,
+    second: bool,
+    first_label: &'static str,
+    second_label: &'static str,
+    neither_label: &'static str,
+) {
+    match (first, second) {
+        (true, true) => {}
+        (true, false) => labels.push(first_label.to_string()),
+        (false, true) => labels.push(second_label.to_string()),
+        (false, false) => labels.push(neither_label.to_string()),
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -929,6 +1410,18 @@ pub fn filter_pull_requests(
         .collect()
 }
 
+pub fn filter_overview_review_requests(
+    items: &[PullRequestSummary],
+    filter: &OverviewReviewFilter,
+    context: &PullRequestFilterContext,
+) -> Vec<PullRequestSummary> {
+    items
+        .iter()
+        .filter(|item| filter.matches(item, context))
+        .cloned()
+        .collect()
+}
+
 pub fn load_pull_request_filter_settings(
     cache: &CacheStore,
 ) -> Result<PullRequestFilterSettings, String> {
@@ -945,6 +1438,46 @@ pub fn save_pull_request_filter_settings(
     cache.put(
         PULL_REQUEST_FILTER_SETTINGS_CACHE_KEY,
         &settings.clone().normalize(),
+        now_ms(),
+    )
+}
+
+pub fn load_overview_comment_filter_settings(
+    cache: &CacheStore,
+) -> Result<OverviewCommentFilterSettings, String> {
+    Ok(cache
+        .get::<OverviewCommentFilterSettings>(OVERVIEW_COMMENT_FILTER_SETTINGS_CACHE_KEY)?
+        .map(|document| document.value)
+        .unwrap_or_default())
+}
+
+pub fn save_overview_comment_filter_settings(
+    cache: &CacheStore,
+    settings: &OverviewCommentFilterSettings,
+) -> Result<(), String> {
+    cache.put(
+        OVERVIEW_COMMENT_FILTER_SETTINGS_CACHE_KEY,
+        settings,
+        now_ms(),
+    )
+}
+
+pub fn load_overview_review_filter_settings(
+    cache: &CacheStore,
+) -> Result<OverviewReviewFilterSettings, String> {
+    Ok(cache
+        .get::<OverviewReviewFilterSettings>(OVERVIEW_REVIEW_FILTER_SETTINGS_CACHE_KEY)?
+        .map(|document| document.value)
+        .unwrap_or_default())
+}
+
+pub fn save_overview_review_filter_settings(
+    cache: &CacheStore,
+    settings: &OverviewReviewFilterSettings,
+) -> Result<(), String> {
+    cache.put(
+        OVERVIEW_REVIEW_FILTER_SETTINGS_CACHE_KEY,
+        settings,
         now_ms(),
     )
 }
@@ -1180,6 +1713,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::triage::PullRequestTriageSignal;
 
     fn temp_cache_store(name: &str) -> CacheStore {
         let suffix = SystemTime::now()
@@ -1228,6 +1762,14 @@ mod tests {
             muted_repositories,
             unread_pr_keys,
             now_epoch_days: parse_iso_date_to_epoch_days("2026-05-21T00:00:00Z").unwrap(),
+        }
+    }
+
+    fn signal(kind: PullRequestTriageSignalKind) -> PullRequestTriageSignal {
+        PullRequestTriageSignal {
+            kind,
+            label: format!("{kind:?}"),
+            detail: None,
         }
     }
 
@@ -1483,6 +2025,160 @@ mod tests {
             settings.active_preset_ids(PullRequestFilterScope::Reviews),
             vec!["attention".to_string(), "stale".to_string()]
         );
+    }
+
+    #[test]
+    fn overview_comment_filter_defaults_include_people_and_bots() {
+        let filter = OverviewCommentFilter::default();
+
+        assert!(filter.matches(
+            OverviewCommentActorKind::Person,
+            OverviewCommentKind::Conversation,
+            false,
+            false,
+        ));
+        assert!(filter.matches(
+            OverviewCommentActorKind::Bot,
+            OverviewCommentKind::Inline,
+            true,
+            true,
+        ));
+        assert_eq!(filter.active_group_count(), 0);
+    }
+
+    #[test]
+    fn overview_comment_filter_can_hide_bots() {
+        let mut settings = OverviewCommentFilterSettings::default();
+        settings.toggle(OverviewCommentFilterToggle::Bots);
+        let filter = settings.current_filter();
+
+        assert!(filter.matches(
+            OverviewCommentActorKind::Person,
+            OverviewCommentKind::Conversation,
+            false,
+            false,
+        ));
+        assert!(!filter.matches(
+            OverviewCommentActorKind::Bot,
+            OverviewCommentKind::Conversation,
+            false,
+            false,
+        ));
+        assert_eq!(filter.active_labels(), vec!["people".to_string()]);
+    }
+
+    #[test]
+    fn overview_comment_filter_can_empty_supplied_unread_bot_bucket() {
+        let mut filter = OverviewCommentFilter::default();
+        filter.include_bots = false;
+        let unread_bucket = vec![(OverviewCommentActorKind::Bot, OverviewCommentKind::Inline)];
+
+        let filtered = unread_bucket
+            .into_iter()
+            .filter(|(actor, kind)| filter.matches(*actor, *kind, false, false))
+            .collect::<Vec<_>>();
+
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn overview_comment_filter_splits_conversation_and_inline_comments() {
+        let mut settings = OverviewCommentFilterSettings::default();
+        settings.toggle(OverviewCommentFilterToggle::Conversation);
+        let filter = settings.current_filter();
+
+        assert!(!filter.matches(
+            OverviewCommentActorKind::Person,
+            OverviewCommentKind::Conversation,
+            false,
+            false,
+        ));
+        assert!(filter.matches(
+            OverviewCommentActorKind::Person,
+            OverviewCommentKind::Inline,
+            false,
+            false,
+        ));
+        assert_eq!(filter.active_labels(), vec!["inline".to_string()]);
+    }
+
+    #[test]
+    fn overview_comment_filter_matches_resolution_and_freshness() {
+        let mut settings = OverviewCommentFilterSettings::default();
+        settings.toggle(OverviewCommentFilterToggle::Resolved);
+        settings.toggle(OverviewCommentFilterToggle::Outdated);
+        let filter = settings.current_filter();
+
+        assert!(filter.matches(
+            OverviewCommentActorKind::Person,
+            OverviewCommentKind::Inline,
+            false,
+            false,
+        ));
+        assert!(!filter.matches(
+            OverviewCommentActorKind::Person,
+            OverviewCommentKind::Inline,
+            true,
+            false,
+        ));
+        assert!(!filter.matches(
+            OverviewCommentActorKind::Person,
+            OverviewCommentKind::Inline,
+            false,
+            true,
+        ));
+        assert_eq!(
+            filter.active_labels(),
+            vec!["unresolved".to_string(), "current".to_string()]
+        );
+    }
+
+    #[test]
+    fn overview_review_filter_keeps_multiple_trust_options_active() {
+        let muted = HashSet::new();
+        let unread = BTreeSet::new();
+        let ctx = context(&muted, &unread);
+        let mut trusted = summary("owner/repo", 1, "alice", "2026-05-20T12:00:00Z");
+        trusted.triage_signals = vec![signal(PullRequestTriageSignalKind::Trusted)];
+        let mut vouched = summary("owner/repo", 2, "bob", "2026-05-20T12:00:00Z");
+        vouched.triage_signals = vec![signal(PullRequestTriageSignalKind::Vouched)];
+        let mut first_time = summary("owner/repo", 3, "carol", "2026-05-20T12:00:00Z");
+        first_time.triage_signals = vec![signal(PullRequestTriageSignalKind::FirstTimeContributor)];
+
+        let mut settings = OverviewReviewFilterSettings::default();
+        settings.toggle(OverviewReviewFilterToggle::FirstTime);
+        settings.toggle(OverviewReviewFilterToggle::TrustUnknown);
+        settings.toggle(OverviewReviewFilterToggle::Denounced);
+        settings.toggle(OverviewReviewFilterToggle::TrustOther);
+        let filter = settings.current_filter();
+
+        assert!(filter.matches(&trusted, &ctx));
+        assert!(filter.matches(&vouched, &ctx));
+        assert!(!filter.matches(&first_time, &ctx));
+        assert_eq!(filter.active_group_count(), 1);
+    }
+
+    #[test]
+    fn overview_review_filter_combines_activity_and_size_groups() {
+        let muted = HashSet::new();
+        let unread = BTreeSet::from(["owner/repo#1".to_string(), "owner/repo#2".to_string()]);
+        let ctx = context(&muted, &unread);
+        let mut large_unread = summary("owner/repo", 1, "alice", "2026-05-20T12:00:00Z");
+        large_unread.changed_files = 40;
+        let small_unread = summary("owner/repo", 2, "bob", "2026-05-20T12:00:00Z");
+        let mut large_read = summary("owner/repo", 3, "carol", "2026-05-20T12:00:00Z");
+        large_read.changed_files = 40;
+
+        let mut settings = OverviewReviewFilterSettings::default();
+        settings.toggle(OverviewReviewFilterToggle::Read);
+        settings.toggle(OverviewReviewFilterToggle::Small);
+        settings.toggle(OverviewReviewFilterToggle::Medium);
+        let filter = settings.current_filter();
+
+        assert!(filter.matches(&large_unread, &ctx));
+        assert!(!filter.matches(&small_unread, &ctx));
+        assert!(!filter.matches(&large_read, &ctx));
+        assert_eq!(filter.active_group_count(), 2);
     }
 
     #[test]
