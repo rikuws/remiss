@@ -396,55 +396,29 @@ fn overview_pull_request_comments_panel(
     is_auth: bool,
     state: Entity<AppState>,
 ) -> impl IntoElement {
+    let comment_count = items.len() as i64;
     let has_unread = items.iter().any(|item| item.unread);
     let loading = "Checking pull request comments.";
-    let error = "Workspace sync needs attention before pull request comments can refresh.";
-    let unread = "Unread review comments from others across your workspace.";
-    let latest = "Latest comments from others across your workspace.";
     let empty = "No comments from others are waiting in the current workspace.";
     let unauthenticated = "Authenticate with gh to populate pull request comments.";
-    let copy = if workspace_loading {
-        loading
-    } else if workspace_error.is_some() {
-        error
-    } else if has_unread {
-        unread
-    } else {
-        latest
-    };
 
     panel().h_full().min_h_0().flex().flex_col().child(
         div()
-            .p(px(20.0))
-            .px(px(22.0))
+            .p(px(10.0))
             .flex_grow()
             .min_h_0()
             .flex()
             .flex_col()
-            .gap(px(16.0))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .min_w_0()
-                    .flex_shrink_0()
-                    .child(eyebrow("PR comments"))
-                    .child(
-                        div()
-                            .text_size(px(18.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(fg_emphasis())
-                            .child("Comments"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .line_height(px(20.0))
-                            .text_color(fg_muted())
-                            .child(copy),
-                    ),
-            )
+            .gap(px(8.0))
+            .child(overview_group_header(
+                LucideIcon::MessageSquare,
+                if has_unread {
+                    "Unread comments"
+                } else {
+                    "Comments"
+                },
+                comment_count,
+            ))
             .when(workspace_loading, |el| el.child(panel_state_text(loading)))
             .when_some(workspace_error.clone(), |el, err| {
                 el.child(error_text(&err))
@@ -469,7 +443,7 @@ fn overview_pull_request_comments_panel(
                     .pb(px(8.0))
                     .flex()
                     .flex_col()
-                    .gap(px(10.0))
+                    .gap(px(2.0))
                     .children(
                         items
                             .into_iter()
@@ -556,6 +530,10 @@ fn overview_review_requests_panel(
 }
 
 fn overview_request_group_header(label: &str, count: i64) -> impl IntoElement {
+    overview_group_header(LucideIcon::ListChecks, label, count)
+}
+
+fn overview_group_header(icon: LucideIcon, label: &str, count: i64) -> impl IntoElement {
     div()
         .min_h(px(44.0))
         .px(px(14.0))
@@ -572,7 +550,7 @@ fn overview_request_group_header(label: &str, count: i64) -> impl IntoElement {
                 .flex()
                 .items_center()
                 .gap(px(10.0))
-                .child(lucide_icon(LucideIcon::ListChecks, 15.0, fg_muted()))
+                .child(lucide_icon(icon, 15.0, fg_muted()))
                 .child(
                     div()
                         .min_w_0()
@@ -709,20 +687,21 @@ fn overview_review_comment_row(
         .w_full()
         .flex_shrink_0()
         .relative()
-        .pl(px(34.0))
-        .pr(px(10.0))
-        .py(px(12.0))
-        .border_t(px(1.0))
-        .border_color(border_muted())
-        .hover(|style| style.bg(hover_bg()).text_color(fg_emphasis()))
+        .pl(px(48.0))
+        .pr(px(14.0))
+        .py(px(10.0))
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(transparent())
+        .hover(|style| style.bg(bg_surface()).text_color(fg_emphasis()))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             open_pull_request(&state, summary.clone(), window, cx);
         })
         .child(
             div()
                 .absolute()
-                .left(px(4.0))
-                .top(px(14.0))
+                .left(px(14.0))
+                .top(px(12.0))
                 .child(user_avatar(
                     &author_login,
                     author_avatar_url.as_deref(),
