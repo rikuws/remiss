@@ -288,6 +288,18 @@ pub fn inspect_working_checkout(path: &Path, fetch: bool) -> Result<LocalReviewI
         raw_diff,
         parsed_diff,
     });
+    let mut detail = detail;
+    if status == LocalReviewStatusKind::Ready {
+        match crate::local_feedback::sync_detail_threads(&root, &detail) {
+            Ok(feedback) => {
+                detail.review_threads = feedback.threads;
+                detail.comments_count = feedback.pending_count as i64;
+            }
+            Err(error) => {
+                eprintln!("Failed to sync local feedback: {error}");
+            }
+        }
+    }
     let summary = summary_from_detail(&detail, &key);
 
     Ok(LocalReviewInspection {

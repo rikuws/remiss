@@ -1,12 +1,14 @@
 use super::*;
 
 pub fn trigger_submit_inline_comment(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
+    if state.read(cx).active_is_local_review() {
+        trigger_save_local_feedback_comment(state, cx);
+        return;
+    }
+
     let Some((detail_id, pending_review_id, repository, number, target, body, loading)) = ({
         let app_state = state.read(cx);
         app_state.active_detail().and_then(|detail| {
-            if crate::local_review::is_local_review_detail(detail) {
-                return None;
-            }
             app_state.active_review_line_action.clone().map(|target| {
                 (
                     detail.id.clone(),
@@ -126,6 +128,37 @@ pub fn trigger_submit_inline_comment(state: &Entity<AppState>, window: &mut Wind
             apply_detail_sync_result(&model, &repository, number, sync_result, cx).await;
         })
         .detach();
+}
+
+fn trigger_save_local_feedback_comment(state: &Entity<AppState>, cx: &mut App) {
+    let Some((detail_key, repo_root, detail, target, body, loading)) =
+        local_feedback_comment_context(state, cx)
+    else {
+        return;
+    };
+
+    if loading {
+        return;
+    }
+
+    if body.trim().is_empty() {
+        state.update(cx, |state, cx| {
+            state.inline_comment_error = Some("Enter local feedback before saving it.".to_string());
+            cx.notify();
+        });
+        return;
+    }
+
+    state.update(cx, |state, cx| {
+        state.inline_comment_loading = true;
+        state.inline_comment_error = None;
+        cx.notify();
+    });
+
+    let target_key = target.stable_key();
+    let feedback_target = local_feedback_target(&target);
+    let result = crate::local_feedback::add_comment(&repo_root, &detail, &feedback_target, &body);
+    apply_local_feedback_action_result(state, &detail_key, result, Some(target_key), cx);
 }
 
 pub fn trigger_submit_review_from_review_mode(
@@ -270,6 +303,10 @@ fn trigger_update_pending_comment(
     window: &mut Window,
     cx: &mut App,
 ) {
+    if trigger_update_local_feedback_comment(state, &comment_id, cx) {
+        return;
+    }
+
     let Some((repository, number, body)) = ({
         let app_state = state.read(cx);
         app_state.active_detail().map(|detail| {
@@ -351,12 +388,63 @@ fn trigger_update_pending_comment(
         .detach();
 }
 
+fn trigger_update_local_feedback_comment(
+    state: &Entity<AppState>,
+    comment_id: &str,
+    cx: &mut App,
+) -> bool {
+    let Some((detail_key, repo_root, detail, body)) = ({
+        let app_state = state.read(cx);
+        if !app_state.active_is_local_review() {
+            None
+        } else {
+            match (
+                app_state.active_pr_key.clone(),
+                active_local_feedback_repo_root(&app_state),
+                app_state.active_detail().cloned(),
+            ) {
+                (Some(detail_key), Some(repo_root), Some(detail)) => Some((
+                    detail_key,
+                    repo_root,
+                    detail,
+                    app_state.inline_comment_draft.clone(),
+                )),
+                _ => None,
+            }
+        }
+    }) else {
+        return false;
+    };
+
+    if body.trim().is_empty() {
+        state.update(cx, |state, cx| {
+            state.review_thread_action_error = Some("Comment body cannot be empty.".to_string());
+            cx.notify();
+        });
+        return true;
+    }
+
+    state.update(cx, |state, cx| {
+        state.review_comment_action_loading_id = Some(comment_id.to_string());
+        state.review_thread_action_error = None;
+        cx.notify();
+    });
+
+    let result = crate::local_feedback::update_comment(&repo_root, &detail, comment_id, &body);
+    apply_local_feedback_action_result(state, &detail_key, result, None, cx);
+    true
+}
+
 fn trigger_delete_pending_comment(
     state: &Entity<AppState>,
     comment_id: String,
     window: &mut Window,
     cx: &mut App,
 ) {
+    if trigger_delete_local_feedback_comment(state, &comment_id, cx) {
+        return;
+    }
+
     let Some((repository, number)) = state
         .read(cx)
         .active_detail()
@@ -421,6 +509,42 @@ fn trigger_delete_pending_comment(
             }
         })
         .detach();
+}
+
+fn trigger_delete_local_feedback_comment(
+    state: &Entity<AppState>,
+    comment_id: &str,
+    cx: &mut App,
+) -> bool {
+    let Some((detail_key, repo_root, detail)) = ({
+        let app_state = state.read(cx);
+        if !app_state.active_is_local_review() {
+            None
+        } else {
+            match (
+                app_state.active_pr_key.clone(),
+                active_local_feedback_repo_root(&app_state),
+                app_state.active_detail().cloned(),
+            ) {
+                (Some(detail_key), Some(repo_root), Some(detail)) => {
+                    Some((detail_key, repo_root, detail))
+                }
+                _ => None,
+            }
+        }
+    }) else {
+        return false;
+    };
+
+    state.update(cx, |state, cx| {
+        state.review_comment_action_loading_id = Some(comment_id.to_string());
+        state.review_thread_action_error = None;
+        cx.notify();
+    });
+
+    let result = crate::local_feedback::delete_comment(&repo_root, &detail, comment_id);
+    apply_local_feedback_action_result(state, &detail_key, result, None, cx);
+    true
 }
 
 fn trigger_submit_thread_reply(
@@ -515,6 +639,10 @@ fn trigger_set_review_thread_resolution(
     window: &mut Window,
     cx: &mut App,
 ) {
+    if trigger_set_local_feedback_resolution(state, &thread_id, resolved, cx) {
+        return;
+    }
+
     let Some((repository, number)) = state
         .read(cx)
         .active_detail()
@@ -576,6 +704,146 @@ fn trigger_set_review_thread_resolution(
             }
         })
         .detach();
+}
+
+fn trigger_set_local_feedback_resolution(
+    state: &Entity<AppState>,
+    thread_id: &str,
+    resolved: bool,
+    cx: &mut App,
+) -> bool {
+    let Some((detail_key, repo_root, detail)) = ({
+        let app_state = state.read(cx);
+        if !app_state.active_is_local_review() {
+            None
+        } else {
+            match (
+                app_state.active_pr_key.clone(),
+                active_local_feedback_repo_root(&app_state),
+                app_state.active_detail().cloned(),
+            ) {
+                (Some(detail_key), Some(repo_root), Some(detail)) => {
+                    Some((detail_key, repo_root, detail))
+                }
+                _ => None,
+            }
+        }
+    }) else {
+        return false;
+    };
+
+    state.update(cx, |state, cx| {
+        state.review_thread_action_loading_id = Some(thread_id.to_string());
+        state.review_thread_action_error = None;
+        cx.notify();
+    });
+
+    let result =
+        crate::local_feedback::set_thread_resolved(&repo_root, &detail, thread_id, resolved);
+    apply_local_feedback_action_result(state, &detail_key, result, None, cx);
+    true
+}
+
+fn local_feedback_comment_context(
+    state: &Entity<AppState>,
+    cx: &App,
+) -> Option<(
+    String,
+    PathBuf,
+    PullRequestDetail,
+    ReviewLineActionTarget,
+    String,
+    bool,
+)> {
+    let app_state = state.read(cx);
+    let detail_key = app_state.active_pr_key.clone()?;
+    let detail = app_state.active_detail()?.clone();
+    let repo_root = active_local_feedback_repo_root(&app_state)?;
+    let target = app_state.active_review_line_action.clone()?;
+    Some((
+        detail_key,
+        repo_root,
+        detail,
+        target,
+        app_state.inline_comment_draft.clone(),
+        app_state.inline_comment_loading,
+    ))
+}
+
+fn active_local_feedback_repo_root(state: &AppState) -> Option<PathBuf> {
+    state
+        .active_local_repository_status()
+        .and_then(|status| status.path.as_ref())
+        .map(PathBuf::from)
+}
+
+fn local_feedback_target(
+    target: &ReviewLineActionTarget,
+) -> crate::local_feedback::LocalFeedbackTarget {
+    crate::local_feedback::LocalFeedbackTarget {
+        anchor: target.anchor.clone(),
+        start_line: target.start_line,
+        start_side: target.start_side.clone(),
+    }
+}
+
+fn apply_local_feedback_action_result(
+    state: &Entity<AppState>,
+    detail_key: &str,
+    result: Result<crate::local_feedback::LocalFeedbackThreads, String>,
+    close_target_key: Option<String>,
+    cx: &mut App,
+) {
+    state.update(cx, |state, cx| {
+        state.inline_comment_loading = false;
+        state.review_thread_action_loading_id = None;
+        state.review_comment_action_loading_id = None;
+
+        match result {
+            Ok(feedback) => {
+                state.inline_comment_draft.clear();
+                state.inline_comment_preview = false;
+                state.inline_comment_error = None;
+                state.review_thread_action_error = None;
+                state.editing_review_comment_id = None;
+                state.active_review_thread_reply_id = None;
+
+                if let Some(target_key) = close_target_key {
+                    if state
+                        .active_review_line_action
+                        .as_ref()
+                        .map(|active| active.stable_key() == target_key)
+                        .unwrap_or(false)
+                    {
+                        state.active_review_line_action = None;
+                        state.active_review_line_action_position = None;
+                        state.review_line_action_mode = ReviewLineActionMode::Menu;
+                    }
+                }
+
+                if let Some(detail_state) = state.detail_states.get_mut(detail_key) {
+                    if let Some(snapshot) = detail_state.snapshot.as_mut() {
+                        if let Some(detail) = snapshot.detail.as_mut() {
+                            detail.review_threads = feedback.threads;
+                            detail.comments_count = feedback.pending_count as i64;
+                        }
+                    }
+                }
+                if let Some(tab) = state
+                    .open_tabs
+                    .iter_mut()
+                    .find(|tab| summary_key(tab) == detail_key)
+                {
+                    tab.comments_count = feedback.pending_count as i64;
+                }
+            }
+            Err(error) => {
+                state.inline_comment_error = Some(error.clone());
+                state.review_thread_action_error = Some(error);
+            }
+        }
+        cx.notify();
+    });
 }
 
 async fn apply_detail_sync_result(
@@ -1539,6 +1807,7 @@ fn render_review_line_action_popup(
     let inline_comment_loading = app_state.inline_comment_loading;
     let inline_comment_error = app_state.inline_comment_error.clone();
     let inline_comment_preview = app_state.inline_comment_preview;
+    let is_local_review = app_state.active_is_local_review();
     let popup_key = target
         .map(|target| target.stable_key())
         .unwrap_or_else(|| "line-action-popup".to_string());
@@ -1590,7 +1859,11 @@ fn render_review_line_action_popup(
                         "inline-comment-{}",
                         target.map(|target| target.stable_key()).unwrap_or_default()
                     ),
-                    "Comment on this line...",
+                    if is_local_review {
+                        "Feedback for the coding agent..."
+                    } else {
+                        "Comment on this line..."
+                    },
                     inline_comment_preview,
                     104.0,
                     cx,
@@ -1607,8 +1880,9 @@ fn render_review_line_action_popup(
                                 .font_family(mono_font_family())
                                 .text_color(fg_subtle())
                                 .child(format!(
-                                    "{} submit",
-                                    crate::shortcuts::secondary_key_label("enter")
+                                    "{} {}",
+                                    crate::shortcuts::secondary_key_label("enter"),
+                                    if is_local_review { "save" } else { "submit" }
                                 )),
                         )
                         .child(
@@ -1670,7 +1944,13 @@ fn render_review_line_action_popup(
                                 }))
                                 .child(review_button(
                                     if inline_comment_loading {
-                                        "Submitting..."
+                                        if is_local_review {
+                                            "Saving..."
+                                        } else {
+                                            "Submitting..."
+                                        }
+                                    } else if is_local_review {
+                                        "Save"
                                     } else {
                                         "Submit"
                                     },
@@ -2094,7 +2374,9 @@ pub(super) fn render_review_thread(
     let thread_id = thread.id.clone();
     let reply_open = ui.active_reply_id.as_deref() == Some(thread.id.as_str());
     let thread_loading = ui.thread_loading_id.as_deref() == Some(thread.id.as_str());
-    let viewer_login = state.read(cx).viewer_login().unwrap_or("you").to_string();
+    let app_state = state.read(cx);
+    let viewer_login = app_state.viewer_login().unwrap_or("you").to_string();
+    let is_local_review = app_state.active_is_local_review();
     let can_resolve = if thread.is_resolved {
         thread.viewer_can_unresolve
     } else {
@@ -2138,7 +2420,11 @@ pub(super) fn render_review_thread(
                                 } else {
                                     fg_muted()
                                 })
-                                .child("Review thread"),
+                                .child(if is_local_review {
+                                    "Local feedback"
+                                } else {
+                                    "Review thread"
+                                }),
                         )
                         .when(thread.is_resolved, |el| el.child(badge_success("resolved")))
                         .when(thread.is_outdated, |el| el.child(badge("outdated"))),

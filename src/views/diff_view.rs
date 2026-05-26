@@ -1764,6 +1764,15 @@ fn render_diff_toolbar(
     let state_for_refresh = state.clone();
     let state_for_submit = state.clone();
     let pending_count = pending_review_comment_count(detail);
+    let stale_local_feedback_count = if is_local_review {
+        detail
+            .review_threads
+            .iter()
+            .filter(|thread| thread.is_outdated)
+            .count()
+    } else {
+        0
+    };
     let submit_label = if pending_count > 0 {
         format!("Submit review ({pending_count})")
     } else {
@@ -1834,7 +1843,13 @@ fn render_diff_toolbar(
             ))
         })
         .when(is_local_review, |el| {
-            el.child(review_button("Refresh", move |_, window, cx| {
+            el.when(pending_count > 0, |el| {
+                el.child(badge(&format!("{pending_count} feedback")))
+            })
+            .when(stale_local_feedback_count > 0, |el| {
+                el.child(badge(&format!("{stale_local_feedback_count} stale")))
+            })
+            .child(review_button("Refresh", move |_, window, cx| {
                 refresh_active_local_review(&state_for_refresh, window, cx);
             }))
         })

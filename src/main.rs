@@ -55,6 +55,7 @@ mod github_files_diff;
 mod icons;
 mod inline_diff;
 mod local_documents;
+mod local_feedback;
 mod local_repo;
 mod local_review;
 mod lsp;
