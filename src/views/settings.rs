@@ -15,9 +15,7 @@ use crate::theme::*;
 use crate::{app_storage, diagnostic_logs, platform_macos};
 
 use super::pr_detail::surface_tab;
-use super::sections::{
-    badge, error_text, eyebrow, ghost_button, panel, panel_state_text, success_text,
-};
+use super::sections::{badge, error_text, eyebrow, panel, panel_state_text, success_text};
 
 const SHOW_REVIEW_INTELLIGENCE_SETTINGS: bool = false;
 
@@ -649,7 +647,7 @@ fn render_language_server_settings_panel(
             .items_center()
             .gap(px(8.0))
             .flex_wrap()
-            .child(ghost_button(
+            .child(settings_action_button(
                 if loading {
                     "Refreshing..."
                 } else {
@@ -771,6 +769,30 @@ fn settings_row_copy(title: impl Into<String>, detail: impl Into<String>) -> Div
         )
 }
 
+fn settings_action_button(
+    label: &str,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .px(px(10.0))
+        .py(px(5.0))
+        .rounded(radius_sm())
+        .bg(transparent())
+        .border_1()
+        .border_color(transparent())
+        .text_color(fg_default())
+        .text_size(px(13.0))
+        .font_weight(FontWeight::MEDIUM)
+        .hover(|style| {
+            style
+                .bg(control_button_bg())
+                .border_color(border_muted())
+                .text_color(fg_emphasis())
+        })
+        .on_mouse_down(MouseButton::Left, on_click)
+        .child(label.to_string())
+}
+
 fn render_software_update_panel(state: &Entity<AppState>, s: &AppState) -> impl IntoElement {
     let status = platform_macos::updates::updater_status();
     let message = s.software_update_message.clone();
@@ -812,19 +834,19 @@ fn render_software_update_panel(state: &Entity<AppState>, s: &AppState) -> impl 
                     .items_center()
                     .gap(px(8.0))
                     .flex_wrap()
-                    .child(ghost_button("Check for Updates", {
-                        let state = state.clone();
-                        move |_, _, cx| {
-                            trigger_software_update_check(&state, cx);
-                        }
-                    }))
                     .child(div().text_size(px(13.0)).text_color(fg_subtle()).child(
                         if status.available {
                             "updater ready"
                         } else {
                             "updater unavailable"
                         },
-                    )),
+                    ))
+                    .child(settings_action_button("Check for Updates", {
+                        let state = state.clone();
+                        move |_, _, cx| {
+                            trigger_software_update_check(&state, cx);
+                        }
+                    })),
             )
             .when_some(message, |el, message| el.child(success_text(&message)))
             .when_some(error, |el, error| el.child(error_text(&error))),
@@ -851,7 +873,7 @@ fn render_diagnostic_logs_panel(state: &Entity<AppState>, s: &AppState) -> impl 
                     .items_center()
                     .gap(px(8.0))
                     .flex_wrap()
-                    .child(ghost_button(
+                    .child(settings_action_button(
                         if loading {
                             "Exporting logs..."
                         } else {
@@ -984,7 +1006,7 @@ fn font_size_icon_button(
         .w(px(30.0))
         .h(px(30.0))
         .rounded(radius_sm())
-        .bg(control_button_bg())
+        .bg(transparent())
         .border_1()
         .border_color(transparent())
         .flex()
@@ -996,7 +1018,8 @@ fn font_size_icon_button(
         button
             .hover(|style| {
                 style
-                    .bg(control_button_hover_bg())
+                    .bg(control_button_bg())
+                    .border_color(border_muted())
                     .text_color(fg_emphasis())
             })
             .on_mouse_down(MouseButton::Left, on_click)
@@ -1049,7 +1072,7 @@ fn render_review_intelligence_settings_panel(
                     .gap(px(8.0))
                     .items_center()
                     .flex_wrap()
-                    .child(ghost_button(
+                    .child(settings_action_button(
                         if settings_state.loading {
                             "Loading settings..."
                         } else {
@@ -1063,7 +1086,7 @@ fn render_review_intelligence_settings_panel(
                         },
                     ))
                     .when(experimental_enabled, |el| {
-                        el.child(ghost_button(
+                        el.child(settings_action_button(
                             if provider_loading {
                                 "Refreshing providers..."
                             } else {
@@ -1312,7 +1335,7 @@ fn settings_toggle_row(
                 } else {
                     disabled_badge
                 }))
-                .child(ghost_button(button_label, on_click)),
+                .child(settings_action_button(button_label, on_click)),
         )
 }
 
@@ -1388,7 +1411,7 @@ fn render_managed_lsp_card(
                 el.child(success_text(&message))
             })
             .when_some(install_error, |el, error| el.child(error_text(&error))),
-        ghost_button(install_button_label(status.state, installing), {
+        settings_action_button(install_button_label(status.state, installing), {
             let state = state.clone();
             move |_, window, cx| {
                 trigger_managed_lsp_install(&state, kind, window, cx);
@@ -1511,7 +1534,7 @@ fn render_review_intelligence_repository_row(
                 } else {
                     "background off"
                 }))
-                .child(ghost_button(
+                .child(settings_action_button(
                     if enabled {
                         "Disable background generation"
                     } else {
