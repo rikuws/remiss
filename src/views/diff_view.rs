@@ -1204,14 +1204,10 @@ pub fn render_files_view(
             el.child(render_finish_review_modal(state, detail, cx))
         })
         .when_some(
-            (!is_local_review)
-                .then(|| {
-                    line_action_target
-                        .as_ref()
-                        .zip(line_action_position)
-                        .map(|(target, position)| (target.clone(), position))
-                })
-                .flatten(),
+            line_action_target
+                .as_ref()
+                .zip(line_action_position)
+                .map(|(target, position)| (target.clone(), position)),
             |el, (target, position)| {
                 el.child(render_review_line_action_overlay(
                     state,

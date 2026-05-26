@@ -1348,8 +1348,8 @@ fn prepare_combined_diff_file_context(
         .active_detail_state()
         .and_then(|detail_state| detail_state.file_content_states.get(&file.path));
     let prepared_file = file_content_state.and_then(|state| state.prepared.as_ref());
-    let has_review_submission = !crate::local_review::is_local_review_detail(detail);
-    let reserve_waypoint_slot = has_review_submission
+    let has_line_feedback = app_state.active_detail().is_some();
+    let reserve_waypoint_slot = has_line_feedback
         || app_state
             .active_review_session()
             .map(|session| {

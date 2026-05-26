@@ -81,11 +81,8 @@ pub(super) fn render_file_diff(
     let highlighted_hunks = diff_view_state.highlighted_hunks.clone();
     let (reserve_waypoint_slot, wrap_diff_lines, focus_scroll_behavior) = {
         let app_state = state.read(cx);
-        let has_review_submission = app_state
-            .active_detail()
-            .map(|detail| !crate::local_review::is_local_review_detail(detail))
-            .unwrap_or(false);
-        let reserve_waypoint_slot = has_review_submission
+        let has_line_feedback = app_state.active_detail().is_some();
+        let reserve_waypoint_slot = has_line_feedback
             || app_state
                 .active_review_session()
                 .map(|session| {
