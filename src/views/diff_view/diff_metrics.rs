@@ -640,7 +640,7 @@ pub(super) fn render_diff_line(
                         div()
                             .w(px(diff_line_number_column_width()))
                             .px(px(DIFF_LINE_NUMBER_CELL_PADDING_X))
-                            .py(px(1.0))
+                            .py(diff_line_vertical_padding_px())
                             .flex()
                             .justify_end()
                             .text_size(diff_line_number_font_size_px())
@@ -655,7 +655,7 @@ pub(super) fn render_diff_line(
                         div()
                             .w(px(diff_line_number_column_width()))
                             .px(px(DIFF_LINE_NUMBER_CELL_PADDING_X))
-                            .py(px(1.0))
+                            .py(diff_line_vertical_padding_px())
                             .flex()
                             .justify_end()
                             .text_size(diff_line_number_font_size_px())
@@ -671,7 +671,7 @@ pub(super) fn render_diff_line(
                 .w(px(diff_marker_column_width()))
                 .flex_shrink_0()
                 .min_h(diff_row_height_px())
-                .py(px(1.0))
+                .py(diff_line_vertical_padding_px())
                 .child(marker),
         )
         .child(render_syntax_content(
@@ -778,7 +778,7 @@ pub(super) fn render_syntax_content(
             diff_code_text_width(content)
         }))
         .px(px(8.0))
-        .py(px(1.0))
+        .py(diff_line_vertical_padding_px())
         .text_size(diff_code_font_size_px())
         .line_height(diff_code_line_height_px())
         .font_weight(FontWeight::MEDIUM)
@@ -950,6 +950,12 @@ pub(super) fn diff_code_font_size_px() -> Pixels {
 
 pub(super) fn diff_code_line_height_px() -> Pixels {
     code_line_height(DIFF_CODE_LINE_HEIGHT)
+}
+
+pub(super) fn diff_line_vertical_padding_px() -> Pixels {
+    let row_height = f32::from(diff_row_height_px());
+    let line_height = f32::from(diff_code_line_height_px());
+    px(((row_height - line_height) / 2.0).max(0.0))
 }
 
 pub(super) fn diff_line_number_font_size_px() -> Pixels {

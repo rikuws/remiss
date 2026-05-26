@@ -724,7 +724,7 @@ fn render_empty_side_by_side_cell(
                         div()
                             .w(px(diff_line_number_column_width()))
                             .px(px(DIFF_LINE_NUMBER_CELL_PADDING_X))
-                            .py(px(1.0))
+                            .py(diff_line_vertical_padding_px())
                             .flex()
                             .justify_end()
                             .text_size(diff_line_number_font_size_px())
@@ -738,7 +738,7 @@ fn render_empty_side_by_side_cell(
                     .w(px(diff_marker_column_width()))
                     .flex_shrink_0()
                     .min_h(diff_row_height_px())
-                    .py(px(1.0))
+                    .py(diff_line_vertical_padding_px())
                     .child(" "),
             )
             .child(
@@ -746,7 +746,7 @@ fn render_empty_side_by_side_cell(
                     .flex_grow()
                     .min_w_0()
                     .px(px(8.0))
-                    .py(px(1.0))
+                    .py(diff_line_vertical_padding_px())
                     .child("\u{00a0}".to_string()),
             )
         })
