@@ -1142,6 +1142,27 @@ pub fn tooltip_shadow() -> Vec<BoxShadow> {
     }
 }
 
+pub fn review_file_header_bg() -> Rgba {
+    match active_theme() {
+        ActiveTheme::Light => mix_rgba(bg_surface(), bg_subtle(), 0.58),
+        ActiveTheme::Dark => mix_rgba(bg_overlay(), bg_subtle(), 0.28),
+    }
+}
+
+pub fn review_file_header_shadow() -> Vec<BoxShadow> {
+    match active_theme() {
+        ActiveTheme::Light => vec![
+            shadow_layer(hsla(0.61, 0.20, 0.18, 0.12), 0.0, 10.0, 24.0, -18.0),
+            shadow_layer(hsla(0.61, 0.18, 0.16, 0.08), 0.0, 2.0, 8.0, -5.0),
+        ],
+        ActiveTheme::Dark => vec![
+            shadow_layer(hsla(0.0, 0.0, 0.0, 0.42), 0.0, 12.0, 28.0, -18.0),
+            shadow_layer(hsla(0.0, 0.0, 0.0, 0.30), 0.0, 3.0, 10.0, -6.0),
+            shadow_layer(hsla(0.60, 0.18, 0.82, 0.05), 0.0, 0.0, 0.0, 1.0),
+        ],
+    }
+}
+
 fn shadow_layer(color: Hsla, x: f32, y: f32, blur: f32, spread: f32) -> BoxShadow {
     BoxShadow {
         color,

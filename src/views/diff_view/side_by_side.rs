@@ -704,7 +704,7 @@ fn render_empty_side_by_side_cell(
                 div()
                     .absolute()
                     .size_full()
-                    .bg(pattern_slash(stripe_color, 1.0, 7.0)),
+                    .bg(pattern_slash(stripe_color, 1.0, 6.0)),
             )
         })
         .when(!striped, |el| {
