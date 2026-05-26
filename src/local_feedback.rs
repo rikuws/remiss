@@ -592,6 +592,7 @@ fn document_matches_review_scope(
         && document.base_ref == detail.base_ref_name
         && document.head_ref == detail.head_ref_name
         && document.base_oid == detail.base_ref_oid
+        && document.head_oid == detail.head_ref_oid
 }
 
 fn refresh_document_snapshot(
@@ -936,13 +937,13 @@ mod tests {
     }
 
     #[test]
-    fn worktree_snapshot_change_keeps_active_comments_in_current() {
+    fn dirty_worktree_identity_change_keeps_active_comments_in_current() {
         let storage = crate::test_git::unique_test_directory("local-feedback-current-refresh");
         let repo_root = storage.join("repo");
         fs::create_dir_all(&repo_root).expect("repo dir");
         let store = LocalFeedbackStore::with_root(storage.join("feedback"));
-        let old_detail = detail_with_diff("local:org/repo:feature:base:head");
-        let new_detail = detail_with_diff("local:org/repo:feature:base:newhead");
+        let old_detail = detail_with_diff("local:org/repo:feature:base:head:worktree-old");
+        let new_detail = detail_with_diff("local:org/repo:feature:base:head:worktree-new");
 
         store
             .add_comment(
@@ -964,8 +965,66 @@ mod tests {
             .expect("read current")
             .expect("current document");
         assert_eq!(current.comments.len(), 1);
-        assert_eq!(current.head_oid.as_deref(), Some("newhead"));
+        assert_eq!(current.head_oid.as_deref(), Some("head"));
+        assert_eq!(current.worktree_identity.as_deref(), Some("worktree-new"));
         assert_eq!(current.local_review_key, new_detail.id);
+    }
+
+    #[test]
+    fn head_commit_change_archives_current_but_allows_new_current_comment() {
+        let storage = crate::test_git::unique_test_directory("local-feedback-head-change");
+        let repo_root = storage.join("repo");
+        fs::create_dir_all(&repo_root).expect("repo dir");
+        let store = LocalFeedbackStore::with_root(storage.join("feedback"));
+        let old_detail = detail_with_diff("local:org/repo:feature:base:head");
+        let new_detail = detail_with_diff("local:org/repo:feature:base:newhead");
+
+        store
+            .add_comment(
+                &repo_root,
+                &old_detail,
+                &target("src/lib.rs", "RIGHT", 2, None),
+                "Fix this first.",
+            )
+            .expect("add old comment");
+        let refreshed = store
+            .sync_detail_threads(&repo_root, &new_detail)
+            .expect("sync new head snapshot");
+
+        assert_eq!(refreshed.pending_count, 0);
+        assert_eq!(refreshed.threads.len(), 1);
+        assert!(refreshed.threads[0].is_outdated);
+
+        let updated = store
+            .add_comment(
+                &repo_root,
+                &new_detail,
+                &target("src/lib.rs", "RIGHT", 1, None),
+                "Fix this after the commit.",
+            )
+            .expect("add new comment");
+
+        assert_eq!(updated.pending_count, 1);
+        assert_eq!(updated.threads.len(), 2);
+        assert_eq!(
+            updated
+                .threads
+                .iter()
+                .filter(|thread| !thread.is_outdated)
+                .count(),
+            1
+        );
+        assert!(updated.threads.iter().any(|thread| thread.is_outdated));
+        let current = store
+            .read_current_document(&repo_root)
+            .expect("read current")
+            .expect("current document");
+        assert_eq!(current.comments.len(), 1);
+        assert_eq!(
+            current.comments[0].body.as_str(),
+            "Fix this after the commit."
+        );
+        assert_eq!(current.head_oid.as_deref(), Some("newhead"));
     }
 
     #[test]
@@ -1005,8 +1064,8 @@ mod tests {
         let repo_root = storage.join("repo");
         fs::create_dir_all(&repo_root).expect("repo dir");
         let store = LocalFeedbackStore::with_root(storage.join("feedback"));
-        let old_detail = detail_with_diff("local:org/repo:feature:base:head");
-        let new_detail = detail_with_diff("local:org/repo:feature:base:newhead");
+        let old_detail = detail_with_diff("local:org/repo:feature:base:head:worktree-old");
+        let new_detail = detail_with_diff("local:org/repo:feature:base:head:worktree-new");
 
         store
             .add_comment(

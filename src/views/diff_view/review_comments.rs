@@ -824,6 +824,8 @@ fn apply_local_feedback_action_result(
                 if let Some(detail_state) = state.detail_states.get_mut(detail_key) {
                     if let Some(snapshot) = detail_state.snapshot.as_mut() {
                         if let Some(detail) = snapshot.detail.as_mut() {
+                            detail.updated_at =
+                                local_feedback_detail_revision(&detail.id, &feedback.threads);
                             detail.review_threads = feedback.threads;
                             detail.comments_count = feedback.pending_count as i64;
                         }
@@ -844,6 +846,29 @@ fn apply_local_feedback_action_result(
         }
         cx.notify();
     });
+}
+
+fn local_feedback_detail_revision(detail_id: &str, threads: &[PullRequestReviewThread]) -> String {
+    let mut hasher = DefaultHasher::new();
+    detail_id.hash(&mut hasher);
+    for thread in threads {
+        thread.id.hash(&mut hasher);
+        thread.path.hash(&mut hasher);
+        thread.line.hash(&mut hasher);
+        thread.original_line.hash(&mut hasher);
+        thread.start_line.hash(&mut hasher);
+        thread.original_start_line.hash(&mut hasher);
+        thread.diff_side.hash(&mut hasher);
+        thread.is_outdated.hash(&mut hasher);
+        thread.is_resolved.hash(&mut hasher);
+        for comment in &thread.comments {
+            comment.id.hash(&mut hasher);
+            comment.body.hash(&mut hasher);
+            comment.state.hash(&mut hasher);
+            comment.updated_at.hash(&mut hasher);
+        }
+    }
+    format!("local-feedback:{detail_id}:{:x}", hasher.finish())
 }
 
 async fn apply_detail_sync_result(
