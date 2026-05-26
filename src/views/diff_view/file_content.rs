@@ -43,9 +43,13 @@ pub async fn load_pull_request_file_content_flow(
             let detail_state = state.detail_states.get(&detail_key);
             let skip_local_checkout = crate::screenshot_mode::screenshot_mode_enabled();
 
-            let file_content_loaded =
-                is_local_checkout_file_loaded(detail_state, &request.path, &request.request_key);
-            let already_loaded = file_content_loaded;
+            let file_content_state =
+                local_checkout_file_load_state(detail_state, &request.path, &request.request_key);
+            let already_loaded = diff_file_content_flow_complete(
+                file_content_state,
+                existing_local_repo_status.as_ref(),
+                skip_local_checkout,
+            );
 
             Some((
                 cache,
@@ -53,7 +57,7 @@ pub async fn load_pull_request_file_content_flow(
                 detail,
                 selected_file,
                 request,
-                file_content_loaded,
+                file_content_state.loaded,
                 already_loaded,
                 existing_local_repo_status,
                 skip_local_checkout,
@@ -93,7 +97,7 @@ pub async fn load_pull_request_file_content_flow(
         log_checkout_flow_event(
             &detail,
             format!(
-                "diff file-content flow skipped; path={}; request_key already loaded",
+                "diff file-content flow skipped; path={}; content and checkout already satisfied",
                 request.path
             ),
         );
@@ -363,6 +367,18 @@ pub async fn load_pull_request_file_content_flow(
                     }
                 }
 
+                cx.notify();
+            })
+            .ok();
+    } else {
+        model
+            .update(cx, |state, cx| {
+                let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
+                    return;
+                };
+                detail_state.local_repository_loading = false;
+                detail_state.local_repository_status = local_repo_status.clone();
+                detail_state.local_repository_error = local_repo_error.clone();
                 cx.notify();
             })
             .ok();
@@ -2124,23 +2140,59 @@ fn build_temp_source_file_content_request(
     })
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct LocalCheckoutFileLoadState {
+    loading: bool,
+    loaded: bool,
+}
+
+fn local_checkout_file_load_state(
+    detail_state: Option<&DetailState>,
+    path: &str,
+    request_key: &str,
+) -> LocalCheckoutFileLoadState {
+    detail_state
+        .and_then(|detail_state| detail_state.file_content_states.get(path))
+        .map(|file_state| {
+            if file_state.request_key.as_deref() != Some(request_key) {
+                return LocalCheckoutFileLoadState::default();
+            }
+
+            LocalCheckoutFileLoadState {
+                loading: file_state.loading,
+                loaded: file_state
+                    .document
+                    .as_ref()
+                    .map(|document| document.source == REPOSITORY_FILE_SOURCE_LOCAL_CHECKOUT)
+                    .unwrap_or(false),
+            }
+        })
+        .unwrap_or_default()
+}
+
 fn is_local_checkout_file_loaded(
     detail_state: Option<&DetailState>,
     path: &str,
     request_key: &str,
 ) -> bool {
-    detail_state
-        .and_then(|detail_state| detail_state.file_content_states.get(path))
-        .map(|file_state| {
-            file_state.request_key.as_deref() == Some(request_key)
-                && (file_state.loading
-                    || file_state
-                        .document
-                        .as_ref()
-                        .map(|document| document.source == REPOSITORY_FILE_SOURCE_LOCAL_CHECKOUT)
-                        .unwrap_or(false))
-        })
-        .unwrap_or(false)
+    let state = local_checkout_file_load_state(detail_state, path, request_key);
+    state.loading || state.loaded
+}
+
+fn diff_file_content_flow_complete(
+    file_content_state: LocalCheckoutFileLoadState,
+    local_repo_status: Option<&local_repo::LocalRepositoryStatus>,
+    skip_local_checkout: bool,
+) -> bool {
+    if file_content_state.loading {
+        return true;
+    }
+
+    file_content_state.loaded
+        && (skip_local_checkout
+            || local_repo_status
+                .map(local_repo::LocalRepositoryStatus::ready_for_snapshot_features)
+                .unwrap_or(false))
 }
 
 fn is_lsp_status_loaded(detail_state: Option<&DetailState>, path: &str) -> bool {
@@ -2190,5 +2242,78 @@ fn prepare_file_content(
         size_bytes: document.size_bytes,
         text: Arc::<str>::from(document.content.as_deref().unwrap_or_default()),
         lines: Arc::new(prepared_lines),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::local_repo;
+
+    use super::{diff_file_content_flow_complete, LocalCheckoutFileLoadState};
+
+    fn local_repository_status(ready: bool) -> local_repo::LocalRepositoryStatus {
+        local_repo::LocalRepositoryStatus {
+            repository: "owner/repo".to_string(),
+            path: ready.then(|| "/tmp/repo".to_string()),
+            source: "managed".to_string(),
+            exists: ready,
+            is_valid_repository: ready,
+            current_head_oid: ready.then(|| "head".to_string()),
+            expected_head_oid: Some("head".to_string()),
+            matches_expected_head: ready,
+            is_worktree_clean: true,
+            ready_for_local_features: ready,
+            message: "test checkout".to_string(),
+        }
+    }
+
+    #[test]
+    fn diff_file_content_flow_waits_for_checkout_when_content_is_cached() {
+        let file_content_state = LocalCheckoutFileLoadState {
+            loading: false,
+            loaded: true,
+        };
+        let not_ready = local_repository_status(false);
+        let ready = local_repository_status(true);
+
+        assert!(!diff_file_content_flow_complete(
+            file_content_state,
+            None,
+            false
+        ));
+        assert!(!diff_file_content_flow_complete(
+            file_content_state,
+            Some(&not_ready),
+            false
+        ));
+        assert!(diff_file_content_flow_complete(
+            file_content_state,
+            Some(&ready),
+            false
+        ));
+    }
+
+    #[test]
+    fn diff_file_content_flow_does_not_duplicate_active_loads() {
+        assert!(diff_file_content_flow_complete(
+            LocalCheckoutFileLoadState {
+                loading: true,
+                loaded: false,
+            },
+            None,
+            false
+        ));
+    }
+
+    #[test]
+    fn diff_file_content_flow_allows_screenshot_mode_without_checkout() {
+        assert!(diff_file_content_flow_complete(
+            LocalCheckoutFileLoadState {
+                loading: false,
+                loaded: true,
+            },
+            None,
+            true
+        ));
     }
 }
