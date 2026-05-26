@@ -788,11 +788,6 @@ fn render_review_snapshot_panel(
     } else {
         "Review Snapshot"
     };
-    let highlight_count = if is_own_pull_request {
-        format!("{} highlights", own_pr_feedback.len())
-    } else {
-        format!("{} threads", thread_digest.len())
-    };
     let unresolved_feedback = own_pr_feedback
         .iter()
         .filter(|item| !item.is_resolved)
@@ -863,16 +858,15 @@ fn render_review_snapshot_panel(
                                         .child(title),
                                 ),
                         )
-                        .child(
-                            div()
-                                .flex()
-                                .gap(px(6.0))
-                                .flex_wrap()
-                                .child(badge(&highlight_count))
-                                .when_some(review_decision, |el, decision| {
-                                    el.child(review_decision_badge(&decision))
-                                }),
-                        ),
+                        .when_some(review_decision, |el, decision| {
+                            el.child(
+                                div()
+                                    .flex()
+                                    .gap(px(6.0))
+                                    .flex_wrap()
+                                    .child(review_decision_badge(&decision)),
+                            )
+                        }),
                 )
                 .child(
                     div()
@@ -1266,7 +1260,7 @@ fn render_thread_digest_card(
 
 fn render_pull_request_summary_panel(
     detail: &github::PullRequestDetail,
-    loaded_from_cache: bool,
+    _loaded_from_cache: bool,
     syncing: bool,
 ) -> impl IntoElement {
     pr_detail_section()
@@ -1283,14 +1277,15 @@ fn render_pull_request_summary_panel(
                         .text_color(fg_emphasis())
                         .child("Summary"),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(6.0))
-                        .items_center()
-                        .child(badge(if loaded_from_cache { "cache" } else { "live" }))
-                        .when(syncing, |el| el.child(badge("refreshing"))),
-                ),
+                .when(syncing, |el| {
+                    el.child(
+                        div()
+                            .flex()
+                            .gap(px(6.0))
+                            .items_center()
+                            .child(badge("refreshing")),
+                    )
+                }),
         )
         .child(div().max_w(px(760.0)).child(if detail.body.is_empty() {
             div()

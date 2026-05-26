@@ -6,7 +6,6 @@ use std::{
 use gpui::prelude::*;
 use gpui::*;
 
-use crate::app_assets::APP_LOGO_ASSET;
 use crate::app_menu::{
     AddLocalRepository, AddWaypoint, CheckForUpdates, CycleCodeTheme, DecreaseCodeFontSize,
     IncreaseCodeFontSize, JumpToNextReviewComment, OpenReviewFiles, OpenSelectedLineInSource,
@@ -1404,7 +1403,7 @@ fn render_app_sidebar(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                 .flex()
                 .flex_col()
                 .opacity(if closed { 0.0 } else { 1.0 })
-                .child(render_sidebar_brand(icons_only))
+                .child(render_sidebar_brand())
                 .child(
                     div()
                         .px(if icons_only { px(10.0) } else { px(14.0) })
@@ -1531,23 +1530,10 @@ fn render_sidebar_footer(
         )
 }
 
-fn render_sidebar_brand(icons_only: bool) -> impl IntoElement {
+fn render_sidebar_brand() -> impl IntoElement {
     div()
-        .px(if icons_only { px(0.0) } else { px(14.0) })
-        .pt(px(APP_SIDEBAR_TRAFFIC_LIGHT_CLEARANCE))
-        .pb(px(8.0))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .when(!icons_only, |el| el.justify_start())
-                .child(
-                    img(APP_LOGO_ASSET)
-                        .size(px(28.0))
-                        .object_fit(ObjectFit::Contain),
-                ),
-        )
+        .h(px(APP_SIDEBAR_TRAFFIC_LIGHT_CLEARANCE))
+        .flex_shrink_0()
 }
 
 fn render_local_review_sidebar_section(

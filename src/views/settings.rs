@@ -19,6 +19,8 @@ use super::sections::{
     badge, error_text, eyebrow, ghost_button, panel, panel_state_text, success_text,
 };
 
+const SHOW_REVIEW_INTELLIGENCE_SETTINGS: bool = false;
+
 pub fn ensure_managed_lsp_statuses_loaded(
     state: &Entity<AppState>,
     window: &mut Window,
@@ -567,8 +569,8 @@ pub fn render_settings_view(state: &Entity<AppState>, cx: &App) -> impl IntoElem
     let storage_root = app_storage::data_dir_root();
 
     div()
-        .p(px(40.0))
-        .px(px(48.0))
+        .p(px(36.0))
+        .px(px(44.0))
         .flex()
         .flex_col()
         .flex_grow()
@@ -581,117 +583,191 @@ pub fn render_settings_view(state: &Entity<AppState>, cx: &App) -> impl IntoElem
                 div()
                     .w_full()
                     .min_w_0()
-                    .max_w(px(1040.0))
+                    .max_w(px(960.0))
                     .flex()
                     .flex_col()
-                    .gap(px(24.0))
+                    .gap(px(30.0))
                     .child(render_theme_settings_panel(state, &s))
                     .child(render_software_update_panel(state, &s))
                     .child(render_diagnostic_logs_panel(state, &s))
-                    .child(render_review_intelligence_settings_panel(state, &s))
-                    .child(
-                        panel().child(
-                            div()
-                                .p(px(28.0))
-                                .px(px(32.0))
-                                .flex()
-                                .flex_col()
-                                .gap(px(16.0))
-                                .child(eyebrow("Settings / Language Servers"))
-                                .child(
-                                    div()
-                                        .text_size(px(24.0))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(fg_emphasis())
-                                        .child("Managed language servers"),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(13.0))
-                                        .text_color(fg_muted())
-                                        .max_w(px(760.0))
-                                        .child(
-                                            "Download or repair the LSPs Remiss can manage itself. This screen also surfaces install failures and broken local metadata.",
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .gap(px(8.0))
-                                        .items_center()
-                                        .child(ghost_button(
-                                            if loading { "Refreshing..." } else { "Refresh statuses" },
-                                            {
-                                                let state = state.clone();
-                                                move |_, window, cx| {
-                                                    trigger_managed_lsp_status_refresh(
-                                                        &state, window, cx,
-                                                    );
-                                                }
-                                            },
-                                        ))
-                                        .when(loading, |el| {
-                                            el.child(panel_state_text(
-                                                "Checking managed server state...",
-                                            ))
-                                        }),
-                                ),
-                        ),
-                    )
-                    .when(!loaded && !loading, |el| {
-                        el.child(panel_state_text(
-                            "Open this screen after startup to check which managed servers are already installed.",
-                        ))
+                    .when(SHOW_REVIEW_INTELLIGENCE_SETTINGS, |el| {
+                        el.child(render_review_intelligence_settings_panel(state, &s))
                     })
-                    .child(
-                        panel().child(
-                            div()
-                                .p(px(24.0))
-                                .px(px(32.0))
-                                .flex()
-                                .flex_col()
-                                .gap(px(8.0))
-                                .child(
-                                    div()
-                                        .text_size(px(13.0))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(fg_emphasis())
-                                        .child("Storage"),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(12.0))
-                                        .text_color(fg_muted())
-                                        .child("App-managed files are stored here."),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(12.0))
-                                        .font_family(mono_font_family())
-                                        .text_color(fg_subtle())
-                                        .child(SelectableText::new(
-                                            "settings-storage-root",
-                                            storage_root.display().to_string(),
-                                        )),
-                                ),
-                        ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(12.0))
-                            .children(
-                                ManagedServerKind::all()
-                                    .iter()
-                                    .copied()
-                                    .map(|kind| {
-                                        render_managed_lsp_card(state, settings, kind)
-                                            .into_any_element()
-                                    }),
-                            ),
-                    ),
+                    .child(render_general_settings_panel(storage_root))
+                    .child(render_language_server_settings_panel(
+                        state, settings, loading, loaded,
+                    )),
             ),
+        )
+}
+
+fn render_general_settings_panel(storage_root: std::path::PathBuf) -> impl IntoElement {
+    settings_section(
+        "General",
+        None,
+        settings_group().child(settings_row_shell(
+            settings_row_copy("Storage", "App-managed files are stored here.").child(
+                div()
+                    .pt(px(4.0))
+                    .text_size(px(12.0))
+                    .font_family(mono_font_family())
+                    .text_color(fg_subtle())
+                    .child(SelectableText::new(
+                        "settings-storage-root",
+                        storage_root.display().to_string(),
+                    )),
+            ),
+            div().w(px(0.0)),
+        )),
+    )
+}
+
+fn render_language_server_settings_panel(
+    state: &Entity<AppState>,
+    settings: &ManagedLspSettingsState,
+    loading: bool,
+    loaded: bool,
+) -> impl IntoElement {
+    let mut group = settings_group().child(settings_row_shell(
+        settings_row_copy(
+            "Managed language servers",
+            "Download or repair the LSPs Remiss can manage itself. This screen also surfaces install failures and broken local metadata.",
+        )
+        .when(!loaded && !loading, |el| {
+            el.child(
+                div()
+                    .pt(px(4.0))
+                    .text_size(px(12.0))
+                    .text_color(fg_subtle())
+                    .child(
+                        "Open this screen after startup to check which managed servers are already installed.",
+                    ),
+            )
+        }),
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .flex_wrap()
+            .child(ghost_button(
+                if loading {
+                    "Refreshing..."
+                } else {
+                    "Refresh statuses"
+                },
+                {
+                    let state = state.clone();
+                    move |_, window, cx| {
+                        trigger_managed_lsp_status_refresh(&state, window, cx);
+                    }
+                },
+            ))
+            .when(loading, |el| {
+                el.child(panel_state_text("Checking managed server state..."))
+            }),
+    ));
+
+    for kind in ManagedServerKind::all().iter().copied() {
+        group = group
+            .child(settings_separator())
+            .child(render_managed_lsp_card(state, settings, kind));
+    }
+
+    settings_section(
+        "Language servers",
+        Some("Local source intelligence used by source and review surfaces."),
+        group,
+    )
+}
+
+fn settings_section(
+    title: &'static str,
+    detail: Option<&'static str>,
+    content: impl IntoElement,
+) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(12.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(5.0))
+                .child(
+                    div()
+                        .text_size(px(18.0))
+                        .line_height(px(24.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg_emphasis())
+                        .child(title),
+                )
+                .when_some(detail, |el, detail| {
+                    el.child(
+                        div()
+                            .text_size(px(13.0))
+                            .line_height(px(20.0))
+                            .text_color(fg_muted())
+                            .child(detail),
+                    )
+                }),
+        )
+        .child(content)
+}
+
+fn settings_group() -> Div {
+    div()
+        .rounded(radius())
+        .border_1()
+        .border_color(border_default())
+        .bg(bg_overlay())
+        .overflow_hidden()
+        .flex()
+        .flex_col()
+}
+
+fn settings_separator() -> Div {
+    div()
+        .h(px(1.0))
+        .mx(px(20.0))
+        .bg(border_muted())
+        .flex_shrink_0()
+}
+
+fn settings_row_shell(left: impl IntoElement, right: impl IntoElement) -> Div {
+    div()
+        .px(px(20.0))
+        .py(px(17.0))
+        .min_h(px(72.0))
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .justify_between()
+        .gap(px(24.0))
+        .child(div().min_w(px(280.0)).flex_grow().child(left))
+        .child(div().flex().justify_end().flex_shrink_0().child(right))
+}
+
+fn settings_row_copy(title: impl Into<String>, detail: impl Into<String>) -> Div {
+    div()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(5.0))
+        .child(
+            div()
+                .text_size(px(14.0))
+                .line_height(px(20.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(fg_emphasis())
+                .child(title.into()),
+        )
+        .child(
+            div()
+                .text_size(px(13.0))
+                .line_height(px(20.0))
+                .text_color(fg_muted())
+                .child(detail.into()),
         )
 }
 
@@ -701,72 +777,58 @@ fn render_software_update_panel(state: &Entity<AppState>, s: &AppState) -> impl 
     let error = s.software_update_error.clone();
     let running_version = format!("{APP_NAME} v{}", platform_macos::app_short_version());
 
-    panel().child(
-        div()
-            .p(px(28.0))
-            .px(px(32.0))
-            .flex()
-            .flex_col()
-            .gap(px(18.0))
-            .child(eyebrow("Settings / Updates"))
-            .child(
-                div()
-                    .text_size(px(24.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(fg_emphasis())
-                    .child("Software updates"),
-            )
-            .child(
-                div()
-                    .text_size(px(13.0))
-                    .text_color(fg_muted())
-                    .max_w(px(760.0))
-                    .child(status.detail),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .flex_wrap()
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(fg_emphasis())
-                            .child("Running version"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .font_family(mono_font_family())
-                            .text_color(fg_subtle())
-                            .child(SelectableText::new(
-                                "settings-remiss-version",
-                                running_version,
-                            )),
-                    ),
-            )
-            .child(
+    settings_section(
+        "Updates",
+        Some("Keep the packaged app current."),
+        settings_group().child(
+            settings_row_shell(
+                settings_row_copy("Software updates", status.detail).child(
+                    div()
+                        .pt(px(4.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .flex_wrap()
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(fg_muted())
+                                .child("Running version"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .font_family(mono_font_family())
+                                .text_color(fg_subtle())
+                                .child(SelectableText::new(
+                                    "settings-remiss-version",
+                                    running_version,
+                                )),
+                        ),
+                ),
                 div()
                     .flex()
                     .items_center()
                     .gap(px(8.0))
                     .flex_wrap()
-                    .child(badge(if status.available {
-                        "updater ready"
-                    } else {
-                        "updater unavailable"
-                    }))
                     .child(ghost_button("Check for Updates", {
                         let state = state.clone();
                         move |_, _, cx| {
                             trigger_software_update_check(&state, cx);
                         }
-                    })),
+                    }))
+                    .child(div().text_size(px(13.0)).text_color(fg_subtle()).child(
+                        if status.available {
+                            "updater ready"
+                        } else {
+                            "updater unavailable"
+                        },
+                    )),
             )
             .when_some(message, |el, message| el.child(success_text(&message)))
             .when_some(error, |el, error| el.child(error_text(&error))),
+        ),
     )
 }
 
@@ -775,37 +837,20 @@ fn render_diagnostic_logs_panel(state: &Entity<AppState>, s: &AppState) -> impl 
     let message = s.diagnostic_export_message.clone();
     let error = s.diagnostic_export_error.clone();
 
-    panel().child(
-        div()
-            .p(px(28.0))
-            .px(px(32.0))
-            .flex()
-            .flex_col()
-            .gap(px(18.0))
-            .child(eyebrow("Settings / Diagnostics"))
-            .child(
-                div()
-                    .text_size(px(24.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(fg_emphasis())
-                    .child("Diagnostic logs"),
-            )
-            .child(
-                div()
-                    .text_size(px(13.0))
-                    .text_color(fg_muted())
-                    .max_w(px(760.0))
-                    .child(
-                        "Export recent Copilot, stack, and checkout logs as a zip file in Downloads.",
-                    ),
-            )
-            .child(
+    settings_section(
+        "Diagnostics",
+        Some("Collect troubleshooting artifacts without leaving the app."),
+        settings_group().child(
+            settings_row_shell(
+                settings_row_copy(
+                    "Diagnostic logs",
+                    "Export recent Copilot, stack, and checkout logs as a zip file in Downloads.",
+                ),
                 div()
                     .flex()
                     .items_center()
                     .gap(px(8.0))
                     .flex_wrap()
-                    .child(badge("local archive"))
                     .child(ghost_button(
                         if loading {
                             "Exporting logs..."
@@ -827,12 +872,12 @@ fn render_diagnostic_logs_panel(state: &Entity<AppState>, s: &AppState) -> impl 
             )
             .when_some(message, |el, message| el.child(success_text(&message)))
             .when_some(error, |el, error| el.child(error_text(&error))),
+        ),
     )
 }
 
 fn render_theme_settings_panel(state: &Entity<AppState>, s: &AppState) -> impl IntoElement {
     let theme_preference = s.theme_preference;
-    let resolved_theme = s.resolved_theme();
     let system_appearance = appearance_label(s.window_appearance);
     let summary_copy = match theme_preference {
         ThemePreference::System => format!(
@@ -848,59 +893,35 @@ fn render_theme_settings_panel(state: &Entity<AppState>, s: &AppState) -> impl I
         }
     };
 
-    panel().child(
-        div()
-            .p(px(28.0))
-            .px(px(32.0))
-            .flex()
-            .flex_col()
-            .gap(px(18.0))
-            .child(eyebrow("Settings / Appearance"))
-            .child(
-                div()
-                    .text_size(px(24.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(fg_emphasis())
-                    .child("Theme"),
-            )
-            .child(
-                div()
-                    .text_size(px(13.0))
-                    .text_color(fg_muted())
-                    .max_w(px(760.0))
-                    .child(summary_copy),
-            )
-            .child(div().flex().gap(px(4.0)).flex_wrap().children(
-                ThemePreference::all().iter().map(|candidate| {
-                    let candidate = *candidate;
-                    let state = state.clone();
-                    surface_tab(
-                        candidate.label(),
-                        theme_preference == candidate,
-                        move |_, window, cx| {
-                            update_theme_preference(&state, candidate, window, cx);
-                        },
-                    )
-                }),
-            ))
-            .child(
+    settings_section(
+        "Appearance",
+        Some("Tune the app surface and code-reading density."),
+        settings_group()
+            .child(settings_row_shell(
+                settings_row_copy("Theme", summary_copy),
                 div()
                     .flex()
-                    .items_center()
-                    .gap(px(8.0))
+                    .gap(px(4.0))
                     .flex_wrap()
-                    .child(badge(&format!(
-                        "active {}",
-                        resolved_theme.label().to_lowercase()
-                    )))
-                    .child(badge(&format!(
-                        "system {}",
-                        system_appearance.to_lowercase()
-                    ))),
-            )
-            .child(render_code_font_size_control(
-                state,
-                s.code_font_size_preference,
+                    .children(ThemePreference::all().iter().map(|candidate| {
+                        let candidate = *candidate;
+                        let state = state.clone();
+                        surface_tab(
+                            candidate.label(),
+                            theme_preference == candidate,
+                            move |_, window, cx| {
+                                update_theme_preference(&state, candidate, window, cx);
+                            },
+                        )
+                    })),
+            ))
+            .child(settings_separator())
+            .child(settings_row_shell(
+                settings_row_copy(
+                    "Code font size",
+                    "Used in diffs, source views, and code popovers.",
+                ),
+                render_code_font_size_control(state, s.code_font_size_preference),
             )),
     )
 }
@@ -914,58 +935,44 @@ fn render_code_font_size_control(
     let can_reset = code_font_size != CodeFontSizePreference::default_size();
 
     div()
-        .pt(px(6.0))
         .flex()
-        .flex_col()
-        .gap(px(10.0))
+        .items_center()
+        .gap(px(8.0))
+        .child(font_size_icon_button(LucideIcon::Minus, can_decrease, {
+            let state = state.clone();
+            move |_, window, cx| {
+                decrease_code_font_size_preference(&state, window, cx);
+            }
+        }))
         .child(
             div()
+                .min_w(px(68.0))
+                .h(px(30.0))
+                .px(px(12.0))
+                .rounded(radius_sm())
+                .bg(bg_inset())
+                .border_1()
+                .border_color(border_muted())
+                .flex()
+                .items_center()
+                .justify_center()
                 .text_size(px(13.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(fg_emphasis())
-                .child("Code font size"),
+                .child(code_font_size.label()),
         )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .child(font_size_icon_button(LucideIcon::Minus, can_decrease, {
-                    let state = state.clone();
-                    move |_, window, cx| {
-                        decrease_code_font_size_preference(&state, window, cx);
-                    }
-                }))
-                .child(
-                    div()
-                        .min_w(px(68.0))
-                        .h(px(30.0))
-                        .px(px(12.0))
-                        .rounded(radius_sm())
-                        .bg(bg_inset())
-                        .border_1()
-                        .border_color(border_muted())
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(13.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(fg_emphasis())
-                        .child(code_font_size.label()),
-                )
-                .child(font_size_icon_button(LucideIcon::Plus, can_increase, {
-                    let state = state.clone();
-                    move |_, window, cx| {
-                        increase_code_font_size_preference(&state, window, cx);
-                    }
-                }))
-                .child(font_size_icon_button(LucideIcon::RotateCcw, can_reset, {
-                    let state = state.clone();
-                    move |_, window, cx| {
-                        reset_code_font_size_preference(&state, window, cx);
-                    }
-                })),
-        )
+        .child(font_size_icon_button(LucideIcon::Plus, can_increase, {
+            let state = state.clone();
+            move |_, window, cx| {
+                increase_code_font_size_preference(&state, window, cx);
+            }
+        }))
+        .child(font_size_icon_button(LucideIcon::RotateCcw, can_reset, {
+            let state = state.clone();
+            move |_, window, cx| {
+                reset_code_font_size_preference(&state, window, cx);
+            }
+        }))
 }
 
 fn font_size_icon_button(
@@ -1328,74 +1335,65 @@ fn render_managed_lsp_card(
     let install_error = settings.install_errors.get(&kind).cloned();
     let install_message = settings.install_messages.get(&kind).cloned();
 
-    panel().child(
+    settings_row_shell(
         div()
-            .p(px(24.0))
-            .px(px(28.0))
+            .flex_grow()
+            .min_w_0()
             .flex()
-            .justify_between()
-            .gap(px(24.0))
-            .items_start()
+            .flex_col()
+            .gap(px(8.0))
             .child(
                 div()
-                    .flex_grow()
-                    .min_w_0()
                     .flex()
-                    .flex_col()
+                    .items_center()
                     .gap(px(10.0))
+                    .flex_wrap()
                     .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .gap(px(10.0))
-                            .flex_wrap()
-                            .child(
-                                div()
-                                    .text_size(px(16.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(fg_emphasis())
-                                    .child(kind.language_label()),
-                            )
-                            .child(managed_server_state_badge(status.state))
-                            .when_some(status.version.clone(), |el, version| {
-                                el.child(badge(&format!("v{version}")))
-                            }),
+                            .text_size(px(14.0))
+                            .line_height(px(20.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(fg_emphasis())
+                            .child(kind.language_label()),
                     )
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .font_family(mono_font_family())
-                            .text_color(fg_subtle())
-                            .child(managed_lsp::managed_server_display_name(kind)),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .text_color(fg_muted())
-                            .child(status.detail),
-                    )
-                    .when_some(kind.runtime_note(), |el, note| {
-                        el.child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(fg_subtle())
-                                .child(note),
-                        )
-                    })
-                    .when_some(install_message, |el, message| {
-                        el.child(success_text(&message))
-                    })
-                    .when_some(install_error, |el, error| el.child(error_text(&error))),
+                    .child(managed_server_state_badge(status.state))
+                    .when_some(status.version.clone(), |el, version| {
+                        el.child(badge(&format!("v{version}")))
+                    }),
             )
             .child(
-                ghost_button(install_button_label(status.state, installing), {
-                    let state = state.clone();
-                    move |_, window, cx| {
-                        trigger_managed_lsp_install(&state, kind, window, cx);
-                    }
-                })
-                .into_any_element(),
-            ),
+                div()
+                    .text_size(px(12.0))
+                    .font_family(mono_font_family())
+                    .text_color(fg_subtle())
+                    .child(managed_lsp::managed_server_display_name(kind)),
+            )
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .line_height(px(20.0))
+                    .text_color(fg_muted())
+                    .child(status.detail),
+            )
+            .when_some(kind.runtime_note(), |el, note| {
+                el.child(
+                    div()
+                        .text_size(px(12.0))
+                        .line_height(px(18.0))
+                        .text_color(fg_subtle())
+                        .child(note),
+                )
+            })
+            .when_some(install_message, |el, message| {
+                el.child(success_text(&message))
+            })
+            .when_some(install_error, |el, error| el.child(error_text(&error))),
+        ghost_button(install_button_label(status.state, installing), {
+            let state = state.clone();
+            move |_, window, cx| {
+                trigger_managed_lsp_install(&state, kind, window, cx);
+            }
+        }),
     )
 }
 
