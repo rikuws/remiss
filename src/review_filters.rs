@@ -2069,8 +2069,10 @@ mod tests {
 
     #[test]
     fn overview_comment_filter_can_empty_supplied_unread_bot_bucket() {
-        let mut filter = OverviewCommentFilter::default();
-        filter.include_bots = false;
+        let filter = OverviewCommentFilter {
+            include_bots: false,
+            ..Default::default()
+        };
         let unread_bucket = vec![(OverviewCommentActorKind::Bot, OverviewCommentKind::Inline)];
 
         let filtered = unread_bucket
