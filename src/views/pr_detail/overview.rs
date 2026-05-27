@@ -99,6 +99,7 @@ pub(super) fn render_overview_surface(state: &Entity<AppState>, cx: &App) -> imp
                 .flex()
                 .flex_col()
                 .gap(px(14.0))
+                .child(render_overview_identity_panel(detail, syncing))
                 .child(render_overview_summary_strip(
                     detail,
                     is_own_pull_request,
@@ -176,6 +177,66 @@ pub(super) fn pr_detail_section() -> Div {
         .bg(bg_overlay())
         .px(px(18.0))
         .py(px(16.0))
+}
+
+fn render_overview_identity_panel(
+    detail: &github::PullRequestDetail,
+    syncing: bool,
+) -> impl IntoElement {
+    let repository_label = format!("{} #{}", detail.repository, detail.number);
+
+    pr_detail_section().child(
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .justify_between()
+                    .gap(px(14.0))
+                    .flex_wrap()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(eyebrow(&repository_label))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .text_size(px(22.0))
+                                    .line_height(px(28.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(fg_emphasis())
+                                    .whitespace_normal()
+                                    .child(detail.title.clone()),
+                            ),
+                    )
+                    .child(pull_request_state_badge(&detail.state, detail.is_draft)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .flex_wrap()
+                    .text_size(px(13.0))
+                    .text_color(fg_muted())
+                    .child(user_avatar(
+                        &detail.author_login,
+                        detail.author_avatar_url.as_deref(),
+                        18.0,
+                        false,
+                    ))
+                    .child(detail.author_login.clone())
+                    .when(syncing, |el| el.child(badge("Refreshing live")))
+                    .child("wants to merge into")
+                    .child(badge(&detail.base_ref_name))
+                    .child("from")
+                    .child(badge(&detail.head_ref_name)),
+            ),
+    )
 }
 
 fn render_overview_summary_strip(
@@ -1632,17 +1693,23 @@ fn render_activity_card(
                                 .flex()
                                 .items_center()
                                 .gap(px(8.0))
-                                .flex_grow()
+                                .flex_1()
                                 .min_w_0()
                                 .child(
                                     div()
+                                        .flex_1()
                                         .min_w_0()
                                         .text_size(px(13.0))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(fg_emphasis())
-                                        .text_ellipsis()
-                                        .whitespace_nowrap()
-                                        .overflow_x_hidden()
+                                        .when(is_commit, |el| {
+                                            el.line_height(px(18.0)).whitespace_normal()
+                                        })
+                                        .when(!is_commit, |el| {
+                                            el.text_ellipsis()
+                                                .whitespace_nowrap()
+                                                .overflow_x_hidden()
+                                        })
                                         .child(item.title.clone()),
                                 ),
                         )

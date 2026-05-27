@@ -67,12 +67,14 @@ const APP_SIDEBAR_TRAFFIC_LIGHT_CLEARANCE: f32 = 58.0;
 pub(crate) const APP_CHROME_HEIGHT: f32 = 48.0;
 pub(crate) const APP_TRAFFIC_LIGHT_LEFT: f32 = 12.0;
 pub(crate) const APP_TRAFFIC_LIGHT_TOP: f32 = 11.0;
-const APP_TITLEBAR_SIDEBAR_TOGGLE_LEFT: f32 = 80.0;
+const APP_MACOS_TITLEBAR_SIDEBAR_TOGGLE_LEFT: f32 = 80.0;
+const APP_COMPACT_TITLEBAR_SIDEBAR_TOGGLE_LEFT: f32 = 14.0;
 const APP_TITLEBAR_CONTROL_SIZE: f32 = 30.0;
 const APP_TITLEBAR_CONTROL_TOP: f32 = 9.0;
 const APP_TITLEBAR_CONTROL_ICON_SIZE: f32 = 15.0;
-const APP_CHROME_HIDDEN_LEFT_INSET: f32 = 206.0;
-const APP_CHROME_ICON_LEFT_INSET: f32 = 64.0;
+const APP_CHROME_CONTENT_GAP: f32 = 14.0;
+const APP_WINDOWS_TITLEBAR_CONTROL_WIDTH: f32 = 46.0;
+const APP_WINDOWS_TITLEBAR_CONTROLS_WIDTH: f32 = APP_WINDOWS_TITLEBAR_CONTROL_WIDTH * 3.0;
 const REVIEW_BOARD_SHADER_CANVAS_LAZY_DELAY_MS: u64 = 350;
 const APP_SIDEBAR_ANIMATION_MS: u64 = 220;
 const NOTIFICATION_DRAWER_ANIMATION_MS: u64 = 160;
@@ -1065,6 +1067,10 @@ impl Render for RootView {
                 window,
                 cx,
             ))
+            .when(cfg!(target_os = "windows"), |el| {
+                el.child(render_windows_titlebar_drag_regions(&self.state, cx))
+                    .child(render_windows_titlebar_controls(window.is_maximized()))
+            })
             .child(render_titlebar_sidebar_toggle(&self.state, cx))
             .when(notification_drawer_open, |el| {
                 el.child(render_notification_drawer(&self.state, cx))
@@ -1880,8 +1886,8 @@ fn render_titlebar_sidebar_toggle(state: &Entity<AppState>, cx: &App) -> impl In
     let sidebar_mode = s.app_sidebar_mode;
     let state_for_sidebar = state.clone();
     let sidebar_tooltip = match sidebar_mode {
-        AppSidebarMode::Open => "Show sidebar icons",
-        AppSidebarMode::Icons => "Close sidebar",
+        AppSidebarMode::Open => "Collapse sidebar to icons",
+        AppSidebarMode::Icons => "Hide sidebar",
         AppSidebarMode::Closed => "Show sidebar",
     };
     let sidebar_icon = match sidebar_mode {
@@ -1891,7 +1897,7 @@ fn render_titlebar_sidebar_toggle(state: &Entity<AppState>, cx: &App) -> impl In
 
     div()
         .absolute()
-        .left(px(APP_TITLEBAR_SIDEBAR_TOGGLE_LEFT))
+        .left(px(app_titlebar_sidebar_toggle_left()))
         .top(px(APP_TITLEBAR_CONTROL_TOP))
         .child(titlebar_icon_button(
             "titlebar-sidebar-toggle",
@@ -1906,6 +1912,117 @@ fn render_titlebar_sidebar_toggle(state: &Entity<AppState>, cx: &App) -> impl In
                 });
             },
         ))
+}
+
+fn render_windows_titlebar_drag_regions(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
+    let sidebar_mode = state.read(cx).app_sidebar_mode;
+    let toggle_left = app_titlebar_sidebar_toggle_left();
+    let toggle_right = toggle_left + APP_TITLEBAR_CONTROL_SIZE;
+    let content_start = app_chrome_content_start_x(sidebar_mode);
+    let before_toggle_width = toggle_left.max(0.0);
+    let after_toggle_width = (content_start - toggle_right).max(0.0);
+
+    div()
+        .absolute()
+        .top(px(0.0))
+        .left(px(0.0))
+        .right(px(APP_WINDOWS_TITLEBAR_CONTROLS_WIDTH))
+        .h(px(APP_CHROME_HEIGHT))
+        .when(before_toggle_width > 0.0, |el| {
+            el.child(windows_titlebar_drag_region(
+                "windows-titlebar-drag-before-sidebar-toggle",
+                0.0,
+                before_toggle_width,
+            ))
+        })
+        .when(after_toggle_width > 0.0, |el| {
+            el.child(windows_titlebar_drag_region(
+                "windows-titlebar-drag-after-sidebar-toggle",
+                toggle_right,
+                after_toggle_width,
+            ))
+        })
+}
+
+fn windows_titlebar_drag_region(id: &'static str, left: f32, width: f32) -> impl IntoElement {
+    div()
+        .id(id)
+        .absolute()
+        .left(px(left))
+        .top(px(0.0))
+        .w(px(width))
+        .h(px(APP_CHROME_HEIGHT))
+        .window_control_area(WindowControlArea::Drag)
+}
+
+fn render_windows_titlebar_controls(maximized: bool) -> impl IntoElement {
+    let maximize_icon = if maximized {
+        LucideIcon::Minimize2
+    } else {
+        LucideIcon::Square
+    };
+    let maximize_tooltip = if maximized { "Restore" } else { "Maximize" };
+
+    div()
+        .absolute()
+        .top(px(0.0))
+        .right(px(0.0))
+        .h(px(APP_CHROME_HEIGHT))
+        .flex()
+        .items_start()
+        .child(windows_titlebar_control_button(
+            "windows-titlebar-minimize",
+            LucideIcon::Minus,
+            "Minimize",
+            WindowControlArea::Min,
+            false,
+        ))
+        .child(windows_titlebar_control_button(
+            "windows-titlebar-maximize",
+            maximize_icon,
+            maximize_tooltip,
+            WindowControlArea::Max,
+            false,
+        ))
+        .child(windows_titlebar_control_button(
+            "windows-titlebar-close",
+            LucideIcon::X,
+            "Close",
+            WindowControlArea::Close,
+            true,
+        ))
+}
+
+fn windows_titlebar_control_button(
+    id: &'static str,
+    icon: LucideIcon,
+    tooltip: &'static str,
+    area: WindowControlArea,
+    danger_style: bool,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .w(px(APP_WINDOWS_TITLEBAR_CONTROL_WIDTH))
+        .h(px(APP_CHROME_HEIGHT))
+        .flex()
+        .items_center()
+        .justify_center()
+        .window_control_area(area)
+        .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
+        .on_mouse_down(MouseButton::Left, move |_, window, _| match area {
+            WindowControlArea::Close => window.remove_window(),
+            WindowControlArea::Min => window.minimize_window(),
+            WindowControlArea::Max => window.zoom_window(),
+            WindowControlArea::Drag => {}
+        })
+        .hover(move |style| {
+            style.bg(if danger_style {
+                danger()
+            } else {
+                bg_selected()
+            })
+        })
+        .child(lucide_icon(icon, 13.0, fg_subtle()))
 }
 
 fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
@@ -1958,7 +2075,7 @@ fn render_workspace_chrome(state: &Entity<AppState>, cx: &App) -> impl IntoEleme
         .flex_shrink_0()
         .bg(bg_sidebar())
         .pl(app_chrome_left_padding(sidebar_mode))
-        .pr(px(14.0))
+        .pr(app_chrome_right_padding())
         .py(px(7.0))
         .flex()
         .items_center()
@@ -2158,12 +2275,14 @@ fn titlebar_icon_button(
         .flex()
         .items_center()
         .justify_center()
-        .when(show_highlight, |el| {
-            el.hover(move |style| {
-                style
-                    .bg(if active { bg_emphasis() } else { bg_selected() })
-                    .text_color(fg_emphasis())
-            })
+        .hover(move |style| {
+            style
+                .bg(if active && show_highlight {
+                    bg_emphasis()
+                } else {
+                    bg_selected()
+                })
+                .text_color(fg_emphasis())
         })
         .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
         .on_mouse_down(MouseButton::Left, on_click)
@@ -2543,11 +2662,53 @@ fn app_sidebar_animation_key(mode: AppSidebarMode) -> usize {
     }
 }
 
-fn app_chrome_left_padding(sidebar_mode: AppSidebarMode) -> Pixels {
+fn app_titlebar_sidebar_toggle_left() -> f32 {
+    app_titlebar_sidebar_toggle_left_for_platform(cfg!(target_os = "macos"))
+}
+
+fn app_titlebar_sidebar_toggle_left_for_platform(is_macos: bool) -> f32 {
+    if is_macos {
+        APP_MACOS_TITLEBAR_SIDEBAR_TOGGLE_LEFT
+    } else {
+        APP_COMPACT_TITLEBAR_SIDEBAR_TOGGLE_LEFT
+    }
+}
+
+fn app_chrome_titlebar_clearance_for_platform(is_macos: bool) -> f32 {
+    app_titlebar_sidebar_toggle_left_for_platform(is_macos)
+        + APP_TITLEBAR_CONTROL_SIZE
+        + APP_CHROME_CONTENT_GAP
+}
+
+fn app_chrome_left_padding_value(sidebar_mode: AppSidebarMode) -> f32 {
+    app_chrome_left_padding_value_for_platform(cfg!(target_os = "macos"), sidebar_mode)
+}
+
+fn app_chrome_left_padding_value_for_platform(is_macos: bool, sidebar_mode: AppSidebarMode) -> f32 {
+    let titlebar_clearance = app_chrome_titlebar_clearance_for_platform(is_macos);
+
     match sidebar_mode {
-        AppSidebarMode::Closed => px(APP_CHROME_HIDDEN_LEFT_INSET),
-        AppSidebarMode::Icons => px(APP_CHROME_ICON_LEFT_INSET),
-        AppSidebarMode::Open => px(14.0),
+        AppSidebarMode::Closed => titlebar_clearance,
+        AppSidebarMode::Icons => {
+            (titlebar_clearance - APP_SIDEBAR_ICON_WIDTH).max(APP_CHROME_CONTENT_GAP)
+        }
+        AppSidebarMode::Open => APP_CHROME_CONTENT_GAP,
+    }
+}
+
+fn app_chrome_content_start_x(sidebar_mode: AppSidebarMode) -> f32 {
+    app_sidebar_width(sidebar_mode) + app_chrome_left_padding_value(sidebar_mode)
+}
+
+fn app_chrome_left_padding(sidebar_mode: AppSidebarMode) -> Pixels {
+    px(app_chrome_left_padding_value(sidebar_mode))
+}
+
+fn app_chrome_right_padding() -> Pixels {
+    if cfg!(target_os = "windows") {
+        px(APP_WINDOWS_TITLEBAR_CONTROLS_WIDTH + APP_CHROME_CONTENT_GAP)
+    } else {
+        px(APP_CHROME_CONTENT_GAP)
     }
 }
 

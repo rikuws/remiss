@@ -524,6 +524,7 @@ fn main_window_titlebar_options() -> TitlebarOptions {
 fn main_window_titlebar_options() -> TitlebarOptions {
     TitlebarOptions {
         title: Some(APP_NAME.into()),
+        appears_transparent: cfg!(target_os = "windows"),
         ..Default::default()
     }
 }
