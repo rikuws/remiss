@@ -49,7 +49,14 @@ mkdir -p "$(dirname "$OUTPUT")"
 OUTPUT_DIR="$(cd "$(dirname "$OUTPUT")" && pwd)"
 OUTPUT="$OUTPUT_DIR/$(basename "$OUTPUT")"
 READY_FILE="$OUTPUT.ready"
-rm -f "$OUTPUT" "$READY_FILE"
+APP_LOG="$OUTPUT.log"
+rm -f "$OUTPUT" "$READY_FILE" "$APP_LOG"
+
+READY_TIMEOUT_SECONDS="${REMISS_SCREENSHOT_READY_TIMEOUT_SECONDS:-120}"
+if [[ ! "$READY_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] || [[ "$READY_TIMEOUT_SECONDS" -le 0 ]]; then
+  echo "REMISS_SCREENSHOT_READY_TIMEOUT_SECONDS must be a positive integer." >&2
+  exit 2
+fi
 
 PID=""
 cleanup() {
@@ -63,20 +70,33 @@ trap cleanup EXIT
 REMISS_SCREENSHOT_MODE=1 \
 REMISS_SCREENSHOT_SCENARIO="$SCENARIO" \
 REMISS_SCREENSHOT_OUTPUT_FILE="$OUTPUT" \
-"$EXECUTABLE" &
+"$EXECUTABLE" >"$APP_LOG" 2>&1 &
 PID="$!"
 
 osascript -e "tell application \"System Events\" to set frontmost of first process whose unix id is $PID to true" >/dev/null 2>&1 || true
 
-for _ in $(seq 1 160); do
+DEADLINE=$((SECONDS + READY_TIMEOUT_SECONDS))
+while [[ $SECONDS -lt $DEADLINE ]]; do
   if [[ -f "$READY_FILE" ]]; then
     break
+  fi
+  if ! kill -0 "$PID" 2>/dev/null; then
+    echo "Remiss exited before becoming screenshot-ready: $READY_FILE" >&2
+    if [[ -s "$APP_LOG" ]]; then
+      echo "Remiss app log:" >&2
+      tail -n 80 "$APP_LOG" >&2
+    fi
+    exit 1
   fi
   sleep 0.25
 done
 
 if [[ ! -f "$READY_FILE" ]]; then
   echo "Remiss did not become screenshot-ready: $READY_FILE" >&2
+  if [[ -s "$APP_LOG" ]]; then
+    echo "Remiss app log:" >&2
+    tail -n 80 "$APP_LOG" >&2
+  fi
   exit 1
 fi
 
