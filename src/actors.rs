@@ -9,7 +9,13 @@ pub(crate) fn is_automation_actor(login: &str) -> bool {
         || login.ends_with("bot")
         || matches!(
             login.as_str(),
-            "github-actions" | "dependabot" | "renovate" | "vercel" | "netlify" | "supabase"
+            "copilot-pull-request-reviewer"
+                | "github-actions"
+                | "dependabot"
+                | "renovate"
+                | "vercel"
+                | "netlify"
+                | "supabase"
         )
 }
 
@@ -20,6 +26,7 @@ mod tests {
     #[test]
     fn automation_actor_detection_matches_bot_logins() {
         assert!(is_automation_actor("coderabbitai[bot]"));
+        assert!(is_automation_actor("copilot-pull-request-reviewer"));
         assert!(is_automation_actor("github-actions"));
         assert!(is_automation_actor("review-bot"));
         assert!(!is_automation_actor("alice"));
