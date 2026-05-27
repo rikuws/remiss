@@ -2,14 +2,20 @@ use std::{
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use gpui::{px, size, Pixels, Size};
 
 use crate::{
     demo_data,
+    github::{PullRequestDetail, RepositoryFileContent},
     review_session::ReviewCenterMode,
-    state::{pr_key, summary_key, AppState, PullRequestSurface, SectionId},
+    state::{
+        pr_key, summary_key, AppState, FileContentState, PreparedFileContent, PreparedFileLine,
+        PullRequestSurface, SectionId,
+    },
+    syntax,
     theme::{self, CodeFontSizePreference, DiffColorThemePreference, ThemePreference},
 };
 
@@ -199,6 +205,10 @@ fn stage_review_workspace(state: &mut AppState) {
     ) else {
         return;
     };
+    let staged_file_content = snapshot
+        .detail
+        .as_ref()
+        .and_then(|detail| stage_file_content_for_detail(detail, REVIEW_WORKSPACE_FILE));
 
     state.workspace = Some(demo_data::workspace_snapshot());
     state.workspace_loading = false;
@@ -253,8 +263,90 @@ fn stage_review_workspace(state: &mut AppState) {
     detail_state.review_session.code_lens_mode = ReviewCenterMode::SemanticDiff;
     detail_state.review_session.show_file_tree = true;
     detail_state.review_session.source_target = None;
+    if let Some(file_content) = staged_file_content {
+        detail_state
+            .file_content_states
+            .insert(REVIEW_WORKSPACE_FILE.to_string(), file_content);
+    }
 
     state.reset_review_focus_scroll();
+}
+
+fn stage_file_content_for_detail(
+    detail: &PullRequestDetail,
+    path: &str,
+) -> Option<FileContentState> {
+    let file = detail.files.iter().find(|file| file.path == path)?;
+    let reference = if file.change_type == "DELETED" {
+        detail
+            .base_ref_oid
+            .clone()
+            .unwrap_or_else(|| detail.base_ref_name.clone())
+    } else {
+        detail
+            .head_ref_oid
+            .clone()
+            .unwrap_or_else(|| detail.head_ref_name.clone())
+    };
+    let reference = reference.trim().to_string();
+    if reference.is_empty() {
+        return None;
+    }
+
+    let document = demo_data::pull_request_file_content(&detail.repository, &reference, path)?;
+    let prepared = prepare_screenshot_file_content(path, &reference, &document);
+
+    Some(FileContentState {
+        request_key: Some(format!(
+            "{}:{reference}:{path}:{}",
+            detail.updated_at, detail.repository
+        )),
+        document: Some(document),
+        prepared: Some(prepared),
+        loading: false,
+        error: None,
+    })
+}
+
+fn prepare_screenshot_file_content(
+    file_path: &str,
+    reference: &str,
+    document: &RepositoryFileContent,
+) -> PreparedFileContent {
+    let lines = document.content.as_deref().unwrap_or_default();
+    let text_lines = if lines.is_empty() {
+        Vec::new()
+    } else {
+        lines.lines().map(str::to_string).collect::<Vec<_>>()
+    };
+    let spans = if document.is_binary || document.size_bytes > syntax::MAX_HIGHLIGHT_BYTES {
+        text_lines
+            .iter()
+            .map(|_| Vec::new())
+            .collect::<Vec<Vec<_>>>()
+    } else {
+        syntax::highlight_lines(file_path, text_lines.iter().map(|line| line.as_str()))
+    };
+
+    let prepared_lines = text_lines
+        .into_iter()
+        .zip(spans)
+        .enumerate()
+        .map(|(index, (text, spans))| PreparedFileLine {
+            line_number: index + 1,
+            text,
+            spans,
+        })
+        .collect::<Vec<_>>();
+
+    PreparedFileContent {
+        path: file_path.to_string(),
+        reference: reference.to_string(),
+        is_binary: document.is_binary,
+        size_bytes: document.size_bytes,
+        text: Arc::<str>::from(document.content.as_deref().unwrap_or_default()),
+        lines: Arc::new(prepared_lines),
+    }
 }
 
 fn review_workspace_ready(state: &AppState) -> bool {
@@ -453,6 +545,14 @@ mod tests {
         assert!(!detail_state.loading);
         assert!(!detail_state.syncing);
         assert!(!detail_state.local_repository_loading);
+        let file_state = detail_state
+            .file_content_states
+            .get(REVIEW_WORKSPACE_FILE)
+            .expect("staged file content");
+        assert!(!file_state.loading);
+        assert!(file_state.error.is_none());
+        assert!(file_state.document.is_some());
+        assert!(file_state.prepared.is_some());
         assert_eq!(
             detail_state.review_session.center_mode,
             ReviewCenterMode::SemanticDiff
