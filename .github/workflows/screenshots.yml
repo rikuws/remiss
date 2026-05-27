@@ -2,23 +2,11 @@ name: Screenshots
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - "src/**"
-      - "assets/**"
-      - "scripts/capture-screenshot-*"
-      - "scripts/build-app.sh"
-      - "scripts/build-windows.ps1"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".github/workflows/screenshots.yml"
 
 jobs:
   macos-screenshots:
     name: macOS screenshots
     runs-on: macos-latest
-    outputs:
-      artifact_url: ${{ steps.upload-screenshot.outputs.artifact-url }}
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -50,7 +38,6 @@ jobs:
           test -s screenshots/remiss-macos-review-workspace.png
 
       - name: Upload screenshot
-        id: upload-screenshot
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           path: screenshots/remiss-macos-review-workspace.png
@@ -59,8 +46,6 @@ jobs:
   windows-screenshots:
     name: Windows screenshots
     runs-on: windows-latest
-    outputs:
-      artifact_url: ${{ steps.upload-screenshot.outputs.artifact-url }}
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -103,71 +88,7 @@ jobs:
           }
 
       - name: Upload screenshot
-        id: upload-screenshot
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           path: screenshots/remiss-windows-review-workspace.png
           archive: false
-
-  comment-screenshots:
-    name: Comment screenshots
-    runs-on: ubuntu-latest
-    needs:
-      - macos-screenshots
-      - windows-screenshots
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      needs.macos-screenshots.result == 'success' &&
-      needs.windows-screenshots.result == 'success'
-    permissions:
-      contents: read
-      issues: write
-      pull-requests: read
-    steps:
-      - name: Post screenshot links
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          MACOS_ARTIFACT_URL: ${{ needs.macos-screenshots.outputs.artifact_url }}
-          WINDOWS_ARTIFACT_URL: ${{ needs.windows-screenshots.outputs.artifact_url }}
-        run: |
-          marker="<!-- remiss-screenshot-artifacts -->"
-          comment_file="$RUNNER_TEMP/remiss-screenshot-comment.md"
-          payload_file="$RUNNER_TEMP/remiss-screenshot-comment.json"
-
-          cat > "$comment_file" <<EOF
-          $marker
-          ### Remiss screenshots
-
-          | OS | Scenario | PNG artifact |
-          | --- | --- | --- |
-          | macOS | review-workspace | [remiss-macos-review-workspace.png]($MACOS_ARTIFACT_URL) |
-          | Windows | review-workspace | [remiss-windows-review-workspace.png]($WINDOWS_ARTIFACT_URL) |
-
-          Run: [Screenshots workflow]($RUN_URL)
-          EOF
-
-          jq -n --rawfile body "$comment_file" '{body: $body}' > "$payload_file"
-
-          comment_id="$(
-            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
-              --paginate \
-              --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"$marker\"))) | .id" \
-              | tail -n 1
-          )"
-
-          if [[ -n "$comment_id" ]]; then
-            gh api \
-              --method PATCH \
-              "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" \
-              --input "$payload_file" \
-              >/dev/null
-          else
-            gh api \
-              --method POST \
-              "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
-              --input "$payload_file" \
-              >/dev/null
-          fi
