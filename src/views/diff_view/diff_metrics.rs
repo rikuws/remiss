@@ -272,58 +272,17 @@ pub(super) fn render_diff_line(
     wrap_diff_lines: bool,
     pointer_hover_suppressed: bool,
 ) -> impl IntoElement {
-    let is_anchor_selected = line_matches_diff_anchor(line, selected_anchor);
-    let is_selected = is_anchor_selected || range_selected;
-    let selected_fill_visible = range_selected || (is_anchor_selected && pointer_hover_suppressed);
-    let gutter_line_action = line_action.clone();
-    let has_gutter_line_action = gutter_line_action.is_some();
-    let source_slot_action = source_action.clone();
-    let hover_source_action = source_action.clone();
-    let row_pointer_target = line_action.clone();
-    let row_drag_action = line_action.clone();
-    let row_drop_action = line_action.clone();
-    let row_click_action = line_action.clone();
-
-    let left_num = line
-        .left_line_number
-        .map(|n| n.to_string())
-        .unwrap_or_default();
-    let right_num = line
-        .right_line_number
-        .map(|n| n.to_string())
-        .unwrap_or_default();
-
-    let marker = if line.prefix.is_empty() {
-        " ".to_string()
-    } else {
-        line.prefix.clone()
-    };
-    let row_id = (
-        ElementId::named_usize(
-            "diff-line-action-row",
-            line.right_line_number
-                .or(line.left_line_number)
-                .unwrap_or_default() as usize,
-        ),
-        SharedString::from(format!(
-            "{}:{}:{}:{}",
-            file_path,
-            line.left_line_number.unwrap_or_default(),
-            line.right_line_number.unwrap_or_default(),
-            marker
-        )),
+    let model = DiffLineRenderModel::new(
+        file_path,
+        line,
+        selected_anchor,
+        force_marker_visible,
+        range_selected,
+        pointer_hover_suppressed,
     );
 
-    let (row_bg, gutter_bg, marker_color, fallback_text_color) = diff_line_palette(&line.kind);
-    let marker_visible = is_selected || force_marker_visible;
-    let number_color = if is_selected {
-        fg_default()
-    } else {
-        fg_subtle()
-    };
-
-    div()
-        .id(row_id)
+    let row = div()
+        .id(model.row_id.clone())
         .relative()
         .flex()
         .w_full()
@@ -334,357 +293,465 @@ pub(super) fn render_diff_line(
         )))
         .items_start()
         .min_h(diff_row_height_px())
-        .bg(row_bg)
+        .bg(model.row_bg)
         .font_family(mono_font_family())
         .text_size(diff_code_font_size_px())
         .line_height(diff_code_line_height_px())
         .font_weight(FontWeight::MEDIUM)
-        .text_color(if marker_visible {
-            marker_color
+        .text_color(if model.marker_visible {
+            model.marker_color
         } else {
             transparent()
         })
         .when(!pointer_hover_suppressed, |el| {
-            el.hover(move |style| style.bg(diff_line_hover_bg()).text_color(marker_color))
+            el.hover(move |style| {
+                style
+                    .bg(diff_line_hover_bg())
+                    .text_color(model.marker_color)
+            })
         })
-        .when(selected_fill_visible, |el| {
+        .when(model.selected_fill_visible, |el| {
             el.bg(diff_line_hover_bg())
-                .text_color(marker_color)
+                .text_color(model.marker_color)
                 .border_l(px(2.0))
                 .border_color(diff_selected_edge())
         })
-        .when(is_selected && !selected_fill_visible, |el| {
+        .when(model.is_selected && !model.selected_fill_visible, |el| {
             el.border_l(px(2.0)).border_color(diff_selected_edge())
         })
-        .child(render_diff_gutter_backdrop(gutter_layout, gutter_bg))
-        .when_some(row_pointer_target, |el, (state, target)| {
-            let move_state = state.clone();
-            let move_target = target.clone();
-            let leave_state = state;
-            let leave_target = target;
-            el.on_mouse_move(move |_, _, cx| {
-                move_state.update(cx, |state, cx| {
-                    if state.set_diff_vim_pointer_hover_target(move_target.clone()) {
-                        cx.notify();
-                    }
-                });
-            })
-            .on_hover(move |hovered, _, cx| {
-                if *hovered {
-                    return;
-                }
-                leave_state.update(cx, |state, cx| {
-                    if state.clear_diff_vim_pointer_hover_target(&leave_target) {
-                        cx.notify();
-                    }
-                });
-            })
-        })
-        .when_some(hover_source_action, |el, (state, target)| {
-            el.on_mouse_move(move |_, _, cx| {
-                state.update(cx, |state, cx| {
-                    state.hovered_temp_source_target = Some(target.clone());
-                    cx.notify();
-                });
-            })
-        })
-        .when_some(row_drag_action, |el, (_, target)| {
-            el.on_drag_move(move |event: &DragMoveEvent<DiffCommentDrag>, _, cx| {
-                if event.bounds.contains(&event.event.position) {
-                    cx.stop_propagation();
-                    let drag_state = event.drag(cx).state.clone();
-                    update_review_line_drag(&drag_state, target.clone(), cx);
-                }
-            })
-        })
-        .when_some(row_drop_action, |el, (_, target)| {
-            el.on_drop::<DiffCommentDrag>(move |drag, window, cx| {
-                cx.stop_propagation();
-                finish_review_line_drag(&drag.state, target.clone(), window.mouse_position(), cx);
-            })
-        })
-        .when_some(row_click_action, |el, (state, target)| {
-            el.on_click(move |event, _, cx| {
-                if !event.standard_click() {
-                    return;
-                }
-                cx.stop_propagation();
-                let target = review_line_action_target_with_range(
-                    &state,
-                    target.clone(),
-                    event.modifiers().shift,
-                    cx,
-                );
-                open_review_line_action(&state, target, event.position(), cx);
-            })
-        })
-        .child(
-            div()
-                .flex()
-                .flex_shrink_0()
-                .w(px(gutter_layout.gutter_width()))
-                .min_h(diff_row_height_px())
-                .when(gutter_layout.reserve_source_slot, |el| {
-                    el.child(
-                        div()
-                            .w(diff_source_slot_width_px())
-                            .h_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .when_some(source_slot_action, |slot, (state, target)| {
-                                let tooltip_label = format!("Open {} source", target.side.label());
-                                let action_key = diff_source_action_key(&target);
-                                let icon_visible =
-                                    hovered_diff_gutter_action_key == Some(action_key.as_str());
-                                let move_state = state.clone();
-                                let move_key = action_key.clone();
-                                let leave_state = state.clone();
-                                let leave_key = action_key.clone();
-                                slot.child(
-                                    div()
-                                        .id((
-                                            ElementId::named_usize(
-                                                "diff-open-source",
-                                                line.right_line_number
-                                                    .or(line.left_line_number)
-                                                    .unwrap_or_default()
-                                                    as usize,
-                                            ),
-                                            SharedString::from(format!(
-                                                "{}:{}",
-                                                file_path,
-                                                target.side.diff_side()
-                                            )),
-                                        ))
-                                        .w(px(18.0))
-                                        .h(px(18.0))
-                                        .rounded(radius_sm())
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .on_mouse_move(move |_, _, cx| {
-                                            set_hovered_diff_gutter_action(
-                                                &move_state,
-                                                &move_key,
-                                                true,
-                                                cx,
-                                            );
-                                        })
-                                        .on_hover(move |hovered, _, cx| {
-                                            if !*hovered {
-                                                set_hovered_diff_gutter_action(
-                                                    &leave_state,
-                                                    &leave_key,
-                                                    false,
-                                                    cx,
-                                                );
-                                            }
-                                        })
-                                        .tooltip(move |_, cx| {
-                                            build_text_tooltip(
-                                                SharedString::from(tooltip_label.clone()),
-                                                cx,
-                                            )
-                                        })
-                                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                                            cx.stop_propagation();
-                                            open_temp_source_window_for_diff_target(
-                                                &state,
-                                                target.clone(),
-                                                window,
-                                                cx,
-                                            );
-                                        })
-                                        .on_click(move |_, _, cx| {
-                                            cx.stop_propagation();
-                                        })
-                                        .child(render_diff_open_source_icon(icon_visible)),
-                                )
-                            }),
-                    )
-                })
-                .when(gutter_layout.reserve_waypoint_slot, |el| {
-                    el.child(
-                        div()
-                            .w(diff_waypoint_slot_width_px())
-                            .h_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .when_some(gutter_line_action, |slot, (state, target)| {
-                                let action_key = diff_comment_action_key(&target);
-                                let icon_visible =
-                                    hovered_diff_gutter_action_key == Some(action_key.as_str());
-                                let move_state = state.clone();
-                                let move_key = action_key.clone();
-                                let leave_state = state.clone();
-                                let leave_key = action_key.clone();
-                                let click_state = state.clone();
-                                let click_target = target.clone();
-                                let drag_payload = DiffCommentDrag {
-                                    state: state.clone(),
-                                    origin: target.clone(),
-                                };
-                                slot.child(
-                                    div()
-                                        .id((
-                                            ElementId::named_usize(
-                                                "diff-comment",
-                                                line.right_line_number
-                                                    .or(line.left_line_number)
-                                                    .unwrap_or_default()
-                                                    as usize,
-                                            ),
-                                            SharedString::from(file_path.to_string()),
-                                        ))
-                                        .w_full()
-                                        .h_full()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .on_mouse_move(move |_, _, cx| {
-                                            set_hovered_diff_gutter_action(
-                                                &move_state,
-                                                &move_key,
-                                                true,
-                                                cx,
-                                            );
-                                        })
-                                        .on_hover(move |hovered, _, cx| {
-                                            if !*hovered {
-                                                set_hovered_diff_gutter_action(
-                                                    &leave_state,
-                                                    &leave_key,
-                                                    false,
-                                                    cx,
-                                                );
-                                            }
-                                        })
-                                        .tooltip(|_, cx| {
-                                            build_static_tooltip("click or drag to comment", cx)
-                                        })
-                                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                                            cx.stop_propagation();
-                                        })
-                                        .on_click(move |event, _, cx| {
-                                            if !event.standard_click() {
-                                                return;
-                                            }
-                                            cx.stop_propagation();
-                                            if event.modifiers().shift {
-                                                let target = review_line_action_target_with_range(
-                                                    &click_state,
-                                                    click_target.clone(),
-                                                    true,
-                                                    cx,
-                                                );
-                                                open_review_line_action(
-                                                    &click_state,
-                                                    target,
-                                                    event.position(),
-                                                    cx,
-                                                );
-                                            } else {
-                                                let target = review_line_action_target_with_range(
-                                                    &click_state,
-                                                    click_target.clone(),
-                                                    false,
-                                                    cx,
-                                                );
-                                                open_review_line_action(
-                                                    &click_state,
-                                                    target,
-                                                    event.position(),
-                                                    cx,
-                                                );
-                                            }
-                                        })
-                                        .on_drag(drag_payload, move |drag, _, _, cx| {
-                                            begin_review_line_drag(
-                                                &drag.state,
-                                                drag.origin.clone(),
-                                                cx,
-                                            );
-                                            cx.new(|_| DiffCommentDragPreview)
-                                        })
-                                        .child(if has_waypoint {
-                                            render_diff_waypoint_icon().into_any_element()
-                                        } else {
-                                            render_diff_comment_icon(icon_visible)
-                                                .into_any_element()
-                                        }),
-                                )
-                            })
-                            .when(!has_gutter_line_action && has_waypoint, |slot| {
-                                slot.child(
-                                    div()
-                                        .id((
-                                            ElementId::named_usize(
-                                                "diff-waypoint",
-                                                line.right_line_number
-                                                    .or(line.left_line_number)
-                                                    .unwrap_or_default()
-                                                    as usize,
-                                            ),
-                                            SharedString::from(file_path.to_string()),
-                                        ))
-                                        .tooltip(|_, cx| build_static_tooltip("waypoint", cx))
-                                        .child(render_diff_waypoint_icon()),
-                                )
-                            }),
-                    )
-                })
-                .when(gutter_layout.show_left_numbers, |el| {
-                    el.child(
-                        div()
-                            .w(px(diff_line_number_column_width()))
-                            .px(px(DIFF_LINE_NUMBER_CELL_PADDING_X))
-                            .py(diff_line_vertical_padding_px())
-                            .flex()
-                            .justify_end()
-                            .text_size(diff_line_number_font_size_px())
-                            .line_height(diff_code_line_height_px())
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(number_color)
-                            .child(left_num),
-                    )
-                })
-                .when(gutter_layout.show_right_numbers, |el| {
-                    el.child(
-                        div()
-                            .w(px(diff_line_number_column_width()))
-                            .px(px(DIFF_LINE_NUMBER_CELL_PADDING_X))
-                            .py(diff_line_vertical_padding_px())
-                            .flex()
-                            .justify_end()
-                            .text_size(diff_line_number_font_size_px())
-                            .line_height(diff_code_line_height_px())
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(number_color)
-                            .child(right_num),
-                    )
-                }),
-        )
+        .child(render_diff_gutter_backdrop(gutter_layout, model.gutter_bg));
+
+    apply_diff_row_interactions(row, line_action.clone(), source_action.clone())
+        .child(render_diff_line_gutter(
+            gutter_layout,
+            file_path,
+            line,
+            line_action.clone(),
+            source_action,
+            has_waypoint,
+            hovered_diff_gutter_action_key,
+            model.number_color,
+        ))
         .child(
             div()
                 .w(px(diff_marker_column_width()))
                 .flex_shrink_0()
                 .min_h(diff_row_height_px())
                 .py(diff_line_vertical_padding_px())
-                .child(marker),
+                .child(model.marker),
         )
         .child(render_syntax_content(
             file_path,
             line,
             syntax_spans,
             emphasis_ranges,
-            fallback_text_color,
+            model.fallback_text_color,
             lsp_context,
             line_action,
             text_selection,
             wrap_diff_lines,
         ))
+}
+
+struct DiffLineRenderModel {
+    row_id: (ElementId, SharedString),
+    marker: String,
+    is_selected: bool,
+    selected_fill_visible: bool,
+    marker_visible: bool,
+    row_bg: Rgba,
+    gutter_bg: Rgba,
+    marker_color: Rgba,
+    fallback_text_color: Rgba,
+    number_color: Rgba,
+}
+
+impl DiffLineRenderModel {
+    fn new(
+        file_path: &str,
+        line: &ParsedDiffLine,
+        selected_anchor: Option<&DiffAnchor>,
+        force_marker_visible: bool,
+        range_selected: bool,
+        pointer_hover_suppressed: bool,
+    ) -> Self {
+        let marker = diff_line_marker(line);
+        let is_anchor_selected = line_matches_diff_anchor(line, selected_anchor);
+        let is_selected = is_anchor_selected || range_selected;
+        let selected_fill_visible =
+            range_selected || (is_anchor_selected && pointer_hover_suppressed);
+        let (row_bg, gutter_bg, marker_color, fallback_text_color) = diff_line_palette(&line.kind);
+
+        Self {
+            row_id: diff_line_row_id(file_path, line, &marker),
+            marker,
+            is_selected,
+            selected_fill_visible,
+            marker_visible: is_selected || force_marker_visible,
+            row_bg,
+            gutter_bg,
+            marker_color,
+            fallback_text_color,
+            number_color: if is_selected {
+                fg_default()
+            } else {
+                fg_subtle()
+            },
+        }
+    }
+}
+
+fn diff_line_marker(line: &ParsedDiffLine) -> String {
+    if line.prefix.is_empty() {
+        " ".to_string()
+    } else {
+        line.prefix.clone()
+    }
+}
+
+fn diff_line_row_id(
+    file_path: &str,
+    line: &ParsedDiffLine,
+    marker: &str,
+) -> (ElementId, SharedString) {
+    (
+        ElementId::named_usize("diff-line-action-row", diff_line_element_index(line)),
+        SharedString::from(format!(
+            "{}:{}:{}:{}",
+            file_path,
+            line.left_line_number.unwrap_or_default(),
+            line.right_line_number.unwrap_or_default(),
+            marker
+        )),
+    )
+}
+
+fn diff_line_element_index(line: &ParsedDiffLine) -> usize {
+    line.right_line_number
+        .or(line.left_line_number)
+        .unwrap_or_default() as usize
+}
+
+fn apply_diff_row_interactions(
+    row: Stateful<Div>,
+    line_action: Option<(Entity<AppState>, ReviewLineActionTarget)>,
+    source_action: Option<(Entity<AppState>, TempSourceTarget)>,
+) -> Stateful<Div> {
+    row.when_some(line_action.clone(), |el, (state, target)| {
+        let move_state = state.clone();
+        let move_target = target.clone();
+        let leave_state = state;
+        let leave_target = target;
+        el.on_mouse_move(move |_, _, cx| {
+            move_state.update(cx, |state, cx| {
+                if state.set_diff_vim_pointer_hover_target(move_target.clone()) {
+                    cx.notify();
+                }
+            });
+        })
+        .on_hover(move |hovered, _, cx| {
+            if *hovered {
+                return;
+            }
+            leave_state.update(cx, |state, cx| {
+                if state.clear_diff_vim_pointer_hover_target(&leave_target) {
+                    cx.notify();
+                }
+            });
+        })
+    })
+    .when_some(source_action, |el, (state, target)| {
+        el.on_mouse_move(move |_, _, cx| {
+            state.update(cx, |state, cx| {
+                state.hovered_temp_source_target = Some(target.clone());
+                cx.notify();
+            });
+        })
+    })
+    .when_some(line_action.clone(), |el, (_, target)| {
+        el.on_drag_move(move |event: &DragMoveEvent<DiffCommentDrag>, _, cx| {
+            if event.bounds.contains(&event.event.position) {
+                cx.stop_propagation();
+                let drag_state = event.drag(cx).state.clone();
+                update_review_line_drag(&drag_state, target.clone(), cx);
+            }
+        })
+    })
+    .when_some(line_action.clone(), |el, (_, target)| {
+        el.on_drop::<DiffCommentDrag>(move |drag, window, cx| {
+            cx.stop_propagation();
+            finish_review_line_drag(&drag.state, target.clone(), window.mouse_position(), cx);
+        })
+    })
+    .when_some(line_action, |el, (state, target)| {
+        el.on_click(move |event, _, cx| {
+            if !event.standard_click() {
+                return;
+            }
+            cx.stop_propagation();
+            let target = review_line_action_target_with_range(
+                &state,
+                target.clone(),
+                event.modifiers().shift,
+                cx,
+            );
+            open_review_line_action(&state, target, event.position(), cx);
+        })
+    })
+}
+
+fn render_diff_line_gutter(
+    gutter_layout: DiffGutterLayout,
+    file_path: &str,
+    line: &ParsedDiffLine,
+    line_action: Option<(Entity<AppState>, ReviewLineActionTarget)>,
+    source_action: Option<(Entity<AppState>, TempSourceTarget)>,
+    has_waypoint: bool,
+    hovered_key: Option<&str>,
+    number_color: Rgba,
+) -> Div {
+    div()
+        .flex()
+        .flex_shrink_0()
+        .w(px(gutter_layout.gutter_width()))
+        .min_h(diff_row_height_px())
+        .when(gutter_layout.reserve_source_slot, |el| {
+            el.child(render_diff_source_slot(
+                file_path,
+                line,
+                source_action,
+                hovered_key,
+            ))
+        })
+        .when(gutter_layout.reserve_waypoint_slot, |el| {
+            el.child(render_diff_waypoint_slot(
+                file_path,
+                line,
+                line_action,
+                has_waypoint,
+                hovered_key,
+            ))
+        })
+        .when(gutter_layout.show_left_numbers, |el| {
+            el.child(render_diff_line_number(
+                line.left_line_number
+                    .map(|n| n.to_string())
+                    .unwrap_or_default(),
+                number_color,
+            ))
+        })
+        .when(gutter_layout.show_right_numbers, |el| {
+            el.child(render_diff_line_number(
+                line.right_line_number
+                    .map(|n| n.to_string())
+                    .unwrap_or_default(),
+                number_color,
+            ))
+        })
+}
+
+fn render_diff_source_slot(
+    file_path: &str,
+    line: &ParsedDiffLine,
+    source_action: Option<(Entity<AppState>, TempSourceTarget)>,
+    hovered_key: Option<&str>,
+) -> Div {
+    let line_index = diff_line_element_index(line);
+    let file_path = file_path.to_string();
+
+    div()
+        .w(diff_source_slot_width_px())
+        .h_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .when_some(source_action, move |slot, (state, target)| {
+            let tooltip_label = format!("Open {} source", target.side.label());
+            let action_key = diff_source_action_key(&target);
+            let icon_visible = hovered_key == Some(action_key.as_str());
+            let move_state = state.clone();
+            let leave_state = state.clone();
+            let open_state = state;
+            let target_side = target.side.diff_side().to_string();
+            let open_target = target.clone();
+
+            slot.child(
+                div()
+                    .id((
+                        ElementId::named_usize("diff-open-source", line_index),
+                        SharedString::from(format!("{file_path}:{target_side}")),
+                    ))
+                    .w(px(18.0))
+                    .h(px(18.0))
+                    .rounded(radius_sm())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .on_mouse_move({
+                        let action_key = action_key.clone();
+                        move |_, _, cx| {
+                            set_hovered_diff_gutter_action(&move_state, &action_key, true, cx);
+                        }
+                    })
+                    .on_hover({
+                        let action_key = action_key.clone();
+                        move |hovered, _, cx| {
+                            if !*hovered {
+                                set_hovered_diff_gutter_action(
+                                    &leave_state,
+                                    &action_key,
+                                    false,
+                                    cx,
+                                );
+                            }
+                        }
+                    })
+                    .tooltip(move |_, cx| {
+                        build_text_tooltip(SharedString::from(tooltip_label.clone()), cx)
+                    })
+                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                        cx.stop_propagation();
+                        open_temp_source_window_for_diff_target(
+                            &open_state,
+                            open_target.clone(),
+                            window,
+                            cx,
+                        );
+                    })
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(render_diff_open_source_icon(icon_visible)),
+            )
+        })
+}
+
+fn render_diff_waypoint_slot(
+    file_path: &str,
+    line: &ParsedDiffLine,
+    line_action: Option<(Entity<AppState>, ReviewLineActionTarget)>,
+    has_waypoint: bool,
+    hovered_key: Option<&str>,
+) -> Div {
+    let has_action = line_action.is_some();
+    let line_index = diff_line_element_index(line);
+    let file_path = file_path.to_string();
+
+    div()
+        .w(diff_waypoint_slot_width_px())
+        .h_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .when_some(line_action, {
+            let file_path = file_path.clone();
+            move |slot, (state, target)| {
+                slot.child(render_diff_comment_action(
+                    file_path.clone(),
+                    line_index,
+                    state,
+                    target,
+                    has_waypoint,
+                    hovered_key,
+                ))
+            }
+        })
+        .when(!has_action && has_waypoint, |slot| {
+            slot.child(
+                div()
+                    .id((
+                        ElementId::named_usize("diff-waypoint", line_index),
+                        SharedString::from(file_path),
+                    ))
+                    .tooltip(|_, cx| build_static_tooltip("waypoint", cx))
+                    .child(render_diff_waypoint_icon()),
+            )
+        })
+}
+
+fn render_diff_comment_action(
+    file_path: String,
+    line_index: usize,
+    state: Entity<AppState>,
+    target: ReviewLineActionTarget,
+    has_waypoint: bool,
+    hovered_key: Option<&str>,
+) -> Stateful<Div> {
+    let action_key = diff_comment_action_key(&target);
+    let icon_visible = hovered_key == Some(action_key.as_str());
+    let move_state = state.clone();
+    let leave_state = state.clone();
+    let click_state = state.clone();
+    let click_target = target.clone();
+    let drag_payload = DiffCommentDrag {
+        state,
+        origin: target,
+    };
+
+    div()
+        .id((
+            ElementId::named_usize("diff-comment", line_index),
+            SharedString::from(file_path),
+        ))
+        .w_full()
+        .h_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .on_mouse_move({
+            let action_key = action_key.clone();
+            move |_, _, cx| {
+                set_hovered_diff_gutter_action(&move_state, &action_key, true, cx);
+            }
+        })
+        .on_hover({
+            let action_key = action_key.clone();
+            move |hovered, _, cx| {
+                if !*hovered {
+                    set_hovered_diff_gutter_action(&leave_state, &action_key, false, cx);
+                }
+            }
+        })
+        .tooltip(|_, cx| build_static_tooltip("click or drag to comment", cx))
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            cx.stop_propagation();
+        })
+        .on_click(move |event, _, cx| {
+            if !event.standard_click() {
+                return;
+            }
+            cx.stop_propagation();
+            let target = review_line_action_target_with_range(
+                &click_state,
+                click_target.clone(),
+                event.modifiers().shift,
+                cx,
+            );
+            open_review_line_action(&click_state, target, event.position(), cx);
+        })
+        .on_drag(drag_payload, move |drag, _, _, cx| {
+            begin_review_line_drag(&drag.state, drag.origin.clone(), cx);
+            cx.new(|_| DiffCommentDragPreview)
+        })
+        .child(if has_waypoint {
+            render_diff_waypoint_icon().into_any_element()
+        } else {
+            render_diff_comment_icon(icon_visible).into_any_element()
+        })
+}
+
+fn render_diff_line_number(value: String, color: Rgba) -> Div {
+    div()
+        .w(px(diff_line_number_column_width()))
+        .px(px(DIFF_LINE_NUMBER_CELL_PADDING_X))
+        .py(diff_line_vertical_padding_px())
+        .flex()
+        .justify_end()
+        .text_size(diff_line_number_font_size_px())
+        .line_height(diff_code_line_height_px())
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(color)
+        .child(value)
 }
 
 pub(super) fn diff_line_palette(kind: &DiffLineKind) -> (Rgba, Rgba, Rgba, Rgba) {
