@@ -68,6 +68,27 @@ fn app_state_mute_unmute_persists_over_restart() {
 }
 
 #[test]
+fn issue_back_preserves_issue_view_choices() {
+    let cache = temp_cache_store("issue-back");
+    let mut state = AppState::new(cache, StartupWizardOptions::force_welcome());
+    state.active_section = SectionId::Issues;
+    state.active_issue_queue_id = "mentioned".to_string();
+    state.active_issue_key = Some("owner/repo#42".to_string());
+    state.active_queue_id = "reviewRequested".to_string();
+    state.active_pr_key = None;
+
+    assert!(state.navigate_issue_back());
+    assert_eq!(state.active_section, SectionId::Issues);
+    assert_eq!(state.active_issue_queue_id, "mentioned");
+    assert_eq!(state.active_queue_id, "reviewRequested");
+    assert_eq!(state.active_issue_key, None);
+    assert_eq!(state.active_pr_key, None);
+
+    assert!(!state.navigate_issue_back());
+    assert_eq!(state.active_issue_queue_id, "mentioned");
+}
+
+#[test]
 fn diff_scrollbar_activity_hides_only_current_generation() {
     let activity = DiffScrollbarActivity::default();
     assert!(!activity.is_visible());

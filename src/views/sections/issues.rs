@@ -8,6 +8,7 @@ use crate::icons::{lucide_icon, LucideIcon};
 use crate::state::{issue_key, AppState};
 use crate::theme::*;
 
+use super::super::tooltips::build_static_tooltip;
 use super::super::workspace_sync::trigger_sync_workspace;
 use super::{
     error_text, eyebrow, filter_pill, format_relative_time, ghost_button, panel, panel_state_text,
@@ -90,6 +91,7 @@ pub(super) fn render_issues(state: &Entity<AppState>, cx: &App) -> AnyElement {
                 .min_h_0()
                 .id("issues-sidebar-scroll")
                 .overflow_y_scroll()
+                .track_scroll(&s.issues_sidebar_scroll_handle)
                 .child(
                     div()
                         .text_size(px(15.0))
@@ -198,6 +200,7 @@ pub(super) fn render_issues(state: &Entity<AppState>, cx: &App) -> AnyElement {
                         .id("issues-list-scroll")
                         .overflow_y_scroll()
                         .scrollbar_width(px(ISSUE_SCROLLBAR_WIDTH))
+                        .track_scroll(&s.issues_list_scroll_handle)
                         .px(px(28.0))
                         .pb(px(28.0))
                         .child(
@@ -369,22 +372,22 @@ fn render_issue_detail(state: &Entity<AppState>, active_issue_key: String, cx: &
                 .child(
                     div()
                         .min_w_0()
-                        .flex()
-                        .items_center()
-                        .gap(px(12.0))
-                        .child(ghost_button("Back", move |_, _, cx| {
-                            state_for_back.update(cx, |state, cx| {
-                                state.active_issue_key = None;
-                                cx.notify();
-                            });
-                        }))
+                        .flex_col()
+                        .gap(px(3.0))
+                        .child(eyebrow(refreshed))
                         .child(
                             div()
                                 .min_w_0()
                                 .flex()
-                                .flex_col()
-                                .gap(px(3.0))
-                                .child(eyebrow(refreshed))
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(issue_detail_back_button(move |_, _, cx| {
+                                    state_for_back.update(cx, |state, cx| {
+                                        if state.navigate_issue_back() {
+                                            cx.notify();
+                                        }
+                                    });
+                                }))
                                 .child(
                                     div()
                                         .min_w_0()
@@ -397,14 +400,15 @@ fn render_issue_detail(state: &Entity<AppState>, active_issue_key: String, cx: &
                                         .whitespace_nowrap()
                                         .overflow_x_hidden()
                                         .child(title.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .font_family(mono_font_family())
-                                        .text_size(px(11.0))
-                                        .text_color(fg_subtle())
-                                        .child(format!("{repository} #{number}")),
                                 ),
+                        )
+                        .child(
+                            div()
+                                .pl(px(30.0))
+                                .font_family(mono_font_family())
+                                .text_size(px(11.0))
+                                .text_color(fg_subtle())
+                                .child(format!("{repository} #{number}")),
                         ),
                 )
                 .child(
@@ -465,6 +469,23 @@ fn render_issue_detail(state: &Entity<AppState>, active_issue_key: String, cx: &
                 ),
         )
         .into_any_element()
+}
+
+fn issue_detail_back_button(
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id("issue-detail-back")
+        .w(px(22.0))
+        .h(px(22.0))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .tooltip(|_, cx| build_static_tooltip("Back to issues", cx))
+        .hover(|style| style.text_color(fg_emphasis()))
+        .on_mouse_down(MouseButton::Left, on_click)
+        .child(lucide_icon(LucideIcon::ArrowLeft, 14.0, fg_muted()))
 }
 
 fn issue_detail_summary_panel(

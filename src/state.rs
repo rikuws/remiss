@@ -1061,6 +1061,8 @@ pub struct AppState {
     pub review_thread_action_error: Option<String>,
     pub pr_header_compact: bool,
     pub pr_overview_scroll_handle: ScrollHandle,
+    pub issues_sidebar_scroll_handle: ScrollHandle,
+    pub issues_list_scroll_handle: ScrollHandle,
 
     // Command palette
     pub palette_open: bool,
@@ -1268,6 +1270,8 @@ impl AppState {
             review_thread_action_error: None,
             pr_header_compact: false,
             pr_overview_scroll_handle: ScrollHandle::new(),
+            issues_sidebar_scroll_handle: ScrollHandle::new(),
+            issues_list_scroll_handle: ScrollHandle::new(),
             palette_open: false,
             palette_closing: false,
             palette_close_generation: 0,
@@ -1959,6 +1963,10 @@ impl AppState {
                 .unwrap_or(0),
             SectionId::Settings => 0,
         }
+    }
+
+    pub fn navigate_issue_back(&mut self) -> bool {
+        self.active_issue_key.take().is_some()
     }
 
     pub fn viewer_name(&self) -> &str {
