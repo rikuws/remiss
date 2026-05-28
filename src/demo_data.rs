@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use crate::{
     diff::parse_unified_diff,
     github::{
-        ActionResult, AuthState, PendingPullRequestReview, PullRequestComment, PullRequestCommit,
+        ActionResult, AuthState, IssueDetail, IssueDetailSnapshot, IssueQueue, IssueSummary,
+        PendingPullRequestReview, PullRequestComment, PullRequestCommit,
         PullRequestDataCompleteness, PullRequestDetail, PullRequestDetailSnapshot, PullRequestFile,
         PullRequestQueue, PullRequestReview, PullRequestReviewComment, PullRequestReviewThread,
         PullRequestSummary, RepositoryFileContent, Viewer, WorkspaceSnapshot,
@@ -66,6 +67,7 @@ pub fn workspace_snapshot() -> WorkspaceSnapshot {
             name: Some("Demo Reviewer".to_string()),
         }),
         queues: demo_queues(),
+        issue_queues: demo_issue_queues(),
     }
 }
 
@@ -100,6 +102,18 @@ pub fn pull_request_detail_snapshot(
             loaded_from_cache: false,
             fetched_at_ms: Some(DEMO_FETCHED_AT_MS),
             detail: Some(pull.detail),
+        })
+}
+
+pub fn issue_detail_snapshot(repository: &str, number: i64) -> Option<IssueDetailSnapshot> {
+    demo_issues()
+        .into_iter()
+        .find(|issue| issue.summary.repository == repository && issue.summary.number == number)
+        .map(|issue| IssueDetailSnapshot {
+            auth: auth_state(),
+            loaded_from_cache: false,
+            fetched_at_ms: Some(DEMO_FETCHED_AT_MS),
+            detail: Some(demo_issue_detail(issue)),
         })
 }
 
@@ -226,6 +240,172 @@ fn queue(id: &str, label: &str, items: Vec<PullRequestSummary>) -> PullRequestQu
         items,
         is_complete: true,
         truncated_reason: None,
+    }
+}
+
+fn demo_issue_queues() -> Vec<IssueQueue> {
+    let issues = demo_issues();
+    [
+        ("assigned", "Assigned"),
+        ("mentioned", "Mentioned"),
+        ("authored", "Authored"),
+        ("involved", "Involved"),
+    ]
+    .into_iter()
+    .map(|(id, label)| {
+        let items = issues
+            .iter()
+            .filter(|issue| issue.queue_ids.contains(&id))
+            .map(|issue| issue.summary.clone())
+            .collect::<Vec<_>>();
+        IssueQueue {
+            id: id.to_string(),
+            label: label.to_string(),
+            total_count: items.len() as i64,
+            items,
+            is_complete: true,
+            truncated_reason: None,
+        }
+    })
+    .collect()
+}
+
+#[derive(Clone)]
+struct DemoIssue {
+    summary: IssueSummary,
+    queue_ids: &'static [&'static str],
+}
+
+fn demo_issues() -> Vec<DemoIssue> {
+    [
+        demo_issue(
+            "remiss/remiss",
+            318,
+            "Persist issue queue selection between launches",
+            "maya",
+            "2026-05-23T14:44:00Z",
+            &["ui", "issues"],
+            &[DEMO_VIEWER_LOGIN],
+            &["assigned", "mentioned", "involved"],
+        ),
+        demo_issue(
+            "remiss/workspace",
+            97,
+            "Track stale local checkout warnings in the workspace view",
+            "demo-reviewer",
+            "2026-05-22T11:28:00Z",
+            &["workspace", "authored-demo"],
+            &["riku"],
+            &["authored", "involved"],
+        ),
+        demo_issue(
+            "remiss/review",
+            144,
+            "Add keyboard route for opening unresolved comments",
+            "lin",
+            "2026-05-21T16:02:00Z",
+            &["review-flow"],
+            &[DEMO_VIEWER_LOGIN, "maya"],
+            &["assigned", "involved"],
+        ),
+        demo_issue(
+            "remiss/local",
+            52,
+            "Clarify oversized Local Changes copy",
+            "riku",
+            "2026-05-20T09:17:00Z",
+            &["copy", "local-changes"],
+            &[DEMO_VIEWER_LOGIN],
+            &["mentioned", "involved"],
+        ),
+        demo_issue(
+            "remiss/docs",
+            76,
+            "Document demo mode fixture refresh steps",
+            "docs-bot",
+            "2026-05-19T18:30:00Z",
+            &["docs"],
+            &[],
+            &["involved"],
+        ),
+    ]
+    .into_iter()
+    .collect()
+}
+
+fn demo_issue(
+    repository: &'static str,
+    number: i64,
+    title: &'static str,
+    author: &'static str,
+    updated_at: &'static str,
+    labels: &'static [&'static str],
+    assignees: &'static [&'static str],
+    queue_ids: &'static [&'static str],
+) -> DemoIssue {
+    DemoIssue {
+        summary: IssueSummary {
+            repository: repository.to_string(),
+            number,
+            title: title.to_string(),
+            author_login: author.to_string(),
+            author_avatar_url: None,
+            comments_count: (number % 5) + 1,
+            state: "OPEN".to_string(),
+            updated_at: updated_at.to_string(),
+            url: format!("https://github.com/{repository}/issues/{number}"),
+            labels: labels.iter().map(|label| label.to_string()).collect(),
+            assignees: assignees
+                .iter()
+                .map(|assignee| assignee.to_string())
+                .collect(),
+            repository_default_branch: Some("main".to_string()),
+        },
+        queue_ids,
+    }
+}
+
+fn demo_issue_detail(issue: DemoIssue) -> IssueDetail {
+    let comments = vec![
+        issue_comment(
+            &format!(
+                "demo-issue-detail-{}-{}-1",
+                issue.summary.repository, issue.summary.number
+            ),
+            "riku",
+            "This is the main thread to keep visible while checking issue detail layout.",
+            "2026-05-23T15:10:00Z",
+            &issue.summary.repository,
+            issue.summary.number,
+        ),
+        issue_comment(
+            &format!(
+                "demo-issue-detail-{}-{}-2",
+                issue.summary.repository, issue.summary.number
+            ),
+            DEMO_VIEWER_LOGIN,
+            "The timeline should stay compact and easy to scan next to the metadata.",
+            "2026-05-23T16:22:00Z",
+            &issue.summary.repository,
+            issue.summary.number,
+        ),
+    ];
+    IssueDetail {
+        id: format!("DEMO_ISSUE_{}_{}", issue.summary.repository, issue.summary.number),
+        repository: issue.summary.repository,
+        number: issue.summary.number,
+        title: issue.summary.title,
+        body: "Demo issue detail for validating the in-app issue timeline. The live view loads GitHub issue comments through the same cache path.".to_string(),
+        url: issue.summary.url,
+        author_login: issue.summary.author_login,
+        author_avatar_url: issue.summary.author_avatar_url,
+        state: issue.summary.state,
+        comments_count: comments.len() as i64,
+        created_at: "2026-05-19T12:00:00Z".to_string(),
+        updated_at: issue.summary.updated_at,
+        labels: issue.summary.labels,
+        assignees: issue.summary.assignees,
+        comments,
     }
 }
 
@@ -2150,8 +2330,13 @@ mod tests {
             Some(DEMO_VIEWER_LOGIN)
         );
         assert_eq!(workspace.queues.len(), 5);
+        assert_eq!(workspace.issue_queues.len(), 4);
         assert!(unique_pull_requests.len() >= 24);
         assert!(workspace.queues.iter().all(|queue| queue.items.len() >= 6));
+        assert!(workspace
+            .issue_queues
+            .iter()
+            .any(|queue| !queue.items.is_empty()));
         assert!(workspace
             .queues
             .iter()

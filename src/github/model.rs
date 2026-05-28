@@ -58,9 +58,74 @@ pub struct PullRequestQueue {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueSummary {
+    pub repository: String,
+    pub number: i64,
+    pub title: String,
+    pub author_login: String,
+    #[serde(default)]
+    pub author_avatar_url: Option<String>,
+    pub comments_count: i64,
+    pub state: String,
+    pub updated_at: String,
+    pub url: String,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    #[serde(default)]
+    pub assignees: Vec<String>,
+    #[serde(default)]
+    pub repository_default_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueQueue {
+    pub id: String,
+    pub label: String,
+    pub items: Vec<IssueSummary>,
+    pub total_count: i64,
+    #[serde(default = "default_true")]
+    pub is_complete: bool,
+    #[serde(default)]
+    pub truncated_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueDetail {
+    pub id: String,
+    pub repository: String,
+    pub number: i64,
+    pub title: String,
+    pub body: String,
+    pub url: String,
+    pub author_login: String,
+    #[serde(default)]
+    pub author_avatar_url: Option<String>,
+    pub state: String,
+    pub comments_count: i64,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    #[serde(default)]
+    pub assignees: Vec<String>,
+    #[serde(default)]
+    pub comments: Vec<PullRequestComment>,
+}
+
+#[derive(Debug, Clone)]
+pub struct IssueDetailSnapshot {
+    pub auth: AuthState,
+    pub loaded_from_cache: bool,
+    pub fetched_at_ms: Option<i64>,
+    pub detail: Option<IssueDetail>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceCachePayload {
     pub viewer: Option<Viewer>,
     pub queues: Vec<PullRequestQueue>,
+    #[serde(default)]
+    pub issue_queues: Vec<IssueQueue>,
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +135,7 @@ pub struct WorkspaceSnapshot {
     pub fetched_at_ms: Option<i64>,
     pub viewer: Option<Viewer>,
     pub queues: Vec<PullRequestQueue>,
+    pub issue_queues: Vec<IssueQueue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

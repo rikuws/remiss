@@ -14,7 +14,7 @@ use crate::{
 mod model;
 pub use model::*;
 
-const WORKSPACE_CACHE_KEY: &str = "workspace-snapshot-v3";
+const WORKSPACE_CACHE_KEY: &str = "workspace-snapshot-v4";
 const AUTH_STATE_CACHE_KEY: &str = "auth-state-v1";
 const REPOSITORY_TRUST_INDEX_CACHE_PREFIX: &str = "repository-trust-index-v1";
 const GITHUB_GRAPHQL_PAGE_SIZE: i64 = 100;
@@ -60,6 +60,7 @@ pub fn sync_workspace_snapshot(cache: &CacheStore) -> Result<WorkspaceSnapshot, 
         fetched_at_ms: Some(fetched_at_ms),
         viewer: payload.viewer,
         queues: payload.queues,
+        issue_queues: payload.issue_queues,
     })
 }
 
@@ -107,6 +108,57 @@ pub fn sync_pull_request_detail(
     cache.put(&key, &detail, fetched_at_ms)?;
 
     Ok(PullRequestDetailSnapshot {
+        auth,
+        loaded_from_cache: false,
+        fetched_at_ms: Some(fetched_at_ms),
+        detail: Some(detail),
+    })
+}
+
+pub fn load_issue_detail(
+    cache: &CacheStore,
+    repository: &str,
+    number: i64,
+) -> Result<IssueDetailSnapshot, String> {
+    if crate::demo_data::demo_mode_enabled() {
+        return crate::demo_data::issue_detail_snapshot(repository, number)
+            .ok_or_else(|| format!("Demo mode has no issue {repository}#{number}."));
+    }
+
+    let auth = cached_auth_state(cache)?;
+    let key = issue_detail_cache_key(repository, number);
+    let cached = cache.get::<IssueDetail>(&key)?;
+
+    Ok(IssueDetailSnapshot {
+        auth,
+        loaded_from_cache: cached.is_some(),
+        fetched_at_ms: cached.as_ref().map(|d| d.fetched_at_ms),
+        detail: cached.map(|d| d.value),
+    })
+}
+
+pub fn sync_issue_detail(
+    cache: &CacheStore,
+    repository: &str,
+    number: i64,
+) -> Result<IssueDetailSnapshot, String> {
+    if crate::demo_data::demo_mode_enabled() {
+        return crate::demo_data::issue_detail_snapshot(repository, number)
+            .ok_or_else(|| format!("Demo mode has no issue {repository}#{number}."));
+    }
+
+    let auth = refresh_auth_state(cache)?;
+
+    if !auth.is_authenticated {
+        return load_issue_detail(cache, repository, number);
+    }
+
+    let detail = fetch_issue_detail(repository, number)?;
+    let fetched_at_ms = now_ms();
+    let key = issue_detail_cache_key(repository, number);
+    cache.put(&key, &detail, fetched_at_ms)?;
+
+    Ok(IssueDetailSnapshot {
         auth,
         loaded_from_cache: false,
         fetched_at_ms: Some(fetched_at_ms),
@@ -876,6 +928,7 @@ fn workspace_snapshot_from_cache(
             fetched_at_ms: Some(document.fetched_at_ms),
             viewer: document.value.viewer,
             queues: document.value.queues,
+            issue_queues: non_empty_issue_queues(document.value.issue_queues),
         },
         None => WorkspaceSnapshot {
             auth,
@@ -883,6 +936,7 @@ fn workspace_snapshot_from_cache(
             fetched_at_ms: None,
             viewer: None,
             queues: default_queues(),
+            issue_queues: default_issue_queues(),
         },
     }
 }
@@ -921,11 +975,39 @@ fn fetch_workspace_payload(cache: &CacheStore) -> Result<WorkspaceCachePayload, 
     for (id, label, query) in queue_specs {
         queues.push(fetch_queue(id, label, query)?);
     }
+    let issue_queue_specs = [
+        (
+            "assigned",
+            "Assigned",
+            "is:open is:issue archived:false assignee:@me",
+        ),
+        (
+            "mentioned",
+            "Mentioned",
+            "is:open is:issue archived:false mentions:@me",
+        ),
+        (
+            "authored",
+            "Authored",
+            "is:open is:issue archived:false author:@me",
+        ),
+        (
+            "involved",
+            "Involved",
+            "is:open is:issue archived:false involves:@me",
+        ),
+    ];
+
+    let mut issue_queues = Vec::with_capacity(issue_queue_specs.len());
+    for (id, label, query) in issue_queue_specs {
+        issue_queues.push(fetch_issue_queue(id, label, query)?);
+    }
     enrich_workspace_triage(cache, &mut queues);
 
     Ok(WorkspaceCachePayload {
         viewer: Some(viewer),
         queues,
+        issue_queues,
     })
 }
 
@@ -1032,6 +1114,97 @@ fn fetch_queue(id: &str, label: &str, search_query: &str) -> Result<PullRequestQ
     }
 
     Ok(PullRequestQueue {
+        id: id.to_string(),
+        label: label.to_string(),
+        items,
+        total_count,
+        is_complete: truncated_reason.is_none(),
+        truncated_reason,
+    })
+}
+
+fn fetch_issue_queue(id: &str, label: &str, search_query: &str) -> Result<IssueQueue, String> {
+    let query = r#"
+        query($searchQuery: String!, $count: Int!, $cursor: String) {
+          search(query: $searchQuery, type: ISSUE, first: $count, after: $cursor) {
+            issueCount
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              ... on Issue {
+                number
+                title
+                url
+                state
+                updatedAt
+                author { login avatarUrl }
+                comments { totalCount }
+                labels(first: 8) { nodes { name } }
+                assignees(first: 8) { nodes { login } }
+                repository { nameWithOwner defaultBranchRef { name } }
+              }
+            }
+          }
+        }
+    "#;
+
+    let mut items = Vec::new();
+    let mut total_count = 0;
+    let mut cursor: Option<String> = None;
+    let mut truncated_reason = None;
+
+    loop {
+        let response = gh::graphql(
+            query,
+            json!({
+                "searchQuery": search_query,
+                "count": GITHUB_GRAPHQL_PAGE_SIZE,
+                "cursor": cursor,
+            }),
+        )?;
+        if let Some(error_message) = graphql_error_message(&response) {
+            return Err(error_message);
+        }
+        let search = response
+            .get("data")
+            .and_then(|v| v.get("search"))
+            .ok_or_else(|| "Missing search data in GraphQL response.".to_string())?;
+
+        total_count = search
+            .get("issueCount")
+            .and_then(Value::as_i64)
+            .unwrap_or(total_count);
+
+        if let Some(nodes) = connection_nodes(search) {
+            items.extend(nodes.iter().filter_map(map_issue_summary));
+        }
+
+        let page_info = page_info(search);
+        if !page_info.has_next_page {
+            break;
+        }
+
+        if items.len() >= GITHUB_SEARCH_RESULT_LIMIT {
+            truncated_reason = Some(format!(
+                "GitHub search results are capped at {GITHUB_SEARCH_RESULT_LIMIT} items."
+            ));
+            break;
+        }
+
+        let Some(next_cursor) = page_info.end_cursor else {
+            truncated_reason =
+                Some("GitHub did not return a cursor for the next search page.".to_string());
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
+
+    if truncated_reason.is_none() && (items.len() as i64) < total_count {
+        truncated_reason = Some(
+            "GitHub reported more matching issues than the search connection returned.".to_string(),
+        );
+    }
+
+    Ok(IssueQueue {
         id: id.to_string(),
         label: label.to_string(),
         items,
@@ -1479,6 +1652,89 @@ fn fetch_pull_request_detail(repository: &str, number: i64) -> Result<PullReques
         parsed_diff,
         data_completeness,
     })
+}
+
+fn fetch_issue_detail(repository: &str, number: i64) -> Result<IssueDetail, String> {
+    let (owner, name) = split_repository(repository)?;
+    let query = r#"
+        query($owner: String!, $name: String!, $number: Int!, $count: Int!, $cursor: String) {
+          repository(owner: $owner, name: $name) {
+            issue(number: $number) {
+              id number title body url state createdAt updatedAt
+              author { login avatarUrl }
+              comments(first: $count, after: $cursor) {
+                totalCount
+                pageInfo { hasNextPage endCursor }
+                nodes {
+                  id
+                  body
+                  createdAt
+                  updatedAt
+                  url
+                  author { login avatarUrl }
+                }
+              }
+              labels(first: 20) { nodes { name } }
+              assignees(first: 20) { nodes { login } }
+              repository { nameWithOwner }
+            }
+          }
+        }
+    "#;
+
+    let mut detail: Option<IssueDetail> = None;
+    let mut comments = Vec::new();
+    let mut cursor: Option<String> = None;
+
+    loop {
+        let response = gh::graphql(
+            query,
+            json!({
+                "owner": owner,
+                "name": name,
+                "number": number,
+                "count": GITHUB_GRAPHQL_PAGE_SIZE,
+                "cursor": cursor,
+            }),
+        )?;
+        if let Some(error_message) = graphql_error_message(&response) {
+            return Err(error_message);
+        }
+
+        let issue = response
+            .get("data")
+            .and_then(|v| v.get("repository"))
+            .and_then(|v| v.get("issue"))
+            .ok_or_else(|| format!("Issue {repository}#{number} was not found."))?;
+
+        if detail.is_none() {
+            detail = Some(map_issue_detail(issue).ok_or_else(|| {
+                format!("GitHub did not return issue detail data for {repository}#{number}.")
+            })?);
+        }
+
+        let comments_connection = issue
+            .get("comments")
+            .ok_or_else(|| "Missing issue comments data in GraphQL response.".to_string())?;
+        comments.extend(map_connection_items(
+            comments_connection,
+            map_pull_request_comment,
+        ));
+
+        let page_info = page_info(comments_connection);
+        if !page_info.has_next_page || comments.len() >= GITHUB_SEARCH_RESULT_LIMIT {
+            break;
+        }
+        let Some(next_cursor) = page_info.end_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
+
+    let mut detail = detail.ok_or_else(|| format!("Issue {repository}#{number} was not found."))?;
+    detail.comments = comments;
+    detail.comments_count = detail.comments_count.max(detail.comments.len() as i64);
+    Ok(detail)
 }
 
 #[derive(Debug, Clone)]
@@ -2091,6 +2347,78 @@ fn map_pull_request_summary(node: &Value) -> Option<PullRequestSummary> {
     })
 }
 
+fn map_issue_summary(node: &Value) -> Option<IssueSummary> {
+    let author = node.get("author");
+    Some(IssueSummary {
+        repository: node
+            .get("repository")?
+            .get("nameWithOwner")?
+            .as_str()?
+            .to_string(),
+        number: node.get("number")?.as_i64()?,
+        title: node.get("title")?.as_str()?.to_string(),
+        author_login: actor_login(author).unwrap_or("unknown").to_string(),
+        author_avatar_url: actor_avatar_url(author).map(str::to_string),
+        comments_count: node
+            .get("comments")
+            .and_then(|v| v.get("totalCount"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0),
+        state: str_field_or(node, "state", "OPEN"),
+        updated_at: str_field(node, "updatedAt"),
+        url: node.get("url")?.as_str()?.to_string(),
+        labels: string_connection_values(node.get("labels"), "name"),
+        assignees: string_connection_values(node.get("assignees"), "login"),
+        repository_default_branch: node
+            .get("repository")
+            .and_then(|repo| repo.get("defaultBranchRef"))
+            .and_then(|branch| branch.get("name"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
+
+fn map_issue_detail(node: &Value) -> Option<IssueDetail> {
+    let author = node.get("author");
+    let comments_connection = node.get("comments");
+    Some(IssueDetail {
+        id: node.get("id")?.as_str()?.to_string(),
+        repository: node
+            .get("repository")?
+            .get("nameWithOwner")?
+            .as_str()?
+            .to_string(),
+        number: node.get("number")?.as_i64()?,
+        title: node.get("title")?.as_str()?.to_string(),
+        body: str_field(node, "body"),
+        url: node.get("url")?.as_str()?.to_string(),
+        author_login: actor_login(author).unwrap_or("unknown").to_string(),
+        author_avatar_url: actor_avatar_url(author).map(str::to_string),
+        state: str_field_or(node, "state", "OPEN"),
+        comments_count: comments_connection.map(connection_total_count).unwrap_or(0),
+        created_at: str_field(node, "createdAt"),
+        updated_at: str_field(node, "updatedAt"),
+        labels: string_connection_values(node.get("labels"), "name"),
+        assignees: string_connection_values(node.get("assignees"), "login"),
+        comments: comments_connection
+            .map(|connection| map_connection_items(connection, map_pull_request_comment))
+            .unwrap_or_default(),
+    })
+}
+
+fn string_connection_values(connection: Option<&Value>, field: &str) -> Vec<String> {
+    connection
+        .and_then(connection_nodes)
+        .map(|nodes| {
+            nodes
+                .iter()
+                .filter_map(|node| node.get(field).and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn map_stack_pull_request_ref(node: &Value) -> Option<StackPullRequestRef> {
     Some(StackPullRequestRef {
         repository: node
@@ -2501,8 +2829,35 @@ fn default_queues() -> Vec<PullRequestQueue> {
     .collect()
 }
 
+fn default_issue_queues() -> Vec<IssueQueue> {
+    ["assigned", "mentioned", "authored", "involved"]
+        .iter()
+        .zip(["Assigned", "Mentioned", "Authored", "Involved"])
+        .map(|(id, label)| IssueQueue {
+            id: id.to_string(),
+            label: label.to_string(),
+            items: Vec::new(),
+            total_count: 0,
+            is_complete: true,
+            truncated_reason: None,
+        })
+        .collect()
+}
+
+fn non_empty_issue_queues(queues: Vec<IssueQueue>) -> Vec<IssueQueue> {
+    if queues.is_empty() {
+        default_issue_queues()
+    } else {
+        queues
+    }
+}
+
 fn pull_request_detail_cache_key(repository: &str, number: i64) -> String {
     format!("pr-detail-v5:{}#{}", repository, number)
+}
+
+fn issue_detail_cache_key(repository: &str, number: i64) -> String {
+    format!("issue-detail-v1:{}#{}", repository, number)
 }
 
 fn pull_request_file_content_cache_key(repository: &str, reference: &str, path: &str) -> String {

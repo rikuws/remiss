@@ -87,6 +87,7 @@ const WORKSPACE_BODY_RADIUS: f32 = 12.0;
 struct WorkspaceRouteKey {
     active_section: SectionId,
     active_pr_key: Option<String>,
+    active_issue_key: Option<String>,
     active_surface: PullRequestSurface,
     active_center_mode: ReviewCenterMode,
     active_code_lens_mode: ReviewCenterMode,
@@ -1418,35 +1419,33 @@ fn render_app_sidebar(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                         .flex()
                         .flex_col()
                         .gap(px(8.0))
-                        .children(
-                            SectionId::all()
-                                .iter()
-                                .filter(|section| **section != SectionId::Issues)
-                                .map(|section| {
-                                    let section = *section;
-                                    let count = s.section_count(section);
-                                    let state = state_for_nav.clone();
-                                    sidebar_nav_button(
-                                        section.label(),
-                                        sidebar_icon_for_section(section),
-                                        count,
-                                        active_section == section,
-                                        icons_only,
-                                        move |_, window, cx| {
-                                            if section == SectionId::Settings {
-                                                prepare_settings_view(&state, window, cx);
-                                            }
-                                            state.update(cx, |s, cx| {
-                                                s.set_active_section(section);
-                                                s.active_pr_key = None;
-                                                s.palette_open = false;
-                                                s.palette_selected_index = 0;
-                                                cx.notify();
-                                            });
-                                        },
-                                    )
-                                }),
-                        ),
+                        .children(SectionId::all().iter().map(|section| {
+                            let section = *section;
+                            let count = s.section_count(section);
+                            let state = state_for_nav.clone();
+                            sidebar_nav_button(
+                                section.label(),
+                                sidebar_icon_for_section(section),
+                                count,
+                                active_section == section,
+                                icons_only,
+                                move |_, window, cx| {
+                                    if section == SectionId::Settings {
+                                        prepare_settings_view(&state, window, cx);
+                                    }
+                                    state.update(cx, |s, cx| {
+                                        s.set_active_section(section);
+                                        s.active_pr_key = None;
+                                        if section != SectionId::Issues {
+                                            s.active_issue_key = None;
+                                        }
+                                        s.palette_open = false;
+                                        s.palette_selected_index = 0;
+                                        cx.notify();
+                                    });
+                                },
+                            )
+                        })),
                 )
                 .child(div().flex_grow().min_h(px(16.0)))
                 .child(render_local_review_sidebar_section(state, cx, icons_only))
@@ -2470,6 +2469,7 @@ fn workspace_route_key(state: &AppState) -> WorkspaceRouteKey {
     WorkspaceRouteKey {
         active_section: state.active_section,
         active_pr_key: state.active_pr_key.clone(),
+        active_issue_key: state.active_issue_key.clone(),
         active_surface: state.active_surface,
         active_center_mode: state.effective_review_center_mode(),
         active_code_lens_mode: state.active_code_lens_mode(),

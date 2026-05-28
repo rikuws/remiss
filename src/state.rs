@@ -9,8 +9,8 @@ use crate::cache::CacheStore;
 use crate::diff::{find_parsed_diff_file, DiffRenderRow};
 use crate::difftastic::AdaptedDifftasticDiffFile;
 use crate::github::{
-    PullRequestDetail, PullRequestDetailSnapshot, PullRequestQueue, PullRequestSummary,
-    RepositoryFileContent, ReviewAction, WorkspaceSnapshot,
+    IssueDetailSnapshot, IssueSummary, PullRequestDetail, PullRequestDetailSnapshot,
+    PullRequestQueue, PullRequestSummary, RepositoryFileContent, ReviewAction, WorkspaceSnapshot,
 };
 use crate::local_repo::LocalRepositoryStatus;
 use crate::local_review::{self, RememberedLocalRepository};
@@ -141,6 +141,10 @@ pub fn pr_key(repository: &str, number: i64) -> String {
     format!("{repository}#{number}")
 }
 
+pub fn issue_key(repository: &str, number: i64) -> String {
+    format!("{repository}#{number}")
+}
+
 pub fn summary_key(summary: &PullRequestSummary) -> String {
     summary
         .local_key
@@ -177,6 +181,15 @@ pub struct DetailState {
     pub stack_open_pull_requests: Option<Vec<StackPullRequestRef>>,
     pub stack_open_pull_requests_loading: bool,
     pub stack_open_pull_requests_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct IssueDetailState {
+    pub summary: Option<IssueSummary>,
+    pub snapshot: Option<IssueDetailSnapshot>,
+    pub loading: bool,
+    pub syncing: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -940,6 +953,8 @@ pub struct AppState {
     pub active_section: SectionId,
     pub active_surface: PullRequestSurface,
     pub active_queue_id: String,
+    pub active_issue_queue_id: String,
+    pub active_issue_key: Option<String>,
     pub active_pr_key: Option<String>,
     pub open_tabs: Vec<PullRequestSummary>,
     pub local_review_repositories: Vec<RememberedLocalRepository>,
@@ -968,6 +983,7 @@ pub struct AppState {
 
     // PR detail data (keyed by pr_key)
     pub detail_states: std::collections::HashMap<String, DetailState>,
+    pub issue_detail_states: std::collections::HashMap<String, IssueDetailState>,
     pub dismissed_lsp_status_notice_keys: HashSet<String>,
     pub unread_review_comment_ids: std::collections::BTreeSet<String>,
     pub expanded_automation_activity_keys: std::collections::BTreeSet<String>,
@@ -1155,6 +1171,8 @@ impl AppState {
             active_section: SectionId::Overview,
             active_surface: PullRequestSurface::Overview,
             active_queue_id: "reviewRequested".to_string(),
+            active_issue_queue_id: "assigned".to_string(),
+            active_issue_key: None,
             active_pr_key: None,
             open_tabs: Vec::new(),
             local_review_repositories,
@@ -1179,6 +1197,7 @@ impl AppState {
             workspace_syncing: false,
             workspace_error: None,
             detail_states: std::collections::HashMap::new(),
+            issue_detail_states: std::collections::HashMap::new(),
             dismissed_lsp_status_notice_keys: HashSet::new(),
             unread_review_comment_ids,
             expanded_automation_activity_keys: std::collections::BTreeSet::new(),
@@ -1927,7 +1946,11 @@ impl AppState {
                 .as_ref()
                 .map(|w| w.queues.iter().map(|q| q.total_count).sum())
                 .unwrap_or(0),
-            SectionId::Issues => 0,
+            SectionId::Issues => self
+                .workspace
+                .as_ref()
+                .map(|w| w.issue_queues.iter().map(|q| q.total_count).sum())
+                .unwrap_or(0),
             SectionId::Reviews => self
                 .workspace
                 .as_ref()

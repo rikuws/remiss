@@ -99,6 +99,7 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
 
     let welcome_greeting = overview_welcome_greeting(&viewer_name, is_auth);
     let state_for_pull_requests = state.clone();
+    let state_for_issues = state.clone();
     let state_for_review_requests = state.clone();
     let state_for_items = state.clone();
     let state_for_comments = state.clone();
@@ -180,8 +181,18 @@ fn render_overview(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                     LucideIcon::Inbox,
                                     "Open Issues",
                                     issue_count,
-                                    false,
-                                    |_, _, _| {},
+                                    is_auth,
+                                    {
+                                        let state = state_for_issues.clone();
+                                        move |_, _, cx| {
+                                            activate_queue(
+                                                &state,
+                                                SectionId::Issues,
+                                                "assigned",
+                                                cx,
+                                            );
+                                        }
+                                    },
                                 ))
                                 .child(overview_metric_card(
                                     LucideIcon::MessageSquareCheck,
@@ -2839,7 +2850,13 @@ fn activate_queue(state: &Entity<AppState>, section: SectionId, queue_id: &str, 
     state.update(cx, |s, cx| {
         s.set_active_section(section);
         s.active_surface = PullRequestSurface::Overview;
-        s.active_queue_id = queue_id.to_string();
+        if section == SectionId::Issues {
+            s.active_issue_queue_id = queue_id.to_string();
+            s.active_issue_key = None;
+        } else {
+            s.active_queue_id = queue_id.to_string();
+            s.active_issue_key = None;
+        }
         s.active_pr_key = None;
         s.palette_open = false;
         s.palette_selected_index = 0;

@@ -37,6 +37,7 @@ pub fn open_pull_request(
         }
         s.set_active_section(SectionId::Pulls);
         s.active_surface = initial_surface;
+        s.active_issue_key = None;
         s.active_pr_key = Some(key.clone());
         s.palette_open = false;
         s.palette_selected_index = 0;

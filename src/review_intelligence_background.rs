@@ -292,6 +292,7 @@ mod tests {
                 name: Some("Octocat".to_string()),
             }),
             queues,
+            issue_queues: Vec::new(),
         }
     }
 

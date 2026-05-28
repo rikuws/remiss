@@ -36,6 +36,74 @@ fn maps_pull_request_summary_for_fast_url_open() {
 }
 
 #[test]
+fn maps_issue_summary_for_workspace_queues() {
+    let node = json!({
+        "number": 17,
+        "title": "Wire issues into the workspace",
+        "url": "https://github.com/acme/repo/issues/17",
+        "state": "OPEN",
+        "updatedAt": "2026-05-26T08:00:00Z",
+        "author": { "login": "rikuws", "avatarUrl": "https://example.com/avatar.png" },
+        "comments": { "totalCount": 3 },
+        "labels": { "nodes": [{ "name": "ui" }, { "name": "issues" }] },
+        "assignees": { "nodes": [{ "login": "octocat" }] },
+        "repository": { "nameWithOwner": "acme/repo", "defaultBranchRef": { "name": "main" } }
+    });
+
+    let summary = map_issue_summary(&node).expect("issue summary");
+
+    assert_eq!(summary.repository, "acme/repo");
+    assert_eq!(summary.number, 17);
+    assert_eq!(summary.title, "Wire issues into the workspace");
+    assert_eq!(summary.author_login, "rikuws");
+    assert_eq!(summary.comments_count, 3);
+    assert_eq!(summary.labels, vec!["ui", "issues"]);
+    assert_eq!(summary.assignees, vec!["octocat"]);
+    assert_eq!(summary.repository_default_branch.as_deref(), Some("main"));
+}
+
+#[test]
+fn maps_issue_detail_with_comments() {
+    let node = json!({
+        "id": "I_1",
+        "number": 17,
+        "title": "Wire issues into the workspace",
+        "body": "Issue detail body",
+        "url": "https://github.com/acme/repo/issues/17",
+        "state": "OPEN",
+        "createdAt": "2026-05-25T08:00:00Z",
+        "updatedAt": "2026-05-26T08:00:00Z",
+        "author": { "login": "rikuws", "avatarUrl": "https://example.com/avatar.png" },
+        "comments": {
+            "totalCount": 1,
+            "nodes": [{
+                "id": "IC_1",
+                "body": "First issue comment.",
+                "createdAt": "2026-05-26T09:00:00Z",
+                "updatedAt": "2026-05-26T09:01:00Z",
+                "url": "https://github.com/acme/repo/issues/17#issuecomment-1",
+                "author": { "login": "octocat", "avatarUrl": null }
+            }]
+        },
+        "labels": { "nodes": [{ "name": "ui" }] },
+        "assignees": { "nodes": [{ "login": "octocat" }] },
+        "repository": { "nameWithOwner": "acme/repo" }
+    });
+
+    let detail = map_issue_detail(&node).expect("issue detail");
+
+    assert_eq!(detail.id, "I_1");
+    assert_eq!(detail.repository, "acme/repo");
+    assert_eq!(detail.number, 17);
+    assert_eq!(detail.body, "Issue detail body");
+    assert_eq!(detail.comments_count, 1);
+    assert_eq!(detail.comments.len(), 1);
+    assert_eq!(detail.comments[0].author_login, "octocat");
+    assert_eq!(detail.labels, vec!["ui"]);
+    assert_eq!(detail.assignees, vec!["octocat"]);
+}
+
+#[test]
 fn maps_pull_request_commit_with_linked_user_author() {
     let node = json!({
         "id": "PRC_1",

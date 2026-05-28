@@ -605,10 +605,7 @@ fn build_command_items(state: &AppState) -> Vec<CommandItem> {
     let query = normalized_palette_query(state);
     let mut items = Vec::new();
 
-    for section in SectionId::all()
-        .iter()
-        .filter(|section| **section != SectionId::Issues)
-    {
+    for section in SectionId::all().iter() {
         push_command(
             &mut items,
             format!("Go to {}", section.label()),
@@ -991,6 +988,9 @@ fn apply_command_action(
             state.update(cx, |s, cx| {
                 s.set_active_section(section);
                 s.active_pr_key = None;
+                if section != SectionId::Issues {
+                    s.active_issue_key = None;
+                }
                 cx.notify();
             });
         }
