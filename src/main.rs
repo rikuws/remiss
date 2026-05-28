@@ -49,6 +49,7 @@ mod diagnostic_logs;
 mod diff;
 mod difftastic;
 mod emoji;
+mod env_flags;
 mod gh;
 mod github;
 mod github_files_diff;

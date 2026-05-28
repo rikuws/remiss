@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::{
     diff::parse_unified_diff,
+    env_flags::permissive_truthy_value,
     github::{
         ActionResult, AuthState, IssueDetail, IssueDetailSnapshot, IssueQueue, IssueSummary,
         PendingPullRequestReview, PullRequestComment, PullRequestCommit,
@@ -43,7 +44,7 @@ where
     F: FnMut(&str) -> Option<String>,
 {
     var(DEMO_MODE_ENV)
-        .map(|value| env_truthy(&value))
+        .map(|value| permissive_truthy_value(&value))
         .unwrap_or(false)
         || crate::screenshot_mode::screenshot_mode_enabled_from_vars(var)
 }
@@ -160,11 +161,6 @@ pub fn action_result(action: &str) -> ActionResult {
         success: true,
         message: format!("Demo mode: {action}. No GitHub data was changed."),
     }
-}
-
-fn env_truthy(value: &str) -> bool {
-    let normalized = value.trim().to_ascii_lowercase();
-    !normalized.is_empty() && !matches!(normalized.as_str(), "0" | "false" | "no" | "off")
 }
 
 fn demo_queues() -> Vec<PullRequestQueue> {
@@ -2437,13 +2433,13 @@ mod tests {
 
     #[test]
     fn demo_env_truthiness_accepts_common_run_values() {
-        assert!(env_truthy("1"));
-        assert!(env_truthy("true"));
-        assert!(env_truthy("yes"));
-        assert!(!env_truthy("0"));
-        assert!(!env_truthy("false"));
-        assert!(!env_truthy("off"));
-        assert!(!env_truthy(" "));
+        assert!(permissive_truthy_value("1"));
+        assert!(permissive_truthy_value("true"));
+        assert!(permissive_truthy_value("yes"));
+        assert!(!permissive_truthy_value("0"));
+        assert!(!permissive_truthy_value("false"));
+        assert!(!permissive_truthy_value("off"));
+        assert!(!permissive_truthy_value(" "));
     }
 
     #[test]
