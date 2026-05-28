@@ -9,6 +9,7 @@ use gpui::{px, size, Pixels, Size};
 
 use crate::{
     demo_data,
+    env_flags::permissive_truthy_value,
     github::{PullRequestDetail, RepositoryFileContent},
     review_session::ReviewCenterMode,
     state::{
@@ -119,7 +120,7 @@ where
     F: FnMut(&str) -> Option<String>,
 {
     var(SCREENSHOT_MODE_ENV)
-        .map(|value| env_truthy(&value))
+        .map(|value| permissive_truthy_value(&value))
         .unwrap_or(false)
 }
 
@@ -386,11 +387,6 @@ fn review_workspace_ready(state: &AppState) -> bool {
         return false;
     };
     !file_state.loading && file_state.error.is_none() && file_state.prepared.is_some()
-}
-
-fn env_truthy(value: &str) -> bool {
-    let normalized = value.trim().to_ascii_lowercase();
-    !normalized.is_empty() && !matches!(normalized.as_str(), "0" | "false" | "no" | "off")
 }
 
 #[cfg(test)]

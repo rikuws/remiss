@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::cache::CacheStore;
+use crate::env_flags::env_var_truthy;
 use crate::gh::CommandOutput;
 use crate::github::AuthState;
 
@@ -115,8 +116,8 @@ pub struct StartupWizardOptions {
 impl StartupWizardOptions {
     pub fn from_env_and_args() -> Self {
         let env_force_wizard = std::env::var("REMISS_FORCE_WIZARD").ok();
-        let env_force_welcome =
-            env_truthy("REMISS_FORCE_WELCOME_WIZARD") || env_truthy("REMISS_WELCOME_WIZARD");
+        let env_force_welcome = env_var_truthy("REMISS_FORCE_WELCOME_WIZARD")
+            || env_var_truthy("REMISS_WELCOME_WIZARD");
         parse_startup_wizard_options(
             std::env::args().skip(1),
             env_force_wizard.as_deref(),
@@ -447,18 +448,6 @@ where
     }
 
     StartupWizardOptions { force_wizard_id }
-}
-
-fn env_truthy(name: &str) -> bool {
-    std::env::var(name)
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
 }
 
 fn now_ms() -> i64 {

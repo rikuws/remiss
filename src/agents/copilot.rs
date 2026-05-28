@@ -13,6 +13,7 @@ use tokio::time::{Instant as TokioInstant, MissedTickBehavior};
 
 use crate::{
     app_storage,
+    env_flags::env_var_truthy,
     review_ai::{ReviewAiProgressUpdate, ReviewAiProvider, ReviewAiProviderStatus},
     sentry_diagnostics,
 };
@@ -1346,17 +1347,7 @@ fn limit_diagnostic_text(value: &str) -> String {
 }
 
 fn copilot_diagnostics_include_prompt() -> bool {
-    env_truthy(COPILOT_DIAGNOSTICS_INCLUDE_PROMPT_ENV)
-}
-
-fn env_truthy(name: &str) -> bool {
-    std::env::var(name)
-        .ok()
-        .map(|value| {
-            let normalized = value.trim().to_ascii_lowercase();
-            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
-        })
-        .unwrap_or(false)
+    env_var_truthy(COPILOT_DIAGNOSTICS_INCLUDE_PROMPT_ENV)
 }
 
 fn append_diagnostic_log_suffix(mut message: String, diagnostic_log_path: Option<&str>) -> String {
