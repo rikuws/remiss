@@ -64,6 +64,9 @@ mod markdown;
 mod notifications;
 mod onboarding;
 mod platform_macos;
+mod platform_updates;
+#[cfg(target_os = "windows")]
+mod platform_windows;
 mod process_group;
 mod review_ai;
 mod review_anchors;
@@ -131,6 +134,7 @@ use views::{
 use vim::input::vim_key_from_keystroke;
 
 fn main() {
+    platform_updates::prepare_startup();
     cli_binary::repair_process_path_for_cli_tools();
     let _sentry_guard = sentry_diagnostics::init();
 
@@ -264,7 +268,7 @@ fn start_app(
     });
 
     if screenshot_config.is_none() {
-        if let Err(error) = platform_macos::updates::start_updater() {
+        if let Err(error) = platform_updates::start_updater() {
             report_sentry_error(format!("{APP_NAME} updater disabled: {error}"));
         }
         if let Err(error) = platform_macos::prepare_system_notifications() {

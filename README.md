@@ -10,6 +10,7 @@ assistant.
 ## Download
 
 - [Latest macOS build](https://github.com/rikuws/remiss/releases/latest/download/remiss-latest-macos.dmg)
+- [Latest Windows portable build](https://github.com/rikuws/remiss/releases/latest/download/remiss-latest-windows.zip)
 - [All releases](https://github.com/rikuws/remiss/releases)
 
 Remiss is early alpha. The core review workflow is usable, but onboarding,

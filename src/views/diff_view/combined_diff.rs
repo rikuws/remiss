@@ -1211,6 +1211,10 @@ fn schedule_combined_diff_hydration(
                         cx.notify();
                     })
                     .ok();
+                cx.update(|window, _cx| {
+                    window.refresh();
+                })
+                .ok();
             }
         })
         .detach();
