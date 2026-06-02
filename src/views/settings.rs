@@ -12,7 +12,7 @@ use crate::review_ai::{self, ReviewAiProvider, ReviewAiProviderStatus};
 use crate::selectable_text::SelectableText;
 use crate::state::{AppState, ManagedLspSettingsState};
 use crate::theme::*;
-use crate::{app_storage, diagnostic_logs, platform_macos};
+use crate::{app_storage, diagnostic_logs, platform_macos, platform_updates};
 
 use super::pr_detail::surface_tab;
 use super::sections::{badge, error_text, eyebrow, panel, panel_state_text, success_text};
@@ -63,12 +63,11 @@ pub fn prepare_settings_view(state: &Entity<AppState>, window: &mut Window, cx: 
 }
 
 pub fn trigger_software_update_check(state: &Entity<AppState>, cx: &mut App) {
-    let result = platform_macos::updates::check_for_updates();
+    let result = platform_updates::check_for_updates();
     state.update(cx, |state, cx| {
         match result {
-            Ok(()) => {
-                state.software_update_message =
-                    Some("Opened the Remiss update checker.".to_string());
+            Ok(result) => {
+                state.software_update_message = Some(result.message);
                 state.software_update_error = None;
             }
             Err(error) => {
@@ -794,7 +793,7 @@ fn settings_action_button(
 }
 
 fn render_software_update_panel(state: &Entity<AppState>, s: &AppState) -> impl IntoElement {
-    let status = platform_macos::updates::updater_status();
+    let status = platform_updates::updater_status();
     let message = s.software_update_message.clone();
     let error = s.software_update_error.clone();
     let running_version = format!("{APP_NAME} v{}", platform_macos::app_short_version());

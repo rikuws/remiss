@@ -232,6 +232,10 @@ jobs:
         shell: pwsh
         run: ./scripts/build-windows.ps1
 
+      - name: Build Velopack update package
+        shell: pwsh
+        run: ./scripts/build-windows-velopack.ps1
+
       - name: Prepare release assets
         shell: pwsh
         run: |
@@ -249,6 +253,15 @@ jobs:
 
           $latest = $artifacts | Sort-Object Name | Select-Object -Last 1
           Copy-Item $latest.FullName (Join-Path release-assets 'remiss-latest-windows.zip')
+
+          $velopackArtifacts = Get-ChildItem -Path (Join-Path dist 'velopack') -File -ErrorAction SilentlyContinue
+          if (-not $velopackArtifacts) {
+            throw "No Velopack Windows artifacts found in dist\velopack"
+          }
+
+          foreach ($artifact in $velopackArtifacts) {
+            Copy-Item $artifact.FullName (Join-Path release-assets $artifact.Name)
+          }
 
           $sumLines = Get-ChildItem -Path release-assets -File | ForEach-Object {
             $hash = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant()

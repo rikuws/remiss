@@ -53,3 +53,6 @@ objc2-core-image = { version = "0.3.2", default-features = false, features = ["s
 objc2-core-video = { version = "0.3.2", default-features = false, features = ["CVPixelBuffer"] }
 objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSDictionary", "NSError", "NSObject", "NSString", "NSValue"] }
 objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationTrigger", "UNUserNotificationCenter", "block2"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+velopack = "0.0.1298"

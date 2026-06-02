@@ -5,9 +5,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::cache::CacheStore;
 use crate::diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk, ParsedDiffLine};
 use crate::github::{
-    AuthState, PullRequestComment, PullRequestDataCompleteness, PullRequestDetail,
-    PullRequestDetailSnapshot, PullRequestFile, PullRequestReview, PullRequestReviewComment,
-    PullRequestReviewThread,
+    AuthState, PullRequestComment, PullRequestCommit, PullRequestDataCompleteness,
+    PullRequestDetail, PullRequestDetailSnapshot, PullRequestFile, PullRequestReview,
+    PullRequestReviewComment, PullRequestReviewThread,
 };
 use crate::lsp::{LspServerCapabilities, LspServerStatus};
 use crate::managed_lsp::ManagedServerKind;
@@ -65,6 +65,27 @@ fn app_state_mute_unmute_persists_over_restart() {
     let final_cache = CacheStore::new(cache_path).expect("reopen cache");
     let final_state = AppState::new(final_cache, StartupWizardOptions::force_welcome());
     assert!(!final_state.muted_repos.contains("owner/repo"));
+}
+
+#[test]
+fn issue_back_preserves_issue_view_choices() {
+    let cache = temp_cache_store("issue-back");
+    let mut state = AppState::new(cache, StartupWizardOptions::force_welcome());
+    state.active_section = SectionId::Issues;
+    state.active_issue_queue_id = "mentioned".to_string();
+    state.active_issue_key = Some("owner/repo#42".to_string());
+    state.active_queue_id = "reviewRequested".to_string();
+    state.active_pr_key = None;
+
+    assert!(state.navigate_issue_back());
+    assert_eq!(state.active_section, SectionId::Issues);
+    assert_eq!(state.active_issue_queue_id, "mentioned");
+    assert_eq!(state.active_queue_id, "reviewRequested");
+    assert_eq!(state.active_issue_key, None);
+    assert_eq!(state.active_pr_key, None);
+
+    assert!(!state.navigate_issue_back());
+    assert_eq!(state.active_issue_queue_id, "mentioned");
 }
 
 #[test]
@@ -142,6 +163,43 @@ fn active_diff_vim_targets_follow_mouse_hovered_file() {
     assert!(!rows.is_empty());
     assert!(rows.iter().all(|row| row.anchor.file_path == "src/b.rs"));
     assert!(rows.iter().any(|row| row.anchor.line == Some(4)));
+}
+
+#[test]
+fn commit_diff_prefetch_starts_from_overview_surface() {
+    let cache = temp_cache_store("commit-diff-overview-prefetch");
+    let mut state = AppState::new(cache, StartupWizardOptions::force_welcome());
+    let detail_key = "org/repo#1".to_string();
+    let mut detail = detail_with_threads(Vec::new());
+    detail.commits = vec![
+        commit("aaaaaaa1", "2026-01-02T00:00:00Z"),
+        commit("bbbbbbb2", "2026-01-03T00:00:00Z"),
+    ];
+    detail.commits_count = detail.commits.len() as i64;
+    let detail_state = DetailState {
+        snapshot: Some(PullRequestDetailSnapshot {
+            auth: AuthState {
+                is_authenticated: true,
+                active_login: Some("you".to_string()),
+                active_hostname: Some("github.com".to_string()),
+                message: String::new(),
+            },
+            loaded_from_cache: false,
+            fetched_at_ms: None,
+            detail: Some(detail),
+        }),
+        ..Default::default()
+    };
+    state.active_surface = PullRequestSurface::Overview;
+    state.active_pr_key = Some(detail_key.clone());
+    state.detail_states.insert(detail_key, detail_state);
+
+    let key = state
+        .next_active_commit_diff_fetch_key()
+        .expect("overview should still start commit diff prefetch");
+
+    assert_eq!(key.oid, "aaaaaaa1");
+    assert!(state.next_active_commit_diff_fetch_key().is_none());
 }
 
 #[test]
@@ -451,6 +509,20 @@ fn file(path: &str) -> PullRequestFile {
         additions: 0,
         deletions: 0,
         change_type: "MODIFIED".to_string(),
+    }
+}
+
+fn commit(oid: &str, committed_date: &str) -> PullRequestCommit {
+    PullRequestCommit {
+        id: format!("C_{oid}"),
+        oid: oid.to_string(),
+        abbreviated_oid: oid.chars().take(7).collect(),
+        message_headline: "Update code".to_string(),
+        committed_date: committed_date.to_string(),
+        author_name: Some("Ada".to_string()),
+        author_login: Some("ada".to_string()),
+        author_avatar_url: None,
+        url: format!("https://example.com/commit/{oid}"),
     }
 }
 

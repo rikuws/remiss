@@ -713,6 +713,10 @@ pub fn blur_review_editor(state: &Entity<AppState>, cx: &mut App) {
 }
 
 pub fn trigger_submit_review(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
+    if state.read(cx).active_commit_filter_read_only() {
+        return;
+    }
+
     if state.read(cx).active_is_local_review() {
         return;
     }
