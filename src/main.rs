@@ -43,6 +43,7 @@ mod cli_binary;
 mod code_display;
 mod code_symbols;
 mod command_runner;
+mod commit_timeline;
 mod deep_link;
 mod demo_data;
 mod diagnostic_logs;
@@ -448,6 +449,60 @@ fn start_app(
             }
         }
 
+        let review_editor_active = app_state_for_keys.read(cx).review_editor_active;
+        let commit_timeline_navigation_enabled = {
+            let state = app_state_for_keys.read(cx);
+            state.active_surface == state::PullRequestSurface::Files
+                && state.effective_review_center_mode()
+                    == review_session::ReviewCenterMode::SemanticDiff
+                && state
+                    .active_detail()
+                    .map(|detail| {
+                        !detail.commits.is_empty()
+                            && !crate::local_review::is_local_review_detail(detail)
+                    })
+                    .unwrap_or(false)
+                && !review_editor_active
+        };
+        if commit_timeline_navigation_enabled {
+            match keystroke.key.as_str() {
+                "left" => {
+                    app_state_for_keys.update(cx, |state, cx| {
+                        state.move_active_commit_filter(-1);
+                        cx.notify();
+                    });
+                    let model = app_state_for_keys.clone();
+                    window
+                        .spawn(cx, async move |cx: &mut AsyncWindowContext| {
+                            views::diff_view::prefetch_active_commit_diffs_flow(model, cx).await;
+                        })
+                        .detach();
+                    return;
+                }
+                "right" => {
+                    app_state_for_keys.update(cx, |state, cx| {
+                        state.move_active_commit_filter(1);
+                        cx.notify();
+                    });
+                    let model = app_state_for_keys.clone();
+                    window
+                        .spawn(cx, async move |cx: &mut AsyncWindowContext| {
+                            views::diff_view::prefetch_active_commit_diffs_flow(model, cx).await;
+                        })
+                        .detach();
+                    return;
+                }
+                "home" => {
+                    app_state_for_keys.update(cx, |state, cx| {
+                        state.reset_active_commit_filter();
+                        cx.notify();
+                    });
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         if is_secondary_plain
             && keystroke.key == "v"
             && try_open_pasted_pull_request_url(&app_state_for_keys, window, cx)
@@ -455,7 +510,6 @@ fn start_app(
             return;
         }
 
-        let review_editor_active = app_state_for_keys.read(cx).review_editor_active;
         if !review_editor_active {
             return;
         }

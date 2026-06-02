@@ -15,6 +15,7 @@ use crate::code_display::{
     build_interactive_code_tokens, build_lsp_hover_tooltip_view, code_text_runs, mono_code_font,
     render_highlighted_code_content, InteractiveCodeToken,
 };
+use crate::commit_timeline::{nearest_timeline_index, timeline_items, CommitDiffFilter};
 use crate::diff::{
     build_diff_render_rows, build_diff_render_rows_for_parsed_file, find_parsed_diff_file,
     find_parsed_diff_file_with_index, DiffLineKind, DiffRenderRow, ParsedDiffFile, ParsedDiffHunk,
@@ -133,6 +134,21 @@ pub(super) const DIFF_FOCUS_CONTEXT_ROWS: usize = 12;
 const DIFF_VIM_SCROLL_EDGE_CONTEXT_ROWS: f32 = 4.0;
 const DIFF_VIM_SCROLL_EDGE_MAX_VIEWPORT_FRACTION: f32 = 0.24;
 
+#[derive(Clone)]
+struct CommitTimelineDrag {
+    state: Entity<AppState>,
+    filters: Vec<CommitDiffFilter>,
+    disabled: bool,
+}
+
+struct CommitTimelineDragPreview;
+
+impl Render for CommitTimelineDragPreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<'_, Self>) -> impl IntoElement {
+        div().w(px(0.0)).h(px(0.0))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum DiffFocusScrollBehavior {
     Context,
@@ -204,6 +220,7 @@ pub fn enter_files_surface(state: &Entity<AppState>, window: &mut Window, cx: &m
         );
     }
     ensure_structural_diff_warmup_started(state, window, cx);
+    trigger_commit_diff_prefetch(state, window, cx);
 }
 
 pub fn switch_review_code_mode(
@@ -223,6 +240,88 @@ pub fn switch_review_code_mode(
     });
 
     ensure_active_review_focus_loaded(state, window, cx);
+    if mode == ReviewCenterMode::SemanticDiff {
+        trigger_commit_diff_prefetch(state, window, cx);
+    }
+}
+
+fn trigger_commit_diff_prefetch(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
+    let model = state.clone();
+    let next_key = state.update(cx, |state, cx| {
+        let key = state.next_active_commit_diff_fetch_key();
+        if key.is_some() {
+            cx.notify();
+        }
+        key
+    });
+
+    let Some(next_key) = next_key else {
+        return;
+    };
+
+    window
+        .spawn(cx, async move |cx: &mut AsyncWindowContext| {
+            prefetch_commit_diffs_from_key(model, next_key, cx).await;
+        })
+        .detach();
+}
+
+pub async fn prefetch_active_commit_diffs_flow(
+    model: Entity<AppState>,
+    cx: &mut AsyncWindowContext,
+) {
+    let next_key = model
+        .update(cx, |state, cx| {
+            let key = state.next_active_commit_diff_fetch_key();
+            if key.is_some() {
+                cx.notify();
+            }
+            key
+        })
+        .ok()
+        .flatten();
+
+    if let Some(next_key) = next_key {
+        prefetch_commit_diffs_from_key(model, next_key, cx).await;
+    }
+}
+
+async fn prefetch_commit_diffs_from_key(
+    model: Entity<AppState>,
+    mut key: crate::commit_timeline::CommitDiffKey,
+    cx: &mut AsyncWindowContext,
+) {
+    loop {
+        let fetch_key = key.clone();
+        let fetch_result = cx
+            .background_executor()
+            .spawn(async move { crate::commit_timeline::fetch_commit_diff(&fetch_key) })
+            .await;
+        let result = match fetch_result {
+            Ok(dataset) => Ok(dataset),
+            Err(error) => Err(error),
+        };
+
+        let next_key = model
+            .update(cx, |state, cx| {
+                let fetched_detail_key = pr_key(&key.repository, key.number);
+                state.complete_active_commit_diff_fetch(key.clone(), result);
+                if state.active_pr_key.as_deref() != Some(fetched_detail_key.as_str()) {
+                    cx.notify();
+                    return None;
+                }
+                let next = state.next_active_commit_diff_fetch_key();
+                cx.notify();
+                next
+            })
+            .ok()
+            .flatten();
+
+        let Some(next) = next_key else {
+            break;
+        };
+        key = next;
+    }
 }
 
 pub fn enter_stack_review_mode(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
@@ -1074,11 +1173,17 @@ pub fn render_files_view(
     let s = state.read(cx);
     let detail = s.active_detail();
 
-    let Some(detail) = detail else {
+    let Some(base_detail) = detail else {
         return div()
             .child(panel_state_text("No detail data available."))
             .into_any_element();
     };
+    let commit_diff_status = s.active_commit_diff_status();
+    let commit_filtered_detail = match &commit_diff_status {
+        ActiveCommitDiffStatus::Loaded(filtered) => Some(filtered.clone()),
+        _ => None,
+    };
+    let detail = commit_filtered_detail.as_ref().unwrap_or(base_detail);
 
     let files = &detail.files;
     let selected_anchor = s.selected_diff_anchor.clone();
@@ -1187,6 +1292,7 @@ pub fn render_files_view(
                     state,
                     &s,
                     detail,
+                    &commit_diff_status,
                     selected_path,
                     selected_anchor.as_ref(),
                     review_stack.clone(),
@@ -1270,6 +1376,7 @@ fn render_diff_panel(
     state: &Entity<AppState>,
     app_state: &AppState,
     detail: &PullRequestDetail,
+    commit_diff_status: &ActiveCommitDiffStatus,
     selected_path: Option<&str>,
     selected_anchor: Option<&DiffAnchor>,
     review_stack: Arc<ReviewStack>,
@@ -1371,7 +1478,9 @@ fn render_diff_panel(
         .gap(px(REVIEW_SURFACE_GAP))
         .child(render_diff_toolbar(
             state,
+            app_state,
             detail,
+            commit_diff_status,
             files.len(),
             total_additions,
             total_deletions,
@@ -1446,6 +1555,16 @@ fn render_diff_panel(
                             cx,
                         )
                         .into_any_element()
+                    } else if matches!(commit_diff_status, ActiveCommitDiffStatus::Loading)
+                        && app_state.active_commit_filter_applies()
+                    {
+                        panel_state_text("Loading selected commit diff...").into_any_element()
+                    } else if let ActiveCommitDiffStatus::Error(error) = commit_diff_status {
+                        error_text(&format!("Could not load selected commit diff: {error}"))
+                            .into_any_element()
+                    } else if app_state.active_commit_filter_applies() && files.is_empty() {
+                        panel_state_text("No files returned for the selected commit.")
+                            .into_any_element()
                     } else {
                         render_combined_diff_files(
                             state,
@@ -1715,9 +1834,190 @@ fn render_review_header_change_summary(
         })
 }
 
-fn render_diff_toolbar(
+fn render_commit_timeline(
     state: &Entity<AppState>,
     detail: &PullRequestDetail,
+    active_filter: CommitDiffFilter,
+    disabled: bool,
+    commit_diff_status: &ActiveCommitDiffStatus,
+) -> impl IntoElement {
+    let items = timeline_items(detail);
+    let item_count = items.len();
+    let filters = items
+        .iter()
+        .map(|item| item.filter.clone())
+        .collect::<Vec<_>>();
+    let drag_payload = CommitTimelineDrag {
+        state: state.clone(),
+        filters,
+        disabled,
+    };
+    let status_label = match commit_diff_status {
+        ActiveCommitDiffStatus::Loading if !active_filter.is_all() => {
+            Some(("loading", fg_subtle()))
+        }
+        ActiveCommitDiffStatus::Error(_) => Some(("error", danger())),
+        _ => None,
+    };
+    let state_for_drop = state.clone();
+
+    div()
+        .id("commit-diff-timeline")
+        .h(px(28.0))
+        .min_w(px(180.0))
+        .max_w(px(560.0))
+        .flex_grow()
+        .overflow_x_scroll()
+        .scrollbar_width(px(0.0))
+        .opacity(if disabled { 0.48 } else { 1.0 })
+        .flex()
+        .items_center()
+        .gap(px(0.0))
+        .on_drag(drag_payload, |_, _, _, cx| {
+            cx.new(|_| CommitTimelineDragPreview)
+        })
+        .on_drag_move(move |event: &DragMoveEvent<CommitTimelineDrag>, _, cx| {
+            let drag = event.drag(cx).clone();
+            if drag.disabled || drag.filters.is_empty() {
+                return;
+            }
+            let local_x = f32::from(event.event.position.x - event.bounds.left());
+            let width = f32::from(event.bounds.size.width);
+            let Some(index) = nearest_timeline_index(local_x, width, drag.filters.len()) else {
+                return;
+            };
+            let Some(filter) = drag.filters.get(index).cloned() else {
+                return;
+            };
+            drag.state.update(cx, |state, cx| {
+                state.set_active_commit_preview_filter(Some(filter));
+                cx.notify();
+            });
+        })
+        .on_drop::<CommitTimelineDrag>(move |drag, window, cx| {
+            if drag.disabled {
+                return;
+            }
+            let filter = drag.state.read(cx).active_commit_timeline_filter();
+            drag.state.update(cx, |state, cx| {
+                state.select_active_commit_filter(filter);
+                cx.notify();
+            });
+            trigger_commit_diff_prefetch(&state_for_drop, window, cx);
+        })
+        .children(items.into_iter().enumerate().map(|(index, item)| {
+            render_commit_timeline_item(state, item, index, item_count, &active_filter, disabled)
+        }))
+        .when_some(status_label, |el, (label, color)| {
+            el.child(
+                div()
+                    .flex_shrink_0()
+                    .pl(px(2.0))
+                    .text_size(px(10.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(color)
+                    .child(label),
+            )
+        })
+}
+
+fn render_commit_timeline_item(
+    state: &Entity<AppState>,
+    item: crate::commit_timeline::CommitTimelineItem,
+    index: usize,
+    item_count: usize,
+    active_filter: &CommitDiffFilter,
+    disabled: bool,
+) -> impl IntoElement {
+    const ITEM_WIDTH: f32 = 68.0;
+    const DOT_SIZE: f32 = 8.0;
+    const DOT_CENTER_X: f32 = ITEM_WIDTH / 2.0;
+    const RAIL_Y: f32 = 7.0;
+
+    let selected = &item.filter == active_filter || (disabled && index == 0);
+    let filter_for_click = item.filter.clone();
+    let state_for_click = state.clone();
+    let tooltip = SharedString::from(item.tooltip.clone());
+    let dot_color = if selected { accent() } else { fg_subtle() };
+    let line_left = if index == 0 { DOT_CENTER_X } else { 0.0 };
+    let line_right = if index + 1 == item_count {
+        ITEM_WIDTH - DOT_CENTER_X
+    } else {
+        0.0
+    };
+
+    div()
+        .id(("commit-timeline-dot", index))
+        .relative()
+        .h(px(28.0))
+        .w(px(ITEM_WIDTH))
+        .flex_shrink_0()
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(transparent())
+        .bg(transparent())
+        .tooltip(move |_, cx| build_text_tooltip(tooltip.clone(), cx))
+        .when(!disabled, move |el| {
+            el.hover(|style| style.bg(bg_selected()))
+                .on_click(move |event, window, cx| {
+                    if !event.standard_click() {
+                        return;
+                    }
+                    state_for_click.update(cx, |state, cx| {
+                        state.select_active_commit_filter(filter_for_click.clone());
+                        cx.notify();
+                    });
+                    trigger_commit_diff_prefetch(&state_for_click, window, cx);
+                })
+        })
+        .child(
+            div()
+                .absolute()
+                .left(px(line_left))
+                .right(px(line_right))
+                .top(px(RAIL_Y))
+                .h(px(1.0))
+                .bg(border_muted()),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(px(DOT_CENTER_X - DOT_SIZE / 2.0))
+                .top(px(RAIL_Y - DOT_SIZE / 2.0))
+                .size(px(DOT_SIZE))
+                .rounded(px(999.0))
+                .border_1()
+                .border_color(dot_color)
+                .bg(if selected { dot_color } else { bg_surface() }),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(px(3.0))
+                .top(px(13.0))
+                .w(px(ITEM_WIDTH - 6.0))
+                .min_w_0()
+                .overflow_x_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_align(TextAlign::Center)
+                .text_size(px(9.0))
+                .font_family(mono_font_family())
+                .font_weight(if selected {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::MEDIUM
+                })
+                .text_color(if selected { fg_emphasis() } else { fg_muted() })
+                .child(item.label),
+        )
+}
+
+fn render_diff_toolbar(
+    state: &Entity<AppState>,
+    app_state: &AppState,
+    detail: &PullRequestDetail,
+    commit_diff_status: &ActiveCommitDiffStatus,
     total_files: usize,
     total_additions: i64,
     total_deletions: i64,
@@ -1749,6 +2049,15 @@ fn render_diff_toolbar(
     if let Some(status) = structural_warmup_status {
         focus_meta.push(status);
     }
+    match commit_diff_status {
+        ActiveCommitDiffStatus::Loading if app_state.active_commit_filter_applies() => {
+            focus_meta.push("loading commit diff".to_string());
+        }
+        ActiveCommitDiffStatus::Error(_) => {
+            focus_meta.push("commit diff unavailable".to_string());
+        }
+        _ => {}
+    }
     let focus_summary = focus_meta.join(" / ");
     let show_layout_toggle = matches!(
         center_mode,
@@ -1760,6 +2069,13 @@ fn render_diff_toolbar(
     let state_for_refresh = state.clone();
     let state_for_submit = state.clone();
     let pending_count = pending_review_comment_count(detail);
+    let commit_filter_read_only = app_state.active_commit_filter_read_only();
+    let timeline_disabled = center_mode != ReviewCenterMode::SemanticDiff || is_local_review;
+    let timeline_filter = if timeline_disabled {
+        CommitDiffFilter::All
+    } else {
+        app_state.active_commit_timeline_filter()
+    };
     let stale_local_feedback_count = if is_local_review {
         detail
             .review_threads
@@ -1801,11 +2117,30 @@ fn render_diff_toolbar(
                         .text_ellipsis()
                         .child(format!("{total_files} files changed")),
                 )
-                .child(render_review_header_change_summary(
-                    total_additions,
-                    total_deletions,
-                    focus_summary,
-                )),
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .min_w_0()
+                        .child(render_review_header_change_summary(
+                            total_additions,
+                            total_deletions,
+                            focus_summary,
+                        ))
+                        .when(
+                            detail.commits_count > 0 || !detail.commits.is_empty(),
+                            |el| {
+                                el.child(render_commit_timeline(
+                                    state,
+                                    detail,
+                                    timeline_filter,
+                                    timeline_disabled,
+                                    commit_diff_status,
+                                ))
+                            },
+                        ),
+                ),
         )
         .when_some(guided_review_lens, |el, lens| {
             el.child(render_guided_review_lens_toggle(state, lens))
@@ -1823,7 +2158,7 @@ fn render_diff_toolbar(
                 layout_toggle_disabled,
             ))
         })
-        .when(!is_local_review, |el| {
+        .when(!is_local_review && !commit_filter_read_only, |el| {
             el.child(diff_toolbar_primary_button(
                 &submit_label,
                 highlight_review_feedback,

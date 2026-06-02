@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::cache::CacheStore;
+use crate::commit_timeline::CommitDiffState;
 use crate::diff::{find_parsed_diff_file, DiffRenderRow};
 use crate::difftastic::AdaptedDifftasticDiffFile;
 use crate::github::{
@@ -55,7 +56,10 @@ use gpui::{
 };
 use serde::{Deserialize, Serialize};
 
+mod commit_diff;
 mod review_navigation;
+
+pub use commit_diff::ActiveCommitDiffStatus;
 
 use review_navigation::{
     diff_anchor_for_line, first_review_comment_after_focus_index, review_comment_navigation_items,
@@ -181,6 +185,7 @@ pub struct DetailState {
     pub stack_open_pull_requests: Option<Vec<StackPullRequestRef>>,
     pub stack_open_pull_requests_loading: bool,
     pub stack_open_pull_requests_error: Option<String>,
+    pub commit_diff_state: CommitDiffState,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -231,6 +236,7 @@ impl Default for DetailState {
             stack_open_pull_requests: None,
             stack_open_pull_requests_loading: false,
             stack_open_pull_requests_error: None,
+            commit_diff_state: CommitDiffState::default(),
         }
     }
 }
@@ -2141,6 +2147,7 @@ impl AppState {
         if location.mode == ReviewCenterMode::GuidedReview && !self.review_ai_features_enabled() {
             location.mode = self.active_code_lens_mode();
         }
+        let target_mode = location.mode;
         let previous = if push_history {
             self.current_review_location()
         } else {
@@ -2200,6 +2207,9 @@ impl AppState {
         session.source_target = location.as_source_target();
         session.last_read = Some(location.clone());
         push_route_location(&mut session.route, location);
+        if target_mode != ReviewCenterMode::SemanticDiff {
+            self.reset_active_commit_filter();
+        }
     }
 
     pub fn current_waymark(&self) -> Option<&ReviewWaymark> {
@@ -2597,6 +2607,9 @@ impl AppState {
                 session.source_target = None;
             }
         }
+        if mode != ReviewCenterMode::SemanticDiff {
+            self.reset_active_commit_filter();
+        }
     }
 
     pub fn hide_experimental_review_ai(&mut self) {
@@ -2753,6 +2766,7 @@ impl AppState {
             session.code_lens_mode = ReviewCenterMode::SourceBrowser;
             session.source_target = Some(target);
         }
+        self.reset_active_commit_filter();
     }
 
     pub fn active_code_lens_mode(&self) -> ReviewCenterMode {

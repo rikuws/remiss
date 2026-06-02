@@ -1,6 +1,10 @@
 use super::*;
 
 pub fn trigger_submit_inline_comment(state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
+    if state.read(cx).active_commit_filter_read_only() {
+        return;
+    }
+
     if state.read(cx).active_is_local_review() {
         trigger_save_local_feedback_comment(state, cx);
         return;
@@ -166,6 +170,10 @@ pub fn trigger_submit_review_from_review_mode(
     window: &mut Window,
     cx: &mut App,
 ) {
+    if state.read(cx).active_commit_filter_read_only() {
+        return;
+    }
+
     if state.read(cx).active_is_local_review() {
         return;
     }
@@ -992,6 +1000,10 @@ pub(super) fn open_review_line_action(
     position: Point<Pixels>,
     cx: &mut App,
 ) {
+    if state.read(cx).active_commit_filter_read_only() {
+        return;
+    }
+
     open_review_line_action_preserving_view(state, target, position, cx);
 }
 

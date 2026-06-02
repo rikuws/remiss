@@ -8,7 +8,10 @@ use crate::review_memory;
 use crate::review_session::load_review_session;
 use crate::state::{pr_key, AppState, PullRequestSurface, SectionId};
 
-use super::super::diff_view::{ensure_structural_diff_warmup_started, warm_structural_diffs_flow};
+use super::super::diff_view::{
+    ensure_structural_diff_warmup_started, prefetch_active_commit_diffs_flow,
+    warm_structural_diffs_flow,
+};
 
 const DETAIL_AUTO_REFRESH_TTL_MS: i64 = 5 * 60 * 1000;
 
@@ -126,6 +129,7 @@ pub fn open_pull_request(
                 }
 
                 warm_structural_diffs_flow(model.clone(), cx).await;
+                prefetch_active_commit_diffs_flow(model.clone(), cx).await;
                 refresh_brief_if_active_overview(model.clone(), &detail_key, cx).await;
             } else {
                 let cached_review_session = cached_review_session_task.await;
@@ -203,6 +207,7 @@ pub fn open_pull_request(
             }
 
             warm_structural_diffs_flow(model.clone(), cx).await;
+            prefetch_active_commit_diffs_flow(model.clone(), cx).await;
             refresh_brief_if_active_overview(model.clone(), &detail_key, cx).await;
         })
         .detach();

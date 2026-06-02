@@ -546,6 +546,7 @@ async fn open_remote_pull_request_flow(
     if showed_cached_detail && !should_sync {
         super::diff_view::load_pull_request_file_content_flow(model.clone(), None, cx).await;
         warm_structural_diffs_flow(model.clone(), cx).await;
+        super::diff_view::prefetch_active_commit_diffs_flow(model.clone(), cx).await;
         return;
     }
 
@@ -634,6 +635,7 @@ async fn open_remote_pull_request_flow(
 
     super::diff_view::load_pull_request_file_content_flow(model.clone(), None, cx).await;
     warm_structural_diffs_flow(model.clone(), cx).await;
+    super::diff_view::prefetch_active_commit_diffs_flow(model.clone(), cx).await;
 }
 
 fn parse_debug_pull_request_target(target: &str) -> Option<(String, i64)> {
