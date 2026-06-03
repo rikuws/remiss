@@ -10,7 +10,7 @@ use crate::commit_timeline::CommitDiffState;
 use crate::diff::{find_parsed_diff_file, DiffRenderRow};
 use crate::difftastic::AdaptedDifftasticDiffFile;
 use crate::github::{
-    IssueDetailSnapshot, IssueQueue, IssueSummary, PullRequestDetail, PullRequestDetailSnapshot,
+    IssueDetailSnapshot, IssueSummary, PullRequestDetail, PullRequestDetailSnapshot,
     PullRequestQueue, PullRequestSummary, RepositoryFileContent, ReviewAction, WorkspaceSnapshot,
 };
 use crate::local_repo::LocalRepositoryStatus;
@@ -57,10 +57,12 @@ use gpui::{
 use serde::{Deserialize, Serialize};
 
 mod commit_diff;
+mod queue_counts;
 mod review_navigation;
 
 pub use commit_diff::ActiveCommitDiffStatus;
 
+use queue_counts::{unique_issue_queue_count, unique_pull_request_queue_count};
 use review_navigation::{
     diff_anchor_for_line, first_review_comment_after_focus_index, review_comment_navigation_items,
     ReviewModeFocus,
@@ -154,52 +156,6 @@ pub fn summary_key(summary: &PullRequestSummary) -> String {
         .local_key
         .clone()
         .unwrap_or_else(|| pr_key(&summary.repository, summary.number))
-}
-
-fn unique_pull_request_queue_count(queues: &[PullRequestQueue]) -> i64 {
-    let mut keys = HashSet::new();
-    let mut max_reported_count = 0;
-    let mut all_queues_complete = true;
-
-    for queue in queues {
-        let reported_count = queue.total_count.max(0);
-        max_reported_count = max_reported_count.max(reported_count);
-        if !queue.is_complete || queue.items.len() as i64 != reported_count {
-            all_queues_complete = false;
-        }
-        keys.extend(queue.items.iter().map(summary_key));
-    }
-
-    let unique_count = keys.len() as i64;
-    if all_queues_complete {
-        unique_count
-    } else {
-        unique_count.max(max_reported_count)
-    }
-}
-
-fn unique_issue_queue_count(queues: &[IssueQueue]) -> i64 {
-    let mut keys = HashSet::new();
-    let mut max_reported_count = 0;
-    let mut all_queues_complete = true;
-
-    for queue in queues {
-        let reported_count = queue.total_count.max(0);
-        max_reported_count = max_reported_count.max(reported_count);
-        if !queue.is_complete || queue.items.len() as i64 != reported_count {
-            all_queues_complete = false;
-        }
-        for issue in &queue.items {
-            keys.insert(issue_key(&issue.repository, issue.number));
-        }
-    }
-
-    let unique_count = keys.len() as i64;
-    if all_queues_complete {
-        unique_count
-    } else {
-        unique_count.max(max_reported_count)
-    }
 }
 
 #[derive(Clone, Debug)]
