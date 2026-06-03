@@ -24,17 +24,21 @@ use std::{
     time::Duration,
 };
 
+mod avatar;
 mod issues;
 mod material;
 mod project_shader_picker;
 mod pull_request_filters;
 mod pull_request_open;
+mod time;
+pub(crate) use avatar::user_avatar;
 use issues::render_issues;
 use material::shader_material_surface_variant;
 use project_shader_picker::render_project_shader_picker;
 use pull_request_filters::{render_pull_request_filter_bar, render_pull_request_filter_dialog};
 pub(super) use pull_request_open::detail_snapshot_needs_background_refresh;
 pub use pull_request_open::open_pull_request;
+pub(crate) use time::format_relative_time;
 
 const OVERVIEW_CONTENT_MAX_WIDTH: f32 = 1440.0;
 const OVERVIEW_PANEL_SCROLLBAR_WIDTH: f32 = 8.0;
@@ -2065,133 +2069,6 @@ pub fn badge(text: &str) -> impl IntoElement {
         .child(text.to_string())
 }
 
-pub fn user_avatar(
-    login: &str,
-    avatar_url: Option<&str>,
-    size: f32,
-    emphasized: bool,
-) -> AnyElement {
-    let login = login.to_string();
-    let avatar_url = avatar_url
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .map(str::to_string);
-
-    match avatar_url {
-        Some(url) => {
-            let url = avatar_image_url(&url, size);
-            let inner_size = avatar_inner_size(size);
-            let loading_login = login.clone();
-            let fallback_login = login.clone();
-            div()
-                .w(px(size))
-                .h(px(size))
-                .rounded(px(size / 2.0))
-                .overflow_hidden()
-                .border_1()
-                .border_color(transparent())
-                .bg(if emphasized {
-                    accent_muted()
-                } else {
-                    bg_emphasis()
-                })
-                .flex()
-                .items_center()
-                .justify_center()
-                .flex_shrink_0()
-                .child(
-                    img(url)
-                        .size(px(inner_size))
-                        .rounded(px(inner_size / 2.0))
-                        .overflow_hidden()
-                        .object_fit(ObjectFit::Cover)
-                        .with_loading(move || {
-                            avatar_placeholder(&loading_login, inner_size, emphasized)
-                                .into_any_element()
-                        })
-                        .with_fallback(move || {
-                            avatar_placeholder(&fallback_login, inner_size, emphasized)
-                                .into_any_element()
-                        }),
-                )
-                .into_any_element()
-        }
-        None => avatar_placeholder(&login, size, emphasized).into_any_element(),
-    }
-}
-
-fn avatar_inner_size(size: f32) -> f32 {
-    (size - 2.0).max(1.0)
-}
-
-fn avatar_image_url(url: &str, display_size: f32) -> String {
-    if !url.contains("avatars.githubusercontent.com") {
-        return url.to_string();
-    }
-
-    let image_size = ((display_size * 3.0).ceil() as usize).clamp(96, 256);
-    let (url_without_fragment, fragment) = url
-        .split_once('#')
-        .map(|(url, fragment)| (url, Some(fragment)))
-        .unwrap_or((url, None));
-    let (base, query) = url_without_fragment
-        .split_once('?')
-        .unwrap_or((url_without_fragment, ""));
-    let mut params = query
-        .split('&')
-        .filter(|param| !param.is_empty() && !param.starts_with("s="))
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    params.push(format!("s={image_size}"));
-
-    let mut output = if params.is_empty() {
-        base.to_string()
-    } else {
-        format!("{base}?{}", params.join("&"))
-    };
-    if let Some(fragment) = fragment {
-        output.push('#');
-        output.push_str(fragment);
-    }
-    output
-}
-
-fn avatar_placeholder(login: &str, size: f32, emphasized: bool) -> Div {
-    div()
-        .w(px(size))
-        .h(px(size))
-        .rounded(px(size / 2.0))
-        .border_1()
-        .border_color(transparent())
-        .bg(if emphasized {
-            accent_muted()
-        } else {
-            bg_emphasis()
-        })
-        .flex()
-        .items_center()
-        .justify_center()
-        .flex_shrink_0()
-        .text_size(px((size * 0.38).max(9.0)))
-        .font_family(mono_font_family())
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(if emphasized { accent() } else { fg_emphasis() })
-        .child(login_monogram(login))
-}
-
-fn login_monogram(login: &str) -> String {
-    let mut monogram = login
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .take(2)
-        .collect::<String>()
-        .to_uppercase();
-    if monogram.is_empty() {
-        monogram.push('?');
-    }
-    monogram
-}
-
 pub fn badge_success(text: &str) -> impl IntoElement {
     div()
         .px(px(10.0))
@@ -2863,88 +2740,4 @@ fn activate_queue(state: &Entity<AppState>, section: SectionId, queue_id: &str, 
         s.pr_header_compact = false;
         cx.notify();
     });
-}
-
-pub(crate) fn format_relative_time(value: &str) -> String {
-    if value.is_empty() {
-        return value.to_string();
-    }
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    if let Some(ts) = parse_iso_timestamp(value) {
-        let diff = now.saturating_sub(ts);
-        let minutes = diff / 60;
-        let hours = diff / 3600;
-        let days = diff / 86400;
-
-        if minutes < 1 {
-            return "just now".to_string();
-        }
-        if minutes < 60 {
-            return format!("{minutes}m ago");
-        }
-        if hours < 24 {
-            return format!("{hours}h ago");
-        }
-        if days < 30 {
-            return format!("{days}d ago");
-        }
-    }
-
-    if value.len() > 10 {
-        value[..10].to_string()
-    } else {
-        value.to_string()
-    }
-}
-
-fn parse_iso_timestamp(value: &str) -> Option<u64> {
-    let parts: Vec<&str> = value.split('T').collect();
-    if parts.len() < 2 {
-        return None;
-    }
-    let date_parts: Vec<u64> = parts[0].split('-').filter_map(|p| p.parse().ok()).collect();
-    if date_parts.len() != 3 {
-        return None;
-    }
-    let time_str = parts[1].trim_end_matches('Z');
-    let time_parts: Vec<u64> = time_str.split(':').filter_map(|p| p.parse().ok()).collect();
-    if time_parts.len() < 2 {
-        return None;
-    }
-
-    let year = date_parts[0];
-    let month = date_parts[1];
-    let day = date_parts[2];
-    let hour = time_parts[0];
-    let minute = time_parts[1];
-    let second = if time_parts.len() > 2 {
-        time_parts[2]
-    } else {
-        0
-    };
-
-    let mut days_total: u64 = 0;
-    for y in 1970..year {
-        days_total += if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
-            366
-        } else {
-            365
-        };
-    }
-    let month_days = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let is_leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-    for m in 1..month {
-        days_total += month_days[m as usize];
-        if m == 2 && is_leap {
-            days_total += 1;
-        }
-    }
-    days_total += day - 1;
-
-    Some(days_total * 86400 + hour * 3600 + minute * 60 + second)
 }
