@@ -1194,10 +1194,11 @@ pub fn render_files_view(
     let line_action_mode = s.review_line_action_mode.clone();
     let review_finish_modal_open = s.review_finish_modal_open;
     let is_local_review = crate::local_review::is_local_review_detail(detail);
-    let review_stack = prepare_review_stack(&s, detail);
     let review_queue = prepare_review_queue(&s, detail);
     let mut review_session = s.active_review_session().cloned().unwrap_or_default();
     review_session.center_mode = s.effective_review_center_mode();
+    let review_stack = (review_session.center_mode == ReviewCenterMode::GuidedReview)
+        .then(|| prepare_review_stack(&s, detail));
     let show_file_tree = review_session.show_file_tree;
     let file_tree_hidden = !show_file_tree;
     let file_tree_animation_key = ("review-file-tree", usize::from(file_tree_hidden));
@@ -1371,6 +1372,7 @@ const DIFF_FLOATING_FILE_HEADER_TOP_PADDING: f32 = 10.0;
 const DIFF_FLOATING_FILE_HEADER_BOTTOM_PADDING: f32 = 10.0;
 const DIFF_SCROLL_TOP_FADE_HEIGHT: f32 = 30.0;
 const DIFF_SCROLLBAR_WIDTH: f32 = 8.0;
+const DIFF_TOOLBAR_META_WIDTH: f32 = 220.0;
 
 fn render_diff_panel(
     state: &Entity<AppState>,
@@ -1379,7 +1381,7 @@ fn render_diff_panel(
     commit_diff_status: &ActiveCommitDiffStatus,
     selected_path: Option<&str>,
     selected_anchor: Option<&DiffAnchor>,
-    review_stack: Arc<ReviewStack>,
+    review_stack: Option<Arc<ReviewStack>>,
     window: &mut Window,
     cx: &App,
 ) -> impl IntoElement {
@@ -1417,8 +1419,8 @@ fn render_diff_panel(
         }
         _ => normal_diff_layout,
     };
-    let stack_filter = (center_mode == ReviewCenterMode::GuidedReview)
-        .then(|| {
+    let stack_filter = if center_mode == ReviewCenterMode::GuidedReview {
+        review_stack.as_ref().and_then(|review_stack| {
             build_layer_diff_filter(
                 review_stack.as_ref(),
                 review_session.stack_diff_mode,
@@ -1426,7 +1428,9 @@ fn render_diff_panel(
                 &review_session.reviewed_stack_atom_ids,
             )
         })
-        .flatten();
+    } else {
+        None
+    };
     let has_textual_diff = detail
         .parsed_diff
         .iter()
@@ -1526,20 +1530,24 @@ fn render_diff_panel(
                                 .into_any_element()
                             })
                     } else if center_mode == ReviewCenterMode::GuidedReview {
-                        render_guided_review_view(
-                            state,
-                            app_state,
-                            detail,
-                            selected_path,
-                            selected_anchor,
-                            review_stack.clone(),
-                            stack_filter.clone(),
-                            guided_review_lens,
-                            normal_diff_layout,
-                            structural_diff_layout,
-                            window,
-                            cx,
-                        )
+                        if let Some(review_stack) = review_stack.clone() {
+                            render_guided_review_view(
+                                state,
+                                app_state,
+                                detail,
+                                selected_path,
+                                selected_anchor,
+                                review_stack,
+                                stack_filter.clone(),
+                                guided_review_lens,
+                                normal_diff_layout,
+                                structural_diff_layout,
+                                window,
+                                cx,
+                            )
+                        } else {
+                            panel_state_text("Preparing Guided Review stack.").into_any_element()
+                        }
                     } else if center_mode == ReviewCenterMode::StructuralDiff {
                         render_combined_diff_files(
                             state,
@@ -1547,7 +1555,7 @@ fn render_diff_panel(
                             detail,
                             selected_path,
                             selected_anchor,
-                            review_stack.clone(),
+                            None,
                             None,
                             center_mode,
                             structural_diff_layout,
@@ -1572,8 +1580,8 @@ fn render_diff_panel(
                             detail,
                             selected_path,
                             selected_anchor,
-                            review_stack.clone(),
-                            stack_filter.clone(),
+                            None,
+                            None,
                             center_mode,
                             normal_diff_layout,
                             window,
@@ -1958,17 +1966,16 @@ fn render_commit_timeline_item(
         .bg(transparent())
         .tooltip(move |_, cx| build_text_tooltip(tooltip.clone(), cx))
         .when(!disabled, move |el| {
-            el.hover(|style| style.bg(bg_selected()))
-                .on_click(move |event, window, cx| {
-                    if !event.standard_click() {
-                        return;
-                    }
-                    state_for_click.update(cx, |state, cx| {
-                        state.select_active_commit_filter(filter_for_click.clone());
-                        cx.notify();
-                    });
-                    trigger_commit_diff_prefetch(&state_for_click, window, cx);
-                })
+            el.on_click(move |event, window, cx| {
+                if !event.standard_click() {
+                    return;
+                }
+                state_for_click.update(cx, |state, cx| {
+                    state.select_active_commit_filter(filter_for_click.clone());
+                    cx.notify();
+                });
+                trigger_commit_diff_prefetch(&state_for_click, window, cx);
+            })
         })
         .child(
             div()
@@ -2123,11 +2130,18 @@ fn render_diff_toolbar(
                         .items_center()
                         .gap(px(8.0))
                         .min_w_0()
-                        .child(render_review_header_change_summary(
-                            total_additions,
-                            total_deletions,
-                            focus_summary,
-                        ))
+                        .child(
+                            div()
+                                .w(px(DIFF_TOOLBAR_META_WIDTH))
+                                .max_w(px(DIFF_TOOLBAR_META_WIDTH))
+                                .flex_shrink_0()
+                                .overflow_x_hidden()
+                                .child(render_review_header_change_summary(
+                                    total_additions,
+                                    total_deletions,
+                                    focus_summary,
+                                )),
+                        )
                         .when(
                             detail.commits_count > 0 || !detail.commits.is_empty(),
                             |el| {
@@ -2175,15 +2189,30 @@ fn render_diff_toolbar(
         })
         .when(is_local_review, |el| {
             el.when(pending_count > 0, |el| {
-                el.child(badge(&format!("{pending_count} feedback")))
+                el.child(diff_toolbar_status_text(&format!(
+                    "{pending_count} feedback"
+                )))
             })
             .when(stale_local_feedback_count > 0, |el| {
-                el.child(badge(&format!("{stale_local_feedback_count} stale")))
+                el.child(diff_toolbar_status_text(&format!(
+                    "{stale_local_feedback_count} stale"
+                )))
             })
             .child(review_button("Refresh", move |_, window, cx| {
                 refresh_active_local_review(&state_for_refresh, window, cx);
             }))
         })
+}
+
+fn diff_toolbar_status_text(label: &str) -> impl IntoElement {
+    div()
+        .flex_shrink_0()
+        .text_size(px(12.0))
+        .line_height(px(18.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(fg_muted())
+        .whitespace_nowrap()
+        .child(label.to_string())
 }
 
 fn diff_toolbar_primary_button(
@@ -2330,7 +2359,7 @@ fn label_for_change_type(change_type: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use crate::diff::parse_unified_diff;
-    use crate::state::StructuralDiffFileState;
+    use crate::state::{CombinedDiffViewState, StructuralDiffFileState};
     use gpui::{point, px, size, Bounds, ListAlignment, ListOffset, ListState, Pixels};
 
     use super::file_content::{
@@ -2342,12 +2371,12 @@ mod tests {
         build_normal_side_by_side_diff_file, current_combined_diff_file_index_for_scroll_top,
         diff_focus_scroll_top_item_ix, diff_vim_scroll_delta_for_bounds,
         estimated_combined_diff_body_height_for_counts, focus_item_index_around,
-        max_side_by_side_column_widths, reading_focus_item_index,
-        should_animate_combined_diff_jump, should_hydrate_combined_diff_file,
-        waypoint_spotlight_detail_label, waypoint_spotlight_location_label, CombinedDiffViewItem,
-        DiffFileCollapseScrollAdjustment, DiffVerticalScrollbarMetrics, DiffViewItem,
-        SideBySideColumnWidths, StructuralDiffTerminalStatus, DIFF_FILE_HEADER_TOP_MARGIN,
-        DIFF_FOCUS_CONTEXT_ROWS,
+        hydrate_selected_combined_diff_path, max_side_by_side_column_widths,
+        reading_focus_item_index, should_animate_combined_diff_jump,
+        should_hydrate_combined_diff_file, waypoint_spotlight_detail_label,
+        waypoint_spotlight_location_label, CombinedDiffViewItem, DiffFileCollapseScrollAdjustment,
+        DiffVerticalScrollbarMetrics, DiffViewItem, SideBySideColumnWidths,
+        StructuralDiffTerminalStatus, DIFF_FILE_HEADER_TOP_MARGIN, DIFF_FOCUS_CONTEXT_ROWS,
     };
 
     fn test_bounds(top: f32, bottom: f32) -> Bounds<Pixels> {
@@ -2727,6 +2756,22 @@ mod tests {
             &hydrated_paths,
             false,
         ));
+    }
+
+    #[test]
+    fn selected_combined_diff_path_marks_hydrated_and_invalidates_cache_once() {
+        let view_state = CombinedDiffViewState::new();
+        *view_state.render_cache.borrow_mut() = Some(Box::new("stale"));
+
+        hydrate_selected_combined_diff_path(&view_state, Some("src/lib.rs"));
+
+        assert!(view_state.hydrated_paths.borrow().contains("src/lib.rs"));
+        assert!(view_state.render_cache.borrow().is_none());
+
+        *view_state.render_cache.borrow_mut() = Some(Box::new("fresh"));
+        hydrate_selected_combined_diff_path(&view_state, Some("src/lib.rs"));
+
+        assert!(view_state.render_cache.borrow().is_some());
     }
 
     #[test]

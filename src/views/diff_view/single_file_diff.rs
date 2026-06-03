@@ -8,7 +8,7 @@ pub(super) fn render_structural_file_diff(
     structural_state: Option<&StructuralDiffFileState>,
     prepared_file: Option<&PreparedFileContent>,
     selected_anchor: Option<&DiffAnchor>,
-    review_stack: Arc<ReviewStack>,
+    review_stack: Option<Arc<ReviewStack>>,
     cx: &App,
 ) -> AnyElement {
     let Some(structural_state) = structural_state else {
@@ -71,7 +71,7 @@ pub(super) fn render_file_diff(
     prepared_file: Option<&PreparedFileContent>,
     selected_anchor: Option<&DiffAnchor>,
     diff_view_state: DiffFileViewState,
-    review_stack: Arc<ReviewStack>,
+    review_stack: Option<Arc<ReviewStack>>,
     stack_filter: Option<LayerDiffFilter>,
     diff_layout: DiffLayout,
     cx: &App,
@@ -120,9 +120,13 @@ pub(super) fn render_file_diff(
     let prepared_file = prepared_file.cloned();
     let file_lsp_context =
         build_diff_file_lsp_context(state, file.path.as_str(), prepared_file.as_ref(), cx);
-    let stack_visibility = stack_filter
-        .as_ref()
-        .map(|filter| stack_file_visibility(review_stack.as_ref(), filter, &file.path));
+    let stack_visibility =
+        review_stack
+            .as_ref()
+            .zip(stack_filter.as_ref())
+            .map(|(review_stack, filter)| {
+                stack_file_visibility(review_stack.as_ref(), filter, &file.path)
+            });
     let normal_side_by_side = (structural_side_by_side.is_none()
         && diff_layout == DiffLayout::SideBySide)
         .then(|| parsed.filter(|parsed| !parsed.hunks.is_empty() && !parsed.is_binary))

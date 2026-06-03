@@ -99,7 +99,7 @@ enum CombinedDiffStructuralRenderStateKey {
     Ready(String),
 }
 
-const COMBINED_DIFF_INITIAL_HYDRATED_FILE_COUNT: usize = 0;
+const COMBINED_DIFF_INITIAL_HYDRATED_FILE_COUNT: usize = 3;
 const COMBINED_DIFF_HYDRATION_BATCH_SIZE: usize = 6;
 const COMBINED_DIFF_HYDRATION_DELAY: Duration = Duration::from_millis(16);
 const COMBINED_DIFF_DEFERRED_MESSAGE: &str = "Loading diff rows...";
@@ -179,16 +179,17 @@ pub(super) fn render_combined_diff_files(
     detail: &PullRequestDetail,
     selected_path: Option<&str>,
     selected_anchor: Option<&DiffAnchor>,
-    review_stack: Arc<ReviewStack>,
+    review_stack: Option<Arc<ReviewStack>>,
     stack_filter: Option<LayerDiffFilter>,
     center_mode: ReviewCenterMode,
     diff_layout: DiffLayout,
     window: &mut Window,
     _cx: &App,
 ) -> AnyElement {
-    let visible_paths = stack_filter
+    let visible_paths = review_stack
         .as_ref()
-        .map(|filter| stack_file_paths_for_filter(review_stack.as_ref(), filter));
+        .zip(stack_filter.as_ref())
+        .map(|(review_stack, filter)| stack_file_paths_for_filter(review_stack.as_ref(), filter));
     let wrap_diff_lines = app_state
         .active_review_session()
         .map(|session| session.wrap_diff_lines)
@@ -202,13 +203,14 @@ pub(super) fn render_combined_diff_files(
     let model = prepare_combined_diff_render_model(
         app_state,
         detail,
-        review_stack.as_ref(),
+        review_stack.as_deref(),
         stack_filter.as_ref(),
         visible_paths.as_ref(),
         center_mode,
         diff_layout,
         wrap_diff_lines,
         &view_state,
+        selected_path,
     );
     schedule_combined_diff_hydration(state, &view_state, &model, selected_path, window, _cx);
 
@@ -871,13 +873,14 @@ fn render_side_by_side_horizontal_scrollbar_lane(
 fn prepare_combined_diff_render_model(
     app_state: &AppState,
     detail: &PullRequestDetail,
-    review_stack: &ReviewStack,
+    review_stack: Option<&ReviewStack>,
     stack_filter: Option<&LayerDiffFilter>,
     visible_paths: Option<&BTreeSet<String>>,
     center_mode: ReviewCenterMode,
     diff_layout: DiffLayout,
     wrap_diff_lines: bool,
     view_state: &CombinedDiffViewState,
+    selected_path: Option<&str>,
 ) -> CombinedDiffRenderModel {
     let tree_rows = prepare_review_file_tree_rows(app_state, detail, visible_paths);
     let ordered_files =
@@ -904,6 +907,7 @@ fn prepare_combined_diff_render_model(
         wrap_diff_lines,
     );
     ensure_combined_diff_hydration_scope(view_state, &progressive_scope_key);
+    hydrate_selected_combined_diff_path(view_state, selected_path);
 
     if let Some(model) = view_state
         .render_cache
@@ -976,7 +980,7 @@ fn prepare_combined_diff_render_model(
 fn combined_diff_progressive_scope_key(
     app_state: &AppState,
     detail: &PullRequestDetail,
-    review_stack: &ReviewStack,
+    review_stack: Option<&ReviewStack>,
     stack_filter: Option<&LayerDiffFilter>,
     visible_paths: Option<&BTreeSet<String>>,
     center_mode: ReviewCenterMode,
@@ -989,7 +993,11 @@ fn combined_diff_progressive_scope_key(
     format!("{center_mode:?}").hash(&mut hasher);
     format!("{diff_layout:?}").hash(&mut hasher);
     wrap_diff_lines.hash(&mut hasher);
-    format!("{:?}", review_stack.source).hash(&mut hasher);
+    if let Some(review_stack) = review_stack {
+        format!("{:?}", review_stack.source).hash(&mut hasher);
+    } else {
+        "no-stack".hash(&mut hasher);
+    }
 
     if let Some(filter) = stack_filter {
         format!("{:?}", filter.mode).hash(&mut hasher);
@@ -1024,6 +1032,20 @@ fn ensure_combined_diff_hydration_scope(
     *view_state.hydration_generation.borrow_mut() = next_generation;
     *view_state.hydration_scheduled.borrow_mut() = false;
     *view_state.render_cache.borrow_mut() = None;
+}
+
+pub(super) fn hydrate_selected_combined_diff_path(
+    view_state: &CombinedDiffViewState,
+    selected_path: Option<&str>,
+) {
+    let Some(selected_path) = selected_path else {
+        return;
+    };
+
+    let mut hydrated_paths = view_state.hydrated_paths.borrow_mut();
+    if hydrated_paths.insert(selected_path.to_string()) {
+        *view_state.render_cache.borrow_mut() = None;
+    }
 }
 
 pub(super) fn should_hydrate_combined_diff_file(
@@ -1224,7 +1246,7 @@ fn combined_diff_render_cache_key(
     app_state: &AppState,
     detail: &PullRequestDetail,
     ordered_files: &[&PullRequestFile],
-    review_stack: &ReviewStack,
+    review_stack: Option<&ReviewStack>,
     stack_filter: Option<&LayerDiffFilter>,
     visible_paths: Option<&BTreeSet<String>>,
     center_mode: ReviewCenterMode,
@@ -1232,32 +1254,34 @@ fn combined_diff_render_cache_key(
     wrap_diff_lines: bool,
 ) -> CombinedDiffRenderCacheKey {
     let detail_state = app_state.active_detail_state();
-    let stack_filter = stack_filter.map(|filter| {
-        let selected_layer = review_stack.selected_layer(filter.selected_layer_id.as_deref());
-        CombinedDiffStackFilterKey {
-            mode: filter.mode,
-            selected_layer_id: filter.selected_layer_id.clone(),
-            stack_source: review_stack.source,
-            selected_layer_title: selected_layer.map(|layer| layer.title.clone()),
-            selected_layer_rationale: selected_layer.map(|layer| layer.rationale.clone()),
-            selected_layer_warnings: selected_layer
-                .map(|layer| {
-                    layer
-                        .warnings
-                        .iter()
-                        .map(|warning| {
-                            (
-                                warning.code.clone(),
-                                warning.message.clone(),
-                                warning.path.clone(),
-                            )
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-            visible_atom_ids: filter.visible_atom_ids.iter().cloned().collect(),
-        }
-    });
+    let stack_filter = review_stack
+        .zip(stack_filter)
+        .map(|(review_stack, filter)| {
+            let selected_layer = review_stack.selected_layer(filter.selected_layer_id.as_deref());
+            CombinedDiffStackFilterKey {
+                mode: filter.mode,
+                selected_layer_id: filter.selected_layer_id.clone(),
+                stack_source: review_stack.source,
+                selected_layer_title: selected_layer.map(|layer| layer.title.clone()),
+                selected_layer_rationale: selected_layer.map(|layer| layer.rationale.clone()),
+                selected_layer_warnings: selected_layer
+                    .map(|layer| {
+                        layer
+                            .warnings
+                            .iter()
+                            .map(|warning| {
+                                (
+                                    warning.code.clone(),
+                                    warning.message.clone(),
+                                    warning.path.clone(),
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                visible_atom_ids: filter.visible_atom_ids.iter().cloned().collect(),
+            }
+        });
     let visible_paths = visible_paths.map(|paths| paths.iter().cloned().collect());
     let waypoint_paths = app_state
         .active_review_session()
@@ -1342,7 +1366,7 @@ fn prepare_combined_diff_file_context(
     app_state: &AppState,
     detail: &PullRequestDetail,
     file: &PullRequestFile,
-    review_stack: &ReviewStack,
+    review_stack: Option<&ReviewStack>,
     stack_filter: Option<&LayerDiffFilter>,
     center_mode: ReviewCenterMode,
     diff_layout: DiffLayout,
@@ -1437,8 +1461,9 @@ fn prepare_combined_diff_file_context(
         })
         .flatten()
         .map(|parsed| Arc::new(build_normal_side_by_side_diff_file(parsed)));
-    let stack_visibility =
-        stack_filter.map(|filter| stack_file_visibility(review_stack, filter, &file.path));
+    let stack_visibility = review_stack
+        .zip(stack_filter)
+        .map(|(review_stack, filter)| stack_file_visibility(review_stack, filter, &file.path));
     let gutter_layout = diff_gutter_layout(file, parsed.as_deref(), reserve_waypoint_slot);
     let wrap_diff_lines = app_state
         .active_review_session()
@@ -1835,7 +1860,7 @@ fn install_combined_diff_scroll_handler(
 
 fn render_combined_diff_view_item(
     state: &Entity<AppState>,
-    review_stack: Arc<ReviewStack>,
+    review_stack: Option<Arc<ReviewStack>>,
     floating_header_path: Option<&str>,
     selected_path: Option<&str>,
     selected_anchor: Option<&DiffAnchor>,
@@ -2298,7 +2323,7 @@ fn combined_diff_item_file_index(item: &CombinedDiffViewItem) -> Option<usize> {
 
 fn render_floating_diff_file_header(
     state: &Entity<AppState>,
-    review_stack: Arc<ReviewStack>,
+    review_stack: Option<Arc<ReviewStack>>,
     header: CombinedDiffFloatingHeader,
     wrap_diff_lines: bool,
 ) -> impl IntoElement {
@@ -2331,7 +2356,7 @@ fn render_floating_diff_file_header(
 
 fn render_diff_file_header_row(
     state: &Entity<AppState>,
-    review_stack: Arc<ReviewStack>,
+    review_stack: Option<Arc<ReviewStack>>,
     header: ReviewFileHeaderProps,
     wrap_diff_lines: bool,
     scope: impl Into<String>,
@@ -2430,7 +2455,7 @@ fn render_diff_file_collapse_toggle(
 
 fn render_diff_file_review_toggle(
     state: &Entity<AppState>,
-    review_stack: Arc<ReviewStack>,
+    review_stack: Option<Arc<ReviewStack>>,
     reviewed: bool,
     scope: String,
     key: String,
@@ -2463,8 +2488,9 @@ fn render_diff_file_review_toggle(
         .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
         .hover(|style| style.bg(bg_selected()))
         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            let review_stack = review_stack.clone();
             state_for_toggle.update(cx, |state, cx| {
-                state.set_review_file_reviewed(review_stack.as_ref(), &key, !reviewed);
+                state.set_review_file_reviewed(review_stack.as_deref(), &key, !reviewed);
                 state.persist_active_review_session();
                 cx.notify();
             });

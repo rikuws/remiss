@@ -2486,12 +2486,13 @@ pub(super) fn render_review_thread(
                             let state = state.clone();
                             let thread_id = thread_id.clone();
                             let next_resolved = !thread.is_resolved;
-                            el.child(ghost_button(
+                            el.child(inline_comment_text_action(
                                 if thread.is_resolved {
                                     "Unresolve"
                                 } else {
                                     "Resolve"
                                 },
+                                false,
                                 move |_, window, cx| {
                                     trigger_set_review_thread_resolution(
                                         &state,

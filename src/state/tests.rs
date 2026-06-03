@@ -5,9 +5,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::cache::CacheStore;
 use crate::diff::{DiffLineKind, ParsedDiffFile, ParsedDiffHunk, ParsedDiffLine};
 use crate::github::{
-    AuthState, PullRequestComment, PullRequestCommit, PullRequestDataCompleteness,
-    PullRequestDetail, PullRequestDetailSnapshot, PullRequestFile, PullRequestReview,
-    PullRequestReviewComment, PullRequestReviewThread,
+    AuthState, IssueQueue, IssueSummary, PullRequestComment, PullRequestCommit,
+    PullRequestDataCompleteness, PullRequestDetail, PullRequestDetailSnapshot, PullRequestFile,
+    PullRequestQueue, PullRequestReview, PullRequestReviewComment, PullRequestReviewThread,
+    PullRequestSummary, WorkspaceSnapshot,
 };
 use crate::lsp::{LspServerCapabilities, LspServerStatus};
 use crate::managed_lsp::ManagedServerKind;
@@ -45,6 +46,87 @@ fn review_line_target(file_path: &str, line: i64) -> ReviewLineActionTarget {
         start_line: None,
         start_side: None,
         label: format!("{file_path}:{line}"),
+    }
+}
+
+fn test_workspace(
+    queues: Vec<PullRequestQueue>,
+    issue_queues: Vec<IssueQueue>,
+) -> WorkspaceSnapshot {
+    WorkspaceSnapshot {
+        auth: AuthState {
+            is_authenticated: true,
+            active_login: Some("viewer".to_string()),
+            active_hostname: Some("github.com".to_string()),
+            message: "Authenticated".to_string(),
+        },
+        loaded_from_cache: false,
+        fetched_at_ms: None,
+        viewer: None,
+        queues,
+        issue_queues,
+    }
+}
+
+fn test_pull_request(repository: &str, number: i64) -> PullRequestSummary {
+    PullRequestSummary {
+        local_key: None,
+        repository: repository.to_string(),
+        number,
+        title: format!("Pull request {number}"),
+        author_login: "viewer".to_string(),
+        author_avatar_url: None,
+        is_draft: false,
+        comments_count: 0,
+        additions: 0,
+        deletions: 0,
+        changed_files: 0,
+        state: "OPEN".to_string(),
+        author_association: "OWNER".to_string(),
+        review_decision: None,
+        updated_at: "2026-06-03T00:00:00Z".to_string(),
+        url: format!("https://github.com/{repository}/pull/{number}"),
+        repository_default_branch: None,
+        triage_signals: Vec::new(),
+    }
+}
+
+fn test_pull_queue(id: &str, items: Vec<PullRequestSummary>) -> PullRequestQueue {
+    PullRequestQueue {
+        id: id.to_string(),
+        label: id.to_string(),
+        total_count: items.len() as i64,
+        items,
+        is_complete: true,
+        truncated_reason: None,
+    }
+}
+
+fn test_issue(repository: &str, number: i64) -> IssueSummary {
+    IssueSummary {
+        repository: repository.to_string(),
+        number,
+        title: format!("Issue {number}"),
+        author_login: "viewer".to_string(),
+        author_avatar_url: None,
+        comments_count: 0,
+        state: "OPEN".to_string(),
+        updated_at: "2026-06-03T00:00:00Z".to_string(),
+        url: format!("https://github.com/{repository}/issues/{number}"),
+        labels: Vec::new(),
+        assignees: Vec::new(),
+        repository_default_branch: None,
+    }
+}
+
+fn test_issue_queue(id: &str, items: Vec<IssueSummary>) -> IssueQueue {
+    IssueQueue {
+        id: id.to_string(),
+        label: id.to_string(),
+        total_count: items.len() as i64,
+        items,
+        is_complete: true,
+        truncated_reason: None,
     }
 }
 
@@ -86,6 +168,50 @@ fn issue_back_preserves_issue_view_choices() {
 
     assert!(!state.navigate_issue_back());
     assert_eq!(state.active_issue_queue_id, "mentioned");
+}
+
+#[test]
+fn pull_section_count_deduplicates_overlapping_queues() {
+    let cache = temp_cache_store("pull-section-dedupes-queues");
+    let mut state = AppState::new(cache, StartupWizardOptions::force_welcome());
+    let authored_and_involved = test_pull_request("acme/app", 17);
+    let authored_only = test_pull_request("acme/app", 18);
+    let involved_only = test_pull_request("acme/tools", 4);
+
+    state.workspace = Some(test_workspace(
+        vec![
+            test_pull_queue(
+                "authored",
+                vec![authored_and_involved.clone(), authored_only],
+            ),
+            test_pull_queue("involved", vec![authored_and_involved, involved_only]),
+        ],
+        Vec::new(),
+    ));
+
+    assert_eq!(state.section_count(SectionId::Pulls), 3);
+}
+
+#[test]
+fn issue_section_count_deduplicates_overlapping_queues() {
+    let cache = temp_cache_store("issue-section-dedupes-queues");
+    let mut state = AppState::new(cache, StartupWizardOptions::force_welcome());
+    let authored_and_involved = test_issue("acme/app", 17);
+    let authored_only = test_issue("acme/app", 18);
+    let involved_only = test_issue("acme/tools", 4);
+
+    state.workspace = Some(test_workspace(
+        Vec::new(),
+        vec![
+            test_issue_queue(
+                "authored",
+                vec![authored_and_involved.clone(), authored_only],
+            ),
+            test_issue_queue("involved", vec![authored_and_involved, involved_only]),
+        ],
+    ));
+
+    assert_eq!(state.section_count(SectionId::Issues), 3);
 }
 
 #[test]

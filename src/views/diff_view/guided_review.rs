@@ -37,7 +37,7 @@ pub(super) fn render_guided_review_view(
                 detail,
                 selected_path,
                 selected_anchor,
-                review_stack.clone(),
+                Some(review_stack.clone()),
                 stack_filter,
                 diff_center_mode,
                 diff_layout,

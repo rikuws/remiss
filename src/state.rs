@@ -10,7 +10,7 @@ use crate::commit_timeline::CommitDiffState;
 use crate::diff::{find_parsed_diff_file, DiffRenderRow};
 use crate::difftastic::AdaptedDifftasticDiffFile;
 use crate::github::{
-    IssueDetailSnapshot, IssueSummary, PullRequestDetail, PullRequestDetailSnapshot,
+    IssueDetailSnapshot, IssueQueue, IssueSummary, PullRequestDetail, PullRequestDetailSnapshot,
     PullRequestQueue, PullRequestSummary, RepositoryFileContent, ReviewAction, WorkspaceSnapshot,
 };
 use crate::local_repo::LocalRepositoryStatus;
@@ -154,6 +154,52 @@ pub fn summary_key(summary: &PullRequestSummary) -> String {
         .local_key
         .clone()
         .unwrap_or_else(|| pr_key(&summary.repository, summary.number))
+}
+
+fn unique_pull_request_queue_count(queues: &[PullRequestQueue]) -> i64 {
+    let mut keys = HashSet::new();
+    let mut max_reported_count = 0;
+    let mut all_queues_complete = true;
+
+    for queue in queues {
+        let reported_count = queue.total_count.max(0);
+        max_reported_count = max_reported_count.max(reported_count);
+        if !queue.is_complete || queue.items.len() as i64 != reported_count {
+            all_queues_complete = false;
+        }
+        keys.extend(queue.items.iter().map(summary_key));
+    }
+
+    let unique_count = keys.len() as i64;
+    if all_queues_complete {
+        unique_count
+    } else {
+        unique_count.max(max_reported_count)
+    }
+}
+
+fn unique_issue_queue_count(queues: &[IssueQueue]) -> i64 {
+    let mut keys = HashSet::new();
+    let mut max_reported_count = 0;
+    let mut all_queues_complete = true;
+
+    for queue in queues {
+        let reported_count = queue.total_count.max(0);
+        max_reported_count = max_reported_count.max(reported_count);
+        if !queue.is_complete || queue.items.len() as i64 != reported_count {
+            all_queues_complete = false;
+        }
+        for issue in &queue.items {
+            keys.insert(issue_key(&issue.repository, issue.number));
+        }
+    }
+
+    let unique_count = keys.len() as i64;
+    if all_queues_complete {
+        unique_count
+    } else {
+        unique_count.max(max_reported_count)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1954,12 +2000,12 @@ impl AppState {
             SectionId::Pulls => self
                 .workspace
                 .as_ref()
-                .map(|w| w.queues.iter().map(|q| q.total_count).sum())
+                .map(|w| unique_pull_request_queue_count(&w.queues))
                 .unwrap_or(0),
             SectionId::Issues => self
                 .workspace
                 .as_ref()
-                .map(|w| w.issue_queues.iter().map(|q| q.total_count).sum())
+                .map(|w| unique_issue_queue_count(&w.issue_queues))
                 .unwrap_or(0),
             SectionId::Reviews => self
                 .workspace
@@ -2404,7 +2450,7 @@ impl AppState {
 
     pub fn set_review_file_reviewed(
         &mut self,
-        review_stack: &ReviewStack,
+        review_stack: Option<&ReviewStack>,
         file_path: &str,
         reviewed: bool,
     ) {
@@ -2417,6 +2463,10 @@ impl AppState {
         } else {
             session.reviewed_file_paths.remove(file_path);
         }
+
+        let Some(review_stack) = review_stack else {
+            return;
+        };
 
         let affected_atom_ids = review_stack
             .atoms

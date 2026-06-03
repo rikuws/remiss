@@ -324,7 +324,7 @@ pub(super) fn render_review_sidebar_pane(
     selected_path: Option<&str>,
     _semantic_file: Option<&SemanticDiffFile>,
     review_session: &crate::review_session::ReviewSessionState,
-    review_stack: Arc<ReviewStack>,
+    review_stack: Option<Arc<ReviewStack>>,
     cx: &App,
 ) -> AnyElement {
     match review_session.center_mode {
@@ -347,9 +347,11 @@ pub(super) fn render_review_sidebar_pane(
         ReviewCenterMode::SourceBrowser => {
             render_source_file_tree(state, detail, selected_path, cx).into_any_element()
         }
-        ReviewCenterMode::GuidedReview => {
-            render_stack_navigation_pane(state, detail, review_stack, cx).into_any_element()
-        }
+        ReviewCenterMode::GuidedReview => review_stack
+            .map(|review_stack| {
+                render_stack_navigation_pane(state, detail, review_stack, cx).into_any_element()
+            })
+            .unwrap_or_else(|| panel_state_text("Preparing stack.").into_any_element()),
     }
 }
 
