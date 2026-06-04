@@ -11,7 +11,7 @@ use crate::review_filters::{
     PullRequestFilterContext, PullRequestFilterScope,
 };
 use crate::review_session::location_label;
-use crate::shader_surface::{OverviewShaderVariant, ShaderCornerMask};
+use crate::shader_surface::{OverviewShaderVariant, ProjectShaderSettings, ShaderCornerMask};
 use crate::state::*;
 use crate::theme::*;
 use crate::triage::{PullRequestTriageSignal, PullRequestTriageSignalKind};
@@ -1623,107 +1623,196 @@ fn summarize_overview_comment(text: &str) -> String {
 }
 
 fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
-    let s = state.read(cx);
-    let is_reviews = s.active_section == SectionId::Reviews;
-    let workspace_loading = s.workspace_loading;
-    let workspace_syncing = s.workspace_syncing;
-    let workspace_error = s.workspace_error.clone();
-    let is_auth = s.is_authenticated();
+    let view = PullListView::from_state(state.read(cx));
 
-    let available_queues: Vec<_> = if is_reviews {
-        s.workspace
+    div()
+        .relative()
+        .flex()
+        .min_w_0()
+        .min_h_0()
+        .flex_grow()
+        .child(render_pull_sidebar(state, &view))
+        .child(render_pull_board(state, &view))
+        .when_some(view.shader_picker.clone(), |el, picker| {
+            el.child(render_project_shader_picker(
+                state,
+                picker,
+                view.shader_settings_error.clone(),
+                cx,
+            ))
+        })
+        .when(view.filter_dialog_open, |el| {
+            el.child(render_pull_filter_dialog(state, &view))
+        })
+}
+
+struct PullListView {
+    is_reviews: bool,
+    workspace_loading: bool,
+    workspace_syncing: bool,
+    workspace_error: Option<String>,
+    is_auth: bool,
+    available_queues: Vec<github::PullRequestQueue>,
+    current_queue: Option<github::PullRequestQueue>,
+    queue_items: Vec<github::PullRequestSummary>,
+    filtered_queue_items: Vec<github::PullRequestSummary>,
+    filter_scope: PullRequestFilterScope,
+    current_filter: crate::review_filters::PullRequestFilter,
+    active_preset_ids: Vec<String>,
+    filter_presets: Vec<crate::review_filters::PullRequestFilterPreset>,
+    active_filter_labels: Vec<String>,
+    hidden_by_filter_count: usize,
+    queue_label: String,
+    queue_truncation_message: Option<String>,
+    loaded_from_cache: bool,
+    shader_picker: Option<ProjectShaderPickerState>,
+    shader_settings_error: Option<String>,
+    project_shader_settings: ProjectShaderSettings,
+    shader_canvases_ready: bool,
+    my_items: Vec<github::PullRequestSummary>,
+    repo_groups: BTreeMap<String, Vec<github::PullRequestSummary>>,
+    lane_strip_width: f32,
+    muted_list: Vec<String>,
+    has_muted: bool,
+    filter_dialog_open: bool,
+    filter_creator_scope: Option<PullRequestFilterScope>,
+    filter_preset_name: String,
+    filter_message: Option<String>,
+}
+
+impl PullListView {
+    fn from_state(state: &AppState) -> Self {
+        let is_reviews = state.active_section == SectionId::Reviews;
+        let available_queues = available_pull_queues(state, is_reviews);
+        let current_queue = current_pull_queue(state, is_reviews, &available_queues);
+        let queue_items = current_queue
             .as_ref()
-            .map(|w| {
-                w.queues
-                    .iter()
-                    .filter(|q| q.id == "reviewRequested")
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default()
-    } else {
-        s.workspace
-            .as_ref()
-            .map(|w| w.queues.clone())
-            .unwrap_or_default()
+            .map(|queue| queue.items.clone())
+            .unwrap_or_default();
+        let filter_scope = pull_request_filter_scope_for_section(state.active_section);
+        let current_filter = state
+            .pull_request_filter_settings
+            .current_filter(filter_scope);
+        let filtered_queue_items = filtered_pull_queue_items(state, &queue_items, &current_filter);
+        let hidden_by_filter_count = queue_items.len().saturating_sub(filtered_queue_items.len());
+        let (my_items, repo_groups) =
+            pull_queue_lanes(state, current_queue.as_ref(), &filtered_queue_items);
+        let muted_list = sorted_muted_repos(state);
+
+        Self {
+            is_reviews,
+            workspace_loading: state.workspace_loading,
+            workspace_syncing: state.workspace_syncing,
+            workspace_error: state.workspace_error.clone(),
+            is_auth: state.is_authenticated(),
+            available_queues,
+            current_queue: current_queue.clone(),
+            queue_items,
+            filtered_queue_items,
+            filter_scope,
+            active_preset_ids: state
+                .pull_request_filter_settings
+                .active_preset_ids(filter_scope),
+            filter_presets: state.pull_request_filter_settings.presets(filter_scope),
+            active_filter_labels: current_filter.active_labels(),
+            hidden_by_filter_count,
+            queue_label: pull_queue_label(current_queue.as_ref()),
+            queue_truncation_message: pull_queue_truncation_message(current_queue.as_ref()),
+            loaded_from_cache: state
+                .workspace
+                .as_ref()
+                .map(|workspace| workspace.loaded_from_cache)
+                .unwrap_or(false),
+            shader_picker: state.project_shader_picker.clone(),
+            shader_settings_error: state.project_shader_settings_error.clone(),
+            project_shader_settings: state.project_shader_settings.clone(),
+            shader_canvases_ready: state.review_board_shader_canvases_ready,
+            lane_strip_width: pull_lane_strip_width(!my_items.is_empty(), repo_groups.len()),
+            my_items,
+            repo_groups,
+            has_muted: !muted_list.is_empty(),
+            muted_list,
+            filter_dialog_open: state.pull_request_filter_dialog_scope == Some(filter_scope),
+            filter_creator_scope: state.pull_request_filter_creator_scope,
+            filter_preset_name: state.pull_request_filter_preset_name.clone(),
+            filter_message: state.pull_request_filter_message.clone(),
+            current_filter,
+        }
+    }
+
+    fn has_any_lanes(&self) -> bool {
+        !self.my_items.is_empty() || !self.repo_groups.is_empty()
+    }
+}
+
+fn available_pull_queues(state: &AppState, is_reviews: bool) -> Vec<github::PullRequestQueue> {
+    let Some(workspace) = state.workspace.as_ref() else {
+        return Vec::new();
     };
 
-    let current_queue = if is_reviews {
-        available_queues.first().cloned()
-    } else {
-        available_queues
+    if is_reviews {
+        workspace
+            .queues
             .iter()
-            .find(|q| q.id == s.active_queue_id)
-            .or(available_queues.first())
+            .filter(|queue| queue.id == "reviewRequested")
             .cloned()
-    };
+            .collect()
+    } else {
+        workspace.queues.clone()
+    }
+}
 
-    let queue_items: Vec<_> = current_queue
-        .as_ref()
-        .map(|q| q.items.clone())
-        .unwrap_or_default();
-    let filter_scope = pull_request_filter_scope_for_section(s.active_section);
-    let current_filter = s.pull_request_filter_settings.current_filter(filter_scope);
-    let active_preset_ids = s
-        .pull_request_filter_settings
-        .active_preset_ids(filter_scope);
-    let filter_presets = s.pull_request_filter_settings.presets(filter_scope);
-    let unread_pr_keys = unread_pull_request_keys_for_filter(s, &current_filter);
+fn current_pull_queue(
+    state: &AppState,
+    is_reviews: bool,
+    queues: &[github::PullRequestQueue],
+) -> Option<github::PullRequestQueue> {
+    if is_reviews {
+        return queues.first().cloned();
+    }
+
+    queues
+        .iter()
+        .find(|queue| queue.id == state.active_queue_id)
+        .or(queues.first())
+        .cloned()
+}
+
+fn filtered_pull_queue_items(
+    state: &AppState,
+    queue_items: &[github::PullRequestSummary],
+    current_filter: &crate::review_filters::PullRequestFilter,
+) -> Vec<github::PullRequestSummary> {
+    let unread_pr_keys = unread_pull_request_keys_for_filter(state, current_filter);
     let filter_context = PullRequestFilterContext {
-        muted_repositories: &s.muted_repos,
+        muted_repositories: &state.muted_repos,
         unread_pr_keys: &unread_pr_keys,
         now_epoch_days: current_epoch_days(),
     };
-    let filtered_queue_items = filter_pull_requests(&queue_items, &current_filter, &filter_context);
-    let active_filter_labels = current_filter.active_labels();
-    let hidden_by_filter_count = queue_items.len().saturating_sub(filtered_queue_items.len());
-    let queue_label = current_queue
-        .as_ref()
-        .map(|q| q.label.clone())
-        .unwrap_or_else(|| "Pull Requests".to_string());
-    let queue_truncation_message = current_queue.as_ref().and_then(|queue| {
-        if queue.is_complete {
-            None
-        } else {
-            Some(queue.truncated_reason.clone().unwrap_or_else(|| {
-                format!(
-                    "Loaded {} of {} pull requests.",
-                    queue.items.len(),
-                    queue.total_count
-                )
-            }))
-        }
-    });
-    let loaded_from_cache = s
+    filter_pull_requests(queue_items, current_filter, &filter_context)
+}
+
+fn pull_queue_lanes(
+    state: &AppState,
+    current_queue: Option<&github::PullRequestQueue>,
+    items: &[github::PullRequestSummary],
+) -> (
+    Vec<github::PullRequestSummary>,
+    BTreeMap<String, Vec<github::PullRequestSummary>>,
+) {
+    let viewer_login = state
         .workspace
         .as_ref()
-        .map(|w| w.loaded_from_cache)
-        .unwrap_or(false);
-    let shader_picker = s.project_shader_picker.clone();
-    let shader_settings_error = s.project_shader_settings_error.clone();
-    let project_shader_settings = s.project_shader_settings.clone();
-    let shader_canvases_ready = s.review_board_shader_canvases_ready;
-
-    let sync_state = state.clone();
-    let state_for_lanes = state.clone();
-
-    // Viewer login for mine/others split
-    let viewer_login = s
-        .workspace
-        .as_ref()
-        .and_then(|w| w.viewer.as_ref())
-        .map(|v| v.login.clone())
+        .and_then(|workspace| workspace.viewer.as_ref())
+        .map(|viewer| viewer.login.as_str())
         .unwrap_or_default();
-    let muted_repos = s.muted_repos.clone();
     let is_authored_queue = current_queue
-        .as_ref()
-        .map(|q| q.id == "authored")
+        .map(|queue| queue.id == "authored")
         .unwrap_or(false);
 
-    // Group items into kanban lanes by repository
-    let mut my_items: Vec<github::PullRequestSummary> = Vec::new();
+    let mut my_items = Vec::new();
     let mut repo_groups: BTreeMap<String, Vec<github::PullRequestSummary>> = BTreeMap::new();
-    for item in &filtered_queue_items {
+    for item in items {
         if !is_authored_queue && !viewer_login.is_empty() && item.author_login == viewer_login {
             my_items.push(item.clone());
         } else {
@@ -1733,267 +1822,331 @@ fn render_pull_list(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                 .push(item.clone());
         }
     }
+    (my_items, repo_groups)
+}
 
-    let has_my_items = !my_items.is_empty();
-    let has_any_lanes = has_my_items || !repo_groups.is_empty();
-    let lane_count = usize::from(has_my_items) + repo_groups.len();
-    let lane_strip_width = lane_count as f32 * KANBAN_LANE_WIDTH
-        + lane_count.saturating_sub(1) as f32 * KANBAN_LANE_GAP;
-    let mut muted_list: Vec<String> = muted_repos.iter().cloned().collect::<Vec<_>>();
+fn pull_queue_label(queue: Option<&github::PullRequestQueue>) -> String {
+    queue
+        .map(|queue| queue.label.clone())
+        .unwrap_or_else(|| "Pull Requests".to_string())
+}
+
+fn pull_queue_truncation_message(queue: Option<&github::PullRequestQueue>) -> Option<String> {
+    let queue = queue?;
+    (!queue.is_complete).then(|| {
+        queue.truncated_reason.clone().unwrap_or_else(|| {
+            format!(
+                "Loaded {} of {} pull requests.",
+                queue.items.len(),
+                queue.total_count
+            )
+        })
+    })
+}
+
+fn sorted_muted_repos(state: &AppState) -> Vec<String> {
+    let mut muted_list = state.muted_repos.iter().cloned().collect::<Vec<_>>();
     muted_list.sort();
-    let has_muted = !muted_list.is_empty();
-    let filter_dialog_open = s.pull_request_filter_dialog_scope == Some(filter_scope);
+    muted_list
+}
 
+fn pull_lane_strip_width(has_my_items: bool, repo_count: usize) -> f32 {
+    let lane_count = usize::from(has_my_items) + repo_count;
+    lane_count as f32 * KANBAN_LANE_WIDTH + lane_count.saturating_sub(1) as f32 * KANBAN_LANE_GAP
+}
+
+fn render_pull_sidebar(state: &Entity<AppState>, view: &PullListView) -> impl IntoElement {
     div()
-        .relative()
+        .w(sidebar_width())
+        .p(px(24.0))
+        .px(px(28.0))
         .flex()
-        .min_w_0()
+        .flex_col()
+        .flex_shrink_0()
         .min_h_0()
-        .flex_grow()
-        // Sidebar
+        .id("pull-sidebar-scroll")
+        .overflow_y_scroll()
+        .child(pull_sidebar_heading(view))
+        .child(pull_sidebar_description(view))
+        .child(pull_queue_pills(state, view))
+        .when(view.has_muted, |el| {
+            el.child(render_muted_repos(state, view.muted_list.clone()))
+        })
+}
+
+fn pull_sidebar_heading(view: &PullListView) -> impl IntoElement {
+    div()
+        .text_size(px(15.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(fg_emphasis())
+        .child(if view.is_reviews {
+            "Reviews"
+        } else {
+            "Pull Requests"
+        })
+}
+
+fn pull_sidebar_description(view: &PullListView) -> impl IntoElement {
+    div()
+        .text_size(px(13.0))
+        .text_color(fg_muted())
+        .mt(px(6.0))
+        .max_w(px(200.0))
+        .child(if view.is_reviews {
+            "Review requests grouped by repository."
+        } else {
+            "Pull requests grouped into repo lanes."
+        })
+}
+
+fn pull_queue_pills(state: &Entity<AppState>, view: &PullListView) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .mt(px(22.0))
+        .children(view.available_queues.iter().map(|queue| {
+            let is_active = view
+                .current_queue
+                .as_ref()
+                .map(|current| current.id == queue.id)
+                .unwrap_or(false);
+            let queue_id = queue.id.clone();
+            let state = state.clone();
+            filter_pill(
+                &queue.label,
+                queue.total_count,
+                is_active,
+                move |_, _, cx| {
+                    state.update(cx, |state, cx| {
+                        state.active_queue_id = queue_id.clone();
+                        cx.notify();
+                    });
+                },
+            )
+        }))
+}
+
+fn render_muted_repos(state: &Entity<AppState>, repos: Vec<String>) -> impl IntoElement {
+    div()
+        .mt(px(24.0))
+        .flex()
+        .flex_col()
+        .child(eyebrow("Muted Repos"))
         .child(
             div()
-                .w(sidebar_width())
-                .p(px(24.0))
-                .px(px(28.0))
                 .flex()
                 .flex_col()
-                .flex_shrink_0()
-                .min_h_0()
-                .id("pull-sidebar-scroll")
-                .overflow_y_scroll()
+                .gap(px(4.0))
+                .children(repos.into_iter().map(|repo| {
+                    let state = state.clone();
+                    let repo_for_unmute = repo.clone();
+                    muted_repo_pill(&repo, move |_, _, cx| {
+                        let repo = repo_for_unmute.clone();
+                        state.update(cx, |state, cx| {
+                            state.unmute_repository(&repo);
+                            cx.notify();
+                        });
+                    })
+                })),
+        )
+}
+
+fn render_pull_board(state: &Entity<AppState>, view: &PullListView) -> impl IntoElement {
+    div()
+        .flex_grow()
+        .min_w_0()
+        .min_h_0()
+        .flex()
+        .flex_col()
+        .child(render_pull_board_header(state, view))
+        .child(render_pull_request_filter_bar(
+            state,
+            view.filter_scope,
+            view.active_filter_labels.clone(),
+            view.filtered_queue_items.len(),
+            view.queue_items.len(),
+            view.hidden_by_filter_count,
+            view.filter_dialog_open,
+        ))
+        .children(pull_board_messages(view))
+        .child(render_pull_lanes(state, view))
+}
+
+fn render_pull_board_header(state: &Entity<AppState>, view: &PullListView) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .px(px(28.0))
+        .pt(px(24.0))
+        .pb(px(16.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .child(eyebrow(if view.loaded_from_cache {
+                    "Cached data"
+                } else {
+                    "Live data"
+                }))
                 .child(
                     div()
                         .text_size(px(15.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(fg_emphasis())
-                        .child(if is_reviews {
-                            "Reviews"
+                        .child(if view.is_reviews {
+                            "Review Board".to_string()
                         } else {
-                            "Pull Requests"
+                            view.queue_label.clone()
                         }),
-                )
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .text_color(fg_muted())
-                        .mt(px(6.0))
-                        .max_w(px(200.0))
-                        .child(if is_reviews {
-                            "Review requests grouped by repository."
-                        } else {
-                            "Pull requests grouped into repo lanes."
-                        }),
-                )
-                .child(div().flex().flex_col().gap(px(6.0)).mt(px(22.0)).children(
-                    available_queues.iter().map(|queue| {
-                        let is_active = current_queue
-                            .as_ref()
-                            .map(|c| c.id == queue.id)
-                            .unwrap_or(false);
-                        let queue_id = queue.id.clone();
-                        let state = state.clone();
-                        filter_pill(
-                            &queue.label,
-                            queue.total_count,
-                            is_active,
-                            move |_, _, cx| {
-                                state.update(cx, |s, cx| {
-                                    s.active_queue_id = queue_id.clone();
-                                    cx.notify();
-                                });
-                            },
-                        )
-                    }),
-                ))
-                .when(has_muted, |el| {
-                    el.child(
-                        div()
-                            .mt(px(24.0))
-                            .flex()
-                            .flex_col()
-                            .child(eyebrow("Muted Repos"))
-                            .child(div().flex().flex_col().gap(px(4.0)).children(
-                                muted_list.into_iter().map(|repo| {
-                                    let state = state.clone();
-                                    let repo_for_unmute = repo.clone();
-                                    muted_repo_pill(&repo, move |_, _, cx| {
-                                        let r = repo_for_unmute.clone();
-                                        state.update(cx, |s, cx| {
-                                            s.unmute_repository(&r);
-                                            cx.notify();
-                                        });
-                                    })
-                                }),
-                            )),
-                    )
-                }),
-        )
-        // Kanban board
-        .child(
-            div()
-                .flex_grow()
-                .min_w_0()
-                .min_h_0()
-                .flex()
-                .flex_col()
-                // Board header
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .px(px(28.0))
-                        .pt(px(24.0))
-                        .pb(px(16.0))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .child(eyebrow(if loaded_from_cache {
-                                    "Cached data"
-                                } else {
-                                    "Live data"
-                                }))
-                                .child(
-                                    div()
-                                        .text_size(px(15.0))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(fg_emphasis())
-                                        .child(if is_reviews {
-                                            "Review Board".to_string()
-                                        } else {
-                                            queue_label
-                                        }),
-                                ),
-                        )
-                        .child(div().flex().items_center().gap(px(8.0)).child(ghost_button(
-                            if workspace_syncing {
-                                "Syncing..."
-                            } else {
-                                "Refresh"
-                            },
-                            {
-                                let state = sync_state.clone();
-                                move |_, window, cx| trigger_sync_workspace(&state, window, cx)
-                            },
-                        ))),
-                )
-                .child(render_pull_request_filter_bar(
-                    state,
-                    filter_scope,
-                    active_filter_labels.clone(),
-                    filtered_queue_items.len(),
-                    queue_items.len(),
-                    hidden_by_filter_count,
-                    filter_dialog_open,
-                ))
-                .when(workspace_loading, |el| {
-                    el.child(
-                        div()
-                            .px(px(28.0))
-                            .child(panel_state_text("Loading queue...")),
-                    )
-                })
-                .when_some(workspace_error, |el, err| {
-                    el.child(div().px(px(28.0)).child(error_text(&err)))
-                })
-                .when_some(queue_truncation_message, |el, message| {
-                    el.child(div().px(px(28.0)).pb(px(12.0)).child(error_text(&message)))
-                })
-                .when(!workspace_loading && !has_any_lanes, |el| {
-                    el.child(div().px(px(28.0)).child(panel_state_text(if has_muted {
-                        "All repositories in this queue are muted."
-                    } else if is_auth {
-                        "No pull requests matched this queue."
-                    } else {
-                        "Authenticate with gh to load live pull request queues."
-                    })))
-                })
-                // Swim lanes
-                .child(
-                    restrict_scroll_to_axis(div())
-                        .w_full()
-                        .min_w_0()
-                        .flex_grow()
-                        .min_h_0()
-                        .id("kanban-board-hscroll")
-                        .overflow_x_scroll()
-                        .overflow_y_hidden()
-                        .scrollbar_width(px(KANBAN_BOARD_SCROLLBAR_WIDTH))
-                        .px(px(24.0))
-                        .pb(px(24.0))
-                        .child(
-                            div()
-                                .flex()
-                                .gap(px(KANBAN_LANE_GAP))
-                                .min_w(px(lane_strip_width))
-                                .h_full()
-                                .when(has_my_items, |el| {
-                                    let state = state_for_lanes.clone();
-                                    let shader_variant =
-                                        project_shader_settings.shader_for_project("__mine__");
-                                    el.child(kanban_lane(
-                                        "__mine__",
-                                        "My Pull Requests",
-                                        &format!("{} open", my_items.len()),
-                                        my_items,
-                                        accent(),
-                                        true,
-                                        shader_variant,
-                                        shader_canvases_ready,
-                                        state,
-                                    ))
-                                })
-                                .children(repo_groups.into_iter().map(|(repo, items)| {
-                                    let short_name =
-                                        repo.split('/').last().unwrap_or(&repo).to_string();
-                                    let count = items.len();
-                                    let subtitle = repo_lane_subtitle(&repo, count);
-                                    let accent_color = lane_accent_color(&repo);
-                                    let state = state_for_lanes.clone();
-                                    let shader_variant =
-                                        project_shader_settings.shader_for_project(&repo);
-                                    kanban_lane(
-                                        &repo,
-                                        &short_name,
-                                        &subtitle,
-                                        items,
-                                        accent_color,
-                                        false,
-                                        shader_variant,
-                                        shader_canvases_ready,
-                                        state,
-                                    )
-                                })),
-                        ),
                 ),
         )
-        .when_some(shader_picker, |el, picker| {
-            el.child(render_project_shader_picker(
-                state,
-                picker,
-                shader_settings_error,
-                cx,
-            ))
-        })
-        .when(filter_dialog_open, |el| {
-            el.child(render_pull_request_filter_dialog(
-                state,
-                filter_scope,
-                filter_presets,
-                active_preset_ids,
-                &current_filter,
-                active_filter_labels,
-                filtered_queue_items.len(),
-                queue_items.len(),
-                hidden_by_filter_count,
-                has_muted,
-                s.pull_request_filter_creator_scope,
-                s.pull_request_filter_preset_name.clone(),
-                s.pull_request_filter_message.clone(),
-            ))
-        })
+        .child(div().flex().items_center().gap(px(8.0)).child(ghost_button(
+            if view.workspace_syncing {
+                "Syncing..."
+            } else {
+                "Refresh"
+            },
+            {
+                let state = state.clone();
+                move |_, window, cx| trigger_sync_workspace(&state, window, cx)
+            },
+        )))
+}
+
+fn pull_board_messages(view: &PullListView) -> Vec<AnyElement> {
+    let mut messages = Vec::new();
+    if view.workspace_loading {
+        messages.push(
+            div()
+                .px(px(28.0))
+                .child(panel_state_text("Loading queue..."))
+                .into_any_element(),
+        );
+    }
+    if let Some(error) = &view.workspace_error {
+        messages.push(
+            div()
+                .px(px(28.0))
+                .child(error_text(error))
+                .into_any_element(),
+        );
+    }
+    if let Some(message) = &view.queue_truncation_message {
+        messages.push(
+            div()
+                .px(px(28.0))
+                .pb(px(12.0))
+                .child(error_text(message))
+                .into_any_element(),
+        );
+    }
+    if !view.workspace_loading && !view.has_any_lanes() {
+        messages.push(
+            div()
+                .px(px(28.0))
+                .child(panel_state_text(pull_empty_state_message(view)))
+                .into_any_element(),
+        );
+    }
+    messages
+}
+
+fn pull_empty_state_message(view: &PullListView) -> &'static str {
+    if view.has_muted {
+        "All repositories in this queue are muted."
+    } else if view.is_auth {
+        "No pull requests matched this queue."
+    } else {
+        "Authenticate with gh to load live pull request queues."
+    }
+}
+
+fn render_pull_lanes(state: &Entity<AppState>, view: &PullListView) -> impl IntoElement {
+    restrict_scroll_to_axis(div())
+        .w_full()
+        .min_w_0()
+        .flex_grow()
+        .min_h_0()
+        .id("kanban-board-hscroll")
+        .overflow_x_scroll()
+        .overflow_y_hidden()
+        .scrollbar_width(px(KANBAN_BOARD_SCROLLBAR_WIDTH))
+        .px(px(24.0))
+        .pb(px(24.0))
+        .child(
+            div()
+                .flex()
+                .gap(px(KANBAN_LANE_GAP))
+                .min_w(px(view.lane_strip_width))
+                .h_full()
+                .when(!view.my_items.is_empty(), |el| {
+                    el.child(render_my_pull_lane(state, view))
+                })
+                .children(
+                    view.repo_groups
+                        .clone()
+                        .into_iter()
+                        .map(|(repo, items)| render_repo_pull_lane(state, view, repo, items)),
+                ),
+        )
+}
+
+fn render_my_pull_lane(state: &Entity<AppState>, view: &PullListView) -> impl IntoElement {
+    let shader_variant = view.project_shader_settings.shader_for_project("__mine__");
+    kanban_lane(
+        "__mine__",
+        "My Pull Requests",
+        &format!("{} open", view.my_items.len()),
+        view.my_items.clone(),
+        accent(),
+        true,
+        shader_variant,
+        view.shader_canvases_ready,
+        state.clone(),
+    )
+}
+
+fn render_repo_pull_lane(
+    state: &Entity<AppState>,
+    view: &PullListView,
+    repo: String,
+    items: Vec<github::PullRequestSummary>,
+) -> impl IntoElement {
+    let short_name = repo.split('/').last().unwrap_or(&repo).to_string();
+    let subtitle = repo_lane_subtitle(&repo, items.len());
+    let accent_color = lane_accent_color(&repo);
+    let shader_variant = view.project_shader_settings.shader_for_project(&repo);
+    kanban_lane(
+        &repo,
+        &short_name,
+        &subtitle,
+        items,
+        accent_color,
+        false,
+        shader_variant,
+        view.shader_canvases_ready,
+        state.clone(),
+    )
+}
+
+fn render_pull_filter_dialog(state: &Entity<AppState>, view: &PullListView) -> impl IntoElement {
+    render_pull_request_filter_dialog(
+        state,
+        view.filter_scope,
+        view.filter_presets.clone(),
+        view.active_preset_ids.clone(),
+        &view.current_filter,
+        view.active_filter_labels.clone(),
+        view.filtered_queue_items.len(),
+        view.queue_items.len(),
+        view.hidden_by_filter_count,
+        view.has_muted,
+        view.filter_creator_scope,
+        view.filter_preset_name.clone(),
+        view.filter_message.clone(),
+    )
 }
 
 // --- Shared components ---
