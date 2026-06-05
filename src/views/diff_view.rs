@@ -15,7 +15,9 @@ use crate::code_display::{
     build_interactive_code_tokens, build_lsp_hover_tooltip_view, code_text_runs, mono_code_font,
     render_highlighted_code_content, InteractiveCodeToken,
 };
-use crate::commit_timeline::{nearest_timeline_index, timeline_items, CommitDiffFilter};
+use crate::commit_timeline::{
+    nearest_timeline_index, timeline_items, CommitDiffFilter, CommitTimelineContext,
+};
 use crate::diff::{
     build_diff_render_rows, build_diff_render_rows_for_parsed_file, find_parsed_diff_file,
     find_parsed_diff_file_with_index, DiffLineKind, DiffRenderRow, ParsedDiffFile, ParsedDiffHunk,
@@ -305,7 +307,7 @@ async fn prefetch_commit_diffs_from_key(
 
         let next_key = model
             .update(cx, |state, cx| {
-                let fetched_detail_key = pr_key(&key.repository, key.number);
+                let fetched_detail_key = key.detail_key.clone();
                 state.complete_active_commit_diff_fetch(key.clone(), result);
                 if state.active_pr_key.as_deref() != Some(fetched_detail_key.as_str()) {
                     cx.notify();
@@ -1511,7 +1513,10 @@ fn render_diff_panel(
                 .flex()
                 .flex_col()
                 .child(
-                    if crate::local_review::is_local_review_detail(detail) && files.is_empty() {
+                    if crate::local_review::is_local_review_detail(detail)
+                        && files.is_empty()
+                        && !app_state.active_commit_filter_applies()
+                    {
                         render_local_review_empty_state(
                             state,
                             detail,
@@ -1846,11 +1851,12 @@ fn render_review_header_change_summary(
 fn render_commit_timeline(
     state: &Entity<AppState>,
     detail: &PullRequestDetail,
+    context: &CommitTimelineContext,
     active_filter: CommitDiffFilter,
     disabled: bool,
     commit_diff_status: &ActiveCommitDiffStatus,
 ) -> impl IntoElement {
-    let items = timeline_items(detail);
+    let items = timeline_items(detail, context);
     let item_count = items.len();
     let filters = items
         .iter()
@@ -2078,7 +2084,9 @@ fn render_diff_toolbar(
     let state_for_submit = state.clone();
     let pending_count = pending_review_comment_count(detail);
     let commit_filter_read_only = app_state.active_commit_filter_read_only();
-    let timeline_disabled = center_mode != ReviewCenterMode::SemanticDiff || is_local_review;
+    let timeline_context = app_state.active_commit_timeline_context(detail);
+    let show_timeline = timeline_items(detail, &timeline_context).len() > 1;
+    let timeline_disabled = center_mode != ReviewCenterMode::SemanticDiff;
     let timeline_filter = if timeline_disabled {
         CommitDiffFilter::All
     } else {
@@ -2143,18 +2151,16 @@ fn render_diff_toolbar(
                                     focus_summary,
                                 )),
                         )
-                        .when(
-                            detail.commits_count > 0 || !detail.commits.is_empty(),
-                            |el| {
-                                el.child(render_commit_timeline(
-                                    state,
-                                    detail,
-                                    timeline_filter,
-                                    timeline_disabled,
-                                    commit_diff_status,
-                                ))
-                            },
-                        ),
+                        .when(show_timeline, |el| {
+                            el.child(render_commit_timeline(
+                                state,
+                                detail,
+                                &timeline_context,
+                                timeline_filter,
+                                timeline_disabled,
+                                commit_diff_status,
+                            ))
+                        }),
                 ),
         )
         .when_some(guided_review_lens, |el, lens| {

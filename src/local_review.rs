@@ -14,8 +14,8 @@ use crate::{
     command_runner::{CommandOutput, CommandRunner},
     diff::{parse_unified_diff, DiffLineKind, ParsedDiffFile},
     github::{
-        AuthState, PullRequestDataCompleteness, PullRequestDetail, PullRequestDetailSnapshot,
-        PullRequestFile, PullRequestSummary,
+        AuthState, PullRequestCommit, PullRequestDataCompleteness, PullRequestDetail,
+        PullRequestDetailSnapshot, PullRequestFile, PullRequestSummary,
     },
     local_repo::LocalRepositoryStatus,
 };
@@ -87,6 +87,10 @@ pub fn is_local_review_key(key: &str) -> bool {
 
 pub fn is_local_review_detail(detail: &PullRequestDetail) -> bool {
     is_local_review_key(&detail.id)
+}
+
+pub fn detail_has_uncommitted_changes(detail: &PullRequestDetail) -> bool {
+    is_local_review_detail(detail) && detail.id.contains(":worktree-")
 }
 
 pub fn reusable_local_repository_status(
@@ -205,6 +209,7 @@ pub fn inspect_working_checkout(path: &Path, fetch: bool) -> Result<LocalReviewI
     let clean = worktree_is_clean(&root)?;
     let (base_ref_name, base_oid) = resolve_review_base(&root)?;
     let commits_count = rev_list_count(&root, &base_oid, &head_oid)?;
+    let commits = local_commits(&root, &base_oid, &head_oid)?;
     let untracked_paths = if clean {
         Vec::new()
     } else {
@@ -280,6 +285,7 @@ pub fn inspect_working_checkout(path: &Path, fetch: bool) -> Result<LocalReviewI
         base_oid: base_oid.clone(),
         head_oid: head_oid.clone(),
         commits_count,
+        commits,
         status,
         message: message.clone(),
         additions,
@@ -367,7 +373,7 @@ fn synthetic_detail(input: SyntheticDetailInput) -> PullRequestDetail {
         changed_files: input.files.len() as i64,
         comments_count: 0,
         commits_count: input.commits_count,
-        commits: Vec::new(),
+        commits: input.commits,
         created_at: input.key.clone(),
         updated_at: input.key,
         labels: Vec::new(),
@@ -392,6 +398,7 @@ struct SyntheticDetailInput {
     base_oid: String,
     head_oid: String,
     commits_count: i64,
+    commits: Vec<PullRequestCommit>,
     status: LocalReviewStatusKind,
     message: String,
     additions: i64,
@@ -682,6 +689,73 @@ fn rev_list_count(path: &Path, base_oid: &str, head_oid: &str) -> Result<i64, St
         .trim()
         .parse::<i64>()
         .map_err(|error| format!("Failed to parse local branch commit count: {error}"))
+}
+
+fn local_commits(
+    path: &Path,
+    base_oid: &str,
+    head_oid: &str,
+) -> Result<Vec<PullRequestCommit>, String> {
+    if base_oid == head_oid {
+        return Ok(Vec::new());
+    }
+
+    let range = format!("{base_oid}..{head_oid}");
+    let output = run_git(
+        path,
+        [
+            "log",
+            "--reverse",
+            "--format=%H%x1f%h%x1f%aI%x1f%an%x1f%s%x1e",
+            &range,
+        ],
+    )?;
+    if output.exit_code != Some(0) {
+        return Err(process_error(output, "Failed to list local branch commits"));
+    }
+
+    Ok(output
+        .stdout
+        .split('\x1e')
+        .filter_map(|record| local_commit_from_record(record.trim_matches('\n')))
+        .collect())
+}
+
+fn local_commit_from_record(record: &str) -> Option<PullRequestCommit> {
+    if record.trim().is_empty() {
+        return None;
+    }
+
+    let mut fields = record.split('\x1f');
+    let oid = fields.next()?.trim();
+    let abbreviated_oid = fields.next()?.trim();
+    let committed_date = fields.next()?.trim();
+    let author_name = fields.next()?.trim();
+    let message_headline = fields.next()?.trim();
+
+    if oid.is_empty() {
+        return None;
+    }
+
+    Some(PullRequestCommit {
+        id: format!("local:{oid}"),
+        oid: oid.to_string(),
+        abbreviated_oid: if abbreviated_oid.is_empty() {
+            oid.chars().take(7).collect()
+        } else {
+            abbreviated_oid.to_string()
+        },
+        message_headline: if message_headline.is_empty() {
+            "(no subject)".to_string()
+        } else {
+            message_headline.to_string()
+        },
+        committed_date: committed_date.to_string(),
+        author_name: (!author_name.is_empty()).then(|| author_name.to_string()),
+        author_login: None,
+        author_avatar_url: None,
+        url: String::new(),
+    })
 }
 
 enum LocalReviewDiffPayload {
@@ -1019,6 +1093,39 @@ fn diff_between(path: &Path, base_oid: &str, head_oid: &str) -> Result<DiffTextL
     Ok(DiffTextLoad::Loaded(command_stdout_text(&output)))
 }
 
+pub fn raw_diff_for_local_commit(path: &Path, oid: &str) -> Result<String, String> {
+    let output = run_git(
+        path,
+        [
+            "show",
+            "--format=",
+            "--binary",
+            "--find-renames",
+            "--find-copies",
+            oid,
+        ],
+    )?;
+    if output.exit_code != Some(0) {
+        return Err(process_error(output, "Failed to build local commit diff"));
+    }
+    if output.stdout_truncated {
+        return Err("Local Changes stopped loading this commit because the patch exceeded the local safety limit.".to_string());
+    }
+
+    Ok(command_stdout_text(&output))
+}
+
+pub fn raw_diff_for_uncommitted_changes(path: &Path) -> Result<String, String> {
+    let untracked_paths = untracked_paths(path)?;
+    match diff_worktree(path, "HEAD", &untracked_paths)? {
+        DiffTextLoad::Loaded(raw_diff) => Ok(raw_diff),
+        DiffTextLoad::Truncated => Err(
+            "Local Changes stopped loading uncommitted changes because the patch exceeded the local safety limit."
+                .to_string(),
+        ),
+    }
+}
+
 fn diff_worktree(
     path: &Path,
     base_oid: &str,
@@ -1304,9 +1411,10 @@ mod tests {
     use crate::test_git::{git_output, run_git, unique_test_directory};
 
     use super::{
-        inspect_working_checkout, normalized_remote_repository, reusable_local_repository_status,
-        upsert_remembered_repository, LocalReviewStatusKind, RememberedLocalRepository,
-        LOCAL_REVIEW_MAX_CHANGED_FILES,
+        detail_has_uncommitted_changes, inspect_working_checkout, normalized_remote_repository,
+        raw_diff_for_local_commit, raw_diff_for_uncommitted_changes,
+        reusable_local_repository_status, upsert_remembered_repository, LocalReviewStatusKind,
+        RememberedLocalRepository, LOCAL_REVIEW_MAX_CHANGED_FILES,
     };
 
     struct GitFixture {
@@ -1475,6 +1583,9 @@ mod tests {
         assert_eq!(inspection.branch, "feature");
         assert_eq!(inspection.head_oid, head);
         assert_eq!(inspection.commits_count, 1);
+        assert_eq!(inspection.detail.commits.len(), 1);
+        assert_eq!(inspection.detail.commits[0].oid, head);
+        assert_eq!(inspection.detail.commits[0].message_headline, "feature");
         assert_eq!(inspection.status, LocalReviewStatusKind::Ready);
         assert_eq!(inspection.detail.files.len(), 1);
         assert_eq!(inspection.detail.files[0].path, "src/lib.rs");
@@ -1584,6 +1695,33 @@ mod tests {
         assert_eq!(inspection.detail.files[0].deletions, 1);
         assert!(inspection.message.contains("Working tree changes"));
         assert!(inspection.key.contains(":worktree-"));
+    }
+
+    #[test]
+    fn dirty_branch_exposes_commits_and_uncommitted_scope_diffs() {
+        let fixture = GitFixture::new("openai/example");
+        fixture.set_file("src/lib.rs", "pub fn value() -> i32 { 1 }\n");
+        fixture.commit_all("initial");
+        fixture.push_main();
+        fixture.checkout_branch("feature");
+        fixture.set_file("src/lib.rs", "pub fn value() -> i32 { 2 }\n");
+        let feature_commit = fixture.commit_all("feature");
+        fixture.set_file("src/lib.rs", "pub fn value() -> i32 { 3 }\n");
+
+        let inspection = inspect_working_checkout(&fixture.root, false).expect("inspection");
+        let commit_diff =
+            raw_diff_for_local_commit(&fixture.root, &feature_commit).expect("commit diff");
+        let uncommitted_diff =
+            raw_diff_for_uncommitted_changes(&fixture.root).expect("uncommitted diff");
+
+        assert_eq!(inspection.status, LocalReviewStatusKind::Ready);
+        assert_eq!(inspection.detail.commits.len(), 1);
+        assert_eq!(inspection.detail.commits[0].oid, feature_commit);
+        assert!(detail_has_uncommitted_changes(&inspection.detail));
+        assert!(commit_diff.contains("+pub fn value() -> i32 { 2 }"));
+        assert!(!commit_diff.contains("+pub fn value() -> i32 { 3 }"));
+        assert!(uncommitted_diff.contains("-pub fn value() -> i32 { 2 }"));
+        assert!(uncommitted_diff.contains("+pub fn value() -> i32 { 3 }"));
     }
 
     #[test]

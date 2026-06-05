@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
 
 use crate::diff::{parse_unified_diff, DiffLineKind, ParsedDiffFile};
 use crate::gh;
@@ -7,10 +8,13 @@ use crate::github::{
     ConnectionCompleteness, PullRequestCommit, PullRequestDetail, PullRequestFile,
 };
 
+const LOCAL_UNCOMMITTED_OID: &str = "__local_uncommitted__";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommitDiffFilter {
     All,
     Commit(String),
+    Uncommitted,
 }
 
 impl CommitDiffFilter {
@@ -22,6 +26,7 @@ impl CommitDiffFilter {
         match self {
             Self::All => None,
             Self::Commit(oid) => Some(oid.as_str()),
+            Self::Uncommitted => None,
         }
     }
 }
@@ -34,27 +39,36 @@ impl Default for CommitDiffFilter {
 
 #[derive(Clone, Debug, Eq)]
 pub struct CommitDiffKey {
+    pub detail_key: String,
     pub repository: String,
     pub number: i64,
     pub oid: String,
     pub url: String,
+    pub local_path: Option<String>,
+    pub uncommitted: bool,
 }
 
 impl PartialEq for CommitDiffKey {
     fn eq(&self, other: &Self) -> bool {
-        self.repository == other.repository
+        self.detail_key == other.detail_key
+            && self.repository == other.repository
             && self.number == other.number
             && self.oid == other.oid
             && self.url == other.url
+            && self.local_path == other.local_path
+            && self.uncommitted == other.uncommitted
     }
 }
 
 impl Hash for CommitDiffKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        self.detail_key.hash(state);
         self.repository.hash(state);
         self.number.hash(state);
         self.oid.hash(state);
         self.url.hash(state);
+        self.local_path.hash(state);
+        self.uncommitted.hash(state);
     }
 }
 
@@ -102,6 +116,23 @@ pub struct CommitTimelineItem {
 }
 
 #[derive(Clone, Debug, Default)]
+pub struct CommitTimelineContext {
+    pub local_path: Option<String>,
+    pub has_uncommitted: bool,
+}
+
+impl CommitTimelineContext {
+    fn has_local_uncommitted(&self) -> bool {
+        self.has_uncommitted
+            && self
+                .local_path
+                .as_deref()
+                .map(|path| !path.trim().is_empty())
+                .unwrap_or(false)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct CommitDiffState {
     pub selected_filter: CommitDiffFilter,
     pub preview_filter: Option<CommitDiffFilter>,
@@ -112,8 +143,12 @@ pub struct CommitDiffState {
 }
 
 impl CommitDiffState {
-    pub fn sync_with_detail(&mut self, detail: &PullRequestDetail) {
-        let keys = ordered_commit_keys(detail);
+    pub fn sync_with_detail(
+        &mut self,
+        detail: &PullRequestDetail,
+        context: &CommitTimelineContext,
+    ) {
+        let keys = ordered_commit_keys(detail, context);
         let identity = commit_timeline_identity(detail, &keys);
         let key_set = keys.iter().cloned().collect::<HashSet<_>>();
 
@@ -132,7 +167,7 @@ impl CommitDiffState {
             {
                 self.in_flight = None;
             }
-            if !filter_exists_in_detail(detail, &self.selected_filter) {
+            if !filter_exists_in_detail(detail, context, &self.selected_filter) {
                 self.selected_filter = CommitDiffFilter::All;
             }
             self.preview_filter = None;
@@ -145,41 +180,58 @@ impl CommitDiffState {
                 self.prefetch_queue.push_back(key);
             }
         }
-        self.prioritize_selected(detail);
+        self.prioritize_selected_with_context(detail, context);
     }
 
-    pub fn select_filter(&mut self, detail: &PullRequestDetail, filter: CommitDiffFilter) {
-        self.sync_with_detail(detail);
-        self.selected_filter = if filter_exists_in_detail(detail, &filter) {
+    pub fn select_filter(
+        &mut self,
+        detail: &PullRequestDetail,
+        context: &CommitTimelineContext,
+        filter: CommitDiffFilter,
+    ) {
+        self.sync_with_detail(detail, context);
+        self.selected_filter = if filter_exists_in_detail(detail, context, &filter) {
             filter
         } else {
             CommitDiffFilter::All
         };
         self.preview_filter = None;
-        self.prioritize_selected(detail);
+        self.prioritize_selected_with_context(detail, context);
     }
 
     pub fn selected_key(&self, detail: &PullRequestDetail) -> Option<CommitDiffKey> {
-        let oid = self.selected_filter.oid()?;
-        ordered_commit_keys(detail)
+        self.selected_key_with_context(detail, &CommitTimelineContext::default())
+    }
+
+    pub fn selected_key_with_context(
+        &self,
+        detail: &PullRequestDetail,
+        context: &CommitTimelineContext,
+    ) -> Option<CommitDiffKey> {
+        ordered_commit_keys(detail, context)
             .into_iter()
-            .find(|key| key.oid == oid)
+            .find(|key| filter_matches_key(&self.selected_filter, key))
     }
 
     pub fn selected_entry<'a>(
         &'a self,
         detail: &PullRequestDetail,
+        context: &CommitTimelineContext,
     ) -> Option<&'a CommitDiffCacheEntry> {
-        let key = self.selected_key(detail)?;
+        let key = self.selected_key_with_context(detail, context)?;
         self.entries.get(&key)
     }
 
-    pub fn next_fetch_key(&mut self, detail: &PullRequestDetail) -> Option<CommitDiffKey> {
-        self.sync_with_detail(detail);
+    pub fn next_fetch_key(
+        &mut self,
+        detail: &PullRequestDetail,
+        context: &CommitTimelineContext,
+    ) -> Option<CommitDiffKey> {
+        self.sync_with_detail(detail, context);
         if self.in_flight.is_some() {
             return None;
         }
-        self.prioritize_selected(detail);
+        self.prioritize_selected_with_context(detail, context);
 
         while let Some(key) = self.prefetch_queue.pop_front() {
             if self.entries.contains_key(&key) {
@@ -211,8 +263,12 @@ impl CommitDiffState {
         self.prefetch_queue.retain(|queued| queued != &key);
     }
 
-    fn prioritize_selected(&mut self, detail: &PullRequestDetail) {
-        let Some(key) = self.selected_key(detail) else {
+    fn prioritize_selected_with_context(
+        &mut self,
+        detail: &PullRequestDetail,
+        context: &CommitTimelineContext,
+    ) {
+        let Some(key) = self.selected_key_with_context(detail, context) else {
             return;
         };
         if self.entries.contains_key(&key) {
@@ -233,11 +289,20 @@ pub fn ordered_pr_commits(detail: &PullRequestDetail) -> Vec<PullRequestCommit> 
     commits
 }
 
-pub fn timeline_items(detail: &PullRequestDetail) -> Vec<CommitTimelineItem> {
+pub fn timeline_items(
+    detail: &PullRequestDetail,
+    context: &CommitTimelineContext,
+) -> Vec<CommitTimelineItem> {
     let mut items = vec![CommitTimelineItem {
         filter: CommitDiffFilter::All,
         label: "All".to_string(),
-        tooltip: "All commits in this pull request".to_string(),
+        tooltip: if context.has_local_uncommitted() {
+            "All committed and uncommitted local changes".to_string()
+        } else if context.local_path.is_some() {
+            "All committed local changes".to_string()
+        } else {
+            "All commits in this pull request".to_string()
+        },
     }];
 
     items.extend(ordered_pr_commits(detail).into_iter().map(|commit| {
@@ -249,14 +314,23 @@ pub fn timeline_items(detail: &PullRequestDetail) -> Vec<CommitTimelineItem> {
         }
     }));
 
+    if context.has_local_uncommitted() {
+        items.push(CommitTimelineItem {
+            filter: CommitDiffFilter::Uncommitted,
+            label: "Uncomm.".to_string(),
+            tooltip: "Uncommitted working tree changes".to_string(),
+        });
+    }
+
     items
 }
 
 pub fn filter_for_timeline_index(
     detail: &PullRequestDetail,
+    context: &CommitTimelineContext,
     index: usize,
 ) -> Option<CommitDiffFilter> {
-    timeline_items(detail)
+    timeline_items(detail, context)
         .get(index)
         .map(|item| item.filter.clone())
 }
@@ -311,7 +385,12 @@ pub fn filtered_detail_for_commit(
     filtered.additions = dataset.additions;
     filtered.deletions = dataset.deletions;
     filtered.changed_files = dataset.changed_files();
-    filtered.updated_at = format!("{}:commit:{}", detail.updated_at, dataset.key.oid);
+    let scope = if dataset.key.uncommitted {
+        "uncommitted"
+    } else {
+        "commit"
+    };
+    filtered.updated_at = format!("{}:{scope}:{}", detail.updated_at, dataset.key.oid);
     filtered.viewer_pending_review = None;
     for thread in &mut filtered.review_threads {
         thread.viewer_can_reply = false;
@@ -328,6 +407,16 @@ pub fn filtered_detail_for_commit(
 }
 
 pub fn fetch_commit_diff(key: &CommitDiffKey) -> Result<CommitDiffDataset, String> {
+    if let Some(local_path) = key.local_path.as_deref() {
+        let path = PathBuf::from(local_path);
+        let raw_diff = if key.uncommitted {
+            crate::local_review::raw_diff_for_uncommitted_changes(&path)?
+        } else {
+            crate::local_review::raw_diff_for_local_commit(&path, &key.oid)?
+        };
+        return Ok(commit_diff_dataset_from_raw_diff(key.clone(), raw_diff));
+    }
+
     let endpoint = format!("repos/{}/commits/{}", key.repository, key.oid);
     let output = gh::run_owned(vec![
         "api".to_string(),
@@ -352,36 +441,98 @@ pub fn fetch_commit_diff(key: &CommitDiffKey) -> Result<CommitDiffDataset, Strin
     })
 }
 
-pub fn commit_diff_key(detail: &PullRequestDetail, commit: &PullRequestCommit) -> CommitDiffKey {
+pub fn commit_diff_key(
+    detail: &PullRequestDetail,
+    commit: &PullRequestCommit,
+    context: &CommitTimelineContext,
+) -> CommitDiffKey {
     CommitDiffKey {
+        detail_key: detail_cache_key(detail),
         repository: detail.repository.clone(),
         number: detail.number,
         oid: commit.oid.clone(),
         url: commit.url.clone(),
+        local_path: context.local_path.clone(),
+        uncommitted: false,
     }
 }
 
-fn ordered_commit_keys(detail: &PullRequestDetail) -> Vec<CommitDiffKey> {
-    ordered_pr_commits(detail)
+fn ordered_commit_keys(
+    detail: &PullRequestDetail,
+    context: &CommitTimelineContext,
+) -> Vec<CommitDiffKey> {
+    let mut keys = ordered_pr_commits(detail)
         .iter()
-        .map(|commit| commit_diff_key(detail, commit))
-        .collect()
+        .map(|commit| commit_diff_key(detail, commit, context))
+        .collect::<Vec<_>>();
+    if context.has_local_uncommitted() {
+        keys.push(local_uncommitted_key(detail, context));
+    }
+    keys
 }
 
-fn filter_exists_in_detail(detail: &PullRequestDetail, filter: &CommitDiffFilter) -> bool {
+fn local_uncommitted_key(
+    detail: &PullRequestDetail,
+    context: &CommitTimelineContext,
+) -> CommitDiffKey {
+    CommitDiffKey {
+        detail_key: detail_cache_key(detail),
+        repository: detail.repository.clone(),
+        number: detail.number,
+        oid: LOCAL_UNCOMMITTED_OID.to_string(),
+        url: String::new(),
+        local_path: context.local_path.clone(),
+        uncommitted: true,
+    }
+}
+
+fn filter_exists_in_detail(
+    detail: &PullRequestDetail,
+    context: &CommitTimelineContext,
+    filter: &CommitDiffFilter,
+) -> bool {
     match filter {
         CommitDiffFilter::All => true,
         CommitDiffFilter::Commit(oid) => detail.commits.iter().any(|commit| commit.oid == *oid),
+        CommitDiffFilter::Uncommitted => context.has_local_uncommitted(),
     }
 }
 
 fn commit_timeline_identity(detail: &PullRequestDetail, keys: &[CommitDiffKey]) -> String {
     let commits = keys
         .iter()
-        .map(|key| format!("{}@{}", key.oid, key.url))
+        .map(|key| {
+            let scope = if key.uncommitted {
+                "worktree"
+            } else {
+                "commit"
+            };
+            format!("{scope}:{}@{}", key.oid, key.url)
+        })
         .collect::<Vec<_>>()
         .join("|");
-    format!("{}#{}:{commits}", detail.repository, detail.number)
+    format!(
+        "{}:{}#{}:{commits}",
+        detail_cache_key(detail),
+        detail.repository,
+        detail.number
+    )
+}
+
+fn filter_matches_key(filter: &CommitDiffFilter, key: &CommitDiffKey) -> bool {
+    match filter {
+        CommitDiffFilter::All => false,
+        CommitDiffFilter::Commit(oid) => !key.uncommitted && key.oid == *oid,
+        CommitDiffFilter::Uncommitted => key.uncommitted,
+    }
+}
+
+fn detail_cache_key(detail: &PullRequestDetail) -> String {
+    if crate::local_review::is_local_review_detail(detail) {
+        detail.id.clone()
+    } else {
+        format!("{}#{}", detail.repository, detail.number)
+    }
 }
 
 fn files_from_diff(raw_diff: &str, parsed_diff: &[ParsedDiffFile]) -> Vec<PullRequestFile> {
@@ -584,7 +735,7 @@ mod tests {
             commit("aaaaaaa1", "2026-01-02T00:00:00Z", "first"),
         ]);
 
-        let items = timeline_items(&detail);
+        let items = timeline_items(&detail, &CommitTimelineContext::default());
 
         assert_eq!(items[0].filter, CommitDiffFilter::All);
         assert_eq!(
@@ -636,7 +787,11 @@ mod tests {
     #[test]
     fn commit_dataset_derives_files_and_totals_from_diff() {
         let detail = detail(vec![commit("aaaaaaa1", "2026-01-02T00:00:00Z", "first")]);
-        let key = commit_diff_key(&detail, &detail.commits[0]);
+        let key = commit_diff_key(
+            &detail,
+            &detail.commits[0],
+            &CommitTimelineContext::default(),
+        );
         let raw = r#"diff --git a/src/lib.rs b/src/lib.rs
 index 1111111..2222222 100644
 --- a/src/lib.rs
@@ -670,17 +825,22 @@ new file mode 100644
             commit("bbbbbbb2", "2026-01-03T00:00:00Z", "second"),
         ]);
         let mut state = CommitDiffState::default();
-        state.sync_with_detail(&detail);
+        let context = CommitTimelineContext::default();
+        state.sync_with_detail(&detail, &context);
 
-        let first = state.next_fetch_key(&detail).expect("first fetch");
+        let first = state
+            .next_fetch_key(&detail, &context)
+            .expect("first fetch");
         assert_eq!(first.oid, "aaaaaaa1");
-        assert!(state.next_fetch_key(&detail).is_none());
+        assert!(state.next_fetch_key(&detail, &context).is_none());
 
         state.complete_fetch(
             first.clone(),
             Ok(commit_diff_dataset_from_raw_diff(first, String::new())),
         );
-        let second = state.next_fetch_key(&detail).expect("second fetch");
+        let second = state
+            .next_fetch_key(&detail, &context)
+            .expect("second fetch");
         assert_eq!(second.oid, "bbbbbbb2");
     }
 
@@ -692,10 +852,17 @@ new file mode 100644
             commit("ccccccc3", "2026-01-04T00:00:00Z", "third"),
         ]);
         let mut state = CommitDiffState::default();
-        state.sync_with_detail(&detail);
-        state.select_filter(&detail, CommitDiffFilter::Commit("ccccccc3".to_string()));
+        let context = CommitTimelineContext::default();
+        state.sync_with_detail(&detail, &context);
+        state.select_filter(
+            &detail,
+            &context,
+            CommitDiffFilter::Commit("ccccccc3".to_string()),
+        );
 
-        let key = state.next_fetch_key(&detail).expect("selected fetch");
+        let key = state
+            .next_fetch_key(&detail, &context)
+            .expect("selected fetch");
 
         assert_eq!(key.oid, "ccccccc3");
     }
@@ -704,14 +871,36 @@ new file mode 100644
     fn fetch_error_is_cached_and_not_retried_by_prefetch() {
         let detail = detail(vec![commit("aaaaaaa1", "2026-01-02T00:00:00Z", "first")]);
         let mut state = CommitDiffState::default();
+        let context = CommitTimelineContext::default();
 
-        let key = state.next_fetch_key(&detail).expect("fetch");
+        let key = state.next_fetch_key(&detail, &context).expect("fetch");
         state.complete_fetch(key.clone(), Err("network failed".to_string()));
 
         assert!(matches!(
             state.entries.get(&key),
             Some(CommitDiffCacheEntry::Error(error)) if error == "network failed"
         ));
-        assert!(state.next_fetch_key(&detail).is_none());
+        assert!(state.next_fetch_key(&detail, &context).is_none());
+    }
+
+    #[test]
+    fn local_timeline_adds_uncommitted_scope_after_commits() {
+        let mut detail = detail(vec![commit("aaaaaaa1", "2026-01-02T00:00:00Z", "first")]);
+        detail.id = "local:acme/widgets:topic:base:head:worktree-dirty".to_string();
+        detail.number = 0;
+        let context = CommitTimelineContext {
+            local_path: Some("/tmp/repo".to_string()),
+            has_uncommitted: true,
+        };
+
+        let items = timeline_items(&detail, &context);
+
+        assert_eq!(items[0].filter, CommitDiffFilter::All);
+        assert_eq!(
+            items[1].filter,
+            CommitDiffFilter::Commit("aaaaaaa1".to_string())
+        );
+        assert_eq!(items[2].filter, CommitDiffFilter::Uncommitted);
+        assert_eq!(items[2].label, "Uncomm.");
     }
 }

@@ -1,11 +1,12 @@
 use crate::commit_timeline::{
     filtered_detail_for_commit, selected_file_for_commit_detail, timeline_items,
     CommitDiffCacheEntry, CommitDiffDataset, CommitDiffFilter, CommitDiffKey,
+    CommitTimelineContext,
 };
 use crate::github::PullRequestDetail;
 use crate::review_session::ReviewCenterMode;
 
-use super::{pr_key, AppState, DetailState};
+use super::{AppState, DetailState};
 
 #[derive(Clone, Debug)]
 pub enum ActiveCommitDiffStatus {
@@ -40,15 +41,31 @@ impl AppState {
             .unwrap_or_default()
     }
 
+    pub fn active_commit_timeline_context(
+        &self,
+        detail: &PullRequestDetail,
+    ) -> CommitTimelineContext {
+        if !crate::local_review::is_local_review_detail(detail) {
+            return CommitTimelineContext::default();
+        }
+
+        CommitTimelineContext {
+            local_path: self
+                .active_detail_state()
+                .and_then(|detail_state| detail_state.local_repository_status.as_ref())
+                .and_then(|status| status.path.clone()),
+            has_uncommitted: crate::local_review::detail_has_uncommitted_changes(detail),
+        }
+    }
+
     pub fn active_commit_filter_applies(&self) -> bool {
         if self.effective_review_center_mode() != ReviewCenterMode::SemanticDiff {
             return false;
         }
-        let Some(detail) = self.active_detail() else {
+        if self.active_detail().is_none() {
             return false;
-        };
-        !crate::local_review::is_local_review_detail(detail)
-            && !self.active_commit_filter().is_all()
+        }
+        !self.active_commit_filter().is_all()
     }
 
     pub fn active_commit_filter_read_only(&self) -> bool {
@@ -59,9 +76,7 @@ impl AppState {
         let Some(detail) = self.active_detail() else {
             return ActiveCommitDiffStatus::Disabled;
         };
-        if self.effective_review_center_mode() != ReviewCenterMode::SemanticDiff
-            || crate::local_review::is_local_review_detail(detail)
-        {
+        if self.effective_review_center_mode() != ReviewCenterMode::SemanticDiff {
             return ActiveCommitDiffStatus::Disabled;
         }
 
@@ -72,7 +87,11 @@ impl AppState {
             return ActiveCommitDiffStatus::All;
         }
 
-        match detail_state.commit_diff_state.selected_entry(detail) {
+        let context = self.active_commit_timeline_context(detail);
+        match detail_state
+            .commit_diff_state
+            .selected_entry(detail, &context)
+        {
             Some(CommitDiffCacheEntry::Loaded(dataset)) => {
                 ActiveCommitDiffStatus::Loaded(filtered_detail_for_commit(detail, dataset))
             }
@@ -95,14 +114,12 @@ impl AppState {
         let Some(detail) = self.active_detail().cloned() else {
             return;
         };
-        if crate::local_review::is_local_review_detail(&detail) {
-            return;
-        }
+        let context = self.active_commit_timeline_context(&detail);
 
         if let Some(detail_state) = self.active_detail_state_mut() {
             detail_state
                 .commit_diff_state
-                .select_filter(&detail, filter.clone());
+                .select_filter(&detail, &context, filter.clone());
         }
         self.close_commit_filter_review_entry_points();
         self.apply_active_commit_filter_selected_file();
@@ -112,8 +129,9 @@ impl AppState {
         let Some(detail) = self.active_detail().cloned() else {
             return;
         };
+        let context = self.active_commit_timeline_context(&detail);
         if let Some(filter) = filter.as_ref() {
-            if !timeline_items(&detail)
+            if !timeline_items(&detail, &context)
                 .iter()
                 .any(|item| &item.filter == filter)
             {
@@ -129,13 +147,12 @@ impl AppState {
         let Some(detail) = self.active_detail().cloned() else {
             return;
         };
-        if self.effective_review_center_mode() != ReviewCenterMode::SemanticDiff
-            || crate::local_review::is_local_review_detail(&detail)
-        {
+        if self.effective_review_center_mode() != ReviewCenterMode::SemanticDiff {
             return;
         }
 
-        let items = timeline_items(&detail);
+        let context = self.active_commit_timeline_context(&detail);
+        let items = timeline_items(&detail, &context);
         if items.is_empty() {
             return;
         }
@@ -157,12 +174,10 @@ impl AppState {
 
     pub fn next_active_commit_diff_fetch_key(&mut self) -> Option<CommitDiffKey> {
         let detail = self.active_detail()?.clone();
-        if crate::local_review::is_local_review_detail(&detail) {
-            return None;
-        }
+        let context = self.active_commit_timeline_context(&detail);
         self.active_detail_state_mut()?
             .commit_diff_state
-            .next_fetch_key(&detail)
+            .next_fetch_key(&detail, &context)
     }
 
     pub fn complete_active_commit_diff_fetch(
@@ -170,7 +185,7 @@ impl AppState {
         key: CommitDiffKey,
         result: Result<CommitDiffDataset, String>,
     ) {
-        let detail_key = pr_key(&key.repository, key.number);
+        let detail_key = key.detail_key.clone();
         if let Some(detail_state) = self.detail_states.get_mut(&detail_key) {
             detail_state.commit_diff_state.complete_fetch(key, result);
         }
