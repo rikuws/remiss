@@ -42,6 +42,7 @@ pub(super) struct CombinedDiffFloatingHeader {
     header: ReviewFileHeaderProps,
     collapsed: bool,
     reviewed: bool,
+    push_offset: Pixels,
     collapse_scroll: Option<DiffFileCollapseScrollAdjustment>,
 }
 
@@ -109,6 +110,7 @@ const COMBINED_DIFF_ESTIMATED_BODY_MIN_HEIGHT: f32 = 58.0;
 const COMBINED_DIFF_JUMP_ANIMATION_MIN_ITEMS: usize = 24;
 const COMBINED_DIFF_JUMP_ANIMATION_STEPS: usize = 10;
 const COMBINED_DIFF_JUMP_ANIMATION_MS: u64 = 180;
+const DIFF_FILE_HEADER_ROW_HEIGHT: f32 = 48.0;
 
 #[derive(Clone, Copy)]
 struct CombinedDiffParsedStats {
@@ -1583,7 +1585,7 @@ fn estimated_combined_diff_item_height(
             } else {
                 DIFF_FILE_HEADER_TOP_MARGIN
             };
-            top_margin + 48.0 + DIFF_FILE_HEADER_BOTTOM_MARGIN
+            top_margin + DIFF_FILE_HEADER_ROW_HEIGHT + DIFF_FILE_HEADER_BOTTOM_MARGIN
         }
         CombinedDiffViewItem::StackNotice(_) => 76.0,
         CombinedDiffViewItem::State { min_height, .. } => min_height.map(f32::from).unwrap_or(58.0),
@@ -2250,12 +2252,18 @@ fn current_combined_diff_header(
             CombinedDiffViewItem::Header(file_index) if *file_index == context_ix
         )
     });
+    let push_offset = header_item_ix
+        .map(|header_item_ix| {
+            current_combined_diff_header_push_offset(list_state, items, header_item_ix)
+        })
+        .unwrap_or(px(0.0));
     let mut header = context.header.clone();
     header.active = true;
     Some(CombinedDiffFloatingHeader {
         header,
         collapsed: context.collapsed,
         reviewed: context.reviewed,
+        push_offset,
         collapse_scroll: header_item_ix.map(|header_item_ix| {
             DiffFileCollapseScrollAdjustment::for_combined_file(list_state, header_item_ix, context)
         }),
@@ -2287,6 +2295,53 @@ fn combined_diff_header_top_padding(item_ix: usize) -> Pixels {
     } else {
         px(DIFF_FILE_HEADER_TOP_MARGIN)
     }
+}
+
+fn current_combined_diff_header_push_offset(
+    list_state: &ListState,
+    items: &[CombinedDiffViewItem],
+    current_header_item_ix: usize,
+) -> Pixels {
+    let Some(next_header_item_ix) =
+        next_combined_diff_header_item_index(items, current_header_item_ix)
+    else {
+        return px(0.0);
+    };
+    let Some(next_header_bounds) = list_state.bounds_for_item(next_header_item_ix) else {
+        return px(0.0);
+    };
+
+    combined_diff_floating_header_push_offset(
+        list_state.viewport_bounds().top(),
+        next_header_bounds.top(),
+        next_header_item_ix,
+    )
+}
+
+fn next_combined_diff_header_item_index(
+    items: &[CombinedDiffViewItem],
+    current_header_item_ix: usize,
+) -> Option<usize> {
+    items
+        .iter()
+        .enumerate()
+        .skip(current_header_item_ix.saturating_add(1))
+        .find_map(|(ix, item)| matches!(item, CombinedDiffViewItem::Header(_)).then_some(ix))
+}
+
+fn combined_diff_floating_header_push_offset(
+    viewport_top: Pixels,
+    next_header_item_top: Pixels,
+    next_header_item_ix: usize,
+) -> Pixels {
+    let next_header_row_top = f32::from(next_header_item_top - viewport_top)
+        + f32::from(combined_diff_header_top_padding(next_header_item_ix));
+    let floating_row_bottom = DIFF_FLOATING_FILE_HEADER_TOP_PADDING + DIFF_FILE_HEADER_ROW_HEIGHT;
+    let max_push = DIFF_FLOATING_FILE_HEADER_TOP_PADDING + DIFF_FILE_HEADER_ROW_HEIGHT;
+
+    px((next_header_row_top - floating_row_bottom)
+        .min(0.0)
+        .max(-max_push))
 }
 
 fn combined_diff_file_index_before_item(
@@ -2329,7 +2384,7 @@ fn render_floating_diff_file_header(
 ) -> impl IntoElement {
     div()
         .absolute()
-        .top(px(0.0))
+        .top(header.push_offset)
         .left(px(DIFF_CONTENT_LEFT_GUTTER))
         .right(px(DIFF_CONTENT_RIGHT_GUTTER))
         .occlude()
@@ -2569,5 +2624,60 @@ fn diff_anchor_matches_file(anchor: &DiffAnchor, fallback_file_path: &str) -> bo
         true
     } else {
         anchor.file_path == fallback_file_path
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::px;
+
+    use super::{
+        combined_diff_floating_header_push_offset, next_combined_diff_header_item_index,
+        CombinedDiffViewItem, DiffViewItem, DIFF_FILE_HEADER_ROW_HEIGHT,
+    };
+    use crate::views::diff_view::DIFF_FLOATING_FILE_HEADER_TOP_PADDING;
+
+    #[test]
+    fn floating_combined_header_stays_fixed_before_next_header_hits() {
+        assert_eq!(
+            combined_diff_floating_header_push_offset(px(0.0), px(23.0), 3),
+            px(0.0)
+        );
+        assert_eq!(
+            combined_diff_floating_header_push_offset(px(0.0), px(22.0), 3),
+            px(0.0)
+        );
+    }
+
+    #[test]
+    fn floating_combined_header_is_pushed_by_next_header() {
+        assert_eq!(
+            combined_diff_floating_header_push_offset(px(0.0), px(12.0), 3),
+            px(-10.0)
+        );
+        assert_eq!(
+            combined_diff_floating_header_push_offset(px(0.0), px(-80.0), 3),
+            px(-(DIFF_FLOATING_FILE_HEADER_TOP_PADDING + DIFF_FILE_HEADER_ROW_HEIGHT))
+        );
+    }
+
+    #[test]
+    fn next_combined_header_item_skips_current_file_body() {
+        let items = vec![
+            CombinedDiffViewItem::Header(0),
+            CombinedDiffViewItem::Row {
+                file_index: 0,
+                item: DiffViewItem::Row(0),
+            },
+            CombinedDiffViewItem::Footer,
+            CombinedDiffViewItem::Header(1),
+            CombinedDiffViewItem::Row {
+                file_index: 1,
+                item: DiffViewItem::Row(0),
+            },
+        ];
+
+        assert_eq!(next_combined_diff_header_item_index(&items, 0), Some(3));
+        assert_eq!(next_combined_diff_header_item_index(&items, 3), None);
     }
 }

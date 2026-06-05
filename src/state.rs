@@ -906,8 +906,11 @@ pub struct CachedSemanticDiffFile {
 #[derive(Clone, Debug)]
 pub enum ReviewFileTreeRow {
     Directory {
+        path: String,
         name: String,
         depth: usize,
+        additions: i64,
+        deletions: i64,
     },
     File {
         path: String,
@@ -1030,6 +1033,7 @@ pub struct AppState {
     pub review_file_tree_cache: RefCell<std::collections::HashMap<String, CachedReviewFileTree>>,
     pub review_stack_cache: RefCell<std::collections::HashMap<String, CachedReviewStack>>,
     pub review_file_tree_list_states: RefCell<std::collections::HashMap<String, ListState>>,
+    pub review_file_tree_collapsed_directory_keys: HashSet<String>,
     pub review_nav_list_states: RefCell<std::collections::HashMap<String, ListState>>,
     pub combined_diff_view_states:
         RefCell<std::collections::HashMap<String, CombinedDiffViewState>>,
@@ -1242,6 +1246,7 @@ impl AppState {
             review_file_tree_cache: RefCell::new(std::collections::HashMap::new()),
             review_stack_cache: RefCell::new(std::collections::HashMap::new()),
             review_file_tree_list_states: RefCell::new(std::collections::HashMap::new()),
+            review_file_tree_collapsed_directory_keys: HashSet::new(),
             review_nav_list_states: RefCell::new(std::collections::HashMap::new()),
             combined_diff_view_states: RefCell::new(std::collections::HashMap::new()),
             source_browser_list_states: RefCell::new(std::collections::HashMap::new()),
@@ -2384,6 +2389,19 @@ impl AppState {
                 }
             })
             .unwrap_or(default_expanded)
+    }
+
+    pub fn set_review_file_tree_directory_collapsed(&mut self, key: &str, collapsed: bool) {
+        if collapsed {
+            self.review_file_tree_collapsed_directory_keys
+                .insert(key.to_string());
+        } else {
+            self.review_file_tree_collapsed_directory_keys.remove(key);
+        }
+    }
+
+    pub fn is_review_file_tree_directory_collapsed(&self, key: &str) -> bool {
+        self.review_file_tree_collapsed_directory_keys.contains(key)
     }
 
     pub fn set_review_file_collapsed(&mut self, file_path: &str, collapsed: bool) {

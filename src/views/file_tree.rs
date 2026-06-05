@@ -148,9 +148,24 @@ pub(crate) fn render_file_tree_state_message(message: String, is_error: bool) ->
         .child(message)
 }
 
-pub(crate) fn render_file_tree_directory_row(name: String, depth: usize) -> impl IntoElement {
+pub(crate) fn render_file_tree_directory_row(
+    state: Entity<AppState>,
+    collapse_key: String,
+    name: String,
+    depth: usize,
+    additions: i64,
+    deletions: i64,
+    collapsed: bool,
+) -> impl IntoElement {
     let name_for_tooltip = name.clone();
-    let directory_name_id = name.bytes().fold(depth, |acc, byte| {
+    let collapse_key_for_toggle = collapse_key.clone();
+    let state_for_toggle = state.clone();
+    let tooltip = if collapsed {
+        "Expand folder"
+    } else {
+        "Collapse folder"
+    };
+    let directory_name_id = collapse_key.bytes().fold(depth, |acc, byte| {
         acc.wrapping_mul(33).wrapping_add(byte as usize)
     });
 
@@ -161,7 +176,18 @@ pub(crate) fn render_file_tree_directory_row(name: String, depth: usize) -> impl
         .px(px(6.0))
         .py(px(4.0))
         .rounded(radius_sm())
+        .cursor_pointer()
+        .id(("file-tree-directory-row", directory_name_id))
+        .tooltip(move |_, cx| build_static_tooltip(tooltip, cx))
         .hover(|style| style.bg(hover_bg()))
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            state_for_toggle.update(cx, |state, cx| {
+                state
+                    .set_review_file_tree_directory_collapsed(&collapse_key_for_toggle, !collapsed);
+                cx.notify();
+            });
+            cx.stop_propagation();
+        })
         .child(
             div()
                 .flex()
@@ -176,6 +202,7 @@ pub(crate) fn render_file_tree_directory_row(name: String, depth: usize) -> impl
                         .min_w_0()
                         .gap(px(4.0))
                         .pl(review_file_tree_indent(depth))
+                        .child(render_file_tree_directory_toggle_icon(collapsed))
                         .child(render_file_tree_directory_icon())
                         .child(
                             div()
@@ -195,7 +222,10 @@ pub(crate) fn render_file_tree_directory_row(name: String, depth: usize) -> impl
                                 })
                                 .child(name),
                         ),
-                ),
+                )
+                .when(collapsed && (additions != 0 || deletions != 0), |el| {
+                    el.child(render_file_tree_diff_summary(additions, deletions))
+                }),
         )
 }
 
@@ -345,6 +375,23 @@ fn render_file_tree_diff_summary(additions: i64, deletions: i64) -> impl IntoEle
                 .text_color(danger())
                 .child(format!("-{deletions}")),
         )
+}
+
+fn render_file_tree_directory_toggle_icon(collapsed: bool) -> impl IntoElement {
+    let icon = if collapsed {
+        LucideIcon::ChevronRight
+    } else {
+        LucideIcon::ChevronDown
+    };
+
+    div()
+        .w(px(14.0))
+        .h(px(14.0))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(lucide_icon(icon, 12.0, fg_subtle()))
 }
 
 fn render_file_tree_directory_icon() -> impl IntoElement {

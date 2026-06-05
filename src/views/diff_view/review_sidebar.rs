@@ -362,7 +362,8 @@ fn render_changed_files_pane(
     open_mode: ReviewFileRowOpenMode,
     cx: &App,
 ) -> impl IntoElement {
-    let (tree_rows, file_count, additions, deletions, structural_status) = {
+    let file_tree_scope = "changed-file-tree";
+    let (tree_rows, file_count, additions, deletions, structural_status, collapse_scope) = {
         let app_state = state.read(cx);
         let (file_count, additions, deletions) = review_file_tree_totals(detail, None);
         let structural_status = if matches!(open_mode, ReviewFileRowOpenMode::Structural) {
@@ -372,17 +373,24 @@ fn render_changed_files_pane(
         } else {
             None
         };
+        let raw_tree_rows = prepare_review_file_tree_rows(&app_state, detail, None);
+        let collapse_scope = review_file_tree_collapse_scope(&app_state, file_tree_scope);
         (
-            prepare_review_file_tree_rows(&app_state, detail, None),
+            prepare_visible_review_file_tree_rows(
+                &app_state,
+                raw_tree_rows.as_ref(),
+                &collapse_scope,
+            ),
             file_count,
             additions,
             deletions,
             structural_status,
+            collapse_scope,
         )
     };
     let list_state = {
         let app_state = state.read(cx);
-        prepare_review_file_tree_list_state_for_scope(&app_state, "changed-file-tree")
+        prepare_review_file_tree_list_state_for_scope(&app_state, file_tree_scope)
     };
     if list_state.item_count() != tree_rows.len() {
         list_state.reset(tree_rows.len());
@@ -423,9 +431,30 @@ fn render_changed_files_pane(
                         let tree_rows = tree_rows.clone();
                         let selected_path = selected_path.clone();
                         let on_file_open = on_file_open.clone();
+                        let collapse_scope = collapse_scope.clone();
                         move |ix, _window, cx| match tree_rows[ix].clone() {
-                            ReviewFileTreeRow::Directory { name, depth } => {
-                                render_file_tree_directory_row(name, depth).into_any_element()
+                            ReviewFileTreeRow::Directory {
+                                path,
+                                name,
+                                depth,
+                                additions,
+                                deletions,
+                            } => {
+                                let collapse_key =
+                                    review_file_tree_directory_collapse_key(&collapse_scope, &path);
+                                let collapsed = state
+                                    .read(cx)
+                                    .is_review_file_tree_directory_collapsed(&collapse_key);
+                                render_file_tree_directory_row(
+                                    state.clone(),
+                                    collapse_key,
+                                    name,
+                                    depth,
+                                    additions,
+                                    deletions,
+                                    collapsed,
+                                )
+                                .into_any_element()
                             }
                             ReviewFileTreeRow::File {
                                 path,
@@ -535,25 +564,37 @@ fn render_stack_navigation_pane(
     let visible_paths = stack_filter
         .as_ref()
         .map(|filter| stack_file_paths_for_filter(review_stack.as_ref(), filter));
+    let file_tree_list_scope = format!(
+        "stack-file-tree:{}",
+        review_file_tree_cache_scope(visible_paths.as_ref())
+    );
     let file_tree_label = stack_filter
         .as_ref()
         .map(|filter| review_file_tree_label(filter.mode))
         .unwrap_or_else(|| review_file_tree_label(StackDiffMode::WholePr));
-    let (tree_rows, visible_file_count, visible_additions, visible_deletions) = {
+    let (tree_rows, visible_file_count, visible_additions, visible_deletions, collapse_scope) = {
         let app_state = state.read(cx);
         let (file_count, additions, deletions) =
             review_file_tree_totals(detail, visible_paths.as_ref());
+        let raw_tree_rows =
+            prepare_review_file_tree_rows(&app_state, detail, visible_paths.as_ref());
+        let collapse_scope = review_file_tree_collapse_scope(&app_state, &file_tree_list_scope);
 
         (
-            prepare_review_file_tree_rows(&app_state, detail, visible_paths.as_ref()),
+            prepare_visible_review_file_tree_rows(
+                &app_state,
+                raw_tree_rows.as_ref(),
+                &collapse_scope,
+            ),
             file_count,
             additions,
             deletions,
+            collapse_scope,
         )
     };
     let file_tree_list_state = {
         let app_state = state.read(cx);
-        prepare_review_file_tree_list_state_for_scope(&app_state, "stack-file-tree")
+        prepare_review_file_tree_list_state_for_scope(&app_state, &file_tree_list_scope)
     };
     if file_tree_list_state.item_count() != tree_rows.len() {
         file_tree_list_state.reset(tree_rows.len());
@@ -629,6 +670,7 @@ fn render_stack_navigation_pane(
             visible_file_count,
             visible_additions,
             visible_deletions,
+            collapse_scope,
         ))
 }
 
@@ -641,6 +683,7 @@ fn render_stack_file_tree_section(
     visible_file_count: usize,
     visible_additions: i64,
     visible_deletions: i64,
+    collapse_scope: String,
 ) -> impl IntoElement {
     let selected_path = selected_path.map(str::to_string);
     let on_file_open = file_tree_row_open_handler();
@@ -682,9 +725,30 @@ fn render_stack_file_tree_section(
                         let tree_rows = tree_rows.clone();
                         let selected_path = selected_path.clone();
                         let on_file_open = on_file_open.clone();
+                        let collapse_scope = collapse_scope.clone();
                         move |ix, _window, cx| match tree_rows[ix].clone() {
-                            ReviewFileTreeRow::Directory { name, depth } => {
-                                render_file_tree_directory_row(name, depth).into_any_element()
+                            ReviewFileTreeRow::Directory {
+                                path,
+                                name,
+                                depth,
+                                additions,
+                                deletions,
+                            } => {
+                                let collapse_key =
+                                    review_file_tree_directory_collapse_key(&collapse_scope, &path);
+                                let collapsed = state
+                                    .read(cx)
+                                    .is_review_file_tree_directory_collapsed(&collapse_key);
+                                render_file_tree_directory_row(
+                                    state.clone(),
+                                    collapse_key,
+                                    name,
+                                    depth,
+                                    additions,
+                                    deletions,
+                                    collapsed,
+                                )
+                                .into_any_element()
                             }
                             ReviewFileTreeRow::File {
                                 path,
@@ -2500,16 +2564,29 @@ fn render_source_file_tree(
     selected_path: Option<&str>,
     cx: &App,
 ) -> impl IntoElement {
-    let (tree_rows, visible_file_count, loading, error, visible_additions, visible_deletions) = {
+    let file_tree_scope = "source-file-tree";
+    let (
+        tree_rows,
+        visible_file_count,
+        loading,
+        error,
+        visible_additions,
+        visible_deletions,
+        collapse_scope,
+    ) = {
         let app_state = state.read(cx);
         let (changed_file_count, additions, deletions) = review_file_tree_totals(detail, None);
         let source_tree = app_state
             .active_detail_state()
             .map(|detail_state| detail_state.source_file_tree.clone())
             .unwrap_or_default();
+        let collapse_scope = review_file_tree_collapse_scope(&app_state, file_tree_scope);
+        let tree_rows = source_tree.rows.map(|rows| {
+            prepare_visible_review_file_tree_rows(&app_state, rows.as_ref(), &collapse_scope)
+        });
 
         (
-            source_tree.rows,
+            tree_rows,
             if source_tree.file_count > 0 {
                 source_tree.file_count
             } else {
@@ -2519,11 +2596,12 @@ fn render_source_file_tree(
             source_tree.error,
             additions,
             deletions,
+            collapse_scope,
         )
     };
     let list_state = {
         let app_state = state.read(cx);
-        prepare_review_file_tree_list_state_for_scope(&app_state, "source-file-tree")
+        prepare_review_file_tree_list_state_for_scope(&app_state, file_tree_scope)
     };
     let tree_row_count = tree_rows.as_ref().map(|rows| rows.len()).unwrap_or(0);
     if list_state.item_count() != tree_row_count {
@@ -2580,9 +2658,30 @@ fn render_source_file_tree(
                         let tree_rows = tree_rows.clone();
                         let selected_path = selected_path.clone();
                         let on_file_open = on_file_open.clone();
+                        let collapse_scope = collapse_scope.clone();
                         move |ix, _window, cx| match tree_rows[ix].clone() {
-                            ReviewFileTreeRow::Directory { name, depth } => {
-                                render_file_tree_directory_row(name, depth).into_any_element()
+                            ReviewFileTreeRow::Directory {
+                                path,
+                                name,
+                                depth,
+                                additions,
+                                deletions,
+                            } => {
+                                let collapse_key =
+                                    review_file_tree_directory_collapse_key(&collapse_scope, &path);
+                                let collapsed = state
+                                    .read(cx)
+                                    .is_review_file_tree_directory_collapsed(&collapse_key);
+                                render_file_tree_directory_row(
+                                    state.clone(),
+                                    collapse_key,
+                                    name,
+                                    depth,
+                                    additions,
+                                    deletions,
+                                    collapsed,
+                                )
+                                .into_any_element()
                             }
                             ReviewFileTreeRow::File {
                                 path,
@@ -2618,6 +2717,26 @@ fn render_source_file_tree(
                 }),
         )
 }
+
+fn review_file_tree_collapse_scope(app_state: &AppState, scope: &str) -> String {
+    review_cache_key(app_state.active_pr_key.as_deref(), scope)
+}
+
+fn review_file_tree_directory_collapse_key(scope: &str, path: &str) -> String {
+    format!("{scope}:{path}")
+}
+
+fn prepare_visible_review_file_tree_rows(
+    app_state: &AppState,
+    rows: &[ReviewFileTreeRow],
+    collapse_scope: &str,
+) -> Arc<Vec<ReviewFileTreeRow>> {
+    Arc::new(visible_review_file_tree_rows(rows, |path| {
+        let key = review_file_tree_directory_collapse_key(collapse_scope, path);
+        app_state.is_review_file_tree_directory_collapsed(&key)
+    }))
+}
+
 fn prepare_review_file_tree_list_state_for_scope(app_state: &AppState, scope: &str) -> ListState {
     let key = review_cache_key(app_state.active_pr_key.as_deref(), scope);
     let mut list_states = app_state.review_file_tree_list_states.borrow_mut();

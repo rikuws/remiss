@@ -126,6 +126,39 @@ pub(crate) fn ordered_review_files_from_tree_rows<'a>(
     files
 }
 
+pub(crate) fn visible_review_file_tree_rows(
+    rows: &[ReviewFileTreeRow],
+    mut is_collapsed_directory: impl FnMut(&str) -> bool,
+) -> Vec<ReviewFileTreeRow> {
+    let mut visible_rows = Vec::with_capacity(rows.len());
+    let mut hidden_depth = None;
+
+    for row in rows {
+        let row_depth = match row {
+            ReviewFileTreeRow::Directory { depth, .. } | ReviewFileTreeRow::File { depth, .. } => {
+                *depth
+            }
+        };
+
+        if let Some(depth) = hidden_depth {
+            if row_depth > depth {
+                continue;
+            }
+            hidden_depth = None;
+        }
+
+        visible_rows.push(row.clone());
+
+        if let ReviewFileTreeRow::Directory { path, depth, .. } = row {
+            if is_collapsed_directory(path) {
+                hidden_depth = Some(*depth);
+            }
+        }
+    }
+
+    visible_rows
+}
+
 #[derive(Clone)]
 struct ReviewFileTreeEntry {
     path: String,
@@ -136,6 +169,9 @@ struct ReviewFileTreeEntry {
 #[derive(Default)]
 struct ReviewFileTreeNode {
     name: String,
+    path: String,
+    additions: i64,
+    deletions: i64,
     children: BTreeMap<String, ReviewFileTreeNode>,
     entries: Vec<ReviewFileTreeNodeEntry>,
 }
@@ -153,10 +189,16 @@ fn build_file_tree_rows(entries: Vec<ReviewFileTreeEntry>) -> Vec<ReviewFileTree
         while let Some(segment) = segments.next() {
             if segments.peek().is_some() {
                 if !cursor.children.contains_key(segment) {
+                    let child_path = if cursor.path.is_empty() {
+                        segment.to_string()
+                    } else {
+                        format!("{}/{}", cursor.path, segment)
+                    };
                     cursor.children.insert(
                         segment.to_string(),
                         ReviewFileTreeNode {
                             name: segment.to_string(),
+                            path: child_path,
                             ..ReviewFileTreeNode::default()
                         },
                     );
@@ -168,6 +210,8 @@ fn build_file_tree_rows(entries: Vec<ReviewFileTreeEntry>) -> Vec<ReviewFileTree
                     .children
                     .get_mut(segment)
                     .expect("inserted directory should be present");
+                cursor.additions += file.additions;
+                cursor.deletions += file.deletions;
             } else {
                 cursor
                     .entries
@@ -249,8 +293,14 @@ fn flatten_review_file_tree_directory(
     depth: usize,
     rows: &mut Vec<ReviewFileTreeRow>,
 ) {
-    let (name, node) = compact_review_file_tree_directory(node);
-    rows.push(ReviewFileTreeRow::Directory { name, depth });
+    let (path, name, node) = compact_review_file_tree_directory(node);
+    rows.push(ReviewFileTreeRow::Directory {
+        path,
+        name,
+        depth,
+        additions: node.additions,
+        deletions: node.deletions,
+    });
 
     for entry in &node.entries {
         match entry {
@@ -268,7 +318,7 @@ fn flatten_review_file_tree_directory(
 
 fn compact_review_file_tree_directory(
     mut node: &ReviewFileTreeNode,
-) -> (String, &ReviewFileTreeNode) {
+) -> (String, String, &ReviewFileTreeNode) {
     let mut name = node.name.clone();
     while let Some(child) = review_file_tree_single_directory_child(node) {
         name.push('/');
@@ -276,7 +326,7 @@ fn compact_review_file_tree_directory(
         node = child;
     }
 
-    (name, node)
+    (node.path.clone(), name, node)
 }
 
 #[cfg(test)]
@@ -292,7 +342,14 @@ mod tests {
         }]);
 
         assert_eq!(rows.len(), 2);
-        assert_directory_row(&rows[0], "app/src/main/kotlin/com/acme/product", 1);
+        assert_directory_row(
+            &rows[0],
+            "app/src/main/kotlin/com/acme/product",
+            "app/src/main/kotlin/com/acme/product",
+            1,
+            3,
+            1,
+        );
         assert_file_row(
             &rows[1],
             "app/src/main/kotlin/com/acme/product/Feature.kt",
@@ -324,8 +381,15 @@ mod tests {
         ]);
 
         assert_eq!(rows.len(), 6);
-        assert_directory_row(&rows[0], "app/src", 1);
-        assert_directory_row(&rows[1], "main/kotlin/com/acme/product", 2);
+        assert_directory_row(&rows[0], "app/src", "app/src", 1, 6, 1);
+        assert_directory_row(
+            &rows[1],
+            "app/src/main/kotlin/com/acme/product",
+            "main/kotlin/com/acme/product",
+            2,
+            2,
+            0,
+        );
         assert_file_row(
             &rows[2],
             "app/src/main/kotlin/com/acme/product/Feature.kt",
@@ -334,7 +398,14 @@ mod tests {
             2,
             0,
         );
-        assert_directory_row(&rows[3], "test/kotlin/com/acme/product", 2);
+        assert_directory_row(
+            &rows[3],
+            "app/src/test/kotlin/com/acme/product",
+            "test/kotlin/com/acme/product",
+            2,
+            4,
+            1,
+        );
         assert_file_row(
             &rows[4],
             "app/src/test/kotlin/com/acme/product/FeatureTest.kt",
@@ -363,15 +434,89 @@ mod tests {
 
         assert_eq!(rows.len(), 3);
         assert_file_row(&rows[0], "README.md", "README.md", 0, 1, 0);
-        assert_directory_row(&rows[1], "src", 1);
+        assert_directory_row(&rows[1], "src", "src", 1, 2, 1);
         assert_file_row(&rows[2], "src/lib.rs", "lib.rs", 2, 2, 1);
     }
 
-    fn assert_directory_row(row: &ReviewFileTreeRow, expected_name: &str, expected_depth: usize) {
+    #[test]
+    fn file_tree_directory_rows_aggregate_descendant_changes() {
+        let rows = build_file_tree_rows(vec![
+            ReviewFileTreeEntry {
+                path: "src/app.rs".to_string(),
+                additions: 5,
+                deletions: 1,
+            },
+            ReviewFileTreeEntry {
+                path: "src/ui/tree.rs".to_string(),
+                additions: 2,
+                deletions: 3,
+            },
+            ReviewFileTreeEntry {
+                path: "src/ui/list.rs".to_string(),
+                additions: 0,
+                deletions: 4,
+            },
+        ]);
+
+        assert_directory_row(&rows[0], "src", "src", 1, 7, 8);
+        assert_directory_row(&rows[2], "src/ui", "ui", 2, 2, 7);
+    }
+
+    #[test]
+    fn collapsed_file_tree_rows_hide_directory_descendants() {
+        let rows = build_file_tree_rows(vec![
+            ReviewFileTreeEntry {
+                path: "README.md".to_string(),
+                additions: 1,
+                deletions: 0,
+            },
+            ReviewFileTreeEntry {
+                path: "src/app.rs".to_string(),
+                additions: 5,
+                deletions: 1,
+            },
+            ReviewFileTreeEntry {
+                path: "src/ui/tree.rs".to_string(),
+                additions: 2,
+                deletions: 3,
+            },
+            ReviewFileTreeEntry {
+                path: "tests/app_test.rs".to_string(),
+                additions: 4,
+                deletions: 0,
+            },
+        ]);
+
+        let visible = visible_review_file_tree_rows(&rows, |path| path == "src");
+
+        assert_eq!(visible.len(), 4);
+        assert_file_row(&visible[0], "README.md", "README.md", 0, 1, 0);
+        assert_directory_row(&visible[1], "src", "src", 1, 7, 4);
+        assert_directory_row(&visible[2], "tests", "tests", 1, 4, 0);
+        assert_file_row(&visible[3], "tests/app_test.rs", "app_test.rs", 2, 4, 0);
+    }
+
+    fn assert_directory_row(
+        row: &ReviewFileTreeRow,
+        expected_path: &str,
+        expected_name: &str,
+        expected_depth: usize,
+        expected_additions: i64,
+        expected_deletions: i64,
+    ) {
         match row {
-            ReviewFileTreeRow::Directory { name, depth } => {
+            ReviewFileTreeRow::Directory {
+                path,
+                name,
+                depth,
+                additions,
+                deletions,
+            } => {
+                assert_eq!(path, expected_path);
                 assert_eq!(name, expected_name);
                 assert_eq!(*depth, expected_depth);
+                assert_eq!(*additions, expected_additions);
+                assert_eq!(*deletions, expected_deletions);
             }
             other => panic!("expected directory row, got {other:?}"),
         }

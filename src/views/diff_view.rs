@@ -41,6 +41,7 @@ use crate::review_file_header::{render_review_file_header_with_controls, ReviewF
 use crate::review_file_tree::{
     build_repository_file_tree_rows, build_review_file_tree_rows,
     ordered_review_files_from_tree_rows, review_file_tree_cache_scope, review_file_tree_totals,
+    visible_review_file_tree_rows,
 };
 use crate::review_queue::{build_review_queue, ReviewQueue, ReviewQueueBucket};
 use crate::review_session::{
