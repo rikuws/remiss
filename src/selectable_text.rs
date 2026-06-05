@@ -1251,236 +1251,16 @@ impl Element for AppTextInput {
                     window.refresh();
                 });
 
-                window.on_key_event({
-                    let key_state = state.clone();
-                    let key_selection = selection_state.clone();
-                    let key_id = selection_id.clone();
-                    let key_text = raw_text.clone();
-                    let key_marked_range = marked_range.clone();
-                    move |event: &KeyDownEvent, phase, window, cx| {
-                        if phase != DispatchPhase::Bubble || !is_active_text_target(&key_id) {
-                            return;
-                        }
-
-                        let modifiers = event.keystroke.modifiers;
-                        let shortcut_only = platform_primary_modifier(modifiers);
-                        let line_modifier = platform_line_navigation_modifier(modifiers);
-                        let word_modifier = platform_word_navigation_modifier(modifiers);
-                        let key = event.keystroke.key.as_str();
-
-                        let mut handled = true;
-                        match key {
-                            "left" => {
-                                let movement = if line_modifier {
-                                    TextMovement::LineStart
-                                } else if word_modifier {
-                                    TextMovement::PreviousWord
-                                } else {
-                                    TextMovement::Left
-                                };
-                                key_state.update(cx, |app_state, cx| {
-                                    move_input_selection(
-                                        input_text_for_field(app_state, field),
-                                        &key_selection,
-                                        movement,
-                                        modifiers.shift,
-                                    );
-                                    key_marked_range.borrow_mut().take();
-                                    cx.notify();
-                                });
-                            }
-                            "right" => {
-                                let movement = if line_modifier {
-                                    TextMovement::LineEnd
-                                } else if word_modifier {
-                                    TextMovement::NextWord
-                                } else {
-                                    TextMovement::Right
-                                };
-                                key_state.update(cx, |app_state, cx| {
-                                    move_input_selection(
-                                        input_text_for_field(app_state, field),
-                                        &key_selection,
-                                        movement,
-                                        modifiers.shift,
-                                    );
-                                    key_marked_range.borrow_mut().take();
-                                    cx.notify();
-                                });
-                            }
-                            "up" if multiline => {
-                                let movement = if line_modifier {
-                                    TextMovement::DocumentStart
-                                } else {
-                                    TextMovement::PreviousLine
-                                };
-                                key_state.update(cx, |app_state, cx| {
-                                    move_input_selection(
-                                        input_text_for_field(app_state, field),
-                                        &key_selection,
-                                        movement,
-                                        modifiers.shift,
-                                    );
-                                    key_marked_range.borrow_mut().take();
-                                    cx.notify();
-                                });
-                            }
-                            "down" if multiline => {
-                                let movement = if line_modifier {
-                                    TextMovement::DocumentEnd
-                                } else {
-                                    TextMovement::NextLine
-                                };
-                                key_state.update(cx, |app_state, cx| {
-                                    move_input_selection(
-                                        input_text_for_field(app_state, field),
-                                        &key_selection,
-                                        movement,
-                                        modifiers.shift,
-                                    );
-                                    key_marked_range.borrow_mut().take();
-                                    cx.notify();
-                                });
-                            }
-                            "home" => {
-                                let target = line_start_boundary(
-                                    &key_text,
-                                    key_selection.borrow().cursor_index(),
-                                );
-                                key_selection
-                                    .borrow_mut()
-                                    .select_to_or_collapse(target, modifiers.shift);
-                                key_marked_range.borrow_mut().take();
-                                window.refresh();
-                            }
-                            "end" => {
-                                let len = line_end_boundary(
-                                    &key_text,
-                                    key_selection.borrow().cursor_index(),
-                                );
-                                key_selection
-                                    .borrow_mut()
-                                    .select_to_or_collapse(len, modifiers.shift);
-                                key_marked_range.borrow_mut().take();
-                                window.refresh();
-                            }
-                            "backspace" => {
-                                let unit = if line_modifier {
-                                    DeleteUnit::Line
-                                } else if word_modifier {
-                                    DeleteUnit::Word
-                                } else {
-                                    DeleteUnit::Character
-                                };
-                                key_state.update(cx, |app_state, cx| {
-                                    key_marked_range.borrow_mut().take();
-                                    edit_input_text(
-                                        app_state,
-                                        field,
-                                        &key_selection,
-                                        EditCommand::Backspace(unit),
-                                    );
-                                    cx.notify();
-                                });
-                            }
-                            "delete" => {
-                                let unit = if line_modifier {
-                                    DeleteUnit::Line
-                                } else if word_modifier {
-                                    DeleteUnit::Word
-                                } else {
-                                    DeleteUnit::Character
-                                };
-                                key_state.update(cx, |app_state, cx| {
-                                    key_marked_range.borrow_mut().take();
-                                    edit_input_text(
-                                        app_state,
-                                        field,
-                                        &key_selection,
-                                        EditCommand::Delete(unit),
-                                    );
-                                    cx.notify();
-                                });
-                            }
-                            "a" if shortcut_only => {
-                                let len = input_text_for_field(key_state.read(cx), field).len();
-                                key_selection.borrow_mut().select_all(len);
-                                key_marked_range.borrow_mut().take();
-                                window.refresh();
-                            }
-                            "c" if shortcut_only => {
-                                if let Some(range) = key_selection.borrow().selection_range() {
-                                    let text =
-                                        input_text_for_field(key_state.read(cx), field).to_string();
-                                    if !range.is_empty() {
-                                        if let Some(selected) = text.get(range) {
-                                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                                selected.to_string(),
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                            "x" if shortcut_only => {
-                                key_state.update(cx, |app_state, cx| {
-                                    key_marked_range.borrow_mut().take();
-                                    cut_input_text(app_state, field, &key_selection, cx);
-                                    cx.notify();
-                                });
-                            }
-                            "v" if shortcut_only => {
-                                if let Some(text) =
-                                    cx.read_from_clipboard().and_then(|item| item.text())
-                                {
-                                    key_state.update(cx, |app_state, cx| {
-                                        key_marked_range.borrow_mut().take();
-                                        edit_input_text(
-                                            app_state,
-                                            field,
-                                            &key_selection,
-                                            EditCommand::Insert(normalize_paste(field, &text)),
-                                        );
-                                        cx.notify();
-                                    });
-                                }
-                            }
-                            "enter" if text_input_return_modifier(modifiers) && multiline => {
-                                key_state.update(cx, |app_state, cx| {
-                                    key_marked_range.borrow_mut().take();
-                                    edit_input_text(
-                                        app_state,
-                                        field,
-                                        &key_selection,
-                                        EditCommand::Insert("\n".to_string()),
-                                    );
-                                    cx.notify();
-                                });
-                            }
-                            "enter" if field == AppTextFieldKind::PullRequestFilterName => {
-                                key_state.update(cx, |app_state, cx| {
-                                    key_marked_range.borrow_mut().take();
-                                    app_state.save_current_pull_request_filter_preset();
-                                    cx.notify();
-                                });
-                            }
-                            "escape" if field == AppTextFieldKind::PullRequestFilterName => {
-                                key_state.update(cx, |app_state, cx| {
-                                    key_marked_range.borrow_mut().take();
-                                    app_state.close_pull_request_filter_creator();
-                                    cx.notify();
-                                });
-                            }
-                            "tab" => {}
-                            _ => {
-                                handled = false;
-                            }
-                        }
-
-                        if handled {
-                            cx.stop_propagation();
-                        }
-                    }
-                });
+                install_app_text_input_key_handler(
+                    state.clone(),
+                    field,
+                    multiline,
+                    selection_id.clone(),
+                    raw_text.clone(),
+                    selection_state.clone(),
+                    marked_range.clone(),
+                    window,
+                );
 
                 if is_active_text_target(&selection_id) {
                     if let Some(focus_handle) = focus_handle.as_ref() {
@@ -1530,6 +1310,408 @@ impl Element for AppTextInput {
             },
         );
     }
+}
+
+fn install_app_text_input_key_handler(
+    state: gpui::Entity<AppState>,
+    field: AppTextFieldKind,
+    multiline: bool,
+    selection_id: String,
+    text: SharedString,
+    selection: Rc<RefCell<TextSelectionState>>,
+    marked_range: Rc<RefCell<Option<Range<usize>>>>,
+    window: &mut Window,
+) {
+    window.on_key_event(move |event: &KeyDownEvent, phase, window, cx| {
+        if phase != DispatchPhase::Bubble || !is_active_text_target(&selection_id) {
+            return;
+        }
+
+        let handled = handle_app_text_input_key(
+            event,
+            &state,
+            field,
+            multiline,
+            text.as_ref(),
+            &selection,
+            &marked_range,
+            window,
+            cx,
+        );
+
+        if handled {
+            cx.stop_propagation();
+        }
+    });
+}
+
+fn handle_app_text_input_key(
+    event: &KeyDownEvent,
+    state: &gpui::Entity<AppState>,
+    field: AppTextFieldKind,
+    multiline: bool,
+    text: &str,
+    selection: &Rc<RefCell<TextSelectionState>>,
+    marked_range: &Rc<RefCell<Option<Range<usize>>>>,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    let modifiers = event.keystroke.modifiers;
+    let key = event.keystroke.key.as_str();
+
+    if let Some(movement) = text_input_movement_for_key(key, modifiers, multiline) {
+        move_app_text_input_selection(
+            state,
+            field,
+            selection,
+            marked_range,
+            movement,
+            modifiers,
+            cx,
+        );
+        return true;
+    }
+
+    if handle_app_text_input_boundary_key(key, text, selection, marked_range, modifiers, window) {
+        return true;
+    }
+
+    if handle_app_text_input_edit_key(
+        key,
+        modifiers,
+        multiline,
+        state,
+        field,
+        selection,
+        marked_range,
+        cx,
+    ) {
+        return true;
+    }
+
+    if handle_app_text_input_shortcut_key(
+        key,
+        modifiers,
+        state,
+        field,
+        selection,
+        marked_range,
+        window,
+        cx,
+    ) {
+        return true;
+    }
+
+    handle_app_text_input_field_key(key, field, state, marked_range, cx)
+}
+
+fn handle_app_text_input_boundary_key(
+    key: &str,
+    text: &str,
+    selection: &Rc<RefCell<TextSelectionState>>,
+    marked_range: &Rc<RefCell<Option<Range<usize>>>>,
+    modifiers: gpui::Modifiers,
+    window: &mut Window,
+) -> bool {
+    match key {
+        "home" => {
+            move_app_text_input_selection_to(
+                selection,
+                marked_range,
+                line_start_boundary(text, selection.borrow().cursor_index()),
+                modifiers.shift,
+                window,
+            );
+            true
+        }
+        "end" => {
+            move_app_text_input_selection_to(
+                selection,
+                marked_range,
+                line_end_boundary(text, selection.borrow().cursor_index()),
+                modifiers.shift,
+                window,
+            );
+            true
+        }
+        _ => false,
+    }
+}
+
+fn handle_app_text_input_edit_key(
+    key: &str,
+    modifiers: gpui::Modifiers,
+    multiline: bool,
+    state: &gpui::Entity<AppState>,
+    field: AppTextFieldKind,
+    selection: &Rc<RefCell<TextSelectionState>>,
+    marked_range: &Rc<RefCell<Option<Range<usize>>>>,
+    cx: &mut App,
+) -> bool {
+    match key {
+        "backspace" => {
+            edit_app_text_input(
+                state,
+                field,
+                selection,
+                marked_range,
+                EditCommand::Backspace(delete_unit_for_modifiers(modifiers)),
+                cx,
+            );
+            true
+        }
+        "delete" => {
+            edit_app_text_input(
+                state,
+                field,
+                selection,
+                marked_range,
+                EditCommand::Delete(delete_unit_for_modifiers(modifiers)),
+                cx,
+            );
+            true
+        }
+        "enter" if text_input_return_modifier(modifiers) && multiline => {
+            edit_app_text_input(
+                state,
+                field,
+                selection,
+                marked_range,
+                EditCommand::Insert("\n".to_string()),
+                cx,
+            );
+            true
+        }
+        _ => false,
+    }
+}
+
+fn handle_app_text_input_shortcut_key(
+    key: &str,
+    modifiers: gpui::Modifiers,
+    state: &gpui::Entity<AppState>,
+    field: AppTextFieldKind,
+    selection: &Rc<RefCell<TextSelectionState>>,
+    marked_range: &Rc<RefCell<Option<Range<usize>>>>,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    if !platform_primary_modifier(modifiers) {
+        return false;
+    }
+
+    match key {
+        "a" => {
+            select_all_app_text_input(state, field, selection, marked_range, window, cx);
+            true
+        }
+        "c" => {
+            copy_app_text_input_selection(state, field, selection, cx);
+            true
+        }
+        "x" => {
+            cut_app_text_input(state, field, selection, marked_range, cx);
+            true
+        }
+        "v" => {
+            paste_app_text_input(state, field, selection, marked_range, cx);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn handle_app_text_input_field_key(
+    key: &str,
+    field: AppTextFieldKind,
+    state: &gpui::Entity<AppState>,
+    marked_range: &Rc<RefCell<Option<Range<usize>>>>,
+    cx: &mut App,
+) -> bool {
+    match key {
+        "enter" if field == AppTextFieldKind::PullRequestFilterName => {
+            save_pull_request_filter_input(state, marked_range, cx);
+            true
+        }
+        "escape" if field == AppTextFieldKind::PullRequestFilterName => {
+            close_pull_request_filter_input(state, marked_range, cx);
+            true
+        }
+        "tab" => true,
+        _ => false,
+    }
+}
+
+fn text_input_movement_for_key(
+    key: &str,
+    modifiers: gpui::Modifiers,
+    multiline: bool,
+) -> Option<TextMovement> {
+    let line_modifier = platform_line_navigation_modifier(modifiers);
+    let word_modifier = platform_word_navigation_modifier(modifiers);
+    match key {
+        "left" if line_modifier => Some(TextMovement::LineStart),
+        "left" if word_modifier => Some(TextMovement::PreviousWord),
+        "left" => Some(TextMovement::Left),
+        "right" if line_modifier => Some(TextMovement::LineEnd),
+        "right" if word_modifier => Some(TextMovement::NextWord),
+        "right" => Some(TextMovement::Right),
+        "up" if multiline && line_modifier => Some(TextMovement::DocumentStart),
+        "up" if multiline => Some(TextMovement::PreviousLine),
+        "down" if multiline && line_modifier => Some(TextMovement::DocumentEnd),
+        "down" if multiline => Some(TextMovement::NextLine),
+        _ => None,
+    }
+}
+
+fn delete_unit_for_modifiers(modifiers: gpui::Modifiers) -> DeleteUnit {
+    if platform_line_navigation_modifier(modifiers) {
+        DeleteUnit::Line
+    } else if platform_word_navigation_modifier(modifiers) {
+        DeleteUnit::Word
+    } else {
+        DeleteUnit::Character
+    }
+}
+
+fn move_app_text_input_selection(
+    state: &gpui::Entity<AppState>,
+    field: AppTextFieldKind,
+    selection: &Rc<RefCell<TextSelectionState>>,
+    marked_range: &Rc<RefCell<Option<Range<usize>>>>,
+    movement: TextMovement,
+    modifiers: gpui::Modifiers,
+    cx: &mut App,
+) {
+    state.update(cx, |app_state, cx| {
+        move_input_selection(
+            input_text_for_field(app_state, field),
+            selection,
+            movement,
+            modifiers.shift,
+        );
+        marked_range.borrow_mut().take();
+        cx.notify();
+    });
+}
+
+fn move_app_text_input_selection_to(
+    selection: &Rc<RefCell<TextSelectionState>>,
+    marked_range: &Rc<RefCell<Option<Range<usize>>>>,
+    target: usize,
+    extend: bool,
+    window: &mut Window,
+) {
+    selection.borrow_mut().select_to_or_collapse(target, extend);
+    marked_range.borrow_mut().take();
+    window.refresh();
+}
+
+fn edit_app_text_input(
+    state: &gpui::Entity<AppState>,
+    field: AppTextFieldKind,
+    selection: &Rc<RefCell<TextSelectionState>>,
+    marked_range: &Rc<RefCell<Option<Range<usize>>>>,
+    command: EditCommand,
+    cx: &mut App,
+) {
+    state.update(cx, |app_state, cx| {
+        marked_range.borrow_mut().take();
+        edit_input_text(app_state, field, selection, command);
+        cx.notify();
+    });
+}
+
+fn select_all_app_text_input(
+    state: &gpui::Entity<AppState>,
+    field: AppTextFieldKind,
+    selection: &Rc<RefCell<TextSelectionState>>,
+    marked_range: &Rc<RefCell<Option<Range<usize>>>>,
+    window: &mut Window,
+    cx: &App,
+) {
+    let len = input_text_for_field(state.read(cx), field).len();
+    selection.borrow_mut().select_all(len);
+    marked_range.borrow_mut().take();
+    window.refresh();
+}
+
+fn copy_app_text_input_selection(
+    state: &gpui::Entity<AppState>,
+    field: AppTextFieldKind,
+    selection: &Rc<RefCell<TextSelectionState>>,
+    cx: &mut App,
+) {
+    let Some(range) = selection.borrow().selection_range() else {
+        return;
+    };
+    if range.is_empty() {
+        return;
+    }
+
+    let text = input_text_for_field(state.read(cx), field).to_string();
+    if let Some(selected) = text.get(range) {
+        cx.write_to_clipboard(ClipboardItem::new_string(selected.to_string()));
+    }
+}
+
+fn cut_app_text_input(
+    state: &gpui::Entity<AppState>,
+    field: AppTextFieldKind,
+    selection: &Rc<RefCell<TextSelectionState>>,
+    marked_range: &Rc<RefCell<Option<Range<usize>>>>,
+    cx: &mut App,
+) {
+    state.update(cx, |app_state, cx| {
+        marked_range.borrow_mut().take();
+        cut_input_text(app_state, field, selection, cx);
+        cx.notify();
+    });
+}
+
+fn paste_app_text_input(
+    state: &gpui::Entity<AppState>,
+    field: AppTextFieldKind,
+    selection: &Rc<RefCell<TextSelectionState>>,
+    marked_range: &Rc<RefCell<Option<Range<usize>>>>,
+    cx: &mut App,
+) {
+    let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+        return;
+    };
+
+    edit_app_text_input(
+        state,
+        field,
+        selection,
+        marked_range,
+        EditCommand::Insert(normalize_paste(field, &text)),
+        cx,
+    );
+}
+
+fn save_pull_request_filter_input(
+    state: &gpui::Entity<AppState>,
+    marked_range: &Rc<RefCell<Option<Range<usize>>>>,
+    cx: &mut App,
+) {
+    state.update(cx, |app_state, cx| {
+        marked_range.borrow_mut().take();
+        app_state.save_current_pull_request_filter_preset();
+        cx.notify();
+    });
+}
+
+fn close_pull_request_filter_input(
+    state: &gpui::Entity<AppState>,
+    marked_range: &Rc<RefCell<Option<Range<usize>>>>,
+    cx: &mut App,
+) {
+    state.update(cx, |app_state, cx| {
+        marked_range.borrow_mut().take();
+        app_state.close_pull_request_filter_creator();
+        cx.notify();
+    });
 }
 
 impl IntoElement for AppTextInput {
