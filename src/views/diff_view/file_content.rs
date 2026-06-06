@@ -18,371 +18,54 @@ pub async fn load_pull_request_file_content_flow(
     requested_path: Option<String>,
     cx: &mut AsyncWindowContext,
 ) {
-    let request = model
-        .read_with(cx, |state, _| {
-            let cache = state.cache.clone();
-            let detail = state.active_detail()?.clone();
-            let detail_key = state.active_pr_key.clone()?;
-            let existing_local_repo_status = state
-                .detail_states
-                .get(&detail_key)
-                .and_then(|detail_state| detail_state.local_repository_status.clone());
-            let selected_path = AppState::select_changed_file_path_for_detail(
-                &detail,
-                requested_path
-                    .clone()
-                    .or_else(|| state.selected_file_path.clone()),
-            )?;
-            let selected_file = detail
-                .files
-                .iter()
-                .find(|file| file.path == selected_path)
-                .cloned()?;
-            let parsed = find_parsed_diff_file(&detail.parsed_diff, &selected_file.path).cloned();
-            let request = build_file_content_request(&detail, &selected_file, parsed.as_ref())?;
-            let detail_state = state.detail_states.get(&detail_key);
-            let skip_local_checkout = crate::screenshot_mode::screenshot_mode_enabled();
-
-            let file_content_state =
-                local_checkout_file_load_state(detail_state, &request.path, &request.request_key);
-            let already_loaded = diff_file_content_flow_complete(
-                file_content_state,
-                existing_local_repo_status.as_ref(),
-                skip_local_checkout,
-            );
-
-            Some((
-                cache,
-                detail_key,
-                detail,
-                selected_file,
-                request,
-                file_content_state.loaded,
-                already_loaded,
-                existing_local_repo_status,
-                skip_local_checkout,
-            ))
-        })
-        .ok()
-        .flatten();
-
-    let Some((
-        cache,
-        detail_key,
-        detail,
-        selected_file,
-        request,
-        file_content_loaded,
-        already_loaded,
-        existing_local_repo_status,
-        skip_local_checkout,
-    )) = request
-    else {
+    let Some(flow) = read_pull_request_file_content_flow(model.clone(), requested_path, cx) else {
         return;
     };
 
     log_checkout_flow_event(
-        &detail,
+        &flow.detail,
         format!(
             "diff file-content flow start; path={}; reference={}; local_reference={}; already_loaded={}; existing_status={}",
-            request.path,
-            request.reference,
-            request.local_reference,
-            already_loaded,
-            summarize_optional_local_repo_status(existing_local_repo_status.as_ref()),
+            flow.request.path,
+            flow.request.reference,
+            flow.request.local_reference,
+            flow.already_loaded,
+            summarize_optional_local_repo_status(flow.existing_local_repo_status.as_ref()),
         ),
     );
 
-    if already_loaded {
+    if flow.already_loaded {
         log_checkout_flow_event(
-            &detail,
+            &flow.detail,
             format!(
                 "diff file-content flow skipped; path={}; content and checkout already satisfied",
-                request.path
+                flow.request.path
             ),
         );
         return;
     }
 
-    let need_file_content = !file_content_loaded;
+    let need_file_content = !flow.file_content_loaded;
 
-    model
-        .update(cx, |state, cx| {
-            if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
-                if need_file_content {
-                    let file_state = detail_state
-                        .file_content_states
-                        .entry(request.path.clone())
-                        .or_default();
-                    file_state.request_key = Some(request.request_key.clone());
-                    file_state.document = None;
-                    file_state.prepared = None;
-                    file_state.loading = true;
-                    file_state.error = None;
-                }
-                detail_state.local_repository_loading = !skip_local_checkout
-                    && existing_local_repo_status
-                        .as_ref()
-                        .map(|status| !status.ready_for_snapshot_features())
-                        .unwrap_or(true);
-                detail_state.local_repository_error = None;
-            }
+    mark_diff_file_content_loading(&model, &flow, need_file_content, cx);
 
-            cx.notify();
-        })
-        .ok();
+    let (local_repo_status, local_repo_error, load_result) =
+        load_diff_file_content(flow.cache.clone(), &flow, need_file_content, cx).await;
+    let prepared_result = prepare_loaded_file_content(
+        load_result,
+        &flow.selected_file.path,
+        &flow.request.reference,
+    );
 
-    let (local_repo_status, local_repo_error, load_result) = if skip_local_checkout {
-        log_checkout_flow_event(
-            &detail,
-            format!(
-                "diff file-content local checkout skipped for screenshot mode; path={}",
-                request.path
-            ),
-        );
-
-        let load_result = if need_file_content {
-            let load_result = cx
-                .background_executor()
-                .spawn({
-                    let cache = cache.clone();
-                    let repository = detail.repository.clone();
-                    let path = request.path.clone();
-                    let reference = request.reference.clone();
-                    async move {
-                        github::load_pull_request_file_content(
-                            &cache,
-                            &repository,
-                            &reference,
-                            &path,
-                        )
-                    }
-                })
-                .await;
-            log_document_result(
-                &detail,
-                "diff file-content final document",
-                &request.path,
-                &request.reference,
-                &load_result,
-            );
-            Some(load_result)
-        } else {
-            log_checkout_flow_event(
-                &detail,
-                format!(
-                    "diff file-content document skipped; path={}; request_key already loaded",
-                    request.path
-                ),
-            );
-            None
-        };
-        (None, None, load_result)
-    } else {
-        let local_repo_result = if let Some(status) = existing_local_repo_status
-            .clone()
-            .filter(|status| status.ready_for_snapshot_features())
-        {
-            Ok(status)
-        } else {
-            cx.background_executor()
-                .spawn({
-                    let cache = cache.clone();
-                    let repository = detail.repository.clone();
-                    let pull_request_number = detail.number;
-                    let head_ref_oid = detail.head_ref_oid.clone();
-                    async move {
-                        local_repo::load_or_prepare_local_repository_for_pull_request(
-                            &cache,
-                            &repository,
-                            pull_request_number,
-                            head_ref_oid.as_deref(),
-                        )
-                    }
-                })
-                .await
-        };
-        log_local_repo_result(&detail, "diff file-content flow", &local_repo_result);
-
-        let local_repo_status = local_repo_result.as_ref().ok().cloned();
-        let local_repo_error = local_repo_result
-            .as_ref()
-            .ok()
-            .and_then(|status| {
-                if status.ready_for_snapshot_features() {
-                    None
-                } else {
-                    Some(status.message.clone())
-                }
-            })
-            .or_else(|| local_repo_result.as_ref().err().cloned());
-
-        let load_result = if need_file_content {
-            let local_load_result = if let Some(status) = local_repo_status.as_ref() {
-                if status.ready_for_snapshot_features() {
-                    if let Some(root) = status.path.as_deref() {
-                        log_checkout_flow_event(
-                            &detail,
-                            format!(
-                                "diff file-content local document load start; root={root}; path={}; local_reference={}; prefer_worktree={}",
-                                request.path,
-                                request.local_reference,
-                                request.prefer_worktree && status.should_prefer_worktree_contents(),
-                            ),
-                        );
-                        cx.background_executor()
-                            .spawn({
-                                let cache = cache.clone();
-                                let repository = detail.repository.clone();
-                                let path = request.path.clone();
-                                let reference = request.local_reference.clone();
-                                let prefer_worktree = request.prefer_worktree
-                                    && status.should_prefer_worktree_contents();
-                                let root = std::path::PathBuf::from(root);
-                                async move {
-                                    local_documents::load_local_repository_file_content(
-                                        &cache,
-                                        &repository,
-                                        &root,
-                                        &reference,
-                                        &path,
-                                        prefer_worktree,
-                                    )
-                                }
-                            })
-                            .await
-                    } else {
-                        Err(status.message.clone())
-                    }
-                } else {
-                    Err(local_repo_error
-                        .clone()
-                        .unwrap_or_else(|| "Local checkout is not ready yet.".to_string()))
-                }
-            } else {
-                Err(local_repo_error
-                    .clone()
-                    .unwrap_or_else(|| "Local checkout is not ready yet.".to_string()))
-            };
-            log_document_result(
-                &detail,
-                "diff file-content local document",
-                &request.path,
-                &request.local_reference,
-                &local_load_result,
-            );
-
-            let load_result = match local_load_result {
-                Ok(document) => Ok(document),
-                Err(local_error) => {
-                    log_checkout_flow_event(
-                        &detail,
-                        format!(
-                            "diff file-content GitHub fallback start; path={}; reference={}; local_error={}",
-                            request.path,
-                            request.reference,
-                            sanitize_checkout_log_text(&local_error),
-                        ),
-                    );
-                    cx.background_executor()
-                        .spawn({
-                            let cache = cache.clone();
-                            let repository = detail.repository.clone();
-                            let path = request.path.clone();
-                            let reference = request.reference.clone();
-                            async move {
-                                github::load_pull_request_file_content(
-                                    &cache,
-                                    &repository,
-                                    &reference,
-                                    &path,
-                                )
-                                .map_err(|github_error| {
-                                    format!(
-                                        "{local_error}\nGitHub fallback also failed for {repository}@{reference}:{path}: {github_error}"
-                                    )
-                                })
-                            }
-                        })
-                        .await
-                }
-            };
-            log_document_result(
-                &detail,
-                "diff file-content final document",
-                &request.path,
-                &request.reference,
-                &load_result,
-            );
-            Some(load_result)
-        } else {
-            log_checkout_flow_event(
-                &detail,
-                format!(
-                    "diff file-content document skipped; path={}; request_key already loaded",
-                    request.path
-                ),
-            );
-            None
-        };
-
-        (local_repo_status, local_repo_error, load_result)
-    };
-
-    let prepared_result = load_result.map(|load_result| {
-        load_result.map(|document| {
-            let prepared = prepare_file_content(&selected_file.path, &request.reference, &document);
-            (document, prepared)
-        })
-    });
-
-    if let Some(prepared_result) = prepared_result {
-        model
-            .update(cx, |state, cx| {
-                let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
-                    return;
-                };
-                let Some(file_state) = detail_state.file_content_states.get_mut(&request.path)
-                else {
-                    return;
-                };
-                if file_state.request_key.as_deref() != Some(&request.request_key) {
-                    return;
-                }
-
-                file_state.loading = false;
-                detail_state.local_repository_loading = false;
-                detail_state.local_repository_status = local_repo_status.clone();
-                detail_state.local_repository_error = local_repo_error.clone();
-                match prepared_result {
-                    Ok((document, prepared)) => {
-                        file_state.document = Some(document);
-                        file_state.prepared = Some(prepared);
-                        file_state.error = None;
-                    }
-                    Err(error) => {
-                        file_state.document = None;
-                        file_state.prepared = None;
-                        file_state.error = Some(error);
-                    }
-                }
-
-                cx.notify();
-            })
-            .ok();
-    } else {
-        model
-            .update(cx, |state, cx| {
-                let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
-                    return;
-                };
-                detail_state.local_repository_loading = false;
-                detail_state.local_repository_status = local_repo_status.clone();
-                detail_state.local_repository_error = local_repo_error.clone();
-                cx.notify();
-            })
-            .ok();
-    }
+    apply_diff_file_content_flow_result(
+        &model,
+        &flow.detail_key,
+        &flow.request,
+        local_repo_status,
+        local_repo_error,
+        prepared_result,
+        cx,
+    );
 }
 
 pub async fn load_structural_diff_flow(
@@ -1250,6 +933,441 @@ fn log_document_result(
     }
 }
 
+fn read_pull_request_file_content_flow(
+    model: Entity<AppState>,
+    requested_path: Option<String>,
+    cx: &mut AsyncWindowContext,
+) -> Option<PullRequestFileContentFlowRequest> {
+    model
+        .read_with(cx, |state, _| {
+            let cache = state.cache.clone();
+            let detail = state.active_detail()?.clone();
+            let detail_key = state.active_pr_key.clone()?;
+            let existing_local_repo_status = state
+                .detail_states
+                .get(&detail_key)
+                .and_then(|detail_state| detail_state.local_repository_status.clone());
+            let selected_path = AppState::select_changed_file_path_for_detail(
+                &detail,
+                requested_path
+                    .clone()
+                    .or_else(|| state.selected_file_path.clone()),
+            )?;
+            let selected_file = detail
+                .files
+                .iter()
+                .find(|file| file.path == selected_path)
+                .cloned()?;
+            let parsed = find_parsed_diff_file(&detail.parsed_diff, &selected_file.path).cloned();
+            let request = build_file_content_request(&detail, &selected_file, parsed.as_ref())?;
+            let detail_state = state.detail_states.get(&detail_key);
+            let skip_local_checkout = crate::screenshot_mode::screenshot_mode_enabled();
+            let file_content_state =
+                local_checkout_file_load_state(detail_state, &request.path, &request.request_key);
+            let already_loaded = diff_file_content_flow_complete(
+                file_content_state,
+                existing_local_repo_status.as_ref(),
+                skip_local_checkout,
+            );
+
+            Some(PullRequestFileContentFlowRequest {
+                cache,
+                detail_key,
+                detail,
+                selected_file,
+                request,
+                file_content_loaded: file_content_state.loaded,
+                already_loaded,
+                existing_local_repo_status,
+                skip_local_checkout,
+            })
+        })
+        .ok()
+        .flatten()
+}
+
+fn mark_diff_file_content_loading(
+    model: &Entity<AppState>,
+    flow: &PullRequestFileContentFlowRequest,
+    need_file_content: bool,
+    cx: &mut AsyncWindowContext,
+) {
+    model
+        .update(cx, |state, cx| {
+            if let Some(detail_state) = state.detail_states.get_mut(&flow.detail_key) {
+                if need_file_content {
+                    let file_state = detail_state
+                        .file_content_states
+                        .entry(flow.request.path.clone())
+                        .or_default();
+                    file_state.request_key = Some(flow.request.request_key.clone());
+                    file_state.document = None;
+                    file_state.prepared = None;
+                    file_state.loading = true;
+                    file_state.error = None;
+                }
+                detail_state.local_repository_loading = !flow.skip_local_checkout
+                    && flow
+                        .existing_local_repo_status
+                        .as_ref()
+                        .map(|status| !status.ready_for_snapshot_features())
+                        .unwrap_or(true);
+                detail_state.local_repository_error = None;
+            }
+
+            cx.notify();
+        })
+        .ok();
+}
+
+async fn load_diff_file_content(
+    cache: Arc<crate::cache::CacheStore>,
+    flow: &PullRequestFileContentFlowRequest,
+    need_file_content: bool,
+    cx: &mut AsyncWindowContext,
+) -> (
+    Option<local_repo::LocalRepositoryStatus>,
+    Option<String>,
+    Option<Result<RepositoryFileContent, String>>,
+) {
+    if flow.skip_local_checkout {
+        log_checkout_flow_event(
+            &flow.detail,
+            format!(
+                "diff file-content local checkout skipped for screenshot mode; path={}",
+                flow.request.path
+            ),
+        );
+
+        let load_result = if need_file_content {
+            let load_result =
+                load_github_file_content(cache, &flow.detail, &flow.request, cx).await;
+            log_document_result(
+                &flow.detail,
+                "diff file-content final document",
+                &flow.request.path,
+                &flow.request.reference,
+                &load_result,
+            );
+            Some(load_result)
+        } else {
+            log_file_content_document_skipped(&flow.detail, "diff file-content", &flow.request);
+            None
+        };
+        return (None, None, load_result);
+    }
+
+    let local_repo_result = load_or_prepare_detail_local_repo(
+        cache.clone(),
+        &flow.detail,
+        flow.existing_local_repo_status.clone(),
+        cx,
+    )
+    .await;
+    log_local_repo_result(&flow.detail, "diff file-content flow", &local_repo_result);
+
+    let (local_repo_status, local_repo_error) = local_repo_status_and_error(&local_repo_result);
+    let load_result = load_file_content_with_checkout_fallback_if_needed(
+        need_file_content,
+        cache,
+        &flow.detail,
+        &flow.request,
+        local_repo_status.as_ref(),
+        local_repo_error.as_deref(),
+        "diff file-content",
+        cx,
+    )
+    .await;
+
+    (local_repo_status, local_repo_error, load_result)
+}
+
+async fn load_or_prepare_detail_local_repo(
+    cache: Arc<crate::cache::CacheStore>,
+    detail: &PullRequestDetail,
+    existing_local_repo_status: Option<local_repo::LocalRepositoryStatus>,
+    cx: &mut AsyncWindowContext,
+) -> Result<local_repo::LocalRepositoryStatus, String> {
+    if let Some(status) = existing_local_repo_status
+        .clone()
+        .filter(|status| status.ready_for_snapshot_features())
+    {
+        return Ok(status);
+    }
+
+    cx.background_executor()
+        .spawn({
+            let repository = detail.repository.clone();
+            let pull_request_number = detail.number;
+            let head_ref_oid = detail.head_ref_oid.clone();
+            async move {
+                local_repo::load_or_prepare_local_repository_for_pull_request(
+                    &cache,
+                    &repository,
+                    pull_request_number,
+                    head_ref_oid.as_deref(),
+                )
+            }
+        })
+        .await
+}
+
+fn local_repo_status_and_error(
+    result: &Result<local_repo::LocalRepositoryStatus, String>,
+) -> (Option<local_repo::LocalRepositoryStatus>, Option<String>) {
+    let status = result.as_ref().ok().cloned();
+    let error = result
+        .as_ref()
+        .ok()
+        .and_then(|status| {
+            if status.ready_for_snapshot_features() {
+                None
+            } else {
+                Some(status.message.clone())
+            }
+        })
+        .or_else(|| result.as_ref().err().cloned());
+
+    (status, error)
+}
+
+async fn load_file_content_with_checkout_fallback_if_needed(
+    need_file_content: bool,
+    cache: Arc<crate::cache::CacheStore>,
+    detail: &PullRequestDetail,
+    request: &FileContentRequest,
+    local_repo_status: Option<&local_repo::LocalRepositoryStatus>,
+    local_repo_error: Option<&str>,
+    stage: &str,
+    cx: &mut AsyncWindowContext,
+) -> Option<Result<RepositoryFileContent, String>> {
+    if !need_file_content {
+        log_file_content_document_skipped(detail, stage, request);
+        return None;
+    }
+
+    let local_load_result = load_local_checkout_file_content(
+        cache.clone(),
+        detail,
+        request,
+        local_repo_status,
+        local_repo_error,
+        stage,
+        cx,
+    )
+    .await;
+    let local_stage = format!("{stage} local document");
+    log_document_result(
+        detail,
+        &local_stage,
+        &request.path,
+        &request.local_reference,
+        &local_load_result,
+    );
+
+    let load_result = match local_load_result {
+        Ok(document) => Ok(document),
+        Err(local_error) => {
+            log_checkout_flow_event(
+                detail,
+                format!(
+                    "{stage} GitHub fallback start; path={}; reference={}; local_error={}",
+                    request.path,
+                    request.reference,
+                    sanitize_checkout_log_text(&local_error),
+                ),
+            );
+            load_github_file_content(cache, detail, request, cx)
+                .await
+                .map_err(|github_error| {
+                    let repository = &detail.repository;
+                    let reference = &request.reference;
+                    let path = &request.path;
+                    format!(
+                        "{local_error}\nGitHub fallback also failed for {repository}@{reference}:{path}: {github_error}"
+                    )
+                })
+        }
+    };
+    let final_stage = format!("{stage} final document");
+    log_document_result(
+        detail,
+        &final_stage,
+        &request.path,
+        &request.reference,
+        &load_result,
+    );
+    Some(load_result)
+}
+
+async fn load_local_checkout_file_content(
+    cache: Arc<crate::cache::CacheStore>,
+    detail: &PullRequestDetail,
+    request: &FileContentRequest,
+    local_repo_status: Option<&local_repo::LocalRepositoryStatus>,
+    local_repo_error: Option<&str>,
+    stage: &str,
+    cx: &mut AsyncWindowContext,
+) -> Result<RepositoryFileContent, String> {
+    let Some(status) = local_repo_status else {
+        return Err(local_checkout_not_ready_error(local_repo_error));
+    };
+    if !status.ready_for_snapshot_features() {
+        return Err(local_checkout_not_ready_error(local_repo_error));
+    }
+    let Some(root) = status.path.as_deref() else {
+        return Err(status.message.clone());
+    };
+
+    log_checkout_flow_event(
+        detail,
+        format!(
+            "{stage} local document load start; root={root}; path={}; local_reference={}; prefer_worktree={}",
+            request.path,
+            request.local_reference,
+            request.prefer_worktree && status.should_prefer_worktree_contents(),
+        ),
+    );
+
+    cx.background_executor()
+        .spawn({
+            let repository = detail.repository.clone();
+            let path = request.path.clone();
+            let reference = request.local_reference.clone();
+            let prefer_worktree =
+                request.prefer_worktree && status.should_prefer_worktree_contents();
+            let root = std::path::PathBuf::from(root);
+            async move {
+                local_documents::load_local_repository_file_content(
+                    &cache,
+                    &repository,
+                    &root,
+                    &reference,
+                    &path,
+                    prefer_worktree,
+                )
+            }
+        })
+        .await
+}
+
+async fn load_github_file_content(
+    cache: Arc<crate::cache::CacheStore>,
+    detail: &PullRequestDetail,
+    request: &FileContentRequest,
+    cx: &mut AsyncWindowContext,
+) -> Result<RepositoryFileContent, String> {
+    cx.background_executor()
+        .spawn({
+            let repository = detail.repository.clone();
+            let path = request.path.clone();
+            let reference = request.reference.clone();
+            async move {
+                github::load_pull_request_file_content(&cache, &repository, &reference, &path)
+            }
+        })
+        .await
+}
+
+fn local_checkout_not_ready_error(local_repo_error: Option<&str>) -> String {
+    local_repo_error
+        .map(str::to_string)
+        .unwrap_or_else(|| "Local checkout is not ready yet.".to_string())
+}
+
+fn log_file_content_document_skipped(
+    detail: &PullRequestDetail,
+    stage: &str,
+    request: &FileContentRequest,
+) {
+    log_checkout_flow_event(
+        detail,
+        format!(
+            "{stage} document skipped; path={}; request_key already loaded",
+            request.path
+        ),
+    );
+}
+
+fn prepare_loaded_file_content(
+    load_result: Option<Result<RepositoryFileContent, String>>,
+    file_path: &str,
+    reference: &str,
+) -> Option<Result<(RepositoryFileContent, PreparedFileContent), String>> {
+    load_result.map(|load_result| {
+        load_result.map(|document| {
+            let prepared = prepare_file_content(file_path, reference, &document);
+            (document, prepared)
+        })
+    })
+}
+
+fn apply_diff_file_content_flow_result(
+    model: &Entity<AppState>,
+    detail_key: &str,
+    request: &FileContentRequest,
+    local_repo_status: Option<local_repo::LocalRepositoryStatus>,
+    local_repo_error: Option<String>,
+    prepared_result: Option<Result<(RepositoryFileContent, PreparedFileContent), String>>,
+    cx: &mut AsyncWindowContext,
+) {
+    model
+        .update(cx, |state, cx| {
+            let Some(detail_state) = state.detail_states.get_mut(detail_key) else {
+                return;
+            };
+
+            if let Some(prepared_result) = prepared_result {
+                apply_file_content_result(
+                    detail_state,
+                    request,
+                    local_repo_status,
+                    local_repo_error,
+                    prepared_result,
+                );
+            } else {
+                detail_state.local_repository_loading = false;
+                detail_state.local_repository_status = local_repo_status;
+                detail_state.local_repository_error = local_repo_error;
+            }
+
+            cx.notify();
+        })
+        .ok();
+}
+
+fn apply_file_content_result(
+    detail_state: &mut DetailState,
+    request: &FileContentRequest,
+    local_repo_status: Option<local_repo::LocalRepositoryStatus>,
+    local_repo_error: Option<String>,
+    prepared_result: Result<(RepositoryFileContent, PreparedFileContent), String>,
+) {
+    let Some(file_state) = detail_state.file_content_states.get_mut(&request.path) else {
+        return;
+    };
+    if file_state.request_key.as_deref() != Some(&request.request_key) {
+        return;
+    }
+
+    file_state.loading = false;
+    detail_state.local_repository_loading = false;
+    detail_state.local_repository_status = local_repo_status;
+    detail_state.local_repository_error = local_repo_error;
+    match prepared_result {
+        Ok((document, prepared)) => {
+            file_state.document = Some(document);
+            file_state.prepared = Some(prepared);
+            file_state.error = None;
+        }
+        Err(error) => {
+            file_state.document = None;
+            file_state.prepared = None;
+            file_state.error = Some(error);
+        }
+    }
+}
+
 fn log_lsp_result(
     detail: &PullRequestDetail,
     stage: &str,
@@ -1939,6 +2057,18 @@ struct FileContentRequest {
     local_reference: String,
     prefer_worktree: bool,
     request_key: String,
+}
+
+struct PullRequestFileContentFlowRequest {
+    cache: Arc<crate::cache::CacheStore>,
+    detail_key: String,
+    detail: PullRequestDetail,
+    selected_file: PullRequestFile,
+    request: FileContentRequest,
+    file_content_loaded: bool,
+    already_loaded: bool,
+    existing_local_repo_status: Option<local_repo::LocalRepositoryStatus>,
+    skip_local_checkout: bool,
 }
 
 const STRUCTURAL_DIFF_WARMUP_CONCURRENCY: usize = 2;
