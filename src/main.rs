@@ -173,27 +173,55 @@ fn start_app(
 ) -> Result<(), String> {
     let screenshot_config = screenshot_mode::ScreenshotConfig::from_env()?;
     let startup_wizard_options = onboarding::StartupWizardOptions::from_env_and_args();
-    let bundled_fonts =
-        load_bundled_fonts().map_err(|error| format!("Failed to load bundled fonts: {error}"))?;
-    cx.text_system()
-        .add_fonts(bundled_fonts)
-        .map_err(|error| format!("Failed to register bundled fonts: {error}"))?;
+    register_bundled_fonts(cx)?;
 
     if let Some(config) = screenshot_config.as_ref() {
         config.clear_ready_file()?;
     }
 
+    let (app_state, initial_window_size) =
+        build_startup_state(cx, screenshot_config.as_ref(), startup_wizard_options)?;
+    install_app_lifecycle(cx, &app_state);
+
+    let initial_window_appearance = cx.window_appearance();
+    app_state.update(cx, |state, _| {
+        state.set_window_appearance(initial_window_appearance);
+    });
+
+    let root_window = open_root_window(
+        cx,
+        &app_state,
+        screenshot_config.clone(),
+        initial_window_size,
+    )?;
+    install_deep_link_handler(deep_link_dispatcher, &app_state, root_window, cx);
+    start_platform_services(screenshot_config.as_ref());
+    install_global_keystroke_observer(cx, &app_state);
+    Ok(())
+}
+
+fn register_bundled_fonts(cx: &mut App) -> Result<(), String> {
+    let bundled_fonts =
+        load_bundled_fonts().map_err(|error| format!("Failed to load bundled fonts: {error}"))?;
+    cx.text_system()
+        .add_fonts(bundled_fonts)
+        .map_err(|error| format!("Failed to register bundled fonts: {error}"))
+}
+
+fn build_startup_state(
+    cx: &mut App,
+    screenshot_config: Option<&screenshot_mode::ScreenshotConfig>,
+    startup_wizard_options: onboarding::StartupWizardOptions,
+) -> Result<(Entity<AppState>, Size<Pixels>), String> {
     let cache_path = screenshot_config
-        .as_ref()
         .map(|config| config.cache_path.clone())
         .unwrap_or_else(cache_path);
     let cache = CacheStore::new(cache_path)
         .map_err(|error| format!("Failed to initialize cache: {error}"))?;
     let initial_window_size = screenshot_config
-        .as_ref()
         .map(|config| config.window_size())
         .unwrap_or_else(|| window_settings::load_window_size(&cache));
-    let screenshot_config_for_state = screenshot_config.clone();
+    let screenshot_config_for_state = screenshot_config.cloned();
     let app_state = cx.new(move |_| {
         let mut state = AppState::new(cache, startup_wizard_options);
         if let Some(config) = screenshot_config_for_state.as_ref() {
@@ -201,6 +229,11 @@ fn start_app(
         }
         state
     });
+
+    Ok((app_state, initial_window_size))
+}
+
+fn install_app_lifecycle(cx: &mut App, app_state: &Entity<AppState>) {
     let lsp_session_manager_for_quit = app_state.read(cx).lsp_session_manager.clone();
     cx.on_app_quit(move |_| {
         let lsp_session_manager = lsp_session_manager_for_quit.clone();
@@ -209,48 +242,71 @@ fn start_app(
         }
     })
     .detach();
+
     app_menu::install(cx);
     let app_state_for_updates = app_state.clone();
     cx.on_action(move |_: &app_menu::CheckForUpdates, cx| {
         trigger_software_update_check(&app_state_for_updates, cx);
     });
     install_temp_source_window_key_bindings(cx);
+    install_diff_vim_key_interceptor(cx, app_state);
+}
+
+fn install_diff_vim_key_interceptor(cx: &mut App, app_state: &Entity<AppState>) {
     let app_state_for_diff_vim = app_state.clone();
     cx.intercept_keystrokes(move |event, window, cx| {
-        if app_state_for_diff_vim.read(cx).temp_source_window.window == cx.active_window() {
-            return;
-        }
-
-        let Some(key) = vim_key_from_keystroke(&event.keystroke) else {
-            return;
-        };
-        if views::diff_view::trigger_diff_vim_key(&app_state_for_diff_vim, key, window, cx) {
-            cx.stop_propagation();
-        }
+        handle_diff_vim_key_event(&app_state_for_diff_vim, event, window, cx);
     })
     .detach();
-    let initial_window_appearance = cx.window_appearance();
-    app_state.update(cx, |state, _| {
-        state.set_window_appearance(initial_window_appearance);
-    });
+}
 
+fn handle_diff_vim_key_event(
+    app_state: &Entity<AppState>,
+    event: &KeystrokeEvent,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if app_state.read(cx).temp_source_window.window == cx.active_window() {
+        return;
+    }
+
+    let Some(key) = vim_key_from_keystroke(&event.keystroke) else {
+        return;
+    };
+    if views::diff_view::trigger_diff_vim_key(app_state, key, window, cx) {
+        cx.stop_propagation();
+    }
+}
+
+fn open_root_window(
+    cx: &mut App,
+    app_state: &Entity<AppState>,
+    screenshot_config: Option<screenshot_mode::ScreenshotConfig>,
+    initial_window_size: Size<Pixels>,
+) -> Result<WindowHandle<RootView>, String> {
     let bounds = Bounds::centered(None, initial_window_size, cx);
     let app_state_for_window = app_state.clone();
-    let screenshot_config_for_window = screenshot_config.clone();
-    let root_window = cx
-        .open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(main_window_titlebar_options()),
-                ..Default::default()
-            },
-            move |window, cx| {
-                let app_state = app_state_for_window.clone();
-                let screenshot_config = screenshot_config_for_window.clone();
-                cx.new(move |cx| RootView::new(app_state, screenshot_config, window, cx))
-            },
-        )
-        .map_err(|error| format!("Failed to open app window: {error:?}"))?;
+    cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: Some(main_window_titlebar_options()),
+            ..Default::default()
+        },
+        move |window, cx| {
+            let app_state = app_state_for_window.clone();
+            let screenshot_config = screenshot_config.clone();
+            cx.new(move |cx| RootView::new(app_state, screenshot_config, window, cx))
+        },
+    )
+    .map_err(|error| format!("Failed to open app window: {error:?}"))
+}
+
+fn install_deep_link_handler(
+    deep_link_dispatcher: deep_link::DeepLinkDispatcher,
+    app_state: &Entity<AppState>,
+    root_window: WindowHandle<RootView>,
+    cx: &mut App,
+) {
     let async_app = cx.to_async();
     deep_link_dispatcher.install_handler({
         let app_state = app_state.clone();
@@ -268,265 +324,433 @@ fn start_app(
             }
         }
     });
+}
 
-    if screenshot_config.is_none() {
-        if let Err(error) = platform_updates::start_updater() {
-            report_sentry_error(format!("{APP_NAME} updater disabled: {error}"));
-        }
-        if let Err(error) = platform_macos::prepare_system_notifications() {
-            report_sentry_error(format!("{APP_NAME} notifications disabled: {error}"));
-        }
+fn start_platform_services(screenshot_config: Option<&screenshot_mode::ScreenshotConfig>) {
+    if screenshot_config.is_some() {
+        return;
     }
 
+    if let Err(error) = platform_updates::start_updater() {
+        report_sentry_error(format!("{APP_NAME} updater disabled: {error}"));
+    }
+    if let Err(error) = platform_macos::prepare_system_notifications() {
+        report_sentry_error(format!("{APP_NAME} notifications disabled: {error}"));
+    }
+}
+
+fn install_global_keystroke_observer(cx: &mut App, app_state: &Entity<AppState>) {
     let app_state_for_keys = app_state.clone();
     cx.observe_keystrokes(move |event, window, cx| {
-        let keystroke = &event.keystroke;
-        let is_secondary_plain = shortcuts::secondary_plain_modifier(keystroke.modifiers);
-        let is_secondary_shift = shortcuts::secondary_shift_modifier(keystroke.modifiers);
-
-        let onboarding_wizard_open = app_state_for_keys
-            .read(cx)
-            .active_onboarding_wizard
-            .is_some();
-        if onboarding_wizard_open {
-            match keystroke.key.as_str() {
-                "escape" => {
-                    app_state_for_keys.update(cx, |state, cx| {
-                        state.complete_active_onboarding_wizard();
-                        cx.notify();
-                    });
-                }
-                "left" => {
-                    app_state_for_keys.update(cx, |state, cx| {
-                        state.previous_onboarding_step();
-                        cx.notify();
-                    });
-                }
-                "right" | "enter" => {
-                    app_state_for_keys.update(cx, |state, cx| {
-                        state.next_onboarding_step();
-                        cx.notify();
-                    });
-                }
-                _ => {}
-            }
-            return;
-        }
-
-        let filter_dialog_open = app_state_for_keys
-            .read(cx)
-            .pull_request_filter_dialog_scope
-            .is_some();
-        if filter_dialog_open {
-            if keystroke.key == "escape" {
-                app_state_for_keys.update(cx, |state, cx| {
-                    state.close_pull_request_filter_dialog();
-                    cx.notify();
-                });
-            }
-            return;
-        }
-
-        if is_secondary_plain && keystroke.key == "k" {
-            toggle_palette(&app_state_for_keys, cx);
-            return;
-        }
-
-        if is_secondary_plain && keystroke.key == "p" {
-            toggle_file_chooser(&app_state_for_keys, window, cx);
-            return;
-        }
-
-        let palette_open = app_state_for_keys.read(cx).palette_open;
-        if palette_open {
-            match keystroke.key.as_str() {
-                "escape" => close_palette(&app_state_for_keys, cx),
-                "up" => move_palette_selection(&app_state_for_keys, -1, cx),
-                "down" => move_palette_selection(&app_state_for_keys, 1, cx),
-                "enter" => execute_palette_selection(&app_state_for_keys, window, cx),
-                _ => {}
-            }
-            return;
-        }
-
-        let file_chooser_open = app_state_for_keys.read(cx).file_chooser_open;
-        if file_chooser_open {
-            match keystroke.key.as_str() {
-                "escape" => close_file_chooser(&app_state_for_keys, cx),
-                "up" => move_file_chooser_selection(&app_state_for_keys, -1, cx),
-                "down" => move_file_chooser_selection(&app_state_for_keys, 1, cx),
-                "enter" => execute_file_chooser_selection(&app_state_for_keys, window, cx),
-                _ => {}
-            }
-            return;
-        }
-
-        if (is_secondary_plain || is_secondary_shift) && matches!(keystroke.key.as_str(), "=" | "+")
-        {
-            increase_code_font_size_preference(&app_state_for_keys, window, cx);
-            return;
-        }
-
-        if (is_secondary_plain || is_secondary_shift) && matches!(keystroke.key.as_str(), "-" | "_")
-        {
-            decrease_code_font_size_preference(&app_state_for_keys, window, cx);
-            return;
-        }
-
-        if is_secondary_plain && keystroke.key == "0" {
-            reset_code_font_size_preference(&app_state_for_keys, window, cx);
-            return;
-        }
-
-        if is_secondary_shift && keystroke.key == "t" {
-            cycle_diff_color_theme_preference(&app_state_for_keys, window, cx);
-            return;
-        }
-
-        if is_secondary_shift && keystroke.key == "j" {
-            trigger_add_waypoint_shortcut(&app_state_for_keys, cx);
-            return;
-        }
-
-        if is_secondary_plain && keystroke.key == "j" {
-            toggle_waypoint_spotlight(&app_state_for_keys, cx);
-            return;
-        }
-
-        if is_secondary_plain
-            && keystroke.key == "o"
-            && open_temp_source_window_for_selected_diff_line(&app_state_for_keys, window, cx)
-        {
-            return;
-        }
-
-        let waypoint_spotlight_open = app_state_for_keys.read(cx).waypoint_spotlight_open;
-        if waypoint_spotlight_open {
-            match keystroke.key.as_str() {
-                "escape" => close_waypoint_spotlight(&app_state_for_keys, cx),
-                "up" => move_waypoint_spotlight_selection(&app_state_for_keys, -1, cx),
-                "down" => move_waypoint_spotlight_selection(&app_state_for_keys, 1, cx),
-                "enter" => execute_waypoint_spotlight_selection(&app_state_for_keys, window, cx),
-                _ => {}
-            }
-            return;
-        }
-
-        if keystroke.key == "escape" && close_temp_source_window_if_active(&app_state_for_keys, cx)
-        {
-            return;
-        }
-
-        let finish_review_open = app_state_for_keys.read(cx).review_finish_modal_open;
-        if finish_review_open {
-            if is_secondary_plain && keystroke.key == "enter" {
-                trigger_submit_review_from_review_mode(&app_state_for_keys, window, cx);
-                return;
-            }
-
-            if keystroke.key == "escape" {
-                close_review_finish_modal(&app_state_for_keys, cx);
-                return;
-            }
-            return;
-        }
-
-        let line_action_active = app_state_for_keys
-            .read(cx)
-            .active_review_line_action
-            .is_some();
-        let line_comment_mode = app_state_for_keys.read(cx).review_line_action_mode
-            == state::ReviewLineActionMode::Comment;
-
-        if line_action_active {
-            if is_secondary_plain && keystroke.key == "enter" && line_comment_mode {
-                trigger_submit_inline_comment(&app_state_for_keys, window, cx);
-                return;
-            }
-
-            if keystroke.key == "escape" {
-                close_review_line_action(&app_state_for_keys, cx);
-                return;
-            }
-        }
-
-        let review_editor_active = app_state_for_keys.read(cx).review_editor_active;
-        let commit_timeline_navigation_enabled = {
-            let state = app_state_for_keys.read(cx);
-            state.active_surface == state::PullRequestSurface::Files
-                && state.effective_review_center_mode()
-                    == review_session::ReviewCenterMode::SemanticDiff
-                && state
-                    .active_detail()
-                    .map(|detail| {
-                        !detail.commits.is_empty()
-                            && !crate::local_review::is_local_review_detail(detail)
-                    })
-                    .unwrap_or(false)
-                && !review_editor_active
-        };
-        if commit_timeline_navigation_enabled {
-            match keystroke.key.as_str() {
-                "left" => {
-                    app_state_for_keys.update(cx, |state, cx| {
-                        state.move_active_commit_filter(-1);
-                        cx.notify();
-                    });
-                    let model = app_state_for_keys.clone();
-                    window
-                        .spawn(cx, async move |cx: &mut AsyncWindowContext| {
-                            views::diff_view::prefetch_active_commit_diffs_flow(model, cx).await;
-                        })
-                        .detach();
-                    return;
-                }
-                "right" => {
-                    app_state_for_keys.update(cx, |state, cx| {
-                        state.move_active_commit_filter(1);
-                        cx.notify();
-                    });
-                    let model = app_state_for_keys.clone();
-                    window
-                        .spawn(cx, async move |cx: &mut AsyncWindowContext| {
-                            views::diff_view::prefetch_active_commit_diffs_flow(model, cx).await;
-                        })
-                        .detach();
-                    return;
-                }
-                "home" => {
-                    app_state_for_keys.update(cx, |state, cx| {
-                        state.reset_active_commit_filter();
-                        cx.notify();
-                    });
-                    return;
-                }
-                _ => {}
-            }
-        }
-
-        if is_secondary_plain
-            && keystroke.key == "v"
-            && try_open_pasted_pull_request_url(&app_state_for_keys, window, cx)
-        {
-            return;
-        }
-
-        if !review_editor_active {
-            return;
-        }
-
-        if is_secondary_plain && keystroke.key == "enter" {
-            trigger_submit_review(&app_state_for_keys, window, cx);
-            return;
-        }
-
-        match keystroke.key.as_str() {
-            "escape" => blur_review_editor(&app_state_for_keys, cx),
-            _ => {}
-        }
+        handle_global_keystroke_event(&app_state_for_keys, event, window, cx);
     })
     .detach();
-    Ok(())
+}
+
+fn handle_global_keystroke_event(
+    app_state: &Entity<AppState>,
+    event: &KeystrokeEvent,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let keystroke = &event.keystroke;
+    let is_secondary_plain = shortcuts::secondary_plain_modifier(keystroke.modifiers);
+    let is_secondary_shift = shortcuts::secondary_shift_modifier(keystroke.modifiers);
+
+    if handle_onboarding_wizard_key(app_state, keystroke, cx)
+        || handle_filter_dialog_key(app_state, keystroke, cx)
+        || handle_global_surface_shortcut_key(app_state, keystroke, is_secondary_plain, window, cx)
+        || handle_palette_key(app_state, keystroke, window, cx)
+        || handle_file_chooser_key(app_state, keystroke, window, cx)
+        || handle_review_surface_shortcut_key(
+            app_state,
+            keystroke,
+            is_secondary_plain,
+            is_secondary_shift,
+            window,
+            cx,
+        )
+        || handle_waypoint_spotlight_key(app_state, keystroke, window, cx)
+        || handle_temp_source_window_key(app_state, keystroke, cx)
+        || handle_finish_review_key(app_state, keystroke, is_secondary_plain, window, cx)
+        || handle_line_action_key(app_state, keystroke, is_secondary_plain, window, cx)
+    {
+        return;
+    }
+
+    let review_editor_active = app_state.read(cx).review_editor_active;
+    if handle_commit_timeline_navigation_key(app_state, keystroke, review_editor_active, window, cx)
+        || handle_global_pull_request_paste_key(
+            app_state,
+            keystroke,
+            is_secondary_plain,
+            window,
+            cx,
+        )
+    {
+        return;
+    }
+
+    handle_review_editor_key(
+        app_state,
+        keystroke,
+        is_secondary_plain,
+        review_editor_active,
+        window,
+        cx,
+    );
+}
+
+fn handle_onboarding_wizard_key(
+    app_state: &Entity<AppState>,
+    keystroke: &Keystroke,
+    cx: &mut App,
+) -> bool {
+    if app_state.read(cx).active_onboarding_wizard.is_none() {
+        return false;
+    }
+
+    match keystroke.key.as_str() {
+        "escape" => app_state.update(cx, |state, cx| {
+            state.complete_active_onboarding_wizard();
+            cx.notify();
+        }),
+        "left" => app_state.update(cx, |state, cx| {
+            state.previous_onboarding_step();
+            cx.notify();
+        }),
+        "right" | "enter" => app_state.update(cx, |state, cx| {
+            state.next_onboarding_step();
+            cx.notify();
+        }),
+        _ => {}
+    }
+    true
+}
+
+fn handle_filter_dialog_key(
+    app_state: &Entity<AppState>,
+    keystroke: &Keystroke,
+    cx: &mut App,
+) -> bool {
+    if app_state
+        .read(cx)
+        .pull_request_filter_dialog_scope
+        .is_none()
+    {
+        return false;
+    }
+
+    if keystroke.key == "escape" {
+        app_state.update(cx, |state, cx| {
+            state.close_pull_request_filter_dialog();
+            cx.notify();
+        });
+    }
+    true
+}
+
+fn handle_global_surface_shortcut_key(
+    app_state: &Entity<AppState>,
+    keystroke: &Keystroke,
+    is_secondary_plain: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    if is_secondary_plain && keystroke.key == "k" {
+        toggle_palette(app_state, cx);
+        return true;
+    }
+    if is_secondary_plain && keystroke.key == "p" {
+        toggle_file_chooser(app_state, window, cx);
+        return true;
+    }
+    false
+}
+
+fn handle_review_surface_shortcut_key(
+    app_state: &Entity<AppState>,
+    keystroke: &Keystroke,
+    is_secondary_plain: bool,
+    is_secondary_shift: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    if handle_code_appearance_shortcut_key(
+        app_state,
+        keystroke,
+        is_secondary_plain,
+        is_secondary_shift,
+        window,
+        cx,
+    ) {
+        return true;
+    }
+    handle_waypoint_or_source_shortcut_key(
+        app_state,
+        keystroke,
+        is_secondary_plain,
+        is_secondary_shift,
+        window,
+        cx,
+    )
+}
+
+fn handle_palette_key(
+    app_state: &Entity<AppState>,
+    keystroke: &Keystroke,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    if !app_state.read(cx).palette_open {
+        return false;
+    }
+
+    match keystroke.key.as_str() {
+        "escape" => close_palette(app_state, cx),
+        "up" => move_palette_selection(app_state, -1, cx),
+        "down" => move_palette_selection(app_state, 1, cx),
+        "enter" => execute_palette_selection(app_state, window, cx),
+        _ => {}
+    }
+    true
+}
+
+fn handle_file_chooser_key(
+    app_state: &Entity<AppState>,
+    keystroke: &Keystroke,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    if !app_state.read(cx).file_chooser_open {
+        return false;
+    }
+
+    match keystroke.key.as_str() {
+        "escape" => close_file_chooser(app_state, cx),
+        "up" => move_file_chooser_selection(app_state, -1, cx),
+        "down" => move_file_chooser_selection(app_state, 1, cx),
+        "enter" => execute_file_chooser_selection(app_state, window, cx),
+        _ => {}
+    }
+    true
+}
+
+fn handle_code_appearance_shortcut_key(
+    app_state: &Entity<AppState>,
+    keystroke: &Keystroke,
+    is_secondary_plain: bool,
+    is_secondary_shift: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    if (is_secondary_plain || is_secondary_shift) && matches!(keystroke.key.as_str(), "=" | "+") {
+        increase_code_font_size_preference(app_state, window, cx);
+        return true;
+    }
+    if (is_secondary_plain || is_secondary_shift) && matches!(keystroke.key.as_str(), "-" | "_") {
+        decrease_code_font_size_preference(app_state, window, cx);
+        return true;
+    }
+    if is_secondary_plain && keystroke.key == "0" {
+        reset_code_font_size_preference(app_state, window, cx);
+        return true;
+    }
+    if is_secondary_shift && keystroke.key == "t" {
+        cycle_diff_color_theme_preference(app_state, window, cx);
+        return true;
+    }
+    false
+}
+
+fn handle_waypoint_or_source_shortcut_key(
+    app_state: &Entity<AppState>,
+    keystroke: &Keystroke,
+    is_secondary_plain: bool,
+    is_secondary_shift: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    if is_secondary_shift && keystroke.key == "j" {
+        trigger_add_waypoint_shortcut(app_state, cx);
+        return true;
+    }
+    if is_secondary_plain && keystroke.key == "j" {
+        toggle_waypoint_spotlight(app_state, cx);
+        return true;
+    }
+    is_secondary_plain
+        && keystroke.key == "o"
+        && open_temp_source_window_for_selected_diff_line(app_state, window, cx)
+}
+
+fn handle_waypoint_spotlight_key(
+    app_state: &Entity<AppState>,
+    keystroke: &Keystroke,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    if !app_state.read(cx).waypoint_spotlight_open {
+        return false;
+    }
+
+    match keystroke.key.as_str() {
+        "escape" => close_waypoint_spotlight(app_state, cx),
+        "up" => move_waypoint_spotlight_selection(app_state, -1, cx),
+        "down" => move_waypoint_spotlight_selection(app_state, 1, cx),
+        "enter" => execute_waypoint_spotlight_selection(app_state, window, cx),
+        _ => {}
+    }
+    true
+}
+
+fn handle_temp_source_window_key(
+    app_state: &Entity<AppState>,
+    keystroke: &Keystroke,
+    cx: &mut App,
+) -> bool {
+    keystroke.key == "escape" && close_temp_source_window_if_active(app_state, cx)
+}
+
+fn handle_finish_review_key(
+    app_state: &Entity<AppState>,
+    keystroke: &Keystroke,
+    is_secondary_plain: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    if !app_state.read(cx).review_finish_modal_open {
+        return false;
+    }
+
+    if is_secondary_plain && keystroke.key == "enter" {
+        trigger_submit_review_from_review_mode(app_state, window, cx);
+        return true;
+    }
+    if keystroke.key == "escape" {
+        close_review_finish_modal(app_state, cx);
+    }
+    true
+}
+
+fn handle_line_action_key(
+    app_state: &Entity<AppState>,
+    keystroke: &Keystroke,
+    is_secondary_plain: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    if app_state.read(cx).active_review_line_action.is_none() {
+        return false;
+    }
+
+    let line_comment_mode =
+        app_state.read(cx).review_line_action_mode == state::ReviewLineActionMode::Comment;
+    if is_secondary_plain && keystroke.key == "enter" && line_comment_mode {
+        trigger_submit_inline_comment(app_state, window, cx);
+        return true;
+    }
+    if keystroke.key == "escape" {
+        close_review_line_action(app_state, cx);
+        return true;
+    }
+    false
+}
+
+fn handle_commit_timeline_navigation_key(
+    app_state: &Entity<AppState>,
+    keystroke: &Keystroke,
+    review_editor_active: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    let navigation_enabled = {
+        let state = app_state.read(cx);
+        commit_timeline_navigation_enabled(state, review_editor_active)
+    };
+    if !navigation_enabled {
+        return false;
+    }
+
+    match keystroke.key.as_str() {
+        "left" => {
+            app_state.update(cx, |state, cx| {
+                state.move_active_commit_filter(-1);
+                cx.notify();
+            });
+            prefetch_active_commit_diffs(app_state, window, cx);
+            true
+        }
+        "right" => {
+            app_state.update(cx, |state, cx| {
+                state.move_active_commit_filter(1);
+                cx.notify();
+            });
+            prefetch_active_commit_diffs(app_state, window, cx);
+            true
+        }
+        "home" => {
+            app_state.update(cx, |state, cx| {
+                state.reset_active_commit_filter();
+                cx.notify();
+            });
+            true
+        }
+        _ => false,
+    }
+}
+
+fn commit_timeline_navigation_enabled(state: &AppState, review_editor_active: bool) -> bool {
+    state.active_surface == state::PullRequestSurface::Files
+        && state.effective_review_center_mode() == review_session::ReviewCenterMode::SemanticDiff
+        && state
+            .active_detail()
+            .map(|detail| {
+                !detail.commits.is_empty() && !crate::local_review::is_local_review_detail(detail)
+            })
+            .unwrap_or(false)
+        && !review_editor_active
+}
+
+fn prefetch_active_commit_diffs(app_state: &Entity<AppState>, window: &mut Window, cx: &mut App) {
+    let model = app_state.clone();
+    window
+        .spawn(cx, async move |cx: &mut AsyncWindowContext| {
+            views::diff_view::prefetch_active_commit_diffs_flow(model, cx).await;
+        })
+        .detach();
+}
+
+fn handle_global_pull_request_paste_key(
+    app_state: &Entity<AppState>,
+    keystroke: &Keystroke,
+    is_secondary_plain: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    is_secondary_plain
+        && keystroke.key == "v"
+        && try_open_pasted_pull_request_url(app_state, window, cx)
+}
+
+fn handle_review_editor_key(
+    app_state: &Entity<AppState>,
+    keystroke: &Keystroke,
+    is_secondary_plain: bool,
+    review_editor_active: bool,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if !review_editor_active {
+        return;
+    }
+    if is_secondary_plain && keystroke.key == "enter" {
+        trigger_submit_review(app_state, window, cx);
+        return;
+    }
+    if keystroke.key == "escape" {
+        blur_review_editor(app_state, cx);
+    }
 }
 
 fn try_open_pasted_pull_request_url(
