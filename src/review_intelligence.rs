@@ -2,7 +2,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        mpsc, Mutex,
+        mpsc, Arc, Mutex,
     },
     time::Duration,
 };
@@ -24,7 +24,7 @@ use crate::{
         atoms::extract_change_atoms,
         cache::{load_ai_review_stack, save_ai_review_stack},
         discovery::discover_review_stack,
-        model::{Confidence, RepoContext, ReviewStack, StackDiscoveryOptions},
+        model::{Confidence, RepoContext, ReviewStack, StackDiscoveryOptions, StackPullRequestRef},
         title_polish,
     },
     state::{AppState, DetailState},
@@ -38,6 +38,26 @@ static FOREGROUND_REVIEW_INTELLIGENCE_JOBS: AtomicUsize = AtomicUsize::new(0);
 struct GeneratedReviewStack {
     stack: ReviewStack,
     semantic_review: Option<semantic_review::RemissSemanticReview>,
+}
+
+struct ReviewIntelligenceFlowInitial {
+    cache: Arc<CacheStore>,
+    detail_key: String,
+    detail: PullRequestDetail,
+    provider: ReviewAiProvider,
+    lsp_session_manager: Arc<crate::lsp::LspSessionManager>,
+    statuses_loaded: bool,
+    open_pull_requests: Vec<StackPullRequestRef>,
+    existing_local_repository_status: Option<local_repo::LocalRepositoryStatus>,
+}
+
+struct ReviewIntelligenceRequestPlan {
+    request_key: String,
+    stack_code_version_key: String,
+    brief_request_key: String,
+    partner_request_key: String,
+    local_repository_status: Result<Option<local_repo::LocalRepositoryStatus>, String>,
+    local_repository_already_ready: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -739,7 +759,156 @@ pub(crate) async fn run_review_intelligence_flow(
     automatic: bool,
     cx: &mut AsyncWindowContext,
 ) {
-    let Some(initial) = model
+    let Some(initial) = read_review_intelligence_initial(&model, automatic, cx) else {
+        return;
+    };
+
+    let request = build_review_intelligence_request_plan(
+        &initial.detail,
+        initial.provider,
+        initial.existing_local_repository_status,
+    );
+    if !start_review_intelligence_request(
+        &model,
+        &initial.detail_key,
+        &request,
+        scope,
+        force,
+        initial.statuses_loaded,
+        cx,
+    ) {
+        return;
+    }
+
+    let local_review_repository_status = match request.local_repository_status {
+        Ok(status) => status,
+        Err(error) => {
+            fail_checkout(
+                &model,
+                &initial.detail_key,
+                scope,
+                initial.provider,
+                &request.request_key,
+                &error,
+                cx,
+            )
+            .await;
+            finish_request(&model, &initial.detail_key, &request.request_key, cx).await;
+            return;
+        }
+    };
+
+    let _permit = ForegroundJobPermit::new();
+
+    load_review_ai_provider_statuses_if_needed(&model, initial.statuses_loaded, cx).await;
+
+    let local_repo_status = match ensure_review_intelligence_checkout(
+        initial.cache.clone(),
+        &initial.detail,
+        local_review_repository_status,
+        cx,
+    )
+    .await
+    {
+        Ok(status) => {
+            set_review_intelligence_checkout_success(
+                &model,
+                &initial.detail_key,
+                status.clone(),
+                cx,
+            );
+            status
+        }
+        Err(error) => {
+            fail_checkout(
+                &model,
+                &initial.detail_key,
+                scope,
+                initial.provider,
+                &request.request_key,
+                &error,
+                cx,
+            )
+            .await;
+            finish_request(&model, &initial.detail_key, &request.request_key, cx).await;
+            return;
+        }
+    };
+
+    let generated_stack = if scope.includes_stack() {
+        generate_or_load_stack(
+            &model,
+            initial.cache.as_ref(),
+            &initial.detail_key,
+            &initial.detail,
+            initial.provider,
+            &request.request_key,
+            &request.stack_code_version_key,
+            &local_repo_status,
+            initial.open_pull_requests,
+            force,
+            cx,
+        )
+        .await
+    } else {
+        None
+    };
+
+    if scope.includes_partner() {
+        if let Some(generated_stack) = generated_stack {
+            generate_or_load_partner(
+                &model,
+                initial.cache.as_ref(),
+                &initial.detail_key,
+                &initial.detail,
+                initial.provider,
+                &request.partner_request_key,
+                &local_repo_status,
+                generated_stack.stack,
+                generated_stack.semantic_review,
+                force,
+                initial.lsp_session_manager.clone(),
+                cx,
+            )
+            .await;
+        } else {
+            set_partner_error(
+                &model,
+                &initial.detail_key,
+                &request.partner_request_key,
+                "Guided Review needs generated stack layers before Review Partner context can be built."
+                    .to_string(),
+                cx,
+            )
+            .await;
+        }
+    }
+
+    if scope.includes_brief() {
+        generate_or_load_brief(
+            &model,
+            initial.cache.as_ref(),
+            &initial.detail_key,
+            &initial.detail,
+            initial.provider,
+            &request.brief_request_key,
+            &local_repo_status,
+            force,
+            automatic,
+            cx,
+        )
+        .await;
+    }
+
+    finish_request(&model, &initial.detail_key, &request.request_key, cx).await;
+}
+
+fn read_review_intelligence_initial(
+    model: &Entity<AppState>,
+    automatic: bool,
+    cx: &mut AsyncWindowContext,
+) -> Option<ReviewIntelligenceFlowInitial> {
+    model
         .read_with(cx, |state, _| {
             if !state.review_ai_features_enabled() {
                 return None;
@@ -757,35 +926,28 @@ pub(crate) async fn run_review_intelligence_flow(
             let existing_local_repository_status = state
                 .active_detail_state()
                 .and_then(|detail_state| detail_state.local_repository_status.clone());
-            Some((
-                state.cache.clone(),
+            Some(ReviewIntelligenceFlowInitial {
+                cache: state.cache.clone(),
                 detail_key,
                 detail,
                 provider,
-                state.lsp_session_manager.clone(),
-                state.review_ai_provider_statuses_loaded,
+                lsp_session_manager: state.lsp_session_manager.clone(),
+                statuses_loaded: state.review_ai_provider_statuses_loaded,
                 open_pull_requests,
                 existing_local_repository_status,
-            ))
+            })
         })
         .ok()
         .flatten()
-    else {
-        return;
-    };
+}
 
-    let (
-        cache,
-        detail_key,
-        detail,
-        provider,
-        lsp_session_manager,
-        statuses_loaded,
-        open_pull_requests,
-        existing_local_repository_status,
-    ) = initial;
-    let request_key = review_intelligence_request_key(&detail, provider);
-    let code_version_key = review_code_version_key(&detail);
+fn build_review_intelligence_request_plan(
+    detail: &PullRequestDetail,
+    provider: ReviewAiProvider,
+    existing_local_repository_status: Option<local_repo::LocalRepositoryStatus>,
+) -> ReviewIntelligenceRequestPlan {
+    let request_key = review_intelligence_request_key(detail, provider);
+    let code_version_key = review_code_version_key(detail);
     let stack_code_version_key = format!(
         "{}:{}:{}:{}",
         code_version_key,
@@ -793,293 +955,251 @@ pub(crate) async fn run_review_intelligence_flow(
         structural_evidence::STRUCTURAL_EVIDENCE_VERSION,
         semantic_review::semantic_review_version_key()
     );
-    let brief_request_key = build_review_brief_request_key(&detail, provider);
-    let partner_request_key = build_review_partner_request_key(&detail, provider);
-    let local_review_repository_status =
-        local_review::reusable_local_repository_status(&detail, existing_local_repository_status);
-    let local_repository_already_ready = matches!(&local_review_repository_status, Ok(Some(_)));
+    let brief_request_key = build_review_brief_request_key(detail, provider);
+    let partner_request_key = build_review_partner_request_key(detail, provider);
+    let local_repository_status =
+        local_review::reusable_local_repository_status(detail, existing_local_repository_status);
+    let local_repository_already_ready = matches!(&local_repository_status, Ok(Some(_)));
+    ReviewIntelligenceRequestPlan {
+        request_key,
+        stack_code_version_key,
+        brief_request_key,
+        partner_request_key,
+        local_repository_status,
+        local_repository_already_ready,
+    }
+}
 
-    let should_start = model
+fn start_review_intelligence_request(
+    model: &Entity<AppState>,
+    detail_key: &str,
+    request: &ReviewIntelligenceRequestPlan,
+    scope: ReviewIntelligenceScope,
+    force: bool,
+    statuses_loaded: bool,
+    cx: &mut AsyncWindowContext,
+) -> bool {
+    model
         .update(cx, |state, cx| {
-            let Some(detail_state) = state.detail_states.get_mut(&detail_key) else {
+            let Some(detail_state) = state.detail_states.get_mut(detail_key) else {
                 return false;
             };
             if detail_state.review_intelligence_loading
-                && detail_state.review_intelligence_request_key.as_deref() == Some(&request_key)
+                && detail_state.review_intelligence_request_key.as_deref()
+                    == Some(request.request_key.as_str())
             {
                 if force {
-                    if scope.includes_brief() {
-                        let brief_state = &mut detail_state.review_brief_state;
-                        brief_state.request_key = Some(brief_request_key.clone());
-                        brief_state.loading = false;
-                        brief_state.generating = true;
-                        brief_state.progress_text =
-                            Some("Generation is already in progress.".to_string());
-                        brief_state.error = None;
-                        brief_state.message =
-                            Some("Generation is already in progress.".to_string());
-                        brief_state.success = false;
-                    }
-
-                    if scope.includes_stack() {
-                        detail_state.ai_stack_state.loading = false;
-                        detail_state.ai_stack_state.generating = true;
-                        detail_state.ai_stack_state.error = None;
-                        detail_state.ai_stack_state.message =
-                            Some("Generation is already in progress.".to_string());
-                        detail_state.ai_stack_state.success = false;
-                    }
-
-                    if scope.includes_partner() {
-                        detail_state.review_partner_state.request_key =
-                            Some(partner_request_key.clone());
-                        detail_state.review_partner_state.loading = false;
-                        detail_state.review_partner_state.generating = true;
-                        detail_state.review_partner_state.error = None;
-                        detail_state.review_partner_state.message =
-                            Some("Generation is already in progress.".to_string());
-                        detail_state.review_partner_state.progress_text =
-                            Some("Generation is already in progress.".to_string());
-                        detail_state.review_partner_state.success = false;
-                    }
-
+                    mark_existing_review_intelligence_generation(detail_state, scope, request);
                     cx.notify();
                 }
                 return false;
             }
 
-            detail_state.review_intelligence_request_key = Some(request_key.clone());
-            detail_state.review_intelligence_loading = true;
-            detail_state.local_repository_loading = !local_repository_already_ready;
-            detail_state.local_repository_error = None;
-            if let Ok(Some(status)) = local_review_repository_status.as_ref() {
-                detail_state.local_repository_status = Some(status.clone());
-            }
+            initialize_review_intelligence_states(detail_state, scope, force, request);
 
             if !statuses_loaded {
                 state.review_ai_provider_loading = true;
                 state.review_ai_provider_error = None;
             }
 
-            if scope.includes_stack() {
-                let stack_request_changed =
-                    detail_state.ai_stack_state.request_key.as_deref() != Some(&request_key);
-                detail_state.ai_stack_state.request_key = Some(request_key.clone());
-                detail_state.ai_stack_state.loading = true;
-                detail_state.ai_stack_state.generating = false;
-                if force || stack_request_changed {
-                    detail_state.ai_stack_state.stack = None;
-                }
-                detail_state.ai_stack_state.error = None;
-                detail_state.ai_stack_state.message =
-                    Some("Preparing local checkout for Guided Review.".to_string());
-                detail_state.ai_stack_state.success = false;
-
-                let partner_request_changed =
-                    detail_state.review_partner_state.request_key.as_deref()
-                        != Some(&partner_request_key);
-                detail_state.review_partner_state.request_key = Some(partner_request_key.clone());
-                detail_state.review_partner_state.loading = true;
-                detail_state.review_partner_state.generating = false;
-                if force || partner_request_changed {
-                    detail_state.review_partner_state.document = None;
-                }
-                detail_state.review_partner_state.error = None;
-                detail_state.review_partner_state.message = None;
-                detail_state.review_partner_state.progress_text =
-                    Some("Preparing local checkout for Review Partner.".to_string());
-                detail_state.review_partner_state.success = false;
-            }
-
-            if scope.includes_brief() {
-                let brief_state = &mut detail_state.review_brief_state;
-                let brief_request_changed =
-                    brief_state.request_key.as_deref() != Some(&brief_request_key);
-                brief_state.request_key = Some(brief_request_key.clone());
-                if force || brief_request_changed {
-                    brief_state.document = None;
-                }
-                brief_state.loading = !force;
-                brief_state.generating = force;
-                brief_state.progress_text =
-                    Some("Preparing local checkout for the review brief.".to_string());
-                brief_state.error = None;
-                brief_state.message = None;
-                brief_state.success = false;
-            }
-
             cx.notify();
             true
         })
         .ok()
-        .unwrap_or(false);
+        .unwrap_or(false)
+}
 
-    if !should_start {
-        return;
+fn mark_existing_review_intelligence_generation(
+    detail_state: &mut DetailState,
+    scope: ReviewIntelligenceScope,
+    request: &ReviewIntelligenceRequestPlan,
+) {
+    if scope.includes_brief() {
+        let brief_state = &mut detail_state.review_brief_state;
+        brief_state.request_key = Some(request.brief_request_key.clone());
+        brief_state.loading = false;
+        brief_state.generating = true;
+        brief_state.progress_text = Some("Generation is already in progress.".to_string());
+        brief_state.error = None;
+        brief_state.message = Some("Generation is already in progress.".to_string());
+        brief_state.success = false;
     }
 
-    let local_review_repository_status = match local_review_repository_status {
-        Ok(status) => status,
-        Err(error) => {
-            fail_checkout(
-                &model,
-                &detail_key,
-                scope,
-                provider,
-                &request_key,
-                &error,
-                cx,
-            )
-            .await;
-            finish_request(&model, &detail_key, &request_key, cx).await;
-            return;
-        }
-    };
-
-    let _permit = ForegroundJobPermit::new();
-
-    if !statuses_loaded {
-        let statuses_result = cx
-            .background_executor()
-            .spawn(async { review_ai::load_review_ai_provider_statuses() })
-            .await;
-        model
-            .update(cx, |state, cx| {
-                state.review_ai_provider_loading = false;
-                state.review_ai_provider_statuses_loaded = true;
-                match statuses_result {
-                    Ok(statuses) => {
-                        state.review_ai_provider_statuses = statuses;
-                        state.review_ai_provider_error = None;
-                    }
-                    Err(error) => {
-                        state.review_ai_provider_error = Some(error);
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
+    if scope.includes_stack() {
+        detail_state.ai_stack_state.loading = false;
+        detail_state.ai_stack_state.generating = true;
+        detail_state.ai_stack_state.error = None;
+        detail_state.ai_stack_state.message =
+            Some("Generation is already in progress.".to_string());
+        detail_state.ai_stack_state.success = false;
     }
-
-    let local_repo_result = if let Some(status) = local_review_repository_status {
-        Ok(status)
-    } else {
-        cx.background_executor()
-            .spawn({
-                let cache = cache.clone();
-                let repository = detail.repository.clone();
-                let pull_request_number = detail.number;
-                let head_ref_oid = detail.head_ref_oid.clone();
-                async move {
-                    run_foreground_blocking(|| {
-                        local_repo::ensure_local_repository_for_pull_request(
-                            &cache,
-                            &repository,
-                            pull_request_number,
-                            head_ref_oid.as_deref(),
-                        )
-                    })
-                }
-            })
-            .await
-    };
-
-    let local_repo_status = match local_repo_result {
-        Ok(status) => {
-            model
-                .update(cx, |state, cx| {
-                    if let Some(detail_state) = state.detail_states.get_mut(&detail_key) {
-                        detail_state.local_repository_loading = false;
-                        detail_state.local_repository_status = Some(status.clone());
-                        detail_state.local_repository_error = None;
-                    }
-                    cx.notify();
-                })
-                .ok();
-            status
-        }
-        Err(error) => {
-            fail_checkout(
-                &model,
-                &detail_key,
-                scope,
-                provider,
-                &request_key,
-                &error,
-                cx,
-            )
-            .await;
-            finish_request(&model, &detail_key, &request_key, cx).await;
-            return;
-        }
-    };
-
-    let generated_stack = if scope.includes_stack() {
-        generate_or_load_stack(
-            &model,
-            cache.as_ref(),
-            &detail_key,
-            &detail,
-            provider,
-            &request_key,
-            &stack_code_version_key,
-            &local_repo_status,
-            open_pull_requests,
-            force,
-            cx,
-        )
-        .await
-    } else {
-        None
-    };
 
     if scope.includes_partner() {
-        if let Some(generated_stack) = generated_stack {
-            generate_or_load_partner(
-                &model,
-                cache.as_ref(),
-                &detail_key,
-                &detail,
-                provider,
-                &partner_request_key,
-                &local_repo_status,
-                generated_stack.stack,
-                generated_stack.semantic_review,
-                force,
-                lsp_session_manager.clone(),
-                cx,
-            )
-            .await;
-        } else {
-            set_partner_error(
-                &model,
-                &detail_key,
-                &partner_request_key,
-                "Guided Review needs generated stack layers before Review Partner context can be built."
-                    .to_string(),
-                cx,
-            )
-            .await;
-        }
+        detail_state.review_partner_state.request_key = Some(request.partner_request_key.clone());
+        detail_state.review_partner_state.loading = false;
+        detail_state.review_partner_state.generating = true;
+        detail_state.review_partner_state.error = None;
+        detail_state.review_partner_state.message =
+            Some("Generation is already in progress.".to_string());
+        detail_state.review_partner_state.progress_text =
+            Some("Generation is already in progress.".to_string());
+        detail_state.review_partner_state.success = false;
+    }
+}
+
+fn initialize_review_intelligence_states(
+    detail_state: &mut DetailState,
+    scope: ReviewIntelligenceScope,
+    force: bool,
+    request: &ReviewIntelligenceRequestPlan,
+) {
+    detail_state.review_intelligence_request_key = Some(request.request_key.clone());
+    detail_state.review_intelligence_loading = true;
+    detail_state.local_repository_loading = !request.local_repository_already_ready;
+    detail_state.local_repository_error = None;
+    if let Ok(Some(status)) = request.local_repository_status.as_ref() {
+        detail_state.local_repository_status = Some(status.clone());
+    }
+
+    if scope.includes_stack() {
+        initialize_stack_and_partner_generation(detail_state, force, request);
     }
 
     if scope.includes_brief() {
-        generate_or_load_brief(
-            &model,
-            cache.as_ref(),
-            &detail_key,
-            &detail,
-            provider,
-            &brief_request_key,
-            &local_repo_status,
-            force,
-            automatic,
-            cx,
-        )
-        .await;
+        initialize_brief_generation(detail_state, force, request);
+    }
+}
+
+fn initialize_stack_and_partner_generation(
+    detail_state: &mut DetailState,
+    force: bool,
+    request: &ReviewIntelligenceRequestPlan,
+) {
+    let stack_request_changed =
+        detail_state.ai_stack_state.request_key.as_deref() != Some(request.request_key.as_str());
+    detail_state.ai_stack_state.request_key = Some(request.request_key.clone());
+    detail_state.ai_stack_state.loading = true;
+    detail_state.ai_stack_state.generating = false;
+    if force || stack_request_changed {
+        detail_state.ai_stack_state.stack = None;
+    }
+    detail_state.ai_stack_state.error = None;
+    detail_state.ai_stack_state.message =
+        Some("Preparing local checkout for Guided Review.".to_string());
+    detail_state.ai_stack_state.success = false;
+
+    let partner_request_changed = detail_state.review_partner_state.request_key.as_deref()
+        != Some(request.partner_request_key.as_str());
+    detail_state.review_partner_state.request_key = Some(request.partner_request_key.clone());
+    detail_state.review_partner_state.loading = true;
+    detail_state.review_partner_state.generating = false;
+    if force || partner_request_changed {
+        detail_state.review_partner_state.document = None;
+    }
+    detail_state.review_partner_state.error = None;
+    detail_state.review_partner_state.message = None;
+    detail_state.review_partner_state.progress_text =
+        Some("Preparing local checkout for Review Partner.".to_string());
+    detail_state.review_partner_state.success = false;
+}
+
+fn initialize_brief_generation(
+    detail_state: &mut DetailState,
+    force: bool,
+    request: &ReviewIntelligenceRequestPlan,
+) {
+    let brief_state = &mut detail_state.review_brief_state;
+    let brief_request_changed =
+        brief_state.request_key.as_deref() != Some(request.brief_request_key.as_str());
+    brief_state.request_key = Some(request.brief_request_key.clone());
+    if force || brief_request_changed {
+        brief_state.document = None;
+    }
+    brief_state.loading = !force;
+    brief_state.generating = force;
+    brief_state.progress_text = Some("Preparing local checkout for the review brief.".to_string());
+    brief_state.error = None;
+    brief_state.message = None;
+    brief_state.success = false;
+}
+
+async fn load_review_ai_provider_statuses_if_needed(
+    model: &Entity<AppState>,
+    statuses_loaded: bool,
+    cx: &mut AsyncWindowContext,
+) {
+    if statuses_loaded {
+        return;
     }
 
-    finish_request(&model, &detail_key, &request_key, cx).await;
+    let statuses_result = cx
+        .background_executor()
+        .spawn(async { review_ai::load_review_ai_provider_statuses() })
+        .await;
+    model
+        .update(cx, |state, cx| {
+            state.review_ai_provider_loading = false;
+            state.review_ai_provider_statuses_loaded = true;
+            match statuses_result {
+                Ok(statuses) => {
+                    state.review_ai_provider_statuses = statuses;
+                    state.review_ai_provider_error = None;
+                }
+                Err(error) => {
+                    state.review_ai_provider_error = Some(error);
+                }
+            }
+            cx.notify();
+        })
+        .ok();
+}
+
+async fn ensure_review_intelligence_checkout(
+    cache: Arc<CacheStore>,
+    detail: &PullRequestDetail,
+    local_repository_status: Option<local_repo::LocalRepositoryStatus>,
+    cx: &mut AsyncWindowContext,
+) -> Result<local_repo::LocalRepositoryStatus, String> {
+    if let Some(status) = local_repository_status {
+        return Ok(status);
+    }
+
+    cx.background_executor()
+        .spawn({
+            let cache = cache.clone();
+            let repository = detail.repository.clone();
+            let pull_request_number = detail.number;
+            let head_ref_oid = detail.head_ref_oid.clone();
+            async move {
+                run_foreground_blocking(|| {
+                    local_repo::ensure_local_repository_for_pull_request(
+                        &cache,
+                        &repository,
+                        pull_request_number,
+                        head_ref_oid.as_deref(),
+                    )
+                })
+            }
+        })
+        .await
+}
+
+fn set_review_intelligence_checkout_success(
+    model: &Entity<AppState>,
+    detail_key: &str,
+    status: local_repo::LocalRepositoryStatus,
+    cx: &mut AsyncWindowContext,
+) {
+    model
+        .update(cx, |state, cx| {
+            if let Some(detail_state) = state.detail_states.get_mut(detail_key) {
+                detail_state.local_repository_loading = false;
+                detail_state.local_repository_status = Some(status.clone());
+                detail_state.local_repository_error = None;
+            }
+            cx.notify();
+        })
+        .ok();
 }
 
 async fn generate_or_load_stack(
